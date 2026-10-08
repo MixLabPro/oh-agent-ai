@@ -151,7 +151,7 @@ export function CityApp() {
     { id: "photo", commandId: "city.photo", label: experience.photoBusy ? "正在拍照" : "拍照", kind: "button", enabled: sceneReady && !cinema && !experience.busy && !experience.film },
     { id: "film", commandId: "city.film", label: experience.film ? `取消导出 · ${Math.round(experience.film.frame / experience.film.total * 100)}%` : "导出视频", kind: "button", enabled: !!experience.film || (sceneReady && !cinema && !experience.busy && supportsBackgroundFilm()) },
     { id: "settings", commandId: "city.settings", label: "城市设置", kind: "button", enabled: !cinema },
-  ].map((tool) => ({ ...tool, label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
+  ].map((tool) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
   const execute = (commandId: string, value?: string) => {
     const engine = engineRef.current;
     switch (commandId) {

@@ -177,17 +177,14 @@ async function cityWaitFor(page, fn, timeoutMs = 20000, arg) {
 }
 function summary(page, index) { return city(page).locator(".city-legend button strong, .city-legend button span").nth(index); }
 async function expectSummary(page, sessions, _tokens) {
-  // Scene-first HUD removed the old stats bar; the district legend (harness names)
-  // is the visible proof that fixture data loaded and was rendered by the plugin.
+  // Readiness must not require opening an optional panel or changing its state.
   try { await page.waitForFunction(() => {
     const frame = document.querySelector("iframe");
-    const legend = frame?.contentDocument?.querySelector(".city-legend");
-    if (!legend) return false;
-    const text = legend.textContent || "";
-    return text.length > 5; // harness names render = fixture data loaded
+    const trigger = frame?.contentDocument?.querySelector(".city-summary-trigger");
+    return !!trigger && !trigger.textContent.includes("—");
   }, undefined, { timeout: 45_000 }); }
   catch (error) {
-    console.error("city legend did not show expected data (sessions=" + sessions + ")");
+    console.error("city summary did not show expected data (sessions=" + sessions + ")");
     throw error;
   }
 }
@@ -230,10 +227,15 @@ try {
   assert.ok(Math.abs(layout.canvas.width - layout.panel.width) < 1);
   assert.equal(await city(page).getByRole("status").count(), 0, "WebGL must initialize normally");
   await frame.waitForFunction(() => window.cityDrawCalls > 0);
+  assert.equal(await city(page).locator(".city-legend").count(), 0, "districts are disclosed on demand");
+  assert.equal(await city(page).locator(".city-replay-controls").count(), 0, "replay starts compact");
+  await city(page).getByRole("button", { name: "城市摘要", exact: true }).click();
   await city(page).locator(".city-legend button").first().click();
+  await city(page).getByRole("button", { name: "时间回放", exact: true }).click();
   await city(page).getByRole("button", { name: "播放回放", exact: true }).click();
   await city(page).getByRole("button", { name: "暂停回放", exact: true }).click();
   await city(page).getByRole("button", { name: "回到实时", exact: true }).click();
+  await page.getByRole("button", { name: "更多工具", exact: true }).click();
   await page.getByRole("button", { name: "城市设置", exact: true }).click();
   const settings = city(page).getByRole("dialog", { name: "城市设置", exact: true });
   await settings.getByLabel("岛屿种子", { exact: true }).fill("12345");

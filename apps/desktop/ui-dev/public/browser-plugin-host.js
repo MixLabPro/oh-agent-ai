@@ -88,6 +88,7 @@
         send("resume"); note("resumed");
       }
       Object.assign(frame.style, { left: `${bounds.x}px`, top: `${bounds.y}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
+      current.boundsSeq = 0;
       send("locale", { locale: args.locale === "en" ? "en" : "zh-Hans" });
       return current.instanceId;
     }
@@ -101,6 +102,16 @@
       return;
     }
     if (command === "plugin_snapshot") return current ? structuredClone(current) : null;
+    if (command === "plugin_set_bounds") {
+      if (!current || args.instanceId !== current.instanceId || current.status === "failed") throw new Error("plugin_unavailable");
+      const bounds = args.bounds;
+      if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+        || bounds.width <= 0 || bounds.height <= 0 || !Number.isSafeInteger(args.seq) || args.seq < 1) throw new Error("invalid_bounds");
+      if (args.seq <= current.boundsSeq) return;
+      current.boundsSeq = args.seq;
+      Object.assign(frame.style, { left: `${bounds.x}px`, top: `${bounds.y}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
+      return;
+    }
     if (!current || args.instanceId !== current.instanceId || current.status !== "ready") throw new Error("plugin_unavailable");
     if (command === "plugin_invalidate") { send("invalidate"); return; }
     if (command === "plugin_command") {

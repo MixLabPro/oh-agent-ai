@@ -3,6 +3,17 @@ import { observeLocale, pluginLocale } from "./host";
 
 // Plugin-owned presentation catalog. Business DTOs and user excerpts are not translated.
 const english: Record<string, string> = {
+  "解除视角锁定": "Unlock view",
+  "锁定视角": "Lock view",
+  "已锁定目标：左键拖动环绕，滚轮缩放。": "Target locked: left-drag to orbit, wheel to zoom.",
+  "点击空白处取消锁定；镜头远近由滚轮控制。": "Click empty space to unlock; use the wheel to zoom.",
+  "画布内按 F 锁定目标；Esc 退出选择。": "Press F on the canvas to lock the target; Esc clears selection.",
+  "已锁定建筑中心：左键拖动环绕，滚轮缩放。": "Building centre locked: left-drag to orbit, wheel to zoom.",
+  "自由视角：左键环绕，右键平移，滚轮朝指针缩放。": "Free view: left-drag to orbit, right-drag to pan, wheel to zoom towards pointer.",
+  "画布内按 F 重新聚焦；Esc 退出选择。": "Press F on the canvas to refocus; Esc clears selection.",
+  "导出说明": "Export details",
+  "演示": "Demo", "正在回放": "Replay running", "已载入会话": "Loaded sessions",
+  "统计及回放仅覆盖已载入会话，不代表完整历史。": "Statistics and replay cover loaded sessions, not complete history.",
   "收起回放": "Collapse replay",
   "当前环境没有可用的视频编码器（H.264 / VP9 / VP8），可使用拍照。": "No video encoder is available here (H.264 / VP9 / VP8). Photos remain available.",
   "已载入": "Loaded",

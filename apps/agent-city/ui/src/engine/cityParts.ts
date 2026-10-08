@@ -792,6 +792,29 @@ export class CityParts {
 
   anchorFor(id: string): { x: number; z: number; height: number; ground: number } | null { return anchorFor(this as unknown as UiOverlayHost, id); }
 
+  /** Interactive framing uses the currently visible growth, not the final tower height. */
+  focusAnchorFor(id: string): { x: number; z: number; height: number; ground: number; footprint: number } | null {
+    const anchor = this.anchorFor(id), runtime = this.runtimeById.get(id);
+    if (!anchor || !runtime) return null;
+    const form = this.formOf(runtime.building);
+    const footprint = !runtime.slot.blockId.startsWith("hotel:") && (form === "tower" || form === "landmark") ? runtime.building.footprint
+      : Math.max(runtime.building.footprint, runtime.slot.width * 0.92, runtime.slot.depth * 0.9);
+    const mesh = this.shaftMeshes?.[runtime.facade];
+    let visibleHeight = Math.max(1, anchor.height * runtime.display), visibleFootprint = footprint;
+    if (mesh && runtime.shaftPrimary >= 0) {
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      if (mesh.geometry.boundingBox) {
+        const matrix = new THREE.Matrix4();
+        mesh.getMatrixAt(runtime.shaftPrimary, matrix);
+        const box = mesh.geometry.boundingBox.clone().applyMatrix4(matrix);
+        const size = box.getSize(new THREE.Vector3());
+        visibleFootprint = Math.max(visibleFootprint, size.x, size.z);
+        visibleHeight = Math.max(visibleHeight, box.max.y - anchor.ground);
+      }
+    }
+    return { ...anchor, footprint: visibleFootprint, height: visibleHeight };
+  }
+
   setHovered(id: string | null): void { setHovered(this as unknown as UiOverlayHost, id); }
 
   setSelected(id: string | null): void { setSelected(this as unknown as UiOverlayHost, id); }

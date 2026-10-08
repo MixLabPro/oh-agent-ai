@@ -1198,6 +1198,7 @@
         if (index >= 0) customRoots.splice(index, 1);
         return ok({ status: "ok", changed: index >= 0 });
       }
+      case "harness_display_names": return { ...cityHarnessNames, workbuddy: "WorkBuddy" };
       case "clear_nav_target": case "clear_focus_target": return ok({ status: "ok" });
         default: throw new Error("Unsupported browser mock command: " + command);
       }

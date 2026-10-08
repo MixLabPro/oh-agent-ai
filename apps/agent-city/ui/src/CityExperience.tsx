@@ -30,6 +30,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   const tooltipRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [orbitLocked, setOrbitLocked] = useState<string | null>(null);
   const [details, setDetails] = useState(false);
   const [options, setOptions] = useState(false);
   const [catalog, setCatalog] = useState(false);
@@ -94,6 +95,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   const districtLabel = (id: string) => modelRef.current?.districts.find((district) => district.id === id)?.label ?? id;
   const callbacks = useMemo(() => ({
     onSelect(id: string | null) { setSelected(id); setDetails(false); },
+    onOrbitLock(id: string | null) { setOrbitLocked(id); },
     onHover(id: string | null, x: number, y: number) {
       const tooltip = tooltipRef.current;
       if (!tooltip) return;
@@ -128,7 +130,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
       if (options) setOptions(false);
       else if (details) setDetails(false);
       else if (film) abort.current?.abort();
-      else { clearSelection(); engine.current?.stopCinematic(); engine.current?.setTimeCursor(null, { playing: false }); }
+      else { engine.current?.stopCinematic(); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -202,7 +204,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
       }
     } finally { abort.current = null; if (mounted.current) setFilm(null); }
   };
-  const refreshSelection = () => { if (selected && !isDecorId(selected) && !modelRef.current?.buildings.some((b) => b.id === selected)) clearSelection(); else engine.current?.setSelected(isDecorId(selected) ? null : selected); };
+  const refreshSelection = () => { if (selected && !isDecorId(selected) && !modelRef.current?.buildings.some((b) => b.id === selected)) clearSelection(); else engine.current?.setSelected(selected); };
   const openHostSession = async () => {
     if (!selected || !embedded() || projection?.source !== "local") { setError("合成会话没有宿主日志详情，请使用原生真实数据模式。"); return; }
     const requestId = `city-open-${++requests.current}`;
@@ -213,22 +215,54 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
       if (response.version !== 1 || response.requestId !== requestId || !response.ok || !response.result?.opened) throw new Error("session_unavailable");
     } catch { if (mounted.current) setError("无法打开宿主会话详情，数据可能已删除或当前实例已失效。"); }
   };
-  return { modelRef, model, setModel, tooltipRef, callbacks, selected, setSelected, clearSelection, details, setDetails, options, setOptions, catalog, setCatalog,
+  return { modelRef, model, setModel, tooltipRef, callbacks, selected, setSelected, clearSelection, orbitLocked, releaseOrbitLock: () => engine.current?.releaseOrbitLock(), details, setDetails, options, setOptions, catalog, setCatalog,
     seed, seedDraft, setSeedDraft, seedBusy, confirmSeed, applySeed, reseed, cursor, playing, speed, setSpeed,
     cut, setCut, backdrop, setBackdrop, film, photoBusy, busy, error, setError, stats, card, progress, seek, replay, live, previewRef,
     describe, photo, exportFilm, refreshSelection, openHostSession, projection,
     focusDistrict: (id: string) => engine.current?.focusDistrict(id),
     focusCatalog: (id: string) => engine.current?.focusCatalog(id) ?? false,
-    focusBuilding: (id: string) => engine.current?.focusBuilding(id) };
+    lockSelection: (id: string) => engine.current?.lockSelection(id) };
 }
 
 export function CityExperience({ ui, disabled, cinema, status, quality, onQuality }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void }) {
   const language = useCityLanguage();
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [replayOpen, setReplayOpen] = useState(false);
+  const summaryButton = useRef<HTMLButtonElement>(null);
+  const replayButton = useRef<HTMLButtonElement>(null);
+  const timelineRef = useRef<HTMLElement>(null);
+  const compact = (n: number) => new Intl.NumberFormat(language === "en" ? "en-US" : "zh-CN", { notation: "compact", maximumFractionDigits: 2 }).format(n);
+  const totalTokens = ui.projection?.sessions.reduce((sum, session) => sum + session.tokens.total, 0);
+  useEffect(() => { if (ui.selected || ui.catalog) setSummaryOpen(false); }, [ui.selected, ui.catalog]);
+  useEffect(() => {
+    const element = timelineRef.current;
+    if (!element) return;
+    const update = () => element.closest<HTMLElement>(".city-app")?.style.setProperty("--city-timeline-height", `${element.getBoundingClientRect().height}px`);
+    const observer = new ResizeObserver(update); observer.observe(element); update();
+    return () => observer.disconnect();
+  }, [cinema]);
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || ui.options || ui.details || ui.film || cinema) return;
+      if (summaryOpen) { setSummaryOpen(false); summaryButton.current?.focus(); }
+      else if (ui.catalog) ui.setCatalog(false);
+      else if (ui.selected) ui.clearSelection();
+      else if (replayOpen) { setReplayOpen(false); replayButton.current?.focus(); }
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [summaryOpen, replayOpen, ui.selected, ui.catalog, ui.options, ui.details, ui.film, cinema]);
   const model = ui.model;
   const selected = model?.buildings.find((b) => b.id === ui.selected);
   const session = ui.projection?.sessions.find((s) => s.id === ui.selected);
   const card = ui.card ? ui.describe(ui.card) : null;
   const locked = disabled || cinema || ui.busy;
+  const decorCamera = <>
+    {ui.orbitLocked === ui.selected ? <button onClick={ui.releaseOrbitLock}>解除视角锁定</button>
+      : <button disabled={locked} onClick={() => ui.selected && ui.lockSelection(ui.selected)}>锁定视角</button>}
+    <p className="city-camera-help">{ui.orbitLocked === ui.selected ? "已锁定目标：左键拖动环绕，滚轮缩放。" : "自由视角：左键环绕，右键平移，滚轮朝指针缩放。"}</p>
+    <p className="city-camera-help">点击空白处取消锁定；镜头远近由滚轮控制。</p>
+  </>;
   // 建筑说明：非模态侧栏（不用 dialog），飞到实时模型时城市仍可见、可旋转查看；开关在顶部工具栏（city.catalog）。
   const catalog = ui.catalog; const setCatalog = ui.setCatalog;
   const [missing, setMissing] = useState<string | null>(null);
@@ -241,7 +275,17 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   useEffect(() => { if (ui.details && session) detailsRef.current?.showModal(); else detailsRef.current?.close(); }, [ui.details, session?.id]);
   return cityView(<>
     <div className="city-tooltip" ref={ui.tooltipRef} aria-hidden="true" />
-    {!cinema && <section className="city-legend" aria-label="执行环境城区">
+    {!cinema && <button ref={summaryButton} className="city-summary-trigger" aria-label="城市摘要" aria-expanded={summaryOpen} aria-controls="city-summary-panel" onClick={() => { ui.clearSelection(); ui.setCatalog(false); setSummaryOpen(!summaryOpen); }}>
+      <span>{ui.projection ? compact(ui.projection.coverage.returned) : "—"} 会话 · {totalTokens === undefined ? "—" : compact(totalTokens)} tokens</span>
+      {ui.projection?.coverage.truncated && <span className="city-coverage-badge">已截断</span>}
+      {ui.projection?.source === "fixture" && <span className="city-coverage-badge">演示</span>}
+      <span aria-hidden="true">{summaryOpen ? "−" : "›"}</span>
+    </button>}
+    {!cinema && summaryOpen && <section id="city-summary-panel" className="city-legend" aria-label="城市摘要">
+      <h2>城市摘要</h2>
+      <p>{status}</p>
+      <dl><dt>已载入会话</dt><dd>{ui.projection?.coverage.returned ?? "—"} / {ui.projection?.coverage.total ?? "—"}</dd><dt>Token</dt><dd>{totalTokens === undefined ? "—" : tokens(totalTokens)}</dd><dt>活跃</dt><dd>{model?.stats.activeCount ?? "—"}</dd></dl>
+      <p>统计及回放仅覆盖已载入会话，不代表完整历史。</p>
       <h2>执行环境城区</h2>
       {(model?.districts ?? []).map((district) => <button key={district.id} disabled={locked} onClick={() => ui.focusDistrict(district.id)}>
         <span aria-hidden="true" style={{ background: paletteFor(district.id).accent }} /><strong>{district.label}</strong>
@@ -249,6 +293,8 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {district.anomaly && <span className="city-district-meta">{district.anomaly.severity} · {district.anomaly.count} 条异常（部分投影）</span>}
       </button>)}
       <p className="city-context-note">灰调背景楼为城市氛围 · 不计入会话</p>
+      <p>会话楼高表示 token 规模；施工状态和生长进度是可视化估算，不代表任务完成度。</p>
+      <p>{ui.projection?.source === "local" ? "本机只读投影 · 不上传数据" : "本地演示数据 · 尚未接入真实数据源"}</p>
     </section>}
     {catalog && !cinema && <aside className="city-catalog" aria-label="建筑说明">
       <button className="city-close" aria-label="关闭建筑说明" onClick={() => setCatalog(false)}>×</button>
@@ -263,15 +309,17 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         </div>
       </li>)}</ul></section>)}
     </aside>}
-    {!cinema && <section className="city-timeline" aria-label="时间回放">
+    {!cinema && <section ref={timelineRef} className={`city-timeline${replayOpen ? " is-expanded" : ""}`} aria-label="时间回放">
+      <button ref={replayButton} type="button" aria-expanded={replayOpen} aria-controls="city-replay-controls" onClick={() => setReplayOpen(!replayOpen)}>{replayOpen ? "收起回放" : "时间回放"}</button>
+      <span className="city-replay-status">{ui.cursor === null ? "实时" : dateLabel(ui.cursor)}{ui.playing && <span aria-label="正在回放"> · ▶</span>}</span>
+      {replayOpen && <div id="city-replay-controls" className="city-replay-controls">
       <button type="button" onClick={ui.replay} disabled={locked}>{ui.playing ? "暂停回放" : "播放回放"}</button>
       <input aria-label="时间游标" type="range" min="0" max="1000" value={slider} disabled={locked} onChange={(e) => ui.seek(Number(e.target.value))} />
-      <span>{ui.cursor === null ? "实时" : dateLabel(ui.cursor)}</span>
       <select aria-label="回放速度" value={ui.speed} disabled={locked || ui.playing} onChange={(e) => ui.setSpeed(Number(e.target.value))}>
         <option value="600">每秒 10 分钟</option><option value="3600">每秒 1 小时</option><option value="14400">每秒 4 小时</option>
       </select>
       <button type="button" onClick={ui.live} disabled={locked || ui.cursor === null}>回到实时</button>
-      <p>会话楼高表示 token 规模；施工状态和生长进度是可视化估算，不代表任务完成度。</p>
+      </div>}
     </section>}
     {cinema && <div className="city-cinematic-overlay" aria-live="polite">
       <div className="city-cinema-top" /><div className="city-cinema-bottom"><span style={{ transform: `scaleX(${ui.progress})` }} /></div>
@@ -296,6 +344,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
           {d.label} · {d.sessionCount} · {Math.round((d.sessionCount / total) * 100)}%</button>)}
         {alerts.length ? <><h3>异常</h3>{alerts.map((d) => <p key={d.id}>{d.label} · {d.anomaly!.severity} · {d.anomaly!.count} 条（部分投影）</p>)}</> : <p>当前没有城区异常。</p>}
         <p>市政厅随岛屿档位升级；广场前的城区旗高度表示各城区会话占比，穹顶信标表示有城区异常。</p>
+        {decorCamera}
       </aside>;
     })()}
     {ui.selected && ui.selected.startsWith("decor:landmark:district:") && !cinema && (() => {
@@ -310,6 +359,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
           {district.anomaly && <><dt>异常</dt><dd>{district.anomaly.severity} · {district.anomaly.count} 条（部分投影）</dd></>}</dl>
         <p>地标高度随本区会话数增长：会话越多，地标越高。</p>
         <button disabled={locked} onClick={() => ui.focusDistrict(district.id)}>聚焦城区</button>
+        {decorCamera}
       </aside>;
     })()}
     {ui.selected && isDecorId(ui.selected) && !ui.selected.startsWith("decor:landmark:district:") && ui.selected !== "decor:site:civic" && !cinema && (() => {
@@ -320,6 +370,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         <p>{info.category}</p><h2>{info.title}</h2>
         <p>{info.body}</p>
         <p>这不是会话楼：没有 token、时间或会话详情可钻取。</p>
+        {decorCamera}
       </aside>;
     })()}
     {selected && !cinema && <aside className="city-detail-panel" aria-label="建筑详情">
@@ -329,23 +380,30 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <dl><dt>Token</dt><dd>{tokens(selected.tokensTotal)}</dd><dt>状态</dt><dd>{selected.active ? "活跃 · 施工中" : "非活跃 · 已封顶"}</dd>
         <dt>进度估算</dt><dd>{Math.round(selected.builtFraction * 100)}%</dd><dt>起始时间</dt><dd>{dateLabel(selected.startedAt)}</dd>
         <dt>事件数</dt><dd>{session?.event_count ?? "未投影"}</dd><dt>费用</dt><dd>尚未接入</dd></dl>
-      <button disabled={locked} onClick={() => ui.focusBuilding(selected.id)}>聚焦建筑</button>
+      {ui.orbitLocked !== selected.id && <button disabled={locked} onClick={() => ui.lockSelection(selected.id)}>锁定视角</button>}
+      {ui.orbitLocked === selected.id && <button onClick={ui.releaseOrbitLock}>解除视角锁定</button>}
+      <p className="city-camera-help">{ui.orbitLocked === selected.id ? "已锁定建筑中心：左键拖动环绕，滚轮缩放。" : "自由视角：左键环绕，右键平移，滚轮朝指针缩放。"}</p>
+      <p className="city-camera-help">画布内按 F 锁定目标；Esc 退出选择。</p>
+      <p className="city-camera-help">点击空白处取消锁定；镜头远近由滚轮控制。</p>
       {session && <button onClick={() => ui.setDetails(true)}>查看会话详情</button>}
       {selected.aggregated && <p>此建筑代表 {selected.extraCount} 个会话，不支持单独钻取。</p>}
       <p>建筑和施工仅为数据隐喻。</p>
     </aside>}
     <dialog className="city-dialog" ref={detailsRef} onCancel={(event) => { event.preventDefault(); event.stopPropagation(); ui.setDetails(false); }} onClose={() => ui.setDetails(false)} aria-label="会话详情">
-      <button className="city-close" aria-label="关闭会话详情" onClick={() => ui.setDetails(false)}>×</button><h2>会话详情</h2>
+      <header className="city-dialog-header"><h2>会话详情</h2><button className="city-close" aria-label="关闭会话详情" onClick={() => ui.setDetails(false)}>×</button></header>
+      <div className="city-dialog-body">
       {session && <><p>{session.harness} · {session.first_event_at}</p><dl><dt>输入 token（含缓存）</dt><dd>{tokens(session.tokens.input)}</dd><dt>输出 token</dt><dd>{tokens(session.tokens.output)}</dd><dt>统计截止</dt><dd>{session.last_event_at}</dd></dl>
         <h3>用户输入摘录</h3>{session.task_excerpts?.length ? session.task_excerpts.map((excerpt, i) => <section key={i} className="city-excerpt"><p>{excerpt.role === "user_first" ? "首次输入" : "后续输入"} · {excerpt.provenance === "truncated" ? "已截断" : excerpt.provenance === "scrubbed" ? "已清理" : "有限摘录"}</p><blockquote>{excerpt.text}</blockquote></section>) : <p>当前数据没有可用摘录。</p>}
         <p>摘录并非完整提示词。原始日志、调用详情、模型、费用及异常尚未开放为此插件的详情投影。</p></>}
-      <button disabled={ui.projection?.source !== "local"} onClick={() => void ui.openHostSession()}>在宿主打开完整会话详情</button>
+      </div>
+      <div className="city-dialog-actions"><button disabled={ui.projection?.source !== "local"} onClick={() => void ui.openHostSession()}>在宿主打开完整会话详情</button></div>
     </dialog>
     <dialog className="city-dialog" ref={settingsRef} onCancel={(event) => { event.preventDefault(); event.stopPropagation(); ui.setOptions(false); }} onClose={() => ui.setOptions(false)} aria-label="城市设置">
-      <button className="city-close" aria-label="关闭城市设置" onClick={() => ui.setOptions(false)}>×</button><h2>城市设置</h2>
+      <header className="city-dialog-header"><h2>城市设置</h2><button className="city-close" aria-label="关闭城市设置" onClick={() => ui.setOptions(false)}>×</button></header>
+      <div className="city-dialog-body">
       <form onSubmit={(e) => { e.preventDefault(); void ui.applySeed(Number(ui.seedDraft.trim())); }}>
-        <label htmlFor="city-seed">岛屿种子</label><input id="city-seed" inputMode="numeric" value={ui.seedDraft} disabled={locked} onChange={(e) => ui.setSeedDraft(e.target.value)} />
-        <button disabled={locked}>应用种子</button>
+        <label htmlFor="city-seed">岛屿种子</label><div className="city-seed-controls"><input id="city-seed" inputMode="numeric" value={ui.seedDraft} disabled={locked} onChange={(e) => ui.setSeedDraft(e.target.value)} />
+        <button disabled={locked}>应用种子</button></div>
       </form>
       <button onClick={ui.reseed} disabled={locked}>{ui.confirmSeed ? "确认重新生成（4 秒内）" : "重新生成岛屿"}</button>
       <p>只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。</p>
@@ -353,13 +411,14 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <p>背景楼只是城市氛围，不是会话，不可点击，不计入统计。</p>
       <label htmlFor="city-quality">画质</label><select id="city-quality" value={quality} onChange={(e) => onQuality(e.target.value)}><option value="auto">自动</option><option value="high">高画质</option><option value="eco">节能</option></select>
       <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
-      <p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p>
+      <details className="city-settings-help"><summary>导出说明</summary><p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p></details>
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
       {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}
-      <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.focusBuilding(e.target.value); ui.setOptions(false); }}>
+      <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.lockSelection(e.target.value); else ui.clearSelection(); ui.setOptions(false); }}>
         <option value="">请选择</option>{(ui.projection?.sessions ?? []).map((session) => <option key={session.id} value={session.id}>{session.harness} · {session.first_event_at} · {tokens(session.tokens.total)} tokens</option>)}
       </select>
       {ui.error && <p role="alert">{ui.error}</p>}
+      </div>
     </dialog>
     {ui.film && <section className="city-export-preview" aria-label="航拍导出预览">
       <canvas ref={ui.previewRef} width="640" height="360" aria-label="后台实际生成的航拍画面" />

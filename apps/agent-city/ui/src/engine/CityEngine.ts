@@ -37,6 +37,7 @@ import { planAirport, roadSamples } from "./cityAirport";
 import { LIGHT_BUDGET, nightFactor } from "./cityLightBudget";
 import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
+import { buildingFrame, isSelectionGesture } from "./cityCameraInteraction";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -52,6 +53,7 @@ export type CityEngineOptions = {
   headless?: boolean;
   onHover?: (id: string | null, clientX: number, clientY: number) => void;
   onSelect?: (id: string | null) => void;
+  onOrbitLock?: (id: string | null) => void;
   onStats?: (stats: EngineStats) => void;
   onTimeCursor?: (ms: number, live: boolean) => void;
   /** 航拍进度（秒）；ended=true 表示片子放完或被打断。 */
@@ -66,7 +68,7 @@ export class CityEngine {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
-  private readonly controls: Pick<OrbitControls, "target" | "enabled" | "enableDamping" | "dampingFactor" | "maxPolarAngle" | "minDistance" | "maxDistance" | "autoRotate" | "autoRotateSpeed" | "update" | "dispose">;
+  private readonly controls: Pick<OrbitControls, "target" | "enabled" | "enableDamping" | "enablePan" | "zoomToCursor" | "dampingFactor" | "maxPolarAngle" | "minDistance" | "maxDistance" | "autoRotate" | "autoRotateSpeed" | "update" | "dispose">;
   private assetsReady: Promise<void>;
   private floraReady: Promise<void> = Promise.resolve();
   private readonly hemisphere: THREE.HemisphereLight;
@@ -131,7 +133,11 @@ export class CityEngine {
   private pointerClient: { x: number; y: number } | null = null;
   private pointerMoved = false;
   private hoveredId: string | null = null;
-  private pointerDown: { x: number; y: number; at: number } | null = null;
+  private pointerDown: { id: number; x: number; y: number; at: number; moved: number } | null = null;
+  private selectedId: string | null = null;
+  private orbitLockedId: string | null = null;
+  private orbitLockedPoint: THREE.Vector3 | null = null;
+  private pickedDecor: { id: string; point: THREE.Vector3 } | null = null;
   private attracted = true;
   private boundsRadius = 150;
   private cityCenter = { x: 0, z: 0 };
@@ -167,17 +173,18 @@ export class CityEngine {
     this.camera.position.set(150, 120, 170);
 
     this.controls = options.headless ? {
-      target: new THREE.Vector3(), enabled: false, enableDamping: false, dampingFactor: 0,
+      target: new THREE.Vector3(), enabled: false, enableDamping: false, enablePan: true, zoomToCursor: true, dampingFactor: 0,
       maxPolarAngle: 1.42, minDistance: 16, maxDistance: 900, autoRotate: false, autoRotateSpeed: 0,
       update: () => { this.camera.lookAt(this.controls.target); return false; }, dispose: () => {},
     } : new OrbitControls(this.camera, canvas as HTMLCanvasElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.maxPolarAngle = 1.42;
-    this.controls.minDistance = 16;
+    this.controls.minDistance = 3;
     this.controls.maxDistance = 900;
     this.controls.autoRotate = false;
     this.controls.autoRotateSpeed = 0.45;
+    this.controls.zoomToCursor = true;
 
     const theme = activeTheme();
     this.scene.background = new THREE.Color(theme.skyHorizon);
@@ -211,6 +218,7 @@ export class CityEngine {
     const interactiveCanvas = canvas as HTMLCanvasElement;
 
     const onPointerMove = (event: PointerEvent) => {
+      if (this.pointerDown?.id === event.pointerId) this.pointerDown.moved = Math.max(this.pointerDown.moved, Math.hypot(event.clientX - this.pointerDown.x, event.clientY - this.pointerDown.y));
       this.pointerClient = { x: event.clientX, y: event.clientY };
       const rect = interactiveCanvas.getBoundingClientRect();
       this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
@@ -218,7 +226,12 @@ export class CityEngine {
       this.noteActivity();
     };
     const onPointerDown = (event: PointerEvent) => {
-      this.pointerDown = { x: event.clientX, y: event.clientY, at: performance.now() };
+      this.interruptCameraFlight();
+      this.hoveredId = null;
+      this.parts?.setHovered(null);
+      this.options.onHover?.(null, 0, 0);
+      this.pointerDown = event.button === 0 && event.isPrimary ? { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now(), moved: 0 } : null;
+      interactiveCanvas.focus({ preventScroll: true });
       if (this.cinematic) this.stopCinematic();
       if (this.attracted) {
         this.attracted = false;
@@ -230,12 +243,24 @@ export class CityEngine {
       const down = this.pointerDown;
       this.pointerDown = null;
       this.noteActivity();
-      if (!down) return;
-      const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
-      if (moved > 7 || performance.now() - down.at > 500) return; // 拖拽不是点击
+      if (!down || down.id !== event.pointerId) return;
+      const moved = Math.max(down.moved, Math.hypot(event.clientX - down.x, event.clientY - down.y));
+      if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (!isSelectionGesture(event.button, event.isPrimary, moved, performance.now() - down.at)) return;
+      onPointerMove(event); // Pick at release coordinates, not a stale hover ray.
       this.handleClick();
     };
-    const onWheel = () => { this.attracted = false; this.noteActivity(); };
+    const onPointerCancel = () => { this.pointerDown = null; };
+    const onPointerLeave = () => {
+      this.pointerClient = null;
+      this.hoveredId = null;
+      this.parts?.setHovered(null);
+      this.options.onHover?.(null, 0, 0);
+    };
+    const onWheel = () => { this.interruptCameraFlight(); if (this.cinematic) this.stopCinematic(); this.attracted = false; this.noteActivity(); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() === "f" && this.selectedId) { event.preventDefault(); this.lockSelection(this.selectedId); }
+    };
     const onVisibility = () => {
       this.documentHidden = document.visibilityState === "hidden";
       if (this.documentHidden) this.stopLoop();
@@ -243,9 +268,13 @@ export class CityEngine {
     };
 
     interactiveCanvas.addEventListener("pointermove", onPointerMove);
-    interactiveCanvas.addEventListener("pointerdown", onPointerDown);
+    interactiveCanvas.tabIndex = 0;
+    interactiveCanvas.addEventListener("pointerdown", onPointerDown, true);
     interactiveCanvas.addEventListener("pointerup", onPointerUp);
-    interactiveCanvas.addEventListener("wheel", onWheel, { passive: true });
+    interactiveCanvas.addEventListener("pointercancel", onPointerCancel);
+    interactiveCanvas.addEventListener("pointerleave", onPointerLeave);
+    interactiveCanvas.addEventListener("wheel", onWheel, { passive: true, capture: true });
+    interactiveCanvas.addEventListener("keydown", onKeyDown);
     document.addEventListener("visibilitychange", onVisibility);
     const suspend = () => { this.documentHidden = true; this.stopLoop(); };
     const resume = () => { this.documentHidden = false; this.noteActivity(); this.startLoop(); };
@@ -257,9 +286,12 @@ export class CityEngine {
     });
     this.observers.push(
       () => interactiveCanvas.removeEventListener("pointermove", onPointerMove),
-      () => interactiveCanvas.removeEventListener("pointerdown", onPointerDown),
+      () => interactiveCanvas.removeEventListener("pointerdown", onPointerDown, true),
       () => interactiveCanvas.removeEventListener("pointerup", onPointerUp),
-      () => interactiveCanvas.removeEventListener("wheel", onWheel),
+      () => interactiveCanvas.removeEventListener("pointercancel", onPointerCancel),
+      () => interactiveCanvas.removeEventListener("pointerleave", onPointerLeave),
+      () => interactiveCanvas.removeEventListener("wheel", onWheel, true),
+      () => interactiveCanvas.removeEventListener("keydown", onKeyDown),
       () => document.removeEventListener("visibilitychange", onVisibility),
     );
 
@@ -587,6 +619,7 @@ export class CityEngine {
   }
 
   private flyTo(position: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }, duration: number): void {
+    this.clearCameraMomentum();
     this.tween = {
       fromPos: this.camera.position.clone(),
       toPos: new THREE.Vector3(position.x, position.y, position.z),
@@ -597,23 +630,140 @@ export class CityEngine {
     };
   }
 
+  private clearCameraMomentum(): void {
+    const position = this.camera.position.clone(), target = this.controls.target.clone();
+    const damping = this.controls.enableDamping;
+    this.controls.enableDamping = false;
+    this.controls.update(); // Consume OrbitControls' residual deltas without jumping the view.
+    this.camera.position.copy(position); this.controls.target.copy(target);
+    this.controls.update();
+    this.controls.enableDamping = damping;
+  }
+
+  private interruptCameraFlight(lockTarget = true): void {
+    if (!this.tween) return;
+    // Input cancels movement immediately, but orbit must already use the building centre.
+    if (lockTarget && this.orbitLockedId) this.controls.target.copy(this.tween.toTarget);
+    this.tween = null;
+    this.clearCameraMomentum();
+  }
+
+  releaseOrbitLock(): void {
+    if (this.orbitLockedId) this.interruptCameraFlight(false);
+    this.orbitLockedId = null;
+    this.controls.enablePan = true;
+    this.controls.zoomToCursor = true;
+    this.controls.minDistance = 3;
+    this.controls.maxDistance = Math.max(this.boundsRadius * 4.5, this.camera.position.distanceTo(this.controls.target));
+    this.options.onOrbitLock?.(null);
+  }
+
+  /** Selection changes only the orbit pivot, never dollies or flies the camera. */
+  lockSelection(id: string): boolean {
+    if (!this.parts) return false;
+    const anchor = id.startsWith("decor:") ? null : this.parts.focusAnchorFor(id);
+    const target = anchor ? new THREE.Vector3(anchor.x, anchor.ground + anchor.height * 0.5, anchor.z)
+      : this.pickedDecor?.id === id ? this.pickedDecor.point.clone()
+      : this.selectedId === id ? this.orbitLockedPoint?.clone() : null;
+    if (!target || !target.toArray().every(Number.isFinite)) return false;
+    if (this.cinematic) this.stopCinematic();
+    this.interruptCameraFlight(false);
+    this.setSelected(id);
+    this.attracted = false;
+    this.controls.autoRotate = false;
+    const position = this.camera.position.clone();
+    this.controls.enablePan = false;
+    this.controls.zoomToCursor = false;
+    const distance = position.distanceTo(target);
+    this.controls.minDistance = Math.min(3, distance);
+    this.controls.maxDistance = Math.max(this.boundsRadius * 4.5, distance);
+    this.orbitLockedId = id;
+    this.orbitLockedPoint = target.clone();
+    const reduceMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    // Same start/end position: interpolate only the look-at pivot, never zoom on selection.
+    this.flyTo(position, target, reduceMotion ? 1 : 360);
+    this.options.onOrbitLock?.(id);
+    this.noteActivity();
+    return true;
+  }
+
+  private buildingViewPosition(id: string, target: THREE.Vector3, direction: THREE.Vector3, distance: number): THREE.Vector3 {
+    const ray = new THREE.Raycaster();
+    const objects = [...(this.parts?.raycastTargets ?? []), ...(this.parts?.decorTargets ?? [])];
+    const occupied: THREE.Box3[] = [];
+    const matrix = new THREE.Matrix4();
+    for (const object of objects) {
+      // Instanced buildings grow after their first raycast; cached bounds can be stale.
+      if (object instanceof THREE.InstancedMesh) object.computeBoundingSphere();
+      object.updateWorldMatrix(true, false);
+      if (object instanceof THREE.InstancedMesh) {
+        if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
+        if (object.geometry.boundingBox) for (let index = 0; index < object.count; index++) {
+          if (this.parts?.idAt(object, index) === id) continue;
+          object.getMatrixAt(index, matrix);
+          occupied.push(object.geometry.boundingBox.clone().applyMatrix4(matrix).applyMatrix4(object.matrixWorld).expandByScalar(this.camera.near));
+        }
+      }
+    }
+    let best = target.clone().addScaledVector(direction, distance * 0.5).add(new THREE.Vector3(0, distance * Math.sqrt(0.75), 0));
+    let fewestBlockers = Infinity;
+    // A focus action may choose a nearby azimuth instead of flying inside an adjacent tower.
+    // This is a bounded one-off search, never a per-frame picking loop.
+    for (const scale of [1, 2, 4]) for (const angle of [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI]) {
+      const heading = direction.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+      const position = target.clone().addScaledVector(heading, distance * scale * 0.5).add(new THREE.Vector3(0, distance * scale * Math.sqrt(0.75), 0));
+      ray.set(position, target.clone().sub(position).normalize());
+      ray.far = position.distanceTo(target);
+      const blockers = ray.intersectObjects(objects, false).filter(hit => {
+        const hitId = hit.instanceId === undefined ? null : this.parts?.idAt(hit.object, hit.instanceId);
+        return hitId !== id;
+      }).length + occupied.filter(box => box.containsPoint(position)).length;
+      if (blockers < fewestBlockers) { best = position; fewestBlockers = blockers; }
+      if (blockers === 0) return position;
+    }
+    return best;
+  }
+
   resetView(): void {
     const home = this.homeView();
+    const damaged = ![...this.camera.position.toArray(), ...this.controls.target.toArray(), ...this.camera.quaternion.toArray()].every(Number.isFinite);
+    if (damaged) {
+      // NaN cannot be lerped away. Repair the endpoints before touching OrbitControls.
+      this.tween = null;
+      this.orbitLockedId = null;
+      this.camera.position.set(home.x, home.y, home.z);
+      this.controls.target.set(this.cityCenter.x, 6, this.cityCenter.z);
+      this.controls.minDistance = 3;
+      this.controls.maxDistance = Math.max(900, this.boundsRadius * 4.5);
+      this.camera.lookAt(this.controls.target);
+      console.warn("[city-camera] recovered invalid view on reset");
+    }
+    this.releaseOrbitLock();
+    this.setSelected(null);
     this.flyTo(home, { ...this.cityCenter, y: 6 }, 900);
     this.options.onSelect?.(null);
-    this.parts?.setSelected(null);
   }
 
   focusBuilding(id: string): boolean {
     if (!this.parts) return false;
-    const anchor = this.parts.anchorFor(id);
+    if (this.cinematic) this.stopCinematic();
+    const anchor = this.parts.focusAnchorFor(id);
     if (!anchor) return false;
+    this.setSelected(id); // Keyboard/menu selection must also update the engine's selected target.
     this.attracted = false;
-    const distance = Math.max(26, anchor.height * 2.1);
+    const framing = buildingFrame(anchor.height, anchor.footprint, this.camera.fov, this.camera.aspect);
+    const target = new THREE.Vector3(anchor.x, anchor.ground + anchor.height * 0.5, anchor.z);
     const direction = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).setY(0).normalize();
     if (direction.lengthSq() < 0.01) direction.set(0.8, 0, 0.6).normalize();
-    const position = new THREE.Vector3(anchor.x, anchor.ground, anchor.z).addScaledVector(direction, distance).add(new THREE.Vector3(0, distance * 0.62, 0));
-    this.flyTo(position, { x: anchor.x, y: anchor.ground + Math.max(4, anchor.height * 0.45), z: anchor.z }, 850);
+    // Start with neighbourhood context for small buildings; wheel zoom remains much closer.
+    const position = this.buildingViewPosition(id, target, direction, Math.max(framing.distance, framing.minDistance * 6));
+    this.controls.enablePan = false;
+    this.controls.zoomToCursor = false;
+    this.controls.minDistance = framing.minDistance;
+    this.controls.maxDistance = Math.max(this.boundsRadius * 4.5, position.distanceTo(target) * 1.5);
+    this.orbitLockedId = id;
+    this.options.onOrbitLock?.(id);
+    this.flyTo(position, target, 550);
     return true;
   }
 
@@ -621,6 +771,7 @@ export class CityEngine {
   focusCatalog(id: string): boolean {
     const target = this.catalogTarget(id);
     if (!target) return false;
+    this.releaseOrbitLock();
     const [x, y, z, d] = target;
     this.flyTo({ x: x + d * 0.8, y: y + d * 0.45, z: z + d * 0.8 }, { x, y, z }, 1100);
     return true;
@@ -694,6 +845,7 @@ export class CityEngine {
     if (!this.parts) return false;
     const anchor = this.parts.districtAnchor(districtId);
     if (!anchor) return false;
+    this.releaseOrbitLock();
     this.attracted = false;
     // A low-volume district has radius's 30-unit floor; 2.6× pushed the camera
     // inside the new pastel context skyline and clipped the tower crowns. Keep
@@ -752,7 +904,10 @@ export class CityEngine {
 
   /** 模型重建后恢复选中态（刷新不打断用户的浏览上下文）。 */
   setSelected(id: string | null): void {
-    this.parts?.setSelected(id);
+    if (id !== this.selectedId) this.orbitLockedPoint = null;
+    this.selectedId = id;
+    if (!id || (this.orbitLockedId && this.orbitLockedId !== id)) this.releaseOrbitLock();
+    this.parts?.setSelected(id?.startsWith("decor:") ? null : id);
   }
 
   /** 时间游标：null = live（跟随现在）；play = 以 speed 倍率回放。 */
@@ -773,31 +928,38 @@ export class CityEngine {
     if (!this.parts) return;
     const id = this.pick();
     if (id && id.startsWith("decor:")) {
-      // 非会话建筑：只弹说明，不飞镜头、不画选中环（那是会话楼的语义）。
-      this.parts.setSelected(null);
+      // Decorations share orbit locking, but not session-only selection rings.
+      this.lockSelection(id);
       this.options.onSelect?.(id);
     } else if (id) {
-      this.parts.setSelected(id);
-      this.focusBuilding(id);
+      this.lockSelection(id);
       this.options.onSelect?.(id);
     } else {
-      this.parts.setSelected(null);
+      this.setSelected(null);
       this.options.onSelect?.(null);
     }
   }
 
   private pick(): string | null {
     if (!this.parts || !this.pointerClient) return null;
+    this.pickedDecor = null;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     // 会话楼与非会话建筑一起测，取最近的命中：站在海滨酒店前点它，得到的是酒店说明而不是背后的会话楼。
     const hits = this.raycaster.intersectObjects([...this.parts.raycastTargets, ...this.parts.decorTargets], false);
     for (const hit of hits) {
+      // Hidden zero-scale/procedural instances may produce non-finite ray intersections.
+      // They are not visible targets and must never poison the camera or hover selection.
+      if (!Number.isFinite(hit.distance) || hit.distance < this.camera.near || !hit.point.toArray().every(Number.isFinite)) continue;
       if (hit.instanceId !== undefined) {
         const id = this.parts.idAt(hit.object, hit.instanceId);
         if (id) return id;
       }
       const decor = this.parts.decorAt(hit.object, hit.instanceId, hit.point);
-      if (decor) return decor;
+      if (decor) {
+        // Merged/procedural decoration bounds can cover many objects; use the visible hit.
+        this.pickedDecor = { id: decor, point: hit.point.clone() };
+        return decor;
+      }
     }
     return null;
   }
@@ -969,6 +1131,7 @@ export class CityEngine {
   /** 开拍：镜头接管相机与时间游标；用户点/拖画布即中止。 */
   startCinematic(cut: CinematicCut = "full"): CinematicPlan | null {
     if (!this.layout || !this.model || !this.parts) return null;
+    this.releaseOrbitLock();
     const plan = planCinematic(this.layout, this.model, this.parts.anchors(), { cut });
     this.tween = null;
     this.playing = false;
@@ -1398,7 +1561,16 @@ export class CityEngine {
       if (progress >= 1) this.tween = null;
     }
 
-    this.controls.update();
+    if (this.orbitLockedId && !this.tween) {
+      const anchor = this.orbitLockedId.startsWith("decor:") ? null : this.parts?.focusAnchorFor(this.orbitLockedId);
+      if (anchor) {
+        const target = new THREE.Vector3(anchor.x, anchor.ground + anchor.height * 0.5, anchor.z);
+        this.camera.position.add(target.clone().sub(this.controls.target));
+        this.controls.target.copy(target); // Follow growth/replay without changing orbit direction or distance.
+      }
+    }
+    if (this.tween) this.camera.lookAt(this.controls.target);
+    else this.controls.update();
     // 相机不得沉到地形/水面以下：低机位会让近裁剪面切出一条平直的陆地边。
     if (this.layout) {
       const floor = Math.max(0, this.layout.terrain.height(this.camera.position.x, this.camera.position.z)) + 3;
@@ -1407,7 +1579,7 @@ export class CityEngine {
     this.parts?.update(dt, this.elapsed);
 
     // 悬停拾取（每帧至多一次，且只在指针动过或相机在动时）。
-    if (this.parts && this.pointerClient && (this.pointerMoved || this.tween)) {
+    if (this.parts && !this.pointerDown && this.pointerClient && (this.pointerMoved || this.tween)) {
       this.pointerMoved = false;
       const id = this.pick();
       if (id !== this.hoveredId) {
