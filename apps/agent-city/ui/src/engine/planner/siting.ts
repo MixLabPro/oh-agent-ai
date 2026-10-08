@@ -1,6 +1,7 @@
 import { DetMath as Math } from "../detMath";
 import { clearsHighways } from "../cityPlan";
 import type { Vec2 } from "../cityLayout";
+import { nearBridgeEnd, polylineDistance, wetCount } from "./footprint";
 import type { RepairContext } from "./context";
 
 // 选址后置（CITY_ARCHITECTURE §6 步）：候选表 + 路网后落位。
@@ -15,44 +16,25 @@ import type { RepairContext } from "./context";
 
 type S = { x: number; z: number; radius: number; kind: string; shore?: Vec2 };
 
-function wetPoints(ctx: RepairContext, s: { radius: number }, x: number, z: number): number {
-  let n = 0;
-  for (let k = 0; k < 16; k += 1) {
-    const t = (k / 16) * Math.PI * 2; const r = k % 2 ? s.radius : s.radius * 0.6;
-    const px = x + Math.cos(t) * r; const pz = z + Math.sin(t) * r;
-    if (ctx.height(px, pz) < 0.5 || ctx.inRiver(px, pz)) n += 1;
-  }
-  return n;
-}
-
 export function resiteViolatingSites(ctx: RepairContext): number {
   const all = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius) as S[];
-  const solid = [...ctx.edges.values()].filter((e) => !e.bridge);
-  const nearestRoad = (x: number, z: number) => {
-    let d = Infinity;
-    for (const e of solid) {
-      const [a, b] = e.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-      const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / l2));
-      d = Math.min(d, Math.hypot(x - a.x - dx * t, z - a.z - dz * t));
-    }
-    return d;
-  };
+  const solid = [...ctx.network.edges.values()].filter((e) => !e.bridge);
+  const geo = { height: ctx.height, inRiver: ctx.inRiver };
+  const nearestRoad = (x: number, z: number) => polylineDistance(solid.map((e) => e.points), { x, z });
   const limit = (s: S) => (ctx.SHORE_SITE_KINDS.has(s.kind) ? 3 : 0);
   const violates = (s: S): boolean => {
     if (s.kind === "harbor" || s.kind === "civic" || s.kind === "arch" || s.shore) return false;
     // 与 constraints.ts siteInWater / sitesOverlap 同口径（此处只看地形高度，不含 inRiver，免得把没违例的岛也动了）
-    let wet = 0;
-    for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? s.radius : s.radius * 0.6; if (ctx.height(s.x + Math.cos(t) * r, s.z + Math.sin(t) * r) < 0.5) wet += 1; }
-    if (wet > (ctx.SHORE_SITE_KINDS.has(s.kind) ? 4 : 0)) return true;
+    if (wetCount(geo, s, s.radius) > (ctx.SHORE_SITE_KINDS.has(s.kind) ? 4 : 0)) return true;
     // 重叠：与 sitesOverlap 同判据（kind 字典序较小的一方被标记）；对方是不能挪的（港口、广场、凯旋门、岛上地标）时，不论字典序都由这一方让开。
     const fixed = (o: S) => o.kind === "harbor" || o.kind === "civic" || o.kind === "arch" || !!o.shore;
     return all.some((o) => o !== s && (o.kind > s.kind || fixed(o)) && Math.hypot(o.x - s.x, o.z - s.z) < o.radius + s.radius);
   };
   const acceptable = (s: S, x: number, z: number): boolean => {
-    if (ctx.height(x, z) <= 0.5 || wetPoints(ctx, s, x, z) > limit(s)) return false;
+    if (ctx.height(x, z) <= 0.5 || wetCount(geo, { x, z }, s.radius, { river: true }) > limit(s)) return false;
     if (all.some((o) => o !== s && Math.hypot(o.x - x, o.z - z) < o.radius + s.radius)) return false;
     if (!clearsHighways({ x, z }, s.radius * 2, s.radius * 2, ctx.ringRuns)) return false;
-    if (ctx.distanceToTrunks({ x, z }) < s.radius * 0.7 || ctx.nearBridgeEnd(x, z, s.radius)) return false;
+    if (polylineDistance(ctx.trunkRuns, { x, z }) < s.radius * 0.7 || nearBridgeEnd(ctx.bridges, x, z, s.radius)) return false;
     const road = nearestRoad(x, z);
     return road >= s.radius * 0.85 && road <= s.radius + 20;
   };

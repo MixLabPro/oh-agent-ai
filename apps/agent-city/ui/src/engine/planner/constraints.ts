@@ -14,6 +14,7 @@
 // 边界：这里只放「单个违规的几何定义」（如中心到路 < 0.7 半径算穿路）；
 // 「允许多少条」的容忍计数是策略，留在守卫里。逻辑逐字取自两个守卫，勿在此改语义。
 import type { createCityPlan } from "../cityPlan";
+import { wetCount } from "./footprint";
 
 export type CityPlan = ReturnType<typeof createCityPlan>;
 export type Violation = { constraint: string; site?: string; at?: { x: number; z: number }; detail: string };
@@ -38,9 +39,9 @@ export const siteInWater: Constraint = {
   id: "siteInWater", description: "占地圈 16 点地形高于水面（岸边类允许 ≤4 点；港口与岛上地标 shore 豁免）",
   measure(plan) {
     const out: Violation[] = [];
+    const geo = { height: plan.terrain.height, inRiver: () => false };
     for (const s of planSites(plan)) {
-      let wet = 0;
-      for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2, r = k % 2 ? s.radius : s.radius * 0.6; if (plan.terrain.height(s.x + Math.cos(t) * r, s.z + Math.sin(t) * r) < 0.5) wet += 1; }
+      const wet = wetCount(geo, s, s.radius); // measure 口径：只看地形高度（河道由 siteNearRiver 单独量）
       if (s.kind !== "harbor" && !s.shore && wet > (SHORE.has(s.kind) ? 4 : 0)) out.push(v("siteInWater", s, `${s.kind} wet=${wet}`));
     }
     return out;

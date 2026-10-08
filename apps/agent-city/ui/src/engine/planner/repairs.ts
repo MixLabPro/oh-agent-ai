@@ -1,27 +1,22 @@
 import { DetMath as Math } from "../detMath"; // 跨引擎确定性：与 cityPlan.ts 同一份 Math（见 detMath.ts）
 import { clearsHighways, roadNodeId, segmentDistance } from "../cityPlan";
 import type { RoadEdge, Vec2 } from "../cityLayout";
+import { polylineClosest, wetCount } from "./footprint";
+import { addNetworkEdge, keyOf } from "./network";
+import { crosses, nearBridgeEnd, polylineDistance, safeRoadLink } from "./footprint";
 import type { RepairContext } from "./context";
 
 // 规划尾部的修复遍（CITY_ARCHITECTURE §2 迁移步 5b）：逐字从 cityPlan.ts 的 buildPlan 尾部搬来，闭包引用改为 ctx 解构，
 // 迭代顺序、阈值与常数一律不变（planner 基线哈希是证明）。每个遍返回「改动数」，供 solve.ts 汇总。
 
-/** 用地修复遍共用的几何：可挪动的用地、最近非桥路段、占地圈湿点数。路网在这些遍内不变，所以每个遍各算一份与原先共用一份等价。 */
+/** 用地修复遍共用的几何：可挪动的用地、最近非桥路段（含垂足）、占地圈湿点数。路网在这些遍内不变，所以每个遍各算一份与原先共用一份等价。 */
 function siteGeometry(ctx: RepairContext) {
-  const { edges, publicSites, landmarks, height, inRiver } = ctx;
+  const { publicSites, landmarks, height, inRiver } = ctx; const { edges } = ctx.network;
   const movable = [...publicSites, ...landmarks].filter((s) => s.radius && s.kind !== "civic" && s.kind !== "arch" && !(s as { shore?: Vec2 }).shore);
-  const solid = [...edges.values()].filter((e) => !e.bridge);
-  const nearestRoad = (x: number, z: number) => {
-    let best: { d: number; q: Vec2 } | null = null;
-    for (const e of solid) {
-      const [a, b] = e.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-      const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / l2));
-      const q = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(q.x - x, q.z - z);
-      if (!best || d < best.d) best = { d, q };
-    }
-    return best;
-  };
-  const wetAt = (site: { radius: number }, x: number, z: number) => { let n = 0; for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; const px = x + Math.cos(t) * r; const pz = z + Math.sin(t) * r; if (height(px, pz) < 0.5 || inRiver(px, pz)) n += 1; } return n; };
+  const solidRuns = [...edges.values()].filter((e) => !e.bridge).map((e) => e.points);
+  const geo = { height, inRiver };
+  const nearestRoad = (x: number, z: number) => polylineClosest(solidRuns, { x, z });
+  const wetAt = (site: { radius: number }, x: number, z: number) => wetCount(geo, { x, z }, site.radius, { river: true });
   return { movable, nearestRoad, wetAt };
 }
 type SiteGeometry = ReturnType<typeof siteGeometry>;
@@ -75,7 +70,7 @@ export function frontStationsAndStadiums(ctx: RepairContext): number {
 
 /** 兜底：岸边用地附近推不开时，沿海岸换一个位置（nudge 轮次里逐用地调用）。成功返回 true。 */
 export function relocateShoreSite(ctx: RepairContext, site: { x: number; z: number; radius: number; kind: string }, g: SiteGeometry, others: Array<{ x: number; z: number; radius: number }>): boolean {
-  const { blocks, ringRuns, coast, core, height, nearBridgeEnd, distanceToTrunks, SHORE_SITE_KINDS } = ctx;
+  const { blocks, ringRuns, coast, core, height, SHORE_SITE_KINDS } = ctx;
   const { nearestRoad, wetAt } = g;
   if (!(SHORE_SITE_KINDS.has(site.kind)) || (site as { shore?: Vec2 }).shore) return false;
   let done = false;
@@ -88,10 +83,10 @@ export function relocateShoreSite(ctx: RepairContext, site: { x: number; z: numb
     const nx = q.x + (lx / ll) * site.radius * f; const nz = q.z + (lz / ll) * site.radius * f;
     const probe = nearestRoad(nx, nz);
     if (!probe || probe.d < site.radius * 0.85 || probe.d > site.radius + 20) continue;
-    if (wetAt(site, nx, nz) > 3 || height(nx, nz) <= 0.5 || nearBridgeEnd(nx, nz, site.radius)) continue;
+    if (wetAt(site, nx, nz) > 3 || height(nx, nz) <= 0.5 || nearBridgeEnd(ctx.bridges, nx, nz, site.radius)) continue;
     if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
     if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;
-    if (distanceToTrunks({ x: nx, z: nz }) < site.radius * 0.7) continue;
+    if (polylineDistance(ctx.trunkRuns, { x: nx, z: nz }) < site.radius * 0.7) continue;
     site.x = nx; site.z = nz; done = true;
     for (const block of blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - nx, pc.z - nz) >= site.radius);
   }
@@ -100,7 +95,7 @@ export function relocateShoreSite(ctx: RepairContext, site: { x: number; z: numb
 
 /** 穿路的用地推离路（最多 6 轮直到没有挪动）；推不开的岸边用地走 relocateShoreSite。返回总挪动数。 */
 export function nudgeSitesOffRoads(ctx: RepairContext): number {
-  const { publicSites, landmarks, blocks, ringRuns, height, distanceToTrunks } = ctx;
+  const { publicSites, landmarks, blocks, ringRuns, height } = ctx;
   const g = siteGeometry(ctx);
   const { movable, nearestRoad, wetAt } = g;
   let total = 0;
@@ -123,7 +118,7 @@ export function nudgeSitesOffRoads(ctx: RepairContext): number {
           if (wetAt(site, nx, nz) > Math.max(3, wet0) || height(nx, nz) <= 0.5) continue;
           if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
           if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;
-          if (distanceToTrunks({ x: nx, z: nz }) < site.radius * 0.7) continue;
+          if (polylineDistance(ctx.trunkRuns, { x: nx, z: nz }) < site.radius * 0.7) continue;
           site.x = nx; site.z = nz; done = true; moved += 1;
           for (const block of blocks) block.parcels = block.parcels.filter((p) => Math.hypot(p.x - nx, p.z - nz) >= site.radius);
         }
@@ -140,7 +135,7 @@ export function nudgeSitesOffRoads(ctx: RepairContext): number {
 
 /** 被用地截断的路：两个共线断头隔着同一块用地时，用绕用地外缘的折线接起来。返回新增折线数。 */
 export function detourAroundSites(ctx: RepairContext): number {
-  const { nodes, edges, addEdge, key, height, inRiver, publicSites, landmarks } = ctx;
+  const { height, inRiver, publicSites, landmarks } = ctx; const { nodes, edges } = ctx.network; const addEdge = (a: Vec2, b: Vec2, arterial: boolean, bridge = false, primary = false) => addNetworkEdge(ctx.network, a, b, arterial, bridge, primary); const key = keyOf;
   let joined = 0;
     const solid = () => [...edges.values()].filter((e) => !e.bridge);
     const degree = new Map<string, RoadEdge[]>();
@@ -187,7 +182,7 @@ export function detourAroundSites(ctx: RepairContext): number {
 
 /** 断头顺着自己的方向直接延伸到下一条路（两遍）。返回接上的断头数。 */
 export function extendLooseEnds(ctx: RepairContext): number {
-  const { nodes, edges, addEdge, key, height, publicSites, landmarks, safeRoadLink, crosses } = ctx;
+  const { height, publicSites, landmarks } = ctx; const { nodes, edges } = ctx.network; const addEdge = (a: Vec2, b: Vec2, arterial: boolean, bridge = false, primary = false) => addNetworkEdge(ctx.network, a, b, arterial, bridge, primary); const key = keyOf;
   let total = 0;
     for (let pass = 0; pass < 2; pass += 1) {
       const solidEdges = [...edges.values()].filter((e) => !e.bridge);
@@ -219,7 +214,7 @@ export function extendLooseEnds(ctx: RepairContext): number {
         const along = Math.hypot(target.x - c.x, target.z - c.z);
         if (along < 12) target = c; else if (lenE - along < 12) target = d;
         if (roadNodeId(target) === id) continue;
-        if (!safeRoadLink(at, target)) continue;
+        if (!safeRoadLink(ctx.geo, [...publicSites, ...landmarks], at, target)) continue;
         // 与落点处已有道路夹角 ≥ 30°（clearAngle 的 35° 对「延伸」略严，这里只防折回重叠）。
         const ex2 = d.x - c.x; const ez2 = d.z - c.z; const cosA = Math.abs((ux * ex2 + uz * ez2) / lenE);
         if (target !== c && target !== d && cosA > Math.cos((30 * Math.PI) / 180)) continue;

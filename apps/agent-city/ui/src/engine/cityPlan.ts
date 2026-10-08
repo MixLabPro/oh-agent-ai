@@ -15,6 +15,10 @@ import { fbm, smoothstep } from "./cityNoise";
 import { boulevardSegments, buildSeasideBand, MIAMI_COASTAL, seasideStripContains, type CoastalConfig, type SeasideBand, type SeasideWorld } from "./citySeaside";
 import type { RepairContext } from "./planner/context";
 import { solvePlan } from "./planner/solve";
+import { isDeepWater, isDry, polylineDistance, wetCount } from "./planner/footprint";
+import { buildGeography } from "./planner/geography";
+import { buildSkeleton, chooseCore } from "./planner/skeleton";
+import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -88,9 +92,9 @@ export const MAX_TIER = 10;
 export function scaleTierFor(sessions: number): number {
   return Math.max(1, Math.min(MAX_TIER, Math.ceil(sessions / SESSIONS_PER_TIER)));
 }
-const targetParcels = (tier: number) => Math.ceil(SESSIONS_PER_TIER * tier * 1.35);
+export const targetParcels = (tier: number) => Math.ceil(SESSIONS_PER_TIER * tier * 1.35);
 
-type Shape = {
+export type Shape = {
   stretch: number; spin: number;
   harmonics: Array<{ k: number; a: number; p: number }>;
   bays: Array<{ at: number; depth: number; width: number }>;
@@ -124,85 +128,13 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
 
 function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null, tier: number, skipSolve: boolean) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
-  const phase = random("river") * 3;
 
-  // ── L1 岛形 ──
-  const islandRadius = (theta: number) => {
-    let r = 1;
-    for (const h of shape.harmonics) r += h.a * Math.cos(h.k * theta + h.p);
-    for (const bay of shape.bays) {
-      const d = Math.atan2(Math.sin(theta - bay.at), Math.cos(theta - bay.at));
-      r -= bay.depth * Math.exp(-(d * d) / (bay.width * bay.width));
-    }
-    r += fbm(Math.cos(theta) * 2.2, Math.sin(theta) * 2.2, seed + 17, 3) * 0.07;
-    return Math.max(0.45, r);
-  };
-  const coast: Vec2[] = Array.from({ length: 96 }, (_, i) => {
-    const theta = (i / 96) * Math.PI * 2;
-    const r = islandRadius(theta) * R;
-    const lx = Math.cos(theta) * r * shape.stretch;
-    const lz = Math.sin(theta) * r / shape.stretch;
-    return { x: lx * Math.cos(shape.spin) - lz * Math.sin(shape.spin), z: lx * Math.sin(shape.spin) + lz * Math.cos(shape.spin) };
-  });
-  const bbox = coast.reduce((b, p) => ({ minX: Math.min(b.minX, p.x), maxX: Math.max(b.maxX, p.x), minZ: Math.min(b.minZ, p.z), maxZ: Math.max(b.maxZ, p.z) }), { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity });
+  // ── L1 地理（V2 步 2a：逐字迁至 planner/geography.ts，random 无状态键控哈希、迁移不改调用序）──
+  const geo = buildGeography(seed, R, shape);
+  const { coast, bbox, hasRiver, river, riverShift, riverX, riverWidth, coastDistance, landClearance, hillAngle, hillDir, hillLine, hillProj, height, buildable, terrain } = geo;
 
-  // ── 河：82% 有河，大致南北向穿岛（街网沿河弯曲，桥跨在第 0 列空隙上）。
-  // 横向偏移不超过岛半宽的 25%，弯曲幅度与东西镜像随种子；无河时河宽恒负、不切地。
-  const hasRiver = random("hasRiver") < 0.82;
-  const halfWidth = (bbox.maxX - bbox.minX) / 2;
-  const riverShift = (bbox.minX + bbox.maxX) / 2 + (random("riverShift") - 0.5) * halfWidth * 0.5;
-  const riverAmp = (0.04 + random("riverAmp") * 0.07) * R * (random("riverMirror") < 0.5 ? -1 : 1);
-  const riverX = (z: number) => hasRiver ? riverShift + riverAmp * Math.sin(z * 0.006 + phase) + 0.03 * R * Math.sin(z * 0.014) : riverShift;
-  const riverWidth = (z: number) => hasRiver ? 16 + 4 * Math.cos(z * 0.012) + smoothstep(bbox.minZ + (bbox.maxZ - bbox.minZ) * 0.55, bbox.maxZ, z) * 34 : -1e6;
-  const river = hasRiver ? Array.from({ length: 121 }, (_, i) => { const z = bbox.minZ - 60 + i * ((bbox.maxZ - bbox.minZ + 120) / 120); return { x: riverX(z), z }; }) : [];
-  // 离岸距离：岛本就是极坐标函数，变回局部坐标比较「该方位的海岸半径 − 点的半径」即可 O(1) 求得。
-  // 曾逐点对 96 段海岸算多边形距离，单岛被调用数十万次（profile 里占 85%）。
-  // 乘 min(stretch, 1/stretch)·0.92 取保守下界：只会低估离岸距离，街区不会因近似落进海里。
-  const radiusTable = Array.from({ length: 721 }, (_, i) => islandRadius((i / 720) * Math.PI * 2) * R);
-  const shrink = Math.min(shape.stretch, 1 / shape.stretch) * 0.92;
-  const cosSpin = Math.cos(shape.spin); const sinSpin = Math.sin(shape.spin);
-  const coastDistance = (x: number, z: number) => {
-    const lx = x * cosSpin + z * sinSpin;
-    const lz = -x * sinSpin + z * cosSpin;
-    const ux = lx / shape.stretch; const uz = lz * shape.stretch;
-    let theta = Math.atan2(uz, ux); if (theta < 0) theta += Math.PI * 2;
-    const f = (theta / (Math.PI * 2)) * 720; const i = Math.floor(f);
-    const edge = radiusTable[i] + (radiusTable[Math.min(720, i + 1)] - radiusTable[i]) * (f - i);
-    return (edge - Math.hypot(ux, uz)) * shrink;
-  };
-  const landClearance = (x: number, z: number) => Math.min(coastDistance(x, z), Math.abs(x - riverX(z)) - riverWidth(z));
-
-  // ── 山脊：方位随种子，占岛在该方向上最外侧的一带。
-  const hillAngle = random("hillAngle") * Math.PI * 2;
-  const hillDir = { x: Math.cos(hillAngle), z: Math.sin(hillAngle) };
-  const reach = Math.max(...coast.map((p) => p.x * hillDir.x + p.z * hillDir.z));
-  const hillLine = reach * 0.6;
-  const hillProj = (x: number, z: number) => x * hillDir.x + z * hillDir.z;
-  const height = (x: number, z: number) => {
-    const inland = landClearance(x, z);
-    if (inland < 0) return -0.65 - Math.min(5, -inland * 0.25);
-    const hills = smoothstep(hillLine - 10, hillLine + reach * 0.3, hillProj(x, z)) * (30 + 65 * fbm(x * 0.012, z * 0.013, seed, 4));
-    return smoothstep(0, 10, inland) * (1.2 + hills);
-  };
-  // 离山脚留 12：山体高度从 hillLine−10 开始起坡，地块要落在 1.2 的平地上。
-  const buildable = (x: number, z: number) => landClearance(x, z) > 12 && hillProj(x, z) < hillLine - 12;
-  const terrain: TerrainField = {
-    height, slope: (x, z) => Math.hypot(height(x + 1, z) - height(x - 1, z), height(x, z + 1) - height(x, z - 1)) / 2,
-    buildable, center: { x: 0, z: 0 }, radius: R * 1.3, coastRadius: () => R, hasRiver,
-  };
-
-  // ── 城市核心点：可建地上评分最高处——离岸约 0.32R、离山脊远、靠河（有河时）。
-  let core: Vec2 = { x: riverShift, z: 0 };
-  let best = -Infinity;
-  for (let gx = 0; gx <= 24; gx += 1) for (let gz = 0; gz <= 24; gz += 1) {
-    const x = bbox.minX + ((bbox.maxX - bbox.minX) * gx) / 24;
-    const z = bbox.minZ + ((bbox.maxZ - bbox.minZ) * gz) / 24;
-    if (!buildable(x, z)) continue;
-    const shore = coastDistance(x, z);
-    const riverGap = hasRiver ? Math.abs(Math.abs(x - riverX(z)) - riverWidth(z) - 70) : 0;
-    const score = -Math.abs(shore - 0.32 * R) - riverGap * 0.6 - Math.max(0, hillProj(x, z) - hillLine * 0.4) * 0.8 + random(`core${gx}:${gz}`) * 8;
-    if (score > best) { best = score; core = { x, z }; }
-  }
+  // ── 核心点（V2 步 2a 迁出；步 4 起带环线成活率降分与出口弦净空，见 skeleton.ts）──
+  let core = chooseCore(geo, seed, random);
 
   /** 从名义位置就近找可建地：同心环搜索，离岸/离河至少 clearance，与已放置点保持间距。 */
   const snap = (nominal: Vec2, clearance: number, placed: Array<Vec2 & { radius: number }>, radius: number, accept?: (q: Vec2) => boolean): Vec2 => {
@@ -232,8 +164,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     publicSites.push({ id, kind, x: q.x, z: q.z, radius, yaw });
   };
   place("civic-square", "civic", core, 44, -0.15);
-  // 广场被 snap 推离核心点（核心离水/河不够远）时，环岛、放射主干道、高架都还围着旧核心点画，于是市政广场孤零零
-  // 偏在一旁、环岛中间是空的（用户截图；30 岛里 10 个岛偏 12–60）。广场挪到哪里，核心点就跟到哪里。
+  // 步 4 起 chooseCore 的硬门保证 snap 的环 0 必然命中（广场 === 核心点，civicPlazaCentred 构造成立）；
+  // 无门控候选的小岛仍走旧口径：广场被推离核心时，广场挪到哪里核心点就跟到哪里，
+  // 否则环岛、放射主干道、高架都围着旧核心画，广场孤悬一旁（用户截图；30 岛里 10 个偏 12–60）。
   { const plaza = publicSites[publicSites.length - 1]; core = { x: plaza.x, z: plaza.z }; }
   place("observation-tower", "tower", around(turn + 0.9, 0.16 * R), 26, 0);
   place("central-station", "station", around(turn + 2.2, 0.38 * R), 46, 0.12);
@@ -347,171 +280,25 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── L2 骨架（CITY_PLANNING_SPEC §4.3）──
   // 主干道从核心放射、沿陆地延伸到海边，过河处自动成桥；环线高架绕核心一圈（沿陆地断续）；
   // 主干道之间每个扇区各铺一张朝向沿扇区放射方向的街网——不再是全岛一张方格（曾经整张方格盖在岛上）。
-  const nodes = new Map<string, RoadNode>(); const edges = new Map<string, RoadEdge>();
+  // 路网原语（V2 步 2b-lite）：nodes/edges/key/addEdge 由 planner/network.ts 唯一实现，此处只留薄包装。
+  const network = emptyNetwork();
+  const { nodes, edges } = network;
   const coastalRoadEdgeIds = new Set<string>();
   const coastalRoadNodeIds = new Set<string>();
-  const key = (p: Vec2) => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
-  const addEdge = (a0: Vec2, b0: Vec2, arterial: boolean, bridge = false, primary = false) => {
-    const a = key(a0); const b = key(b0);
-    const from = roadNodeId(a); const to = roadNodeId(b); if (from === to) return;
-    const id = [from, to].sort().join("/");
-    nodes.set(from, { ...a, id: from }); nodes.set(to, { ...b, id: to });
-    if (!edges.has(id)) edges.set(id, { id, from, to, width: primary ? 12 : arterial ? 8 : 5, kind: arterial ? "arterial" : "local", points: [a, b], bridge });
-  };
+  const key = keyOf;
+  const addEdge = (a0: Vec2, b0: Vec2, arterial: boolean, bridge = false, primary = false) => addNetworkEdge(network, a0, b0, arterial, bridge, primary);
   const inRiver = (x: number, z: number) => hasRiver && coastDistance(x, z) > 0 && Math.abs(x - riverX(z)) < riverWidth(z);
+  // 占地谓词统一走 planner/footprint（V2 步 1）：此处只注入地理闭包；河岸带口径（不含 coastDistance）与
+  // inRiver 不同，历史上就是两套判断，按原语义各自保留。
+  const footprintGeo = { height, inRiver, riverBank: (x: number, z: number, bank: number) => hasRiver && Math.abs(x - riverX(z)) < riverWidth(z) + bank };
 
-  // 市政广场（核心处，半径 44）外环路半径：主干道都接在这一圈上，广场四周是路、中间不走车。
-  const PLAZA_RING = 52;
   const SHORE_SITE_KINDS = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel", "villa-complex"]); // 庄园：临水拱廊，同属岸边地标
-  // 主干道：5–6 条，均分方位 + 抖动；指向山脊的方向（与山脊方位夹角 < 40°）不修路。
-  const trunkCount = 5 + Math.floor(random("trunks") * 2);
-  const trunkBase = random("trunkBase") * Math.PI * 2;
-  const trunks: Array<{ angle: number; points: Vec2[] }> = [];
-  const bridges: CityLayout["bridges"] = [];
-  for (let i = 0; i < trunkCount; i += 1) {
-    const nominal = trunkBase + (i / trunkCount) * Math.PI * 2 + (random(`trunkJ${i}`) - 0.5) * 0.35;
-    // 桥址取最窄处（规划旧债 D-桥址，CITY_ROAD_SIMULATION_PROPOSAL §1）：主干道是从核心出发的射线，过河位置
-    // 曾由抖动角度偶然决定。在 ±0.14 弧度内选过河跨距最短的角度；跨距相同取偏移最小者，尽量不动原规划。
-    const waterSpan = (a: number) => {
-      const d = { x: Math.cos(a), z: Math.sin(a) };
-      let span = 0; let entered = false;
-      for (let step = Math.ceil(PLAZA_RING / 12) + 1; step < 400; step += 1) {
-        const q = { x: core.x + d.x * step * 12, z: core.z + d.z * step * 12 };
-        if (inRiver(q.x, q.z)) { span += 12; entered = true; continue; }
-        if (entered || coastDistance(q.x, q.z) <= 0) break;
-      }
-      return span;
-    };
-    let angle = nominal;
-    if (hasRiver) {
-      let best = { offset: 0, span: waterSpan(nominal) };
-      if (best.span > 0) for (let k = -7; k <= 7; k += 1) {
-        const offset = k * 0.02; const span = waterSpan(nominal + offset);
-        if (span > 0 && (span < best.span || (span === best.span && Math.abs(offset) < Math.abs(best.offset)))) best = { offset, span };
-      }
-      angle = nominal + best.offset;
-    }
-    const dir = { x: Math.cos(angle), z: Math.sin(angle) };
-    if (dir.x * hillDir.x + dir.z * hillDir.z > Math.cos((40 * Math.PI) / 180)) continue;
-    // 主干道从市政广场外环出发（环形广场 = 环岛），不再穿过广场中心。
-    const start = { x: core.x + dir.x * PLAZA_RING, z: core.z + dir.z * PLAZA_RING };
-    const points: Vec2[] = [start];
-    let water = 0;
-    let lastLand: Vec2 = start;
-    let farBank = 0;
-    for (let step = Math.ceil(PLAZA_RING / 12) + 1; step < 400; step += 1) {
-      const q = { x: core.x + dir.x * step * 12, z: core.z + dir.z * step * 12 };
-      if (inRiver(q.x, q.z)) {
-        // 入水前的最后一个陆地点作为桥头（曾用「每 3 步才记一次」的上一个路点，桥头最多退回岸上 36）。
-        if (water === 0 && points[points.length - 1] !== lastLand) points.push(lastLand);
-        water += 12; if (water > 140) break; continue; // 河：最多跨 140
-      }
-      // Riverbank setbacks are not obstacles to a road crossing the river.
-      if (coastDistance(q.x, q.z) <= 0 || hillProj(q.x, q.z) >= hillLine - 12) break;
-      // 岸边用地（港口/灯塔/歌剧院/摩天轮）：主干道到它门口为止，这一段就是它的入口路。
-      // 曾一路穿过去直到海边（港口中心离主干道 1 单位）。
-      if (water === 0 && [...publicSites, ...landmarks].some((site) => SHORE_SITE_KINDS.has(site.kind) && Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 4)) {
-        if (points[points.length - 1] !== lastLand) points.push(lastLand);
-        break;
-      }
-      if (water > 0) {
-        // 对岸退界最多再铺 3 步（36）桥面就落地：曾一直延伸到「可建设」地块为止——对岸是一长条不可建的
-        // 低地/海岸带时，「桥」在干地上又铺了两百多单位（扩到 1 档 2000 栋的大岛后 seed 2175747322 实测）。
-        if (!buildable(q.x, q.z) && farBank < 3) { farBank += 1; continue; }
-        farBank = 0;
-        // 刚过完河：把对岸点接上，这一段是桥。
-        const from = points[points.length - 1];
-        bridges.push({ from, to: q, angle: Math.atan2(q.z - from.z, q.x - from.x), length: Math.hypot(q.x - from.x, q.z - from.z) });
-        addEdge(from, q, true, true, true);
-        points.push(q);
-        water = 0;
-        continue;
-      }
-      lastLand = q;
-      if (step % 3 === 0) points.push(q);
-    }
-    if (points.length < 3) continue;
-    for (let k = 1; k < points.length; k += 1) {
-      const isBridge = bridges.some((bridge) => bridge.to === points[k]);
-      if (!isBridge) addEdge(points[k - 1], points[k], true, false, true);
-    }
-    trunks.push({ angle, points });
-  }
-  trunks.sort((p, q) => p.angle - q.angle);
-  // 广场环路：经过每条主干道的起点，其余按 24 等分补点；跨河/不可建的弧段不修。
-  {
-    const angles = [...trunks.map((t) => ((t.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)),
-      ...Array.from({ length: 24 }, (_, i) => (i / 24) * Math.PI * 2)].sort((a, b) => a - b)
-      .filter((a, i, all) => i === 0 || a - all[i - 1] > 0.08);
-    const ringPoint = (a: number) => {
-      const trunk = trunks.find((t) => Math.abs((((t.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) - a) < 1e-9);
-      return trunk ? trunk.points[0] : { x: core.x + Math.cos(a) * PLAZA_RING, z: core.z + Math.sin(a) * PLAZA_RING };
-    };
-    for (let i = 0; i < angles.length; i += 1) {
-      const a = ringPoint(angles[i]); const b = ringPoint(angles[(i + 1) % angles.length]);
-      const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
-      if (inRiver(mid.x, mid.z) || inRiver(a.x, a.z) || inRiver(b.x, b.z) || coastDistance(mid.x, mid.z) <= 0) continue;
-      addEdge(a, b, true);
-    }
-  }
-  const trunkIndex = new SegmentIndex(trunks.map((trunk) => trunk.points));
-  const distanceToTrunks = (p: Vec2) => {
-    let d = Infinity;
-    for (const trunk of trunks) for (let k = 1; k < trunk.points.length; k += 1) d = Math.min(d, segmentDistance(p, trunk.points[k - 1], trunk.points[k]));
-    return d;
-  };
+  // ── 骨架（V2 步 2b-full：逐字迁至 planner/skeleton.ts::buildSkeleton）──
+  const { trunks, bridges, ringRuns } = buildSkeleton({ geo, seed, core, publicSites, landmarks, shoreSiteKinds: SHORE_SITE_KINDS, random, network, inRiver });
+  const trunkRuns = trunks.map((trunk) => trunk.points);
+  const trunkIndex = new SegmentIndex(trunkRuns);
+  const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
 
-  // 环线高架：半径 0.55R ± fbm，河流/河岸连续跨越，仅出海或进山时断开。
-  const ringRadius = 0.55 * R;
-  const ringRuns: Vec2[][] = [];
-  let run: Vec2[] = [];
-  for (let i = 0; i <= 96; i += 1) {
-    const t = (i / 96) * Math.PI * 2;
-    const r = ringRadius * (1 + 0.08 * fbm(Math.cos(t) * 1.7, Math.sin(t) * 1.7, seed + 91, 2));
-    const q = { x: core.x + Math.cos(t) * r, z: core.z + Math.sin(t) * r };
-    if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12) run.push(q);
-    else { if (run.length >= 6) ringRuns.push(run); run = []; }
-  }
-  if (run.length >= 6) ringRuns.push(run);
-  // Highway fragments stop at the coast today, where the deck still hangs above
-  // the ground. Trim each end to buildable land, then connect it to a nearby arterial.
-  for (let r = ringRuns.length - 1; r >= 0; r -= 1) {
-    const points = ringRuns[r];
-    if (Math.hypot(points[0].x - points[points.length - 1].x, points[0].z - points[points.length - 1].z) < 0.01) continue;
-    const safe = (p: Vec2) => buildable(p.x, p.z);
-    while (points.length > 6 && !safe(points[0])) points.shift();
-    while (points.length > 6 && !safe(points[points.length - 1])) points.pop();
-    if (points.length <= 6) { ringRuns.splice(r, 1); continue; }
-    const exits: Vec2[] = [];
-    for (const end of [points[0], points[points.length - 1]]) {
-      const candidates: Array<{ p: Vec2; distance: number }> = [];
-      for (const edge of edges.values()) {
-        if (edge.bridge) continue;
-        const [a, b] = edge.points;
-        const dx = b.x - a.x; const dz = b.z - a.z;
-        const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
-        const p = key({ x: a.x + t * dx, z: a.z + t * dz });
-        if (Math.hypot(p.x - core.x, p.z - core.z) < 110) continue; // 出口不能落在环岛附近：高架贴到市政广场（半径 44 + 避让 ≈ 69）会把广场推离核心点
-        const distance = Math.hypot(p.x - end.x, p.z - end.z);
-        const samples = Math.max(1, Math.ceil(distance / 4));
-        let clear = true;
-        for (let k = 0; k <= samples; k += 1) {
-          if (!safe({ x: end.x + (p.x - end.x) * k / samples, z: end.z + (p.z - end.z) * k / samples })) { clear = false; break; }
-        }
-        if (clear) candidates.push({ p, distance });
-      }
-      candidates.sort((a, b) => a.distance - b.distance);
-      if (candidates[0]) exits.push(candidates[0].p);
-    }
-    if (exits.length !== 2) { ringRuns.splice(r, 1); continue; }
-    ringRuns[r] = [exits[0], ...points, exits[1]].filter((p, i, all) => i === 0 || Math.hypot(p.x - all[i - 1].x, p.z - all[i - 1].z) > 0.01);
-    for (const endpoint of exits) for (const edge of [...edges.values()]) {
-      if (edge.bridge || segmentDistance(endpoint, edge.points[0], edge.points[1]) > 0.02) continue;
-      edges.delete(edge.id);
-      addEdge(edge.points[0], endpoint, true);
-      addEdge(endpoint, edge.points[1], true);
-    }
-  }
   // 公共用地与地标先于环线选址，名义位置可能正压在高架上（clearsHighways 守卫只覆盖了地块/配套/花园）：
   // 环线只取决于核心点与岛半径，所以这里把压线的预留地原地重新贴到不压高架的位置；街区与地块都在此之后生成。
   for (const site of [...publicSites, ...landmarks]) {
@@ -524,14 +311,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 曾在主干道之前按地理选址、之后互不避让：车站中心正压在主干道上，10 个对象没有一个与门前道路对齐。
   // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
   // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
-  const footprintDry = (c: Vec2, r: number) => {
-    for (let k = 0; k < 16; k += 1) {
-      const a = (k / 16) * Math.PI * 2; const rr = k % 2 ? r : r * 0.6;
-      const x = c.x + Math.cos(a) * rr; const z = c.z + Math.sin(a) * rr;
-      if (height(x, z) < 0.8 || inRiver(x, z)) return false;
-    }
-    return true;
-  };
+  const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
   const SHORE_BOUND = new Set([...SHORE_SITE_KINDS, "civic"]); // civic = 核心广场，四周是环路
   // 桥头（过河桥两端）：用地不能贴着桥头——桥头必须接一条路回路网，那条路就只能从用地里穿过（庄园落在桥头旁 21，规划守卫抓到）。
   const nearBridgeEnd = (x: number, z: number, radius: number) => bridges.some((b) => Math.hypot(b.from.x - x, b.from.z - z) < radius + 14 || Math.hypot(b.to.x - x, b.to.z - z) < radius + 14);
@@ -541,10 +321,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 曾按「离核心最近的海岸点」放下就不管了，约三分之一占地悬在海面上（场景依赖守卫抓到）。港口本就临水，除外。
   for (const site of landmarks) {
     if (!site.radius || !SHORE_SITE_KINDS.has(site.kind)) continue;
-    const wetCount = (c: Vec2) => { let n = 0; for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; if (height(c.x + Math.cos(t) * r, c.z + Math.sin(t) * r) < 0.5) n += 1; } return n; };
+    const wetCountAt = (c: Vec2) => wetCount(footprintGeo, c, site.radius); // 内移判据：只看地形水位（不含河道），与原实现同口径
     const dx = core.x - site.x; const dz = core.z - site.z; const len = Math.hypot(dx, dz) || 1;
     // 每步都要求中心仍在陆上、不在河里：直线朝核心走可能跨过河道（geography 守卫 seed 3668352332 抓到摩天轮进河）。
-    for (let step = 0; step < 20 && wetCount(site) > 3; step += 1) {
+    for (let step = 0; step < 20 && wetCountAt(site) > 3; step += 1) {
       const nx = site.x + (dx / len) * 3; const nz = site.z + (dz / len) * 3;
       if (height(nx, nz) <= 0.5 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || nearBridgeEnd(nx, nz, site.radius)) break; // 也不推到主干道/桥头上
       site.x = nx; site.z = nz;
@@ -622,7 +402,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 朝最近岸点移动到中心离岸 ≈ 0.7 半径，同时占地圈 16 点落水不超过 3（立在水边、不悬空）。
   for (const site of landmarks) {
     if (!site.radius || !SHORE_SITE_KINDS.has(site.kind)) continue;
-    const wet = (x: number, z: number) => { let n = 0; for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; const px = x + Math.cos(t) * r; const pz = z + Math.sin(t) * r; if (height(px, pz) < 0.5 || inRiver(px, pz) || (hasRiver && Math.abs(px - riverX(pz)) < riverWidth(pz) + 14)) n += 1; } return n; }; // 河道及两岸 14 内也算水：歌剧院曾立在河口上（用户截图）
+    const wet = (x: number, z: number) => wetCount(footprintGeo, { x, z }, site.radius, { river: true, riverBank: 14 }); // 河道及两岸 14 内也算水：歌剧院曾立在河口上（用户截图）
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
     // 试最近的 8 个岸点，取最终离岸最近的落点（一条路径被别的用地挡住时换个方向贴岸）。
     const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 8);
@@ -663,8 +443,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const len = Math.hypot(shore.x - core.x, shore.z - core.z) || 1;
       const out = { x: (shore.x - core.x) / len, z: (shore.z - core.z) / len };
       const c = { x: shore.x + out.x * (site.radius + 40), z: shore.z + out.z * (site.radius + 40) };
-      let deep = true;
-      for (let k = 0; k < 16 && deep; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; const x = c.x + Math.cos(t) * r; const z = c.z + Math.sin(t) * r; if (height(x, z) > -0.8 || inRiver(x, z) || (hasRiver && Math.abs(x - riverX(z)) < riverWidth(z) + 60)) deep = false; }
+      const deep = isDeepWater(footprintGeo, c, site.radius);
       if (!deep || others.some((o) => Math.hypot(o.x - c.x, o.z - c.z) < o.radius + site.radius + (o.kind === "harbor" ? 120 : 30))) continue;
       if (height(shore.x - out.x * 6, shore.z - out.z * 6) < 0.3) continue; // 堤道陆地端要踩在实地上
       site.x = c.x; site.z = c.z; site.shore = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
@@ -673,11 +452,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
   const ringIndex = new SegmentIndex(ringRuns);
-  const distanceToRing = (p: Vec2) => {
-    let d = Infinity;
-    for (const ring of ringRuns) for (let k = 1; k < ring.length; k += 1) d = Math.min(d, segmentDistance(p, ring[k - 1], ring[k]));
-    return d;
-  };
+  const distanceToRing = (p: Vec2) => polylineDistance(ringRuns, p);
 
   // ── 海滨带（VICE B1）：选段避开港口与河口朝向；街区/地块避开保留带。
   // 港口已按「离核心最近海岸」放置，其方位由站点位置推出；河口 = 海岸点中离河中线近的两侧。
@@ -1221,20 +996,23 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         if (!linked && pass === 2) {
           let best: { a: RoadNode; b: RoadNode; d: number } | null = null;
           // 最后手段也先选不穿过用地/地标的直连；实在没有才不限。
-          const clearOfSites = (a: Vec2, b: Vec2) => {
+          // 中间档 0.7r+3：roadThroughSite 的通过线（步 4 实测：核心挪位后孤立分量用「不限」档
+          // 直连，连线从 villa-complex 中心 14.7 处穿过，seed 2000523645——连接器只看点不看线的病根，
+          // 见 docs/CITY_PLANNER_V2_FINDINGS.md §4）。
+          const clearOfSites = (a: Vec2, b: Vec2, tolerance: number) => {
             const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 4));
             for (let k = 0; k <= n; k += 1) {
               const q = { x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n };
-              if (reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 3)) return false;
+              if (reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius * tolerance + 3)) return false;
             }
             return true;
           };
-          for (const strict of [true, false]) {
+          for (const tolerance of [1, 0.7, 0]) {
             for (const a of members) for (const b of nodes.values()) {
               if (find(b.id) !== target) continue;
               const d = Math.hypot(a.x - b.x, a.z - b.z);
               if (best && d >= best.d) continue;
-              if (strict && !clearOfSites(a, b)) continue;
+              if (tolerance > 0 && !clearOfSites(a, b, tolerance)) continue;
               best = { a, b, d };
             }
             if (best) break;
@@ -1381,7 +1159,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
-  const repairCtx: RepairContext = { nodes, edges, addEdge, key, height, inRiver, publicSites, landmarks, blocks, ringRuns, coast, core, nearBridgeEnd, distanceToTrunks, safeRoadLink, crosses, SHORE_SITE_KINDS, carPaths };
+  const repairCtx: RepairContext = { network, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths };
   if (!skipSolve) solvePlan(repairCtx);
   // 车流折线的收口放在求解之后：修复（删冗余路段、切 T 路口、近距接入）会增删路段，车流必须按最终路网校验——
   // 曾放在求解之前，删路后海滨车流折线引用了已不存在的路段（verify-react-city-seaside 抓到）。
