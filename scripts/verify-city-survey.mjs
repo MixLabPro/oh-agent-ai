@@ -23,6 +23,11 @@ const TIERS = [
 // 批次 4-3c 加了跨河档（bridge-candidate ≤84 连续水段）与帆形歌剧院岸点选址避让后实测
 // t1 2 / t3 1 / t5 1 / t10 0 岛（前值 19/10/3/3——多数孤立分量隔河而居，跨河桥是设计 §4.2
 // 的正解）；悬空桥头 t1 8 / t3 5 / t5 4 / t10 1（桥建成后接续地面路被后续阶段删除——批次前不可见）。
+// acuteJunctions（city-roundabout 批次，2026-10-08）：resolveAcuteJunctions 对三岔锐汇先试
+// mini-roundabout 建环、删枝退居最后手段后，四档实测不变（t1 5 / t3 1 / t5 4 / t10 3 岛，
+// 15 处违例逐个核对均为环契约外的形态：多岔 4/5 路 ×8、桥腿 ×3、近共线 1–3° 对 ×2、腿过短 ×1、
+// 预留地压环带 ×1）——不放松硬约束换数字，阈值维持；收益是形态层（建环保边替代删枝，
+// 见 docs/CITY_PLANNER_V2_FINDINGS §5）。
 const CEILING = {
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
   stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,

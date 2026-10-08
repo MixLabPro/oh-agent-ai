@@ -85,13 +85,21 @@
 | --- | --- | --- |
 | 三岔口（T） | 大量，一等构造（落点拆边成 T） | connect.ts 阶梯、横街/滨海段端接入；acuteJunctions 守卫夹角 ≥30° |
 | 十字/多路口 | 扇区街网交点 + 共线重叠边切分收口 | cityPlan 街网段 |
-| 环岛 | 仅一个（市政广场外环 PLAZA_RING=52，主干全从其放射）——礼仪结构，非路网原语 | skeleton.ts |
-| Y 形锐汇 | 守卫刻意压制（<30° 计违例） | acuteJunctions |
+| 环岛 | 两级：市政广场外环 PLAZA_RING=52（礼仪结构）+ 交叉口小型环（city-roundabout 批次：三岔锐汇先建半径 10–14 的环，删枝退居最后手段） | skeleton.ts；connect.ts 策略档 mini-roundabout |
+| Y 形锐汇 | 守卫刻意压制（<30° 计违例）；三岔锐汇先以小型环消解（建不成才删短枝） | acuteJunctions；networkRepairs.resolveAcuteJunctions |
 
 缺口与处置（按可获得性）：
 
-1. **小型环岛（交叉口环）**：无。立项为连接器策略档 `mini-roundabout`——三岔夹角 30–50° 灰区
-   （现要么拒、要么删短枝）改用交通环消解，替代删边并压 acuteJunctions 残留。质量项，接线批之后。
+1. **小型环岛（交叉口环）**：已落地（city-roundabout 批次，2026-10-08）——连接器策略档
+   `mini-roundabout`（connect.ts，不在 DEFAULT_LADDER）：三岔口相邻边最小夹角 < 50°（覆盖
+   30–50° 灰区；<30° 对按阈值放宽接纳）时以半径 10–14、4–6 段弧边的环消解，弧段逐条过
+   corridorFailure 地面校验，整补丁走 commitNetworkPatch 事务提交；入口在
+   networkRepairs.resolveAcuteJunctions，删短枝是建环失败后的最后手段。普查结论：四档
+   acuteJunctions 残留数字不变（t1 5、t3 1、t5 4、t10 3 岛；四档合计 15 处违例）——逐个看
+   残留形态均在环的契约之外（多岔 4/5 路口 ×8、桥腿 ×3、近共线小角对 1–3° ×2、腿短于
+   半径+残段下限 ×1、环带被公园预留圈压住 ×1），不靠放松硬约束换数字；收益是形态层的：
+   原本「删短枝」处理的路口（如回归岛 1703342472/t2、1703310796/t5）改为建环保边，
+   等级/宽度在剩余段上精确继承。
 2. **高架匝道/互通**：现为「弦接主干」平面合并，无真匝道——随 RoadEdge 立体分层批次（设计 §4.2
    明令），不单独立项。
 3. **尽端回车场（cul-de-sac bulb）**：语义有（EndpointRole planned-local）、几何无（路戛然而止）。
