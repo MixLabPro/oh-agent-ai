@@ -5,10 +5,12 @@
  * **不用于验收**——验收仍是 constraints + 普查上限。硬约束违例的方案不参与比较（solve 里先 measure）。
  *
  * 每项归一化到 [0,1]、越大越好；权重表 ≤8 项、每项注明来源（现有守卫或用户反馈），改权重按改 golden 对待。
- * 近似处（terrain 中心代替名义锚点、R 圆代替真实岸线）标注了 TODO(步 6)：SiteSpec 落地后换成名义位置。
+ * 近似处（terrain 中心代替名义锚点）标注了 TODO(步 6)：SiteSpec 落地后换成名义位置。
+ * 口径与约束对齐（2026-10-08 评审）：parcelYield 复用 targetParcels（曾误用 tier×2700，分母差 5 倍）；
+ * doorAlignment 与 stationDoorFacesRoad 同一口径（投影点方向，不再用端点序切向）；shoreHug 用真实岸线折线。
  */
 import { DetMath as Math } from "../detMath";
-import { segmentDistance } from "../cityPlan";
+import { segmentDistance, targetParcels } from "../cityPlan";
 import { CONSTRAINTS, type CityPlan } from "./constraints";
 
 export type ScoreTerm = "siteDrift" | "doorAlignment" | "shoreHug" | "landmarkSpread" | "networkQuality" | "parcelYield";
@@ -26,7 +28,6 @@ export const SCORE_WEIGHTS: ScoreWeights = {
 
 const SHORE_KINDS = new Set(["lighthouse", "sail-opera", "ferris-wheel", "villa-complex", "harbor"]);
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
-const angleDelta = (a: number, b: number) => { const d = Math.abs(a - b) % (Math.PI * 2); return Math.min(d, Math.PI * 2 - d); };
 
 const measure = (id: string, plan: CityPlan) => CONSTRAINTS.find((c) => c.id === id)?.measure(plan).length ?? 0;
 
@@ -45,25 +46,37 @@ export function scoreTerms(plan: CityPlan): Record<ScoreTerm, number> {
       }, 0) / sites.length
     : 0;
 
-  // 车站正门与最近路向的夹角（yaw 与路切向对齐 = 1；垂直 = 0）。
+  // 车站/体育场正门贴合（与 stationDoorFacesRoad 同口径）：局部 +z 法向对「建筑→最近路投影点」
+  // 方向的 cos——投影点取代整边切向，端点序反转不再改变分数。
   let doorSum = 0; let doorN = 0;
   for (const s of sites) {
     if (s.kind !== "station" && s.kind !== "stadium") continue;
-    let best: { d: number; yaw: number } | null = null;
+    let best: { d: number; cos: number } | null = null;
     for (const e of solid) {
-      const d = segmentDistance(s, e.points[0], e.points[1]);
-      if (!best || d < best.d) best = { d, yaw: Math.atan2(e.points[1].z - e.points[0].z, e.points[1].x - e.points[0].x) };
+      const a = e.points[0]; const b = e.points[e.points.length - 1];
+      const dx = b.x - a.x; const dz = b.z - a.z;
+      const t = Math.max(0, Math.min(1, ((s.x - a.x) * dx + (s.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+      const qx = a.x + dx * t; const qz = a.z + dz * t;
+      const d = Math.hypot(qx - s.x, qz - s.z);
+      if (!best || d < best.d) best = { d, cos: (Math.sin(s.yaw) * (qx - s.x) + Math.cos(s.yaw) * (qz - s.z)) / (d || 1) };
     }
-    if (best) { doorSum += 1 - clamp01(angleDelta(s.yaw, best.yaw) / (Math.PI / 2)); doorN += 1; }
+    if (best) { doorSum += clamp01(best.cos); doorN += 1; }
   }
 
-  // 岸类用地贴岸程度：中心离岸 ≈ 0.7 半径最佳（TODO(步 6)：换真实岸线距离）。
+  // 岸类用地贴岸程度：中心到真实岸线折线的距离 ≈ 目标（0.7 半径；港口贴岸到 ~12，取 0.3）最佳。
+  // 曾用「离核心距离 − R 圈」近似：核心偏移、海湾与拉伸岛形下会错评。
+  const coastDist = (s: { x: number; z: number }): number => {
+    let d = Infinity;
+    for (let i = 0; i < plan.coast.length; i += 1) {
+      d = Math.min(d, segmentDistance(s, plan.coast[i], plan.coast[(i + 1) % plan.coast.length]));
+    }
+    return d;
+  };
   let shoreSum = 0; let shoreN = 0;
   for (const s of sites) {
     if (!SHORE_KINDS.has(s.kind)) continue;
-    const dist = Math.hypot(s.x - plan.core.x, s.z - plan.core.z);
-    const target = plan.islandRadius - s.radius * 0.7;
-    shoreSum += 1 - clamp01(Math.abs(dist - target) / (s.radius * 0.7)); shoreN += 1;
+    const target = (s.kind === "harbor" ? 0.3 : 0.7) * s.radius;
+    shoreSum += 1 - clamp01(Math.abs(coastDist(s) - target) / (s.radius * 0.7)); shoreN += 1;
   }
 
   // 地标两两最小间距 / R（越大越散）。
@@ -75,7 +88,6 @@ export function scoreTerms(plan: CityPlan): Record<ScoreTerm, number> {
 
   const softViolations = measure("acuteJunctions", plan) + measure("crowdedArterials", plan) + measure("looseInlandRoadEnds", plan);
   const parcels = plan.blocks.reduce((sum, b) => sum + b.parcels.length, 0);
-  const parcelsTarget = plan.scaleTier * 2700; // targetParcels 未导出：档位×2000×1.35 的近似，比较用足够
 
   return {
     siteDrift: clamp01(1 - drift * 4),
@@ -83,7 +95,7 @@ export function scoreTerms(plan: CityPlan): Record<ScoreTerm, number> {
     shoreHug: shoreN ? shoreSum / shoreN : 1,
     landmarkSpread: marks.length > 1 ? clamp01(minGap / (plan.islandRadius * 0.5)) : 1,
     networkQuality: clamp01(1 - softViolations / 12),
-    parcelYield: clamp01(parcels / parcelsTarget),
+    parcelYield: clamp01(parcels / targetParcels(plan.scaleTier)),
   };
 }
 

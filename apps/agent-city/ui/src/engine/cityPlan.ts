@@ -92,7 +92,7 @@ export const MAX_TIER = 10;
 export function scaleTierFor(sessions: number): number {
   return Math.max(1, Math.min(MAX_TIER, Math.ceil(sessions / SESSIONS_PER_TIER)));
 }
-const targetParcels = (tier: number) => Math.ceil(SESSIONS_PER_TIER * tier * 1.35);
+export const targetParcels = (tier: number) => Math.ceil(SESSIONS_PER_TIER * tier * 1.35);
 
 export type Shape = {
   stretch: number; spin: number;
