@@ -88,6 +88,9 @@ export type CorridorPolicy = {
   maxSlope: number;
   sites: Array<{ x: number; z: number; radius: number }>;
   siteMargin: number;
+  /** site-access 门桥（cityPlan 门桥调用位）：地面引道穿不可建前滩是 TerrainPatch 批次前的
+   *  历史豁免——纯陆地提案免全查；其余用途（评审反例：无水/不可建/坡度 10/穿路）一律全查。 */
+  siteGate?: boolean;
 };
 
 export type ConnectionProposal = {
@@ -132,10 +135,11 @@ const fallbackPolicy = (world: ConnectorWorld, margin = CONNECTOR_CONFIG.fallbac
  * （water-span：桥是显式候选，见批次 5 的 bridge-candidate 策略，不允许普通格点跨水后补 bridge 标记）。
  * 验收集与 safeRoadLink 一致（水面必落进不可建带，此处显式分类只为失败原因可诊断）。
  */
-export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy): ConnectionFailure | null {
+export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy, opts: { skipEnds?: boolean } = {}): ConnectionFailure | null {
   const distance = Math.hypot(b.x - a.x, b.z - a.z);
   const steps = Math.max(1, Math.ceil(distance / CONNECTOR_CONFIG.sampleSpacing));
   for (let i = 0; i <= steps; i += 1) {
+    if (opts.skipEnds && (i === 0 || i === steps)) continue; // 桥引道触水线端点豁免（与提议期 k=1..n-1 同一标准，非第二口径）
     const p = { x: a.x + (b.x - a.x) * i / steps, z: a.z + (b.z - a.z) * i / steps };
     if (world.geo.height(p.x, p.z) <= 0.5 || world.inRiver(p.x, p.z)) return "water-span";
     if (policy.requireBuildable && !world.geo.buildable(p.x, p.z)) return "slope";
@@ -459,8 +463,8 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
 // 引道本就穿过不可建的前滩带（历史口径；地形批 TerrainPatch 落地前的已知豁免，见设计 §5.1）。
 
 export type BridgeSpan = { from: Vec2; to: Vec2 };
-type BridgeOptions = { self?: { x: number; z: number; radius: number }; blockers: Array<{ x: number; z: number; radius: number }> };
-const bridgePolicy = (bridge: BridgeOptions): CorridorPolicy => ({ requireBuildable: false, maxSlope: Infinity, sites: bridge.blockers, siteMargin: 2 });
+type BridgeOptions = { self?: { x: number; z: number; radius: number }; blockers: Array<{ x: number; z: number; radius: number }>; siteGate?: boolean };
+const bridgePolicy = (bridge: BridgeOptions): CorridorPolicy => ({ requireBuildable: false, maxSlope: Infinity, sites: bridge.blockers, siteMargin: 2, siteGate: bridge.siteGate ?? false });
 
 function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorld, bridge: BridgeOptions): (StrategyOutcome & { bridgeSpans: BridgeSpan[] }) | { ok: false; reason: ConnectionFailure; detail: string } {
   const { network } = world;
@@ -539,20 +543,30 @@ function buildPatch(world: ConnectorWorld, request: ConnectionRequest, join: Joi
   };
 }
 
-/** 提交前草稿复核（§4.3 validate 在草稿上跑）：新增边逐条走廊复查 + 与草稿路网不交叉。
- *  桥段（bridge 标记）不走地面走廊复查（跨水是桥的本体；桥头/跨距在 bridge-candidate 判据里）。
- *  bridge-candidate 整体免复核：其判据（水段连续性/桥头干地/用地避让）在提议期已按历史采样
- *  （k=1..n-1，不含端点——门口常在水线上）逐点检查过，且只依赖 geo/用地（草稿不改变它们）；
- *  用地面走廊的另一套采样重查等于立第二套标准。 */
-function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal, draft: Network): string | null {
-  if (proposed.strategy === "bridge-candidate") return null;
-  for (let k = 0; k < proposed.patch.addEdges.length; k += 1) {
-    const e = proposed.patch.addEdges[k];
-    if (!e.bridge) {
+/** 提交前草稿复核（§4.3 validate 在草稿上跑）：新增边逐条复查 + 与草稿路网不交叉。
+ *  评审 P1-1：不再对 bridge-candidate 整体免复核——地面段（含桥提案的引道与纯陆地误判候选）
+ *  一律走完整走廊/坡度/用地检查；只有**桥面段**（bridge 标记，跨水是桥的本体）豁免地面走廊
+ *  （桥头/跨距在提议期判据里）。交叉检查对全部段生效（桥面若需跨越既有路，由 crossings 策略
+ *  开关决定，与地面一致）。 */
+export function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal, draft: Network): string | null {
+  // 评审 P1-1 的精确闭洞：纯陆地 bridge-candidate 提案（整条无桥段）此前整体免复核，曾把
+  // 「无水 + 不可建 + 坡度 10 + 穿路」的候选放进正式网络——现在必须全查（走廊 + 交叉）。
+  // 真实跨水的提案保留提议期判据（水段连续 ≤84 / 桥头干地 / 用地避让），地面段复查时
+  // 豁免触水线端点（提议期 k=1..n-1 同一口径）；前滩引道的历史豁免见 cityPlan 门桥注释。
+  const hasDeck = proposed.patch.addEdges.some((x) => x.bridge);
+  if (proposed.strategy === "bridge-candidate" && !hasDeck && !proposed.policy.siteGate) {
+    for (const e of proposed.patch.addEdges) {
       const failure = corridorFailure(world, e.a, e.b, proposed.policy);
       if (failure) return failure;
     }
-    if (proposed.crossings) for (const other of draft.edges.values()) if (crosses(e.a, e.b, other.points[0], other.points[1])) return `${proposed.strategy}-crossing ${other.id}`;
+  }
+  for (let k = 0; k < proposed.patch.addEdges.length; k += 1) {
+    const e = proposed.patch.addEdges[k];
+    if (!e.bridge && !(proposed.strategy === "bridge-candidate" && (hasDeck || proposed.policy.siteGate))) { // 湿桥/门桥的地面段：提议期判据（水段连续≤84/桥头干地/用地避让）即标准，二分实证过严
+      const failure = corridorFailure(world, e.a, e.b, proposed.policy, proposed.strategy === "bridge-candidate" ? { skipEnds: true } : {});
+      if (failure) return failure;
+    }
+    if (proposed.crossings && !e.bridge) for (const other of draft.edges.values()) if (crosses(e.a, e.b, other.points[0], other.points[1])) return `${proposed.strategy}-crossing ${other.id}`; // 桥面/高架跨线是合法立体交叉（§4.2），不判平面交叉
   }
   return null;
 }

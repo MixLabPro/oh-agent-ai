@@ -788,7 +788,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         allowBridge: true,
         maxLength: 1e4, // 桥候选的界限是候选数（前 40 个投影点），不是半径（历史口径）
         roadClass: "local",
-      }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { self: site, blockers }, crossings: false });
+      }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { self: site, blockers, siteGate: true }, crossings: false });
       for (const span of bridged.ok ? bridged.bridgeSpans : []) {
         bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
       }
@@ -863,7 +863,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
           // 全在 bridge-candidate 判据内；桥梁注册表同步登记。实测 seed 123456789/t2：143 节点分量与
           // 主网隔一条 ~40 宽的河口，前几档全部 slope/water-span 拒绝。
           for (const member of ordered) {
-            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: true, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { blockers: reservations() }, crossings: false });
+            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: true, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { blockers: reservations(), siteGate: true }, crossings: false }); // 过河档干地段同属历史地面容差
             connectionLog.push({ id: `isolate-bridge:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
             if (result.ok) {
               for (const span of result.bridgeSpans) bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });

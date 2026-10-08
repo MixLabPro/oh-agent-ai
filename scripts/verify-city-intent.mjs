@@ -40,5 +40,23 @@ for (const [tier, i, cfg] of ISLANDS) {
   assert.ok(d1.unmet.every((u) => u.reason && u.demandId), `seed ${seed}: an unmet demand lacks a reason`);
   shadow.push(`${seed}/t${tier}: endpoints ${d1.endpoints.length} (must-connect ${d1.endpoints.filter((e) => e.role.kind === "must-connect").length}), unmet ${d1.unmet.length}${d1.unmet.length ? ` [${d1.unmet.slice(0, 3).map((u) => u.demandId).join(", ")}]` : ""}`);
 }
+// 评审 P1-2 反例：车站旁只有孤立环路 → site-access 必须 unmet（曾误报满足）
+{
+  const node = (x, z, id) => ({ x, z, id: id ?? `${x}:${z}` });
+  const road = (a, b) => ({ id: [a.id, b.id].sort().join("/"), from: a.id, to: b.id, width: 5, kind: "local", points: [a, b], bridge: false });
+  const primaryA = node(0, 0, "p1"); const primaryB = node(100, 0, "p2"); const lonelyA = node(300, 200, "l1"); const lonelyB = node(320, 220, "l2");
+  const fakePlan = {
+    roadNodes: [primaryA, primaryB, lonelyA, lonelyB],
+    roadEdges: [road(primaryA, primaryB), road(lonelyA, lonelyB)],
+    publicSites: [{ id: "station-x", kind: "station", x: 310, z: 210, radius: 30 }],
+    landmarks: [], blocks: [], terrain: { height: () => 5 },
+    seaside: null, coast: [node(-500, -500), node(500, -500), node(500, 500)], river: null,
+    core: node(50, 0), coastRoads: [[lonelyA, lonelyB]], riverRoadRuns: [],
+  };
+  const dd = diagnoseNetwork(fakePlan);
+  const station = dd.demands.find((x) => x.demand.id === "site:station-x");
+  assert.ok(station && !station.satisfied && /not on the primary network/.test(station.reason ?? ""), `isolated-road door must be unmet, got ${JSON.stringify(station)}`);
+}
+
 console.log(`City intent diagnostics: ${ISLANDS.length} islands — every degree-1 endpoint classified, every required demand verdicted, read-only and deterministic.`);
 console.log(`  ${shadow.join(" | ")}`);

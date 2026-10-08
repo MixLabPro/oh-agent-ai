@@ -104,10 +104,18 @@ export function evaluateDemands(plan: NetworkIntentPlan, comp: Map<string, strin
     }
     if (d.class === "site-access") {
       const s = sites.find((x) => (x.id ?? x.kind) === d.anchor)!;
-      let near = Infinity; // 含桥（门口起桥也是门前有路）
-      for (const e of plan.roadEdges) near = Math.min(near, seg(s, e.points[0], e.points[e.points.length - 1]));
-      const satisfied = near <= s.radius + 20;
-      return { demand: d, satisfied, reason: satisfied ? undefined : `no road within radius+20 of the plot edge (nearest centre distance ${Math.round(near)})` };
+      // 评审 P1-2：近旁有路 ≠ 可达——必须绑定到主网分量（含桥，门口起桥也是门前有路；
+      // 车站旁只有孤立环路时曾误报满足）。
+      let best: { d: number; onPrimary: boolean } | null = null;
+      for (const e of plan.roadEdges) {
+        const d0 = seg(s, e.points[0], e.points[e.points.length - 1]);
+        const onPrimary = comp.get(e.from) === primary || comp.get(e.to) === primary;
+        if (!best || d0 < best.d) best = { d: d0, onPrimary };
+        if (best.d <= s.radius + 20 && best.onPrimary) break;
+      }
+      const near = best?.d ?? Infinity;
+      const satisfied = near <= s.radius + 20 && !!best?.onPrimary;
+      return { demand: d, satisfied, reason: satisfied ? undefined : best?.onPrimary ? `no road within radius+20 of the plot edge (nearest centre distance ${Math.round(near)})` : `nearest road is not on the primary network (d ${Math.round(near)})` };
     }
     const run = [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])][Number(d.anchor.replace("run ", ""))] ?? [];
     // 挂接判定按几何邻接（run 折线点与节点 id 的浮点键不稳定）：任一端 1 单位内有主网分量节点。

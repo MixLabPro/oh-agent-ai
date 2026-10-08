@@ -42,7 +42,7 @@ export type NetworkPatch = {
   splits: Array<{ edgeId: string; at: Vec2 }>;
 };
 
-export type PatchResult = { ok: true; version: number } | { ok: false; reason: "stale-base" | "unknown-edge" | "validation" | "self-loop"; detail?: string };
+export type PatchResult = { ok: true; version: number } | { ok: false; reason: "stale-base" | "unknown-edge" | "validation" | "self-loop" | "off-line-split"; detail?: string };
 
 const clone = (network: Network): Network => ({
   nodes: new Map([...network.nodes].map(([k, n]) => [k, { ...n }])),
@@ -60,10 +60,25 @@ function applyOps(draft: Network, patch: NetworkPatch): PatchResult {
     if (!host) return { ok: false, reason: "unknown-edge", detail: s.edgeId };
     const at = keyOf(s.at);
     if (roadNodeId(at) === host.from || roadNodeId(at) === host.to) return { ok: false, reason: "self-loop", detail: `split at endpoint of ${s.edgeId}` };
+    // 在册校验（评审 P1-4）：拆分点必须落在宿主段上——离线拆分会把直路「拆」成绕向路外的折线。
+    {
+      const [a, b] = [host.points[0], host.points[host.points.length - 1]];
+      const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((at.x - a.x) * dx + (at.z - a.z) * dz) / l2));
+      const off = Math.hypot(a.x + dx * t - at.x, a.z + dz * t - at.z);
+      if (off > 0.05) return { ok: false, reason: "off-line-split", detail: `split point ${Math.round(off)} off ${s.edgeId}` };
+    }
     draft.edges.delete(s.edgeId);
-    const arterial = host.kind === "arterial";
-    addNetworkEdge(draft, host.points[0], s.at, arterial, host.bridge, host.width >= 12);
-    addNetworkEdge(draft, s.at, host.points[host.points.length - 1], arterial, host.bridge, host.width >= 12);
+    // 属性完整继承（评审 P1-4）：直接按宿主原值构造两半，不走 addNetworkEdge 的 {5,8,12} 宽度映射
+    // （宽度 9 曾被重建为 8）。节点注册沿用规范化键。
+    const half = (u: Vec2, v: Vec2) => {
+      const uf = keyOf(u); const vf = keyOf(v);
+      const id = [roadNodeId(uf), roadNodeId(vf)].sort().join("/");
+      draft.nodes.set(roadNodeId(uf), { ...uf, id: roadNodeId(uf) });
+      draft.nodes.set(roadNodeId(vf), { ...vf, id: roadNodeId(vf) });
+      draft.edges.set(id, { id, from: roadNodeId(uf), to: roadNodeId(vf), width: host.width, kind: host.kind, points: [uf, vf], bridge: host.bridge });
+    };
+    half(host.points[0], at); half(at, host.points[host.points.length - 1]);
   }
   for (const e of patch.addEdges) {
     addNetworkEdge(draft, e.a, e.b, e.arterial, e.bridge ?? false, e.primary ?? false);

@@ -75,6 +75,12 @@ function plannedEndWorld(ctx: RepairContext, sites: Array<{ x: number; z: number
  *  （策略顺序见 solve.ts 注释）；2026-10-08 起 prune 不再有高度盲区，平地短枝同样会被收掉。 */
 function removable(ctx: RepairContext, edge: RoadEdge, baseline: number): boolean {
   if (edge.bridge || edge.width >= 12) return false;
+  // 桥头连续（评审修复轮实测）：地面引道是桥面的唯一地面接入，删了就剩悬空桥板
+  // （seed 2000104729：连接器建好引道+桥面，prune 把引道当普通窄枝收走）。
+  for (const other of ctx.network.edges.values()) {
+    if (!other.bridge || other === edge) continue;
+    if (other.from === edge.from || other.to === edge.from || other.from === edge.to || other.to === edge.to) return false;
+  }
   if (components(ctx, edge.id) > baseline) return false;
   if (onCarPath(ctx, edge)) return false;
   return keepsSiteDoors(ctx, edge);
