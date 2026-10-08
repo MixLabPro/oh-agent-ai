@@ -257,6 +257,7 @@ function proposeDirectProjection(request: ConnectionRequest, world: ConnectorWor
 function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, options: LadderOptions): StrategyOutcome {
   const { network } = world;
   const policy = fallbackPolicy(world, options.siteMargin);
+  const relaxed = options.anglePolicy === "relaxed";
   const sourceId = roadNodeId(keyOf(request.source));
   const rejected: { nearest: { d: number; reason: ConnectionFailure } | null } = { nearest: null };
   const note = (d: number, reason: ConnectionFailure) => { if (!rejected.nearest || d < rejected.nearest.d) rejected.nearest = { d, reason }; };
@@ -266,7 +267,8 @@ function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, opt
     if (d > request.maxLength) break; // 已按 (d, id) 排序
     const corridor = corridorFailure(world, request.source, p, policy);
     if (corridor) { note(d, corridor); continue; }
-    if (!endpointClear(network, p, request.source) || !endpointClear(network, request.source, p)) { note(d, "junction-angle"); continue; }
+    // 角度从宽档（软成本，设计 §4.1「转弯是软成本」）：只作最后手段，acuteJunctions 度量其质量代价。
+    if (!relaxed && (!endpointClear(network, p, request.source) || !endpointClear(network, request.source, p))) { note(d, "junction-angle"); continue; }
     if (options.crossings !== false && crossAny(network, request.source, p, null)) { note(d, "crossing"); continue; }
     return { ok: true, join: { edge: null, at: p, onEnd: true }, polyline: [request.source, p], cost: d };
   }
@@ -513,6 +515,9 @@ export type LadderOptions = {
   siteMargin?: number;
   /** node-merge 是否检查与既有路交叉（滨海互接的历史档不查，传 false）。 */
   crossings?: boolean;
+  /** node-merge 的端点角度档：strict（缺省，净空角 ≥35°）或 relaxed（最后手段——设计 §4.1 转弯是软成本，
+   *  角度从宽只换连通，质量代价由 acuteJunctions 约束度量；走廊/交叉硬检查不放松）。 */
+  anglePolicy?: "strict" | "relaxed";
   /** bridge-candidate 的用地视图：self = 发起连接的用地自身（r 内禁穿、桥头 r+2 外），blockers = 其它用地（r+2 外）。 */
   bridge?: BridgeOptions;
 };

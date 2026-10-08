@@ -114,7 +114,7 @@
   }
  },
  "1600/day": {
-  "all": "c76b895e67f0a079",
+  "all": "dd4cb5b1dbac0ee1",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -128,7 +128,7 @@
    "city-garden-rocks": "1:edfff59d07b8",
    "city-garden-roofs": "1:e117bc923081",
    "city-garden-trees": "1:b852bb366fa3",
-   "city-infrastructure-decorative": "1:87d7bc191814",
+   "city-infrastructure-decorative": "1:0dd5747d31b2",
    "city-landmark-airport": "100:7b57fa330b5a",
    "city-landmark-arch": "31:5c3fe3cb8190",
    "city-landmark-district:claude-code": "8:7e6450d42659",
@@ -165,14 +165,14 @@
    "city-vice-context-rooftops": "1:55a6a6c6b4ee",
    "city-volleyball-courts": "1:f9358c948d7b",
    "city-yachts": "1:44c84dbbf7f5",
-   "unnamed:Mesh": "41:c7da713edd46",
+   "unnamed:Mesh": "41:7a4ec094e822",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:16636ead96c4",
    "villa-campanile": "15:8b513c313977"
   }
  },
  "1600/night": {
-  "all": "6863e1aa27b6cd11",
+  "all": "8510dc439860dc50",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -186,7 +186,7 @@
    "city-garden-rocks": "1:edfff59d07b8",
    "city-garden-roofs": "1:e117bc923081",
    "city-garden-trees": "1:b852bb366fa3",
-   "city-infrastructure-decorative": "1:87d7bc191814",
+   "city-infrastructure-decorative": "1:0dd5747d31b2",
    "city-landmark-airport": "100:ce5bf5115c92",
    "city-landmark-arch": "31:5c3fe3cb8190",
    "city-landmark-district:claude-code": "8:2ebc126a4442",
@@ -223,7 +223,7 @@
    "city-vice-context-rooftops": "1:55a6a6c6b4ee",
    "city-volleyball-courts": "1:f9358c948d7b",
    "city-yachts": "1:44c84dbbf7f5",
-   "unnamed:Mesh": "41:f17431bfdec5",
+   "unnamed:Mesh": "41:fc45dd60066b",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:16636ead96c4",
    "villa-campanile": "15:8b513c313977"
