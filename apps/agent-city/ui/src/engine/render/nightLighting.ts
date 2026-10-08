@@ -8,6 +8,7 @@ import { activeTheme } from "../cityTheme";
 import { roadPaintPlan } from "../cityRoadPaint";
 import { createRenderCanvas } from "../renderCanvas";
 import type { CityLayout } from "../cityLayout";
+import { culDeSacBulbRadius } from "../systems/roadSystem";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "./shared";
 import type { NightLights } from "./types";
 
@@ -144,6 +145,20 @@ export function buildNightLights(host: NightHost): NightLights {
       const x = site.x + ox * ring; const z = site.z + oz * ring;
       lamp(x, z, ox, oz, Math.max(0, host.layout.terrain.height(x, z)), -Math.atan2(ox, -oz) + Math.PI / 2);
     }
+  }
+  // 尽端回车圈的守夜灯（形态批 §5-3）：挂最低档（lampTier 体系 0.45 档）——夜里回车圈微亮。
+  // 灯杆立在圈边、垂直于来路方向，光斑落回圆心（nx/nz 指向圆心）。
+  for (const end of host.layout.culDeSacEnds ?? []) {
+    const id = `${end.x}:${end.z}`;
+    const incident = host.layout.roadEdges.find((edge) => !edge.bridge && (edge.from === id || edge.to === id));
+    if (!incident) continue;
+    const other = incident.points[incident.from === id ? 1 : 0];
+    const length = Math.hypot(end.x - other.x, end.z - other.z) || 1;
+    const dx = (end.x - other.x) / length; const dz = (end.z - other.z) / length;
+    const nx = -dz; const nz = dx;
+    const radius = culDeSacBulbRadius(incident.width);
+    const x = end.x + nx * (radius - 0.9); const z = end.z + nz * (radius - 0.9);
+    lamp(x, z, nx, nz, Math.max(0, host.layout.terrain.height(x, z)), -Math.atan2(dz, dx), 3.2, 9.5, 0.45);
   }
   // 高架：桥面两侧交错路灯，灯头朝路中心。立在行车面（板顶）上；光斑圆心落到桥面中线、
   // 半径不超过半幅桥宽——地面路灯的 9.5 光斑在 10.5 宽桥面上大半悬空，看起来是灯光穿透到桥下。

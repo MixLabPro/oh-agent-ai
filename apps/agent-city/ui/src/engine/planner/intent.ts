@@ -45,8 +45,13 @@ const seg = (p: Vec2, a: Vec2, b: Vec2) => {
   return Math.hypot(a.x + dx * t - p.x, a.z + dz * t - p.z);
 };
 
+/** 意图诊断实际消费的 plan 结构子集（structural typing）：createCityPlan 的完整产物满足，
+ *  cityPlan 组装中的中间产物（尚未补 scaleTier/biome 等外层字段）也满足——形态批 §5-3
+ *  在 buildPlan 末尾直接取 cul-de-sac 端点而无需等外层包装。 */
+export type NetworkIntentPlan = Pick<CityPlan, "roadNodes" | "roadEdges" | "publicSites" | "landmarks" | "seaside" | "coastRoads" | "riverRoadRuns" | "coast" | "river" | "core">;
+
 /** 连通分量（桥计入连通——车能过桥）。返回 node id → 分量 id（复用 roadNodeId 作分量代表）。 */
-export function componentOf(plan: CityPlan): Map<string, string> {
+export function componentOf(plan: NetworkIntentPlan): Map<string, string> {
   const parent = new Map<string, string>();
   const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
   for (const n of plan.roadNodes) parent.set(n.id, n.id);
@@ -58,7 +63,7 @@ export function componentOf(plan: CityPlan): Map<string, string> {
 
 /** 主网 = 含 civic/plaza 骨架节点的分量：取离核心最近的路端（环岛节点围绕核心，半径 52；
  *  无任何路端时返回 null —— civic 骨架缺失，按设计属于规划失败，这里只作诊断输出）。 */
-export function primaryComponentId(plan: CityPlan, comp: Map<string, string>): string | null {
+export function primaryComponentId(plan: NetworkIntentPlan, comp: Map<string, string>): string | null {
   let best: { id: string; d: number } | null = null;
   for (const n of plan.roadNodes) {
     const d = Math.hypot(n.x - plan.core.x, n.z - plan.core.z);
@@ -69,7 +74,7 @@ export function primaryComponentId(plan: CityPlan, comp: Map<string, string>): s
 
 /** 后验派生需求：非主网分量要接主网（district-access）、每个用地要有门前路（site-access）、
  *  每段沿海/河岸路要挂进主网（coastal-link）。id 稳定（分量代表 id / 用地 id / 段序号）。 */
-export function deriveDemands(plan: CityPlan, comp: Map<string, string>, primary: string): ConnectionDemand[] {
+export function deriveDemands(plan: NetworkIntentPlan, comp: Map<string, string>, primary: string): ConnectionDemand[] {
   const demands: ConnectionDemand[] = [];
   const seen = new Set<string>();
   for (const n of plan.roadNodes) {
@@ -90,7 +95,7 @@ export function deriveDemands(plan: CityPlan, comp: Map<string, string>, primary
  *  离占地边缘 ≤ 20——岸边地标门口直接起桥也算，sail-opera 的堤道即此类）；
  *  coastal-link = 海段（plan.coastRoads 仅含海段）任一端挂进主网；河岸段端由近水豁免兜底
  *  （宽河超 40 的分歧记为批次 3 债务：coastRoads 与修复期 coastRoadRunEnds 的切片口径要统一）。 */
-export function evaluateDemands(plan: CityPlan, comp: Map<string, string>, primary: string, demands: ConnectionDemand[]): DemandDiagnostic[] {
+export function evaluateDemands(plan: NetworkIntentPlan, comp: Map<string, string>, primary: string, demands: ConnectionDemand[]): DemandDiagnostic[] {
   const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius) as Site[];
   return demands.map((d) => {
     if (d.class === "district-access") {
@@ -116,7 +121,7 @@ export function evaluateDemands(plan: CityPlan, comp: Map<string, string>, prima
  *  门前终点 → site-access（带 ownerId）；滨海大道断点 → cul-de-sac(planned-local)（海滨段规则：
  *  无效样本处断开、不跨接）；沿海/河岸路段端 → must-connect（挂对应 coastal-link 需求）；
  *  近水终止 → cul-de-sac(coast)；其余 → must-connect（挂所在分量的 district-access 需求）。 */
-export function classifyEndpoints(plan: CityPlan, comp: Map<string, string>, primary: string): EndpointDiagnostic[] {
+export function classifyEndpoints(plan: NetworkIntentPlan, comp: Map<string, string>, primary: string): EndpointDiagnostic[] {
   const deg = new Map<string, number>();
   for (const e of plan.roadEdges) if (!e.bridge) for (const id of [e.from, e.to]) deg.set(id, (deg.get(id) || 0) + 1);
   const nodes = new Map(plan.roadNodes.map((n) => [n.id, n]));
@@ -142,7 +147,7 @@ export function classifyEndpoints(plan: CityPlan, comp: Map<string, string>, pri
 }
 
 /** 汇总诊断（只读：不触碰 plan 的任何字段）。 */
-export function diagnoseNetwork(plan: CityPlan): NetworkDiagnostics | null {
+export function diagnoseNetwork(plan: NetworkIntentPlan): NetworkDiagnostics | null {
   const comp = componentOf(plan);
   const primary = primaryComponentId(plan, comp);
   if (!primary) return null;

@@ -64,6 +64,9 @@ export type CityLayout = {
   activityKey?: string;
   /** 环岛滨海路段（不含河岸路），S3 滨海景观带沿其在建成区附近的岸段铺设。 */
   coastRoads?: Vec2[][];
+  /** 尽端回车点（形态批 §5-3，加性）：计划层 classifyEndpoints 判为 cul-de-sac 的合法尽端，
+   *  生长剪枝（G1）删掉所在支路后已不存在于最终路网的点被剔除——回车圈只画在真实路尽头。 */
+  culDeSacEnds?: Vec2[];
   districtLandmarks?: DistrictLandmark[];
   terrain: TerrainField; extent: number; coast: Vec2[]; river: Vec2[]; publicSites: PublicSite[];
   parkTrees: Array<Vec2 & { y: number; seed: number }>;
@@ -475,7 +478,12 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
   const grown = growWithBuildings(plan, used, districts, civics);
-  return { ...plan, ...grown, districtLandmarks, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+  // 生长剪枝（G1）会删掉空置街区的支路：计划层的回车点若所在路已被删，就不再画回车圈。
+  // 只保留最终路网里仍是度 1 非桥路端的点（与 classifyEndpoints 的度口径一致）。
+  const liveDegree = new Map<string, number>();
+  for (const edge of grown.roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) liveDegree.set(id, (liveDegree.get(id) ?? 0) + 1);
+  const culDeSacEnds = (plan.culDeSacEnds ?? []).filter((end) => liveDegree.get(`${end.x}:${end.z}`) === 1);
+  return { ...plan, ...grown, culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
 }
 
 /**

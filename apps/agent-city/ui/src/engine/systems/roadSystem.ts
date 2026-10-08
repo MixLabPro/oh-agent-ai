@@ -4,7 +4,7 @@
  */
 
 import * as THREE from "three";
-import type { CityLayout } from "../cityLayout";
+import type { CityLayout, Vec2 } from "../cityLayout";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../render/shared";
 
 /** 本系统读写的 CityParts 成员（精确清单；CityParts 以 `this as unknown as RoadHost` 传入）。 */
@@ -159,6 +159,55 @@ export function buildDistrictExpressways(host: RoadHost): void {
   mesh.name = "city-district-expressways";
   host.group.add(mesh);
   host.disposables.push(geometry, mesh.material);
+}
+
+/** 尽端回车圈半径（形态批 §5-3）：所在路段半宽 + 2.5，夹在 6–9——与路宽协调
+ *  （支路 5 宽 → 6，主干/大道 12 宽 → 8.5）。守夜灯（nightLighting）同用此口径。 */
+export function culDeSacBulbRadius(roadWidth: number): number {
+  return Math.max(6, Math.min(9, roadWidth / 2 + 2.5));
+}
+
+/** 尽端回车圈（backlog 形态批 §5-3，docs/CITY_PLANNER_V2_FINDINGS.md §5）：合法尽端
+ *  （layout.culDeSacEnds，EndpointRole cul-de-sac）几何上是路戛然而止——在路尽头铺一块
+ *  平贴地面的回车圆盘 + 路缘色描边。纯渲染装饰，不改路网拓扑；一个 InstancedMesh 装全部
+ *  圆盘、一个装全部描边（同 buildTrussBridges 的合并批模式，不逐端点建 Mesh）。
+ *  高度按地形中心取样、法向贴合坡度（中心差分梯度），颜色用桥面/路缘同款涂装。 */
+export function buildCulDeSacBulbs(host: RoadHost): void {
+  const ends = host.layout.culDeSacEnds ?? [];
+  if (!ends.length) return;
+  // 所在点最宽的 incident 路段决定回车圈半径（找到的多为唯一悬挂边）。
+  const widthAt = new Map<string, number>();
+  for (const edge of host.layout.roadEdges) {
+    if (edge.bridge) continue;
+    for (const id of [edge.from, edge.to]) widthAt.set(id, Math.max(widthAt.get(id) ?? 0, edge.width));
+  }
+  const discs = host.makeInstanced(new THREE.CylinderGeometry(1, 1, 1, 20).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#6a7071" }), ends.length);
+  const rims = host.makeInstanced(new THREE.RingGeometry(0.86, 1, 28).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: "#cbc6ba" }), ends.length);
+  discs.name = "city-culdesac-bulb-disc";
+  rims.name = "city-culdesac-bulb-rim";
+  discs.receiveShadow = true;
+  const up = new THREE.Vector3(0, 1, 0);
+  const normal = new THREE.Vector3();
+  const height = host.layout.terrain.height;
+  ends.forEach((end: Vec2, index: number) => {
+    const radius = culDeSacBulbRadius(widthAt.get(`${end.x}:${end.z}`) ?? 9);
+    const base = Math.max(0, height(end.x, end.z));
+    // 圆盘贴合地形坡度：沿半径的两轴中心差分求梯度，法向 = (-gx, 1, -gz)。
+    const gx = (height(end.x + radius, end.z) - height(end.x - radius, end.z)) / (2 * radius);
+    const gz = (height(end.x, end.z + radius) - height(end.x, end.z - radius)) / (2 * radius);
+    normal.set(-gx, 1, -gz).normalize();
+    host.quaternion.setFromUnitVectors(up, normal);
+    host.positionVector.set(end.x, base + 0.02, end.z);
+    host.scaleVector.set(radius, 0.12, radius);
+    host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector);
+    discs.setMatrixAt(index, host.matrix);
+    // 描边圆环贴在圆盘顶面上（盘厚 0.12 + 0.01，防 z-fighting）。
+    host.positionVector.set(end.x, base + 0.15, end.z);
+    host.scaleVector.set(radius, 1, radius);
+    host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector);
+    rims.setMatrixAt(index, host.matrix);
+  });
+  for (const mesh of [discs, rims]) { mesh.count = ends.length; mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
 }
 
 /** 红色穿式桁架桥（backlog L-7）：悬索桥之外、跨距 40–160 的过河桥加一套格构桁架——上下弦 + 竖杆 + 交替斜腹杆，
