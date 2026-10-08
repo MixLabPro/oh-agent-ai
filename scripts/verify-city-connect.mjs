@@ -11,9 +11,10 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { runConnection, proposeConnection, commitConnection, emptyNetwork, addNetworkEdge } = await loadCity({
-  "engine/planner/connect.ts": ["runConnection", "proposeConnection", "commitConnection"],
+const { runConnection, proposeConnection, commitConnection, runMiniRoundabout, corridorFailure, CONNECTOR_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
+  "engine/planner/connect.ts": ["runConnection", "proposeConnection", "commitConnection", "runMiniRoundabout", "corridorFailure", "CONNECTOR_CONFIG"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
+  "engine/planner/constraints.ts": ["acuteJunctions"],
 });
 
 /** 合成地理：半径 1000 的平岛（高 1.2），可选竖直河道（x = riverX，宽 riverWidth）、圆形湖与陡坡盘。 */
@@ -226,4 +227,84 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.ok(connected(w2.network, "-200:0", "320:0"), "slope detour did not join the components");
 }
 
-console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), fold-back endpoints refused, slope discs detoured, deterministic.");
+// (k) mini-roundabout 策略档（city-roundabout，形态盘点 §5-1）：三岔口锐角对（20° < 30°，阈值放宽 (b)）
+//     以交通环消解——建环不删边（三条腿只剩环内残头被替换，远端全部经环连通）、弧段全过走廊、
+//     建环后整网过角度守卫（acuteJunctions 归零）；陡坡盘挡住 r=10 时升档到 r=12（半径阶梯）；
+//     灰带外（≥50°）/腿太短 → 拒绝且零副作用；确定性：两次建环产生相同网络。
+{
+  const legAt = (w, deg, len, arterial) => addNetworkEdge(w.network, { x: 0, z: 0 }, { x: Math.cos(deg * Math.PI / 180) * len, z: Math.sin(deg * Math.PI / 180) * len }, arterial);
+  const trunkAt = (w, deg, len) => addNetworkEdge(w.network, { x: 0, z: 0 }, { x: Math.cos(deg * Math.PI / 180) * len, z: Math.sin(deg * Math.PI / 180) * len }, true, false, true);
+  const farId = (deg, len) => `${Math.round(Math.cos(deg * Math.PI / 180) * len * 100) / 100}:${Math.round(Math.sin(deg * Math.PI / 180) * len * 100) / 100}`;
+  const view = (w) => ({ roadEdges: [...w.network.edges.values()], roadNodes: [...w.network.nodes.values()] });
+  const policy = (w) => ({ requireBuildable: true, maxSlope: 0.9, sites: w.reservations(), siteMargin: CONNECTOR_CONFIG.fallbackSiteMargin });
+  // 锐角对：V 三条腿 90° / 70°（夹角 20°，acuteJunctions 标记）/ 220°，各长 120。
+  const w = makeWorld();
+  legAt(w, 90, 120, false); legAt(w, 70, 120, false); legAt(w, 220, 120, true);
+  assert.equal(acuteJunctions.measure(view(w)).length, 1, "scenario must start with exactly one acute junction");
+  const r = runMiniRoundabout(w, { id: "0:0", x: 0, z: 0 }, [...w.network.edges.values()]);
+  assert.ok(r.ok, `mini-roundabout expected: ${JSON.stringify(r)}`);
+  assert.ok(r.radius >= 10 && r.radius <= 14, `ring radius ${r.radius} outside 10..14`);
+  assert.ok(r.ring.length >= CONNECTOR_CONFIG.roundaboutMinSegments && r.ring.length <= CONNECTOR_CONFIG.roundaboutMaxSegments, `ring must have 4-6 arc edges, got ${r.ring.length}`);
+  assert.ok(!w.network.nodes.has("0:0"), "the ring must replace the junction node (no orphan centre)");
+  assert.ok(connected(w.network, farId(90, 120), farId(70, 120)) && connected(w.network, farId(90, 120), farId(220, 120)), "all three leg far-ends must stay connected through the ring (no deletion)");
+  assert.equal(w.network.edges.size, 3 + r.ring.length, `3 leg remainders + ${r.ring.length} arc edges expected, got ${w.network.edges.size}`);
+  const arterialRemainder = [...w.network.edges.values()].filter((e) => e.kind === "arterial");
+  assert.equal(arterialRemainder.length, 1, "the arterial leg's remainder must keep its class/width (attribute inheritance)");
+  assert.ok([...w.network.edges.values()].filter((e) => e.width === 5).length >= r.ring.length, "arc edges are local-width ring segments");
+  for (const p of r.ring) assert.ok(Math.abs(Math.hypot(p.x, p.z) - r.radius) < 0.06, `ring point (${p.x},${p.z}) off the radius-${r.radius} circle`);
+  for (let k = 0; k < r.ring.length; k += 1) {
+    const a = r.ring[k]; const b = r.ring[(k + 1) % r.ring.length];
+    assert.equal(corridorFailure(w, a, b, policy(w)), null, `arc chord ${k} must pass the ground corridor`);
+  }
+  assert.equal(acuteJunctions.measure(view(w)).length, 0, "the ring must clear acuteJunctions across the whole network (guard's own predicate)");
+  // 半径阶梯：以 V 为圆心的陡坡盘（半径 9）挡住 r=10 的弧段（弦心距 <9 采样入盘），r=12 全线过——走廊校验不空转。
+  const wSlope = makeWorld({ slopeDisc: { x: 0, z: 0, r: 9 } });
+  legAt(wSlope, 90, 120, false); legAt(wSlope, 70, 120, false); legAt(wSlope, 220, 120, false);
+  const rs = runMiniRoundabout(wSlope, { id: "0:0", x: 0, z: 0 }, [...wSlope.network.edges.values()]);
+  assert.ok(rs.ok && rs.radius === 12, `radius ladder must climb 10 -> 12 around the slope disc: ${JSON.stringify(rs)}`);
+  for (let k = 0; k < rs.ring.length; k += 1) {
+    const a = rs.ring[k]; const b = rs.ring[(k + 1) % rs.ring.length];
+    assert.equal(corridorFailure(wSlope, a, b, policy(wSlope)), null, `arc chord ${k} at r=12 must clear the slope disc`);
+  }
+  // 主干三岔口（普查残留的真实形态，如 seed 2004084431：local 78° / trunk 102° / trunk 282°，24.2° 对）：
+  // 主干腿进环（环是路口形态不是删路），剩余段保 12 宽，弧段是 local 5 宽的环流。
+  const wTrunk = makeWorld();
+  legAt(wTrunk, 77.8, 113, false); trunkAt(wTrunk, 102, 36); trunkAt(wTrunk, 282, 36);
+  const rt = runMiniRoundabout(wTrunk, { id: "0:0", x: 0, z: 0 }, [...wTrunk.network.edges.values()]);
+  assert.ok(rt.ok, `trunk-leg roundabout expected: ${JSON.stringify(rt)}`);
+  assert.equal([...wTrunk.network.edges.values()].filter((e) => e.width === 12).length, 2, "trunk leg remainders must keep width 12");
+  assert.equal([...wTrunk.network.edges.values()].filter((e) => e.width === 5).length, rt.ring.length + 1, "the ring plus the local leg remainder stay width 5");
+  assert.equal(acuteJunctions.measure(view(wTrunk)).length, 0, "trunk roundabout must clear acuteJunctions too");
+  assert.ok(connected(wTrunk.network, farId(77.8, 113), farId(102, 36)) && connected(wTrunk.network, farId(102, 36), farId(282, 36)), "trunk junction must stay connected through the ring");
+  // 桥腿不参与（环段是地面弧边，不能替换桥跨）：锐角对里一条腿是桥的三岔口拒绝且零副作用。
+  const wBridge = makeWorld();
+  legAt(wBridge, 80, 120, false); legAt(wBridge, 100, 120, false); legAt(wBridge, 250, 120, false);
+  const bridgeId = [ "0:0", farId(100, 120) ].sort().join("/");
+  wBridge.network.edges.get(bridgeId).bridge = true;
+  const frozenBridge = snap(wBridge.network);
+  const rb = runMiniRoundabout(wBridge, { id: "0:0", x: 0, z: 0 }, [...wBridge.network.edges.values()]);
+  assert.ok(!rb.ok && rb.reason === "no-target", `bridge-leg junction must be refused: ${JSON.stringify(rb)}`);
+  assert.equal(snap(wBridge.network), frozenBridge, "refused bridge-leg roundabout mutated the network");
+  // 灰带外（最小夹角 55° ≥ 50°）：策略档不是它的活——拒绝（junction-angle）且零副作用。
+  const wWide = makeWorld();
+  legAt(wWide, 90, 120, false); legAt(wWide, 35, 120, false); legAt(wWide, 220, 120, false);
+  const frozenWide = snap(wWide.network);
+  const rw = runMiniRoundabout(wWide, { id: "0:0", x: 0, z: 0 }, [...wWide.network.edges.values()]);
+  assert.ok(!rw.ok && rw.reason === "junction-angle", `out-of-band junction must be refused: ${JSON.stringify(rw)}`);
+  assert.equal(snap(wWide.network), frozenWide, "refused roundabout mutated the network");
+  // 腿太短（12 长，切完剩 <6）：三档半径全作废——如实失败、零副作用（调用方退回删短枝）。
+  const wShort = makeWorld();
+  legAt(wShort, 90, 12, false); legAt(wShort, 70, 12, false); legAt(wShort, 220, 12, false);
+  const frozenShort = snap(wShort.network);
+  const rshort = runMiniRoundabout(wShort, { id: "0:0", x: 0, z: 0 }, [...wShort.network.edges.values()]);
+  assert.ok(!rshort.ok, "short legs must not yield a roundabout");
+  assert.equal(snap(wShort.network), frozenShort, "failed roundabout mutated the network");
+  // 确定性：同输入两次建环产生相同网络。
+  const build2 = () => { const x = makeWorld(); legAt(x, 90, 120, false); legAt(x, 70, 120, false); legAt(x, 220, 120, true); return x; };
+  const wA = build2(); const wB = build2();
+  runMiniRoundabout(wA, { id: "0:0", x: 0, z: 0 }, [...wA.network.edges.values()]);
+  runMiniRoundabout(wB, { id: "0:0", x: 0, z: 0 }, [...wB.network.edges.values()]);
+  assert.equal(snap(wA.network), snap(wB.network), "same input must yield the identical ring network");
+}
+
+console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), fold-back endpoints refused, slope discs detoured, mini-roundabout rings dissolving acute 3-way junctions (radius ladder, corridor-checked arcs, guard-level angles, zero side effects), deterministic.");

@@ -5,6 +5,7 @@ import { addNetworkEdge, keyOf } from "./network";
 import { crosses, safeRoadLink } from "./footprint";
 import type { RepairContext } from "./context";
 import { isPlannedRoadEnd, type PlannedEndInputs } from "./endpoints";
+import { runMiniRoundabout, type ConnectorWorld } from "./connect";
 
 // 路网修复手段（CITY_ROAD_NETWORK_SPEC §6：no-parallel / no-acute / no-loose-end）。与 repairs.ts 不同，这些会**改变**规划结果
 // （删冗余路段），所以每条都有三道保险：① 只删窄路（局部街 5 / 次干 8），主干 12、桥、沿岸大道一律不动；
@@ -112,9 +113,18 @@ export function resolveCrowdedArterials(ctx: RepairContext): number {
   return removed;
 }
 
-/** 约束 acuteJunctions：路口相邻两条路夹角 < 30° —— 删其中较短的窄路（保持连通与门前路）。 */
+/** ctx → 连接器世界视图（resolveAcuteJunctions 的 mini-roundabout 策略档用；用地面视时取，规划中会挪动）。 */
+function roundaboutWorld(ctx: RepairContext): ConnectorWorld {
+  return { network: ctx.network, geo: ctx.geo, inRiver: ctx.inRiver, reservations: () => [...ctx.publicSites, ...ctx.landmarks] };
+}
+
+/** 约束 acuteJunctions：路口相邻两条路夹角 < 30°。city-roundabout 起先试小型交通环（connect.ts 的
+ *  mini-roundabout 策略档：三岔口建半径 10–14 的环、4–6 段弧边接上三条腿，主干腿允许进环——环是
+ *  路口形态不是删路，不违反删除路径的主干保护；阈值放宽 (b)——建环后新路口相邻边夹角全部 ≥30° 时，
+ *  原本 <30° 的对也以环消解），建环不成（腿上有车流回路、腿太短、桥腿、走廊或角度不过）才退回删
+ *  较短的窄路。删是最后手段，不再是无条件首选。 */
 export function resolveAcuteJunctions(ctx: RepairContext): number {
-  let removed = 0;
+  let resolved = 0;
   const baseline = components(ctx);
   const incident = new Map<string, RoadEdge[]>();
   for (const e of ctx.network.edges.values()) for (const id of [e.from, e.to]) (incident.get(id) ?? incident.set(id, []).get(id)!).push(e);
@@ -127,13 +137,15 @@ export function resolveAcuteJunctions(ctx: RepairContext): number {
     for (let k = 0; k < sorted.length; k += 1) {
       const gap = (k + 1 < sorted.length ? sorted[k + 1].a : sorted[0].a + Math.PI * 2) - sorted[k].a;
       if (gap >= (30 * Math.PI) / 180) continue;
+      // 策略档 mini-roundabout：三岔口且三条腿都不载车流回路（换边会让车流折线的逐段核对失效）。
+      if (live.length === 3 && live.every((e) => !onCarPath(ctx, e)) && runMiniRoundabout(roundaboutWorld(ctx), node, live).ok) { resolved += 1; break; }
       const pair = [sorted[k].e, sorted[(k + 1) % sorted.length].e].sort((x, y) => edgeLength(x) - edgeLength(y));
       const victim = pair.find((e) => ctx.network.edges.has(e.id) && removable(ctx, e, baseline));
-      if (victim) { dropEdge(ctx, victim); removed += 1; }
+      if (victim) { dropEdge(ctx, victim); resolved += 1; }
       break;
     }
   }
-  return removed;
+  return resolved;
 }
 
 /** 约束 looseInlandRoadEnds：短悬挂链（< 60、全是窄路）就删——通往空地的小尾巴；长路不动（要接通而不是删）。 */

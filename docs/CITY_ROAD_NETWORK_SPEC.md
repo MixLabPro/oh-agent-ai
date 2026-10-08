@@ -94,7 +94,7 @@ network/
 | 约束 | measure | repair |
 | --- | --- | --- |
 | no-parallel | 同级路平行（< 20°）且间距 < dtest 的段长 | 删除较短一条，端点用 connect.ts 重接 |
-| no-acute | 路口相邻夹角 < 30° | 端点沿垂直方向退 10 后重接 |
+| no-acute | 路口相邻夹角 < 30° | 三岔口先建小型交通环（city-roundabout 批次：mini-roundabout 策略档，删是最后手段）；建不成删较短的窄路 |
 | merge-close-junctions | 两路口间距 < 12 | 合并节点 |
 | no-loose-end | 不允许的断头 | connect.ts 步 3/4；仍失败则删除悬挂链（< 40） |
 | grade-transition-at-junction | 等级变化发生在度 2 节点 | 把变化点移到最近的路口 |
