@@ -18,8 +18,10 @@
  * 不是本批的行为。
  */
 import { DetMath as Math } from "../detMath";
-import type { Vec2 } from "../cityLayout";
+import { segmentDistance, type Landmark } from "../cityPlan";
+import type { PublicSite, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
+import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount, isDry } from "./footprint";
 
 /** 候选点：坐标 + 朝向 + 稳定 id（排序 tie-break 用）+ 来源说明；shoreAnchor 供海上岛堤道校验。 */
@@ -222,5 +224,124 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
       if (harbor) return "harbor-distance-120";
       return spacing(30);
     }
+  }
+}
+
+// ── 临路挪动四遍（V2 网络优先批次 6b-2：从 buildPlan 逐字迁出，闭包改显式 ctx；迭代顺序、
+// 阈值与注释一律不变——行为保持由计划/场景基线哈希证明）─────────────────────────────
+// 岸边/跨路/广场豁免集合由 sitespec 表派生（frontageExemptKinds === SHORE_BOUND ∪ STRADDLE、
+// straddleSitingKinds === STRADDLE，守卫证值相等）。segmentDistance 仍取自 cityPlan
+// （原语反转移是后续依赖倒置批次的事，本批不新增第三份实现）。
+
+/** 临路挪动四遍共用的只读依赖 + 可变用地表 + buildPlan 的两个环搜闭包（snap/siteClearance 按引用传入）。 */
+export type FrontageMoveContext = {
+  publicSites: PublicSite[];
+  landmarks: Landmark[];
+  /** 主干折线（distanceToTrunks = polylineDistance）。 */
+  trunkRuns: Vec2[][];
+  /** 主干按段、桥段剔除（跨路/临街遍的候选段；与 buildPlan 的 trunkSegments 同一份数组）。 */
+  trunkSegments: Array<readonly [Vec2, Vec2]>;
+  ringRuns: Vec2[][];
+  height: (x: number, z: number) => number;
+  inRiver: (x: number, z: number) => boolean;
+  riverBank: (x: number, z: number, bank: number) => boolean;
+  buildable: (x: number, z: number) => boolean;
+  landClearance: (x: number, z: number) => number;
+  snap: (nominal: Vec2, clearance: number, placed: Array<Vec2 & { radius: number }>, radius: number, accept?: (q: Vec2) => boolean) => Vec2;
+  siteClearance: (kind: string, radius: number) => number;
+};
+
+const FRONTAGE_EXEMPT = frontageExemptKinds();
+const STRADDLE_KINDS = straddleSitingKinds();
+
+/** 避高架遍（原 buildPlan「压环线的预留地重新贴位」）：用地与地标先于环线选址，名义位置可能正压在
+ *  高架下——压线的（clearsHighways 不过）用 snap 原地重贴到不压高架的位置（accept 含高架净空）。 */
+export function restickSitesClearOfRingRuns(ctx: FrontageMoveContext): void {
+  const { publicSites, landmarks, ringRuns, snap, siteClearance } = ctx;
+  for (const site of [...publicSites, ...landmarks]) {
+    if (!site.radius || clearsRingRuns(site, site.radius * 2, site.radius * 2, ringRuns)) continue;
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
+    const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius, (c) => clearsRingRuns(c, site.radius * 2, site.radius * 2, ringRuns));
+    site.x = q.x; site.z = q.z;
+  }
+}
+
+/** 跨路遍（原 buildPlan「凯旋门骑上主干中段」）：取离用地最近的主干段（len ≥ 20）中点，
+ *  要求可建、占地全干、不压环线高架、距其它用地 ≥ r_o+r+10；开口轴（局部 z）沿道路方向。 */
+export function straddleSitesAcrossTrunk(ctx: FrontageMoveContext): void {
+  const { publicSites, landmarks, trunkSegments, ringRuns, buildable, height, inRiver, riverBank } = ctx;
+  const footprintGeo = { height, inRiver, riverBank };
+  const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
+  for (const site of landmarks) {
+    if (!STRADDLE_KINDS.has(site.kind)) continue;
+    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d);
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    for (const { a, b } of ranked) {
+      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz);
+      if (len < 20) continue;
+      const q = { x: a.x + dx * 0.5, z: a.z + dz * 0.5 };
+      if (!buildable(q.x, q.z) || !footprintDry(q, site.radius)) continue;
+      if (!clearsRingRuns(q, site.radius * 2, site.radius * 2, ringRuns)) continue; // 不能压在环线高架下（geography 守卫）
+      if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
+      site.x = q.x; site.z = q.z; site.yaw = Math.atan2(dx, dz);
+      break;
+    }
+  }
+}
+
+/** 临街遍（原 buildPlan「内陆用地贴到最近主干道一侧」）：最近 4 条主干段的投影垂足、沿法线偏移
+ *  radius+12（两侧），边缘离路肩、朝向与路对齐；全干、离水 ≥ r+4、别的主干道也不能穿过（r+8）、
+ *  避高架、距其它用地 ≥ r_o+r+10。找不到临街位置且被主干穿过时，snap 挪到离主干 ≥ r+8 处。 */
+export function frontSitesOnTrunks(ctx: FrontageMoveContext): void {
+  const { publicSites, landmarks, trunkSegments, trunkRuns, ringRuns, buildable, landClearance, height, inRiver, riverBank, snap, siteClearance } = ctx;
+  const footprintGeo = { height, inRiver, riverBank };
+  const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
+  const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
+  for (const site of [...publicSites, ...landmarks]) {
+    if (!site.radius || FRONTAGE_EXEMPT.has(site.kind)) continue;
+    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d).slice(0, 4);
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    let placed = false;
+    for (const { a, b } of ranked) {
+      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
+      const t = Math.max(0.2, Math.min(0.8, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (len * len)));
+      const foot = { x: a.x + dx * t, z: a.z + dz * t };
+      let nx = -dz / len; let nz = dx / len;
+      if ((site.x - foot.x) * nx + (site.z - foot.z) * nz < 0) { nx = -nx; nz = -nz; }
+      for (const sign of [1, -1]) {
+        const offset = site.radius + 12;
+        const q = { x: foot.x + nx * sign * offset, z: foot.z + nz * sign * offset };
+        // 整个占地都要在陆上：曾只要求中心离水 0.6 半径，双子塔（两塔各偏 13）一半立进河里（真机截图）。
+        if (!buildable(q.x, q.z) || landClearance(q.x, q.z) < site.radius + 4 || !footprintDry(q, site.radius)) continue;
+        if (distanceToTrunks(q) < site.radius + 8) continue;               // 别的主干道也不能穿过它
+        if (!clearsRingRuns(q, site.radius * 2, site.radius * 2, ringRuns)) continue;
+        if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
+        site.x = q.x; site.z = q.z; site.yaw = -Math.atan2(dz, dx);
+        placed = true; break;
+      }
+      if (placed) break;
+    }
+    // 找不到临街位置时，至少别让主干道从中间穿过：就近挪到离主干道 ≥ 半径+8 的位置。
+    if (!placed && distanceToTrunks(site) < site.radius + 6) {
+      const q = snap(site, siteClearance(site.kind, site.radius), others.map((o) => ({ x: o.x, z: o.z, radius: o.radius })), site.radius,
+        (c) => distanceToTrunks(c) >= site.radius + 8 && landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && clearsRingRuns(c, site.radius * 2, site.radius * 2, ringRuns));
+      site.x = q.x; site.z = q.z;
+    }
+  }
+}
+
+/** 干地遍（原 buildPlan「仍不在干地的用地重贴」）：非岸边/跨路类用地若 landClearance < r+4 或占地
+ *  不全干，用 snap（accept 含四项联合判据）重贴。岸边/跨路/广场豁免（各有专属遍/构造保证）。 */
+export function resnapSitesOntoDryLand(ctx: FrontageMoveContext): void {
+  const { publicSites, landmarks, trunkRuns, ringRuns, landClearance, height, inRiver, riverBank, snap, siteClearance } = ctx;
+  const footprintGeo = { height, inRiver, riverBank };
+  const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
+  const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
+  for (const site of [...publicSites, ...landmarks]) {
+    if (!site.radius || FRONTAGE_EXEMPT.has(site.kind) || (landClearance(site.x, site.z) >= site.radius + 4 && footprintDry(site, site.radius))) continue;
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
+    const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius,
+      (c) => landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && distanceToTrunks(c) >= site.radius + 8 && clearsRingRuns(c, site.radius * 2, site.radius * 2, ringRuns));
+    site.x = q.x; site.z = q.z;
   }
 }

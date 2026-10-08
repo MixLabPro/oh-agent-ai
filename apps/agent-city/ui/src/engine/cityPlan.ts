@@ -15,7 +15,9 @@ import { fbm, smoothstep } from "./cityNoise";
 import { boulevardSegments, buildSeasideBand, MIAMI_COASTAL, seasideStripContains, type CoastalConfig, type SeasideBand, type SeasideWorld } from "./citySeaside";
 import type { RepairContext } from "./planner/context";
 import { solvePlan } from "./planner/solve";
-import { isDry, polylineDistance } from "./planner/footprint";
+import { polylineDistance } from "./planner/footprint";
+import { coastalSitingKinds } from "./planner/sitespec";
+import { frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, type FrontageMoveContext } from "./planner/access";
 import { retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, type ShoreMoveContext } from "./planner/siting";
 import { buildGeography } from "./planner/geography";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
@@ -293,90 +295,37 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // inRiver 不同，历史上就是两套判断，按原语义各自保留。
   const footprintGeo = { height, inRiver, riverBank: (x: number, z: number, bank: number) => hasRiver && Math.abs(x - riverX(z)) < riverWidth(z) + bank };
 
-  const SHORE_SITE_KINDS = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel", "villa-complex"]); // 庄园：临水拱廊，同属岸边地标
+  // 岸边类集合由 sitespec 表派生（V2 网络优先 6b-2：值 === 原 Set 字面量，守卫 verify-city-sitespec 证相等）。
+  const SHORE_SITE_KINDS = coastalSitingKinds(); // 庄园：临水拱廊，同属岸边地标
   // ── 骨架（V2 步 2b-full：逐字迁至 planner/skeleton.ts::buildSkeleton）──
   const { trunks, bridges, ringRuns } = buildSkeleton({ geo, seed, core, publicSites, landmarks, shoreSiteKinds: SHORE_SITE_KINDS, random, network, inRiver });
   const trunkRuns = trunks.map((trunk) => trunk.points);
   const trunkIndex = new SegmentIndex(trunkRuns);
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
 
-  // 公共用地与地标先于环线选址，名义位置可能正压在高架上（clearsHighways 守卫只覆盖了地块/配套/花园）：
-  // 环线只取决于核心点与岛半径，所以这里把压线的预留地原地重新贴到不压高架的位置；街区与地块都在此之后生成。
-  for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || clearsHighways(site, site.radius * 2, site.radius * 2, ringRuns)) continue;
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
-    const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius, (c) => clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
-    site.x = q.x; site.z = q.z;
-  }
-  // ── 用地临街（R2）：内陆的公共用地与地标贴到最近主干道的一侧（边缘离路肩 6），朝向与道路对齐。
-  // 曾在主干道之前按地理选址、之后互不避让：车站中心正压在主干道上，10 个对象没有一个与门前道路对齐。
-  // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
-  // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
-  const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
-  const SHORE_BOUND = new Set([...SHORE_SITE_KINDS, "civic"]); // civic = 核心广场，四周是环路
+  // 主干按段（桥段剔除）与临路挪动四遍的显式依赖（V2 网络优先 6b-2：遍体逐字迁至 planner/access.ts；
+  // trunkSegments 提前到避高架遍之前定义——纯计算无副作用，snap/siteClearance 环搜闭包按引用传入）。
   const trunkSegments = trunks.flatMap((trunk) => trunk.points.slice(1).map((b, k) => [trunk.points[k], b] as const))
     .filter(([a, b]) => !bridges.some((bridge) => bridge.to === b || bridge.from === a && bridge.to === b));
+  const frontageCtx: FrontageMoveContext = { publicSites, landmarks, trunkRuns, trunkSegments, ringRuns, height, inRiver: footprintGeo.inRiver, riverBank: footprintGeo.riverBank, buildable, landClearance, snap, siteClearance };
   // 岸线挪动四遍的显式依赖（V2 网络优先 6b-1：遍体逐字迁至 planner/siting.ts；此处只组 ctx，行为不变）。
   const shoreCtx: ShoreMoveContext = { publicSites, landmarks, core, coast, coastDistance, height, inRiver: footprintGeo.inRiver, riverBank: footprintGeo.riverBank, trunkRuns, bridges, ringRuns };
+  // 公共用地与地标先于环线选址，名义位置可能正压在高架上（clearsHighways 守卫只覆盖了地块/配套/花园）：
+  // 环线只取决于核心点与岛半径，所以这里把压线的预留地原地重新贴到不压高架的位置；街区与地块都在此之后生成。
+  restickSitesClearOfRingRuns(frontageCtx);
   // 岸边地标（歌剧院、摩天轮、灯塔、庄园）向核心方向内移，直到占地圈 16 点里落在水上的 ≤3 个——
   // 曾按「离核心最近的海岸点」放下就不管了，约三分之一占地悬在海面上（场景依赖守卫抓到）。港口本就临水，除外。
   retreatShoreSitesToDryLand(shoreCtx);
+  // ── 用地临街（R2）：内陆的公共用地与地标贴到最近主干道的一侧（边缘离路肩 6），朝向与道路对齐。
+  // 曾在主干道之前按地理选址、之后互不避让：车站中心正压在主干道上，10 个对象没有一个与门前道路对齐。
+  // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
   // 跨路地标（门式）：凯旋门骑在主干道上、道路从拱券开口穿过——曾与其它用地一样贴到路旁，门下是草地
   // （用户截图：「凯旋门下面不是路？建筑物缺少约束」）。取最近主干道中段，开口轴（局部 z）沿道路方向。
-  const STRADDLE = new Set(["arch"]);
-  for (const site of landmarks) {
-    if (!STRADDLE.has(site.kind)) continue;
-    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d);
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    for (const { a, b } of ranked) {
-      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz);
-      if (len < 20) continue;
-      const q = { x: a.x + dx * 0.5, z: a.z + dz * 0.5 };
-      if (!buildable(q.x, q.z) || !footprintDry(q, site.radius)) continue;
-      if (!clearsHighways(q, site.radius * 2, site.radius * 2, ringRuns)) continue; // 不能压在环线高架下（geography 守卫）
-      if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
-      site.x = q.x; site.z = q.z; site.yaw = Math.atan2(dx, dz);
-      break;
-    }
-  }
-  for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || SHORE_BOUND.has(site.kind) || STRADDLE.has(site.kind)) continue;
-    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d).slice(0, 4);
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    let placed = false;
-    for (const { a, b } of ranked) {
-      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
-      const t = Math.max(0.2, Math.min(0.8, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (len * len)));
-      const foot = { x: a.x + dx * t, z: a.z + dz * t };
-      let nx = -dz / len; let nz = dx / len;
-      if ((site.x - foot.x) * nx + (site.z - foot.z) * nz < 0) { nx = -nx; nz = -nz; }
-      for (const sign of [1, -1]) {
-        const offset = site.radius + 12;
-        const q = { x: foot.x + nx * sign * offset, z: foot.z + nz * sign * offset };
-        // 整个占地都要在陆上：曾只要求中心离水 0.6 半径，双子塔（两塔各偏 13）一半立进河里（真机截图）。
-        if (!buildable(q.x, q.z) || landClearance(q.x, q.z) < site.radius + 4 || !footprintDry(q, site.radius)) continue;
-        if (distanceToTrunks(q) < site.radius + 8) continue;               // 别的主干道也不能穿过它
-        if (!clearsHighways(q, site.radius * 2, site.radius * 2, ringRuns)) continue;
-        if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
-        site.x = q.x; site.z = q.z; site.yaw = -Math.atan2(dz, dx);
-        placed = true; break;
-      }
-      if (placed) break;
-    }
-    // 找不到临街位置时，至少别让主干道从中间穿过：就近挪到离主干道 ≥ 半径+8 的位置。
-    if (!placed && distanceToTrunks(site) < site.radius + 6) {
-      const q = snap(site, siteClearance(site.kind, site.radius), others.map((o) => ({ x: o.x, z: o.z, radius: o.radius })), site.radius,
-        (c) => distanceToTrunks(c) >= site.radius + 8 && landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
-      site.x = q.x; site.z = q.z;
-    }
-  }
-  for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || SHORE_BOUND.has(site.kind) || STRADDLE.has(site.kind) || (landClearance(site.x, site.z) >= site.radius + 4 && footprintDry(site, site.radius))) continue;
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
-    const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius,
-      (c) => landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && distanceToTrunks(c) >= site.radius + 8 && clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
-    site.x = q.x; site.z = q.z;
-  }
+  straddleSitesAcrossTrunk(frontageCtx);
+  frontSitesOnTrunks(frontageCtx);
+  // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
+  // 仍不在干地的内陆用地（岸边/跨路/广场豁免，各有专属遍或构造保证）重贴到干地。
+  resnapSitesOntoDryLand(frontageCtx);
   // 港口最后贴回岸线：前面的避让（离其它用地、离环线高架）会把它推进内陆，港口离水上百（用户截图：港口在市中心）。
   // 朝最近的岸点逐步移动，直到中心离岸 ≤ 12（码头半边伸进水面）。
   settleHarborOnCoast(shoreCtx);
