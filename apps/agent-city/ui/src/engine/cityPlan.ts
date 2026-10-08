@@ -19,7 +19,7 @@ import { isDeepWater, isDry, polylineDistance, wetCount } from "./planner/footpr
 import { buildGeography } from "./planner/geography";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
-import { runConnection, endpointClear, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
+import { runConnection, endpointClear, commitFixedLink, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -859,16 +859,19 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
 
   // 入口路（R2）：仍离路较远的用地/地标（岸边对象，或找不到临街位置的）从朝向最近道路的边缘
   // 拉一条支路接入路网——门前要有路（真机：双子塔、摩天轮、港口门前无路）。
+  // 批次 5-1 桥接统一：堤道与「过水门前路」都改走连接器的显式桥候选（ground→bridge→ground
+  // 三段、桥头干地与跨距校验、候选按距离前 40 个投影点），经事务补丁提交；判据逐字保留。
   for (const site of [...publicSites, ...landmarks]) {
     if (!site.radius) continue;
-    // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。
+    // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。落位期已验证
+    // （占地圈全深水、岸点在实地 ≥0.3），此处仅事务化提交（commitFixedLink）。
     const landmarkSite = site as typeof site & { shore?: Vec2 };
     const ref: Vec2 = landmarkSite.shore ?? site;
     if (landmarkSite.shore) {
       const l = Math.hypot(site.x - ref.x, site.z - ref.z) || 1;
       const edgePt = key({ x: site.x - ((site.x - ref.x) / l) * site.radius * 0.9, z: site.z - ((site.z - ref.z) / l) * site.radius * 0.9 });
       const shorePt = key(ref);
-      addEdge(shorePt, edgePt, false, true, false);
+      commitFixedLink(connectorWorld, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
       bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
     }
     let nearest: { p: Vec2; d: number; edge: RoadEdge } | null = null;
@@ -884,58 +887,23 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     // 岸边地标（灯塔在岬角尖上）门口常是不可建的岸滩：沿朝路方向往里走到可建地面再起路。
     let reach = landmarkSite.shore ? 0 : site.radius + 6;
     // 不再向内陆走到可建地：岬角灯塔会走 100+，入口路从远处的路边起步、根本到不了地标（用户：门前要有路）。
-    // 门口在不可建岸滩时，由下方的「全程在陆上」兜底直连。
+    // 门口在不可建岸滩时，由下方的显式桥候选兜底（全程在陆上或 ≤84 连续水段成桥）。
     const gate = key({ x: ref.x + ux * reach, z: ref.z + uz * reach });
     if (!connectToNetwork(gate, 240, false) && !connectToNetwork(gate, 700, false, () => false, 35)) {
-      // 兜底：岸边地标贴回水边后常在岬角上，到最近路面要穿过不可建的岸滩。在最近 6 个路面点里取第一条
-      // 「全程在陆上、不穿河、不穿其它用地」的直线连过去，并在落点切开宿主路段成 T 路口。
+      // 兜底（批次 5-1 起统一走 bridge-candidate）：门口 → 近岸 → 桥 → 对岸 → 接入点（无水时纯地面引道）。
+      // 地面引道不查 buildable/坡度（门前引道穿过不可建前滩带是历史口径，TerrainPatch 批次前的已知豁免）。
       const blockers = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-      const candidates: Array<{ p: Vec2; d: number; edge: RoadEdge }> = [];
-      for (const edge of edges.values()) {
-        if (edge.bridge) continue;
-        const [ea, eb] = edge.points; const ex = eb.x - ea.x; const ez = eb.z - ea.z; const el = ex * ex + ez * ez || 1;
-        const t = Math.max(0, Math.min(1, ((gate.x - ea.x) * ex + (gate.z - ea.z) * ez) / el));
-        const p = { x: ea.x + ex * t, z: ea.z + ez * t };
-        candidates.push({ p, d: Math.hypot(p.x - gate.x, p.z - gate.z), edge });
-      }
-      candidates.sort((x, y) => x.d - y.d);
-      // 返回连线上的水段（首/末水点）：无水 = 纯陆路；水段 ≤ 84 且两端是干地 = 可架短桥（岸边地标常与路网隔着河，
-      // 守卫抓到 3 例「门前无路」）；更宽或被其它用地挡住则不连。
-      const clear = (to: Vec2): { span: [Vec2, Vec2] | null } | null => {
-        const n = Math.max(4, Math.ceil(Math.hypot(to.x - gate.x, to.z - gate.z) / 6));
-        let first = -1; let last = -1;
-        for (let k = 1; k < n; k += 1) {
-          const x = gate.x + (to.x - gate.x) * (k / n); const z = gate.z + (to.z - gate.z) * (k / n);
-          if (height(x, z) <= 0.5 || inRiver(x, z)) { if (first < 0) first = k; last = k; }
-          if (blockers.some((o) => Math.hypot(o.x - x, o.z - z) < o.radius + 2)) return null;
-          if (Math.hypot(site.x - x, site.z - z) < site.radius) return null;
-        }
-        if (first < 0) return { span: null };
-        if (last - first + 1 > 14 || first < 1 || last > n - 2) return null;
-        for (let k = first; k <= last; k += 1) { // 水段必须连续（中间不能又是陆地再入水）
-          const x = gate.x + (to.x - gate.x) * (k / n); const z = gate.z + (to.z - gate.z) * (k / n);
-          if (!(height(x, z) <= 0.5 || inRiver(x, z))) return null;
-        }
-        const at = (k: number) => ({ x: gate.x + (to.x - gate.x) * (k / n), z: gate.z + (to.z - gate.z) * (k / n) });
-        if (Math.hypot(at(first - 1).x - site.x, at(first - 1).z - site.z) < site.radius + 2) return null; // 桥头不能落在用地圈里：路会从用地中间穿过（庄园跨河时）
-        return { span: [at(first - 1), at(last + 1)] };
-      };
-      const picked = candidates.slice(0, 40).map((c) => ({ c, plan: clear(c.p) })).find((x) => x.plan);
-      const pick = picked?.c;
-      if (pick) {
-        const host = pick.edge; const join = key(pick.p);
-        if (edges.has(host.id) && roadNodeId(join) !== host.from && roadNodeId(join) !== host.to) {
-          edges.delete(host.id);
-          addEdge(host.points[0], join, host.kind === "arterial", false, host.width >= 12);
-          addEdge(join, host.points[1], host.kind === "arterial", false, host.width >= 12);
-        }
-        const span = picked!.plan!.span;
-        if (span) { // 门口 → 近岸 → 桥 → 对岸 → 接入点
-          addEdge(gate, span[0], false);
-          addEdge(span[0], span[1], false, true, false);
-          bridges.push({ from: span[0], to: span[1], angle: Math.atan2(span[1].z - span[0].z, span[1].x - span[0].x), length: Math.hypot(span[1].x - span[0].x, span[1].z - span[0].z) });
-          addEdge(span[1], join, false);
-        } else addEdge(gate, join, false);
+      const bridged = runConnection({
+        id: `gate:${site.id ?? site.kind}`,
+        source: gate,
+        target: { kind: "edges", include: () => true },
+        purpose: "site-access",
+        allowBridge: true,
+        maxLength: 1e4, // 桥候选的界限是候选数（前 40 个投影点），不是半径（历史口径）
+        roadClass: "local",
+      }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { self: site, blockers }, crossings: false });
+      for (const span of bridged.ok ? bridged.bridgeSpans : []) {
+        bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
       }
     }
   }

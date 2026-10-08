@@ -170,4 +170,35 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.equal(snap(w1.network), snap(w2.network), "same input must yield the identical network");
 }
 
-console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, deterministic.");
+// (i) 显式桥候选（批次 5-1，设计 §4.2）：窄河 ground→bridge→ground 三段、桥头在干地、跨距受控；
+//     宽河拒绝；不 allowBridge 的普通连接不许「遇水自动可桥」。
+{
+  // 窄河（宽 18）：地面阶梯全部 water-span 失败，bridge-candidate 产出三段（中段 bridge）。
+  const w = makeWorld({ riverX: 0 });
+  addNetworkEdge(w.network, { x: -100, z: 0 }, { x: -220, z: 0 }, false);   // 门口悬挂支路
+  addNetworkEdge(w.network, { x: 100, z: 0 }, { x: 220, z: 0 }, true);      // 对岸干道
+  const noBridge = runConnection(request({ id: "nobridge", source: { x: -100, z: 0 }, maxLength: 400 }), w);
+  assert.ok(!noBridge.ok && ["water-span", "slope", "no-target", "search-budget"].includes(noBridge.reason), `ground ladder must refuse to cross the river: ${JSON.stringify(noBridge)}`);
+  assert.ok(!connected(w.network, "-100:0", "220:0"), "ground-only request must not reach the far bank");
+  assert.ok([...w.network.edges.values()].every((e) => !e.bridge), "ground-only request must not sneak a bridge edge in");
+  const br = runConnection(request({ id: "bridge", source: { x: -100, z: 0 }, maxLength: 400, allowBridge: true }), w, { strategies: ["bridge-candidate"], crossings: false });
+  assert.ok(br.ok && br.strategy === "bridge-candidate", `bridge candidate expected: ${JSON.stringify(br)}`);
+  assert.equal(br.patch.addEdges.length, 3, `ground-bridge-ground needs 3 segments, got ${br.patch.addEdges.length}`);
+  assert.equal(br.patch.addEdges.filter((e) => e.bridge).length, 1, "exactly the middle segment is the bridge");
+  assert.equal(br.bridgeSpans.length, 1, "one bridge span to register");
+  for (const end of [br.bridgeSpans[0].from, br.bridgeSpans[0].to]) assert.ok(w.geo.height(end.x, end.z) > 0.5, "bridgeheads must sit on dry land");
+  const committed = runConnection(request({ id: "bridge2", source: { x: -100, z: 0 }, maxLength: 400, allowBridge: true }), w, { strategies: ["bridge-candidate"], crossings: false });
+  assert.ok(committed.ok, "the bridge connection must commit");
+  assert.ok(connected(w.network, "-100:0", "220:0"), "bridge did not join the banks");
+  assert.ok([...w.network.edges.values()].some((e) => e.bridge), "the committed network must carry the bridge edge");
+  // 宽河（跨距 > 84）：拒绝成桥，且零副作用。
+  const w2 = makeWorld({ riverX: 0, riverWidth: 140 });
+  addNetworkEdge(w2.network, { x: -200, z: 0 }, { x: -320, z: 0 }, false);
+  addNetworkEdge(w2.network, { x: 200, z: 0 }, { x: 320, z: 0 }, true);
+  const frozen = snap(w2.network);
+  const tooWide = runConnection(request({ id: "wide", source: { x: -200, z: 0 }, maxLength: 800, allowBridge: true }), w2, { strategies: ["bridge-candidate"], crossings: false });
+  assert.ok(!tooWide.ok && tooWide.reason === "water-span", `wide river must be refused: ${JSON.stringify(tooWide)}`);
+  assert.equal(snap(w2.network), frozen, "refused bridge mutated the network");
+}
+
+console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), deterministic.");
