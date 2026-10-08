@@ -50,6 +50,7 @@ const ENGLISH: Record<string, string> = {
   "重试": "Retry",
   "剩时": "Left",
   "穿过高亮圆环，顺序错误不计数。": "Fly through the highlighted rings in order; wrong order does not count.",
+  "成绩仅本次保留": "Records are kept for this session only",
 };
 
 export function gameText(text: string, locale: GameLocale): string {

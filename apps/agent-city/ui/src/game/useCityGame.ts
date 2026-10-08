@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { CityEngine } from "../engine/CityEngine";
 import { GameSession, type GameSessionSnapshot } from "./GameSession";
 import type { GameLocale } from "./gameCopy";
+import { EMPTY_PROFILE, loadProfilePort, mergeRecord, saveProfile, type FlightProfileV1, type ProfilePort } from "../data/profile";
 
 export type GameHostBridge = {
   cinemaActive: () => boolean;
@@ -22,7 +23,12 @@ export type GameHostBridge = {
 export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHostBridge) {
   const [snapshot, setSnapshot] = useState<GameSessionSnapshot | null>(null);
   const [entryError, setEntryError] = useState<string | null>(null);
+  /** 档案存储层级与保存状态（HUD 提示「本次成绩尚未保存」）。 */
+  const [persistTier, setPersistTier] = useState<"native" | "local" | "memory" | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
   const sessionRef = useRef<GameSession | null>(null);
+  const portRef = useRef<ProfilePort | null>(null);
+  const profileRef = useRef<FlightProfileV1>({ ...EMPTY_PROFILE });
   const hostRef = useRef(host);
   hostRef.current = host;
 
@@ -39,10 +45,34 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
           engineInstance.setLabelsVisible(hostRef.current.labelsVisible());
           hostRef.current.requestRefresh();
         },
+        onRecord: (courseId, bestTimeMs, collisions) => {
+          // 新最佳 → 合并档案并保存（失败不丢本次结果，HUD 标注未保存）。
+          profileRef.current = mergeRecord(profileRef.current, { courseId, bestTimeMs, collisions });
+          const port = portRef.current;
+          if (!port) { setSaveFailed(true); return; }
+          void saveProfile(port, profileRef.current).then((next) => {
+            portRef.current = next;
+            setPersistTier(next.tier);
+            setSaveFailed(next.tier === "memory" || next.readOnly);
+          }).catch(() => setSaveFailed(true));
+        },
       });
     }
     return sessionRef.current;
   }, [engine]);
+
+  // 档案载入：端口就绪后注入跨会话最佳成绩（§9；原生不可用降级 localStorage/内存）。
+  useEffect(() => {
+    let active = true;
+    void loadProfilePort().then((port) => {
+      if (!active) return;
+      portRef.current = port;
+      profileRef.current = port.profile;
+      setPersistTier(port.tier);
+      sessionRef.current?.adoptProfileRecords(port.profile.records);
+    }).catch(() => { if (active) setPersistTier("memory"); });
+    return () => { active = false; };
+  }, []);
 
   const enterGame = useCallback((mode: "practice" | "race") => {
     const session = getSession();
@@ -110,6 +140,8 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     active,
     snapshot,
     entryError,
+    persistTier,
+    saveFailed,
     clearEntryError: () => setEntryError(null),
     enterPractice: () => enterGame("practice"),
     enterRace: () => enterGame("race"),

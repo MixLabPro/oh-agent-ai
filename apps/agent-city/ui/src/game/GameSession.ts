@@ -26,6 +26,8 @@ export type GameSessionEvents = {
   onState: (snapshot: GameSessionSnapshot) => void;
   /** 退出已完成（相机已归还）；React 层再恢复 UI 状态并触发投影刷新。 */
   onExited: () => void;
+  /** 新最佳成绩（React 层负责档案持久化，§9）。 */
+  onRecord?: (courseId: string, bestTimeMs: number, collisions: number) => void;
 };
 
 export type GameSessionSnapshot = {
@@ -36,7 +38,7 @@ export type GameSessionSnapshot = {
   collisions: number;
   /** 穿环任务（仅 race 模式；practice 为 null）。 */
   mission: RaceMissionSnapshot | null;
-  /** 本会话内存最佳（G2：不标注跨重启保存）。 */
+  /** 本路线最佳（含跨会话载入的档案成绩）。 */
   best: RaceResult | null;
 };
 
@@ -257,6 +259,14 @@ export class GameSession {
     return PHYSICS_VERSION;
   }
 
+  /** 载入档案成绩（跨会话最佳；由 React 层在端口就绪后注入，§9）。 */
+  adoptProfileRecords(records: Array<{ courseId: string; bestTimeMs: number; collisions: number }>): void {
+    for (const record of records) {
+      this.bestByCourse.set(record.courseId, { finished: true, elapsedMs: record.bestTimeMs, collisions: record.collisions, penaltyMs: 0, finalMs: record.bestTimeMs });
+    }
+    this.emit(true);
+  }
+
   get courseVersion(): number {
     return COURSE_VERSION;
   }
@@ -371,6 +381,7 @@ export class GameSession {
       const best = this.bestByCourse.get(this.course.courseId);
       if (!best || result.finalMs < best.finalMs || (result.finalMs === best.finalMs && result.collisions < best.collisions)) {
         this.bestByCourse.set(this.course.courseId, result);
+        this.events.onRecord?.(this.course.courseId, result.finalMs, result.collisions);
       }
     }
     this.emit(true);

@@ -445,7 +445,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <small>实际生成帧 · 预览最多 2 FPS，成片 30 FPS</small>
     </section>}
     {ui.error && !ui.options && <div className="city-feature-error" role="alert">{ui.error}<button aria-label="关闭提示" onClick={() => ui.setError(null)}>×</button></div>}
-    {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} actions={{
+    {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} persist={{ tier: game.persistTier, saveFailed: game.saveFailed }} actions={{
       onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse,
     }} />}
     {debug && ui.stats && <p className="city-perf">{ui.stats.fps} FPS · {ui.stats.drawCalls} draw calls · {ui.stats.buildings} buildings · quality {ui.stats.quality}</p>}

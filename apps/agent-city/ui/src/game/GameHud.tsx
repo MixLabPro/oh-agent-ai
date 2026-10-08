@@ -22,7 +22,7 @@ const clock = (ms: number) => {
   return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}.${Math.floor((seconds * 10) % 10)}`;
 };
 
-export function GameHud({ snapshot, actions, locale }: { snapshot: GameSessionSnapshot; actions: GameHudActions; locale: GameLocale }) {
+export function GameHud({ snapshot, actions, locale, persist }: { snapshot: GameSessionSnapshot; actions: GameHudActions; locale: GameLocale; persist?: { tier: "native" | "local" | "memory" | null; saveFailed: boolean } }) {
   const [helpOpen, setHelpOpen] = useState(true);
   const t = (text: string) => gameText(text, locale);
   const { controller, telemetry, softOutside, mission, best } = snapshot;
@@ -106,6 +106,7 @@ export function GameHud({ snapshot, actions, locale }: { snapshot: GameSessionSn
         <dt>{t("碰撞")}</dt><dd>{mission.result.collisions}</dd>
         {best && <><dt>{t("最佳")}</dt><dd>{clock(best.finalMs)}{mission.result.finished && mission.result.finalMs <= best.finalMs && mission.result.collisions <= best.collisions ? ` · ${t("新纪录")}` : ""}</dd></>}
       </dl>
+      {(persist?.saveFailed || persist?.tier === "memory") && mission.result.finished && <p role="status">{t(persist?.tier === "memory" ? "成绩仅本次保留" : "本次成绩尚未保存")}</p>}
       <div className="city-game-actions">
         <button autoFocus onClick={actions.onRestart}>{t("重试")}</button>
         <button onClick={actions.onNewCourse}>{t("换一条路线")}</button>
