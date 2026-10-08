@@ -23,4 +23,5 @@
 .city-game-panel .city-game-danger { border-color: #7c3a3a; }
 .city-game-paused dl { margin: 10px 0 0; gap: 4px 10px; font-size: 12px; }
 .city-game-paused dt { color: var(--city-text); font-weight: 600; }
-.city-game-paused dd { margin: 0; color: var(--city-muted); }
+.city-game-paused dd { margin: 0; color: var(--city-muted); font-variant-numeric: tabular-nums; }
+.city-game-countdown { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; font-weight: 700; color: #eaf6ff; text-shadow: 0 2px 24px #0a2033cc; pointer-events: none; }

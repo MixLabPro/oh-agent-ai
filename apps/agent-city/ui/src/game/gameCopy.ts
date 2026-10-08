@@ -39,6 +39,17 @@ const ENGLISH: Record<string, string> = {
   "当前有操作进行中，稍后再试。": "Another action is in progress — try again shortly.",
   "城市数据尚未就绪，暂时无法进入游戏。": "City data is not ready yet.",
   "本次成绩尚未保存": "This run was not saved",
+  "完成！": "Finished!",
+  "超时": "Timed out",
+  "用时": "Time",
+  "罚时": "Penalty",
+  "碰撞": "Collisions",
+  "最佳": "Best",
+  "新纪录": "New record",
+  "换一条路线": "New course",
+  "重试": "Retry",
+  "剩时": "Left",
+  "穿过高亮圆环，顺序错误不计数。": "Fly through the highlighted rings in order; wrong order does not count.",
 };
 
 export function gameText(text: string, locale: GameLocale): string {

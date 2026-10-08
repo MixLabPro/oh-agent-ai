@@ -44,13 +44,13 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     return sessionRef.current;
   }, [engine]);
 
-  const enterPractice = useCallback(() => {
+  const enterGame = useCallback((mode: "practice" | "race") => {
     const session = getSession();
     const engineInstance = engine.current;
     if (!session || !engineInstance) return;
     setEntryError(null);
     const hostState = session.hostState(hostRef.current.cinemaActive(), hostRef.current.filmActive(), hostRef.current.busy());
-    const result = session.enter({ mode: "practice" }, hostState);
+    const result = session.enter({ mode }, hostState);
     if (!result.ok) {
       const locale = hostRef.current.locale();
       const reasons: Record<string, string> = {
@@ -59,6 +59,7 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
         busy: locale === "en" ? "Another action is in progress — try again shortly." : "当前有操作进行中，稍后再试。",
         "not-ready": locale === "en" ? "City data is not ready yet." : "城市数据尚未就绪，暂时无法进入游戏。",
         "no-safe-spawn": locale === "en" ? "No safe spawn point is available right now." : "没有可用的安全出生点，暂不能进入飞行。",
+        "no-course": locale === "en" ? "No safe race course could be generated; try again or use free flight." : "这条航线暂时无法生成安全路线，可重试或先自由练习。",
         "camera-busy": locale === "en" ? "The camera is busy." : "相机被占用，暂时无法起飞。",
         "already-in-game": "",
       };
@@ -98,7 +99,7 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     return () => canvas.removeEventListener("webglcontextlost", onLost);
   }, [active, engine]);
 
-  const call = useCallback((method: "pause" | "resume" | "restart" | "retryPrepare" | "exit", reason?: Parameters<GameSession["pause"]>[0]) => {
+  const call = useCallback((method: "pause" | "resume" | "restart" | "retryPrepare" | "exit" | "newCourse", reason?: Parameters<GameSession["pause"]>[0]) => {
     const session = getSession();
     if (!session) return;
     if (method === "pause" && reason) session.pause(reason);
@@ -110,11 +111,13 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     snapshot,
     entryError,
     clearEntryError: () => setEntryError(null),
-    enterPractice,
+    enterPractice: () => enterGame("practice"),
+    enterRace: () => enterGame("race"),
     pause: (reason: Parameters<GameSession["pause"]>[0]) => call("pause", reason),
     resume: () => call("resume"),
     restart: () => call("restart"),
     retryPrepare: () => call("retryPrepare"),
+    newCourse: () => call("newCourse"),
     exit: () => call("exit"),
   };
 }

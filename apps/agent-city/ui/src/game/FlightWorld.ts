@@ -41,6 +41,8 @@ const LANDMARK_HEIGHT: Record<string, number> = {
 export class FlightWorld {
   readonly boxes: readonly ObstacleBox[];
   readonly bounds: FlightBounds;
+  /** 岛体半径（路线生成以此外扩海面宽弧）。 */
+  readonly islandRadius: number;
   private readonly grid = new Map<string, number[]>();
   private readonly terrainAt: (x: number, z: number) => number;
 
@@ -124,6 +126,7 @@ export class FlightWorld {
     }
 
     this.boxes = boxes;
+    this.islandRadius = layout.islandRadius;
     const urban = layout.urbanBounds;
     const centerX = (urban.left + urban.right) / 2;
     const centerZ = (urban.north + urban.south) / 2;
