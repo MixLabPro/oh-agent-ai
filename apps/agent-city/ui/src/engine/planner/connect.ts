@@ -47,8 +47,8 @@ export const CONNECTOR_CONFIG = {
   detourMinBendCos: Math.cos((60 * Math.PI) / 180), // 折线拐角 ≥ 60°（防发卡弯）
   gridStep: 12,                 // A* 格距
   turnPenalty: 1.35,            // A* 转向成本系数（软成本：长度、转弯构成代价，§4.1）
-  aStarBudget: 3000,            // 每请求 A* 扩展状态上限（节点数预算，非墙钟）
-  aStarGoals: 6,                // A* 目标节点数（离 source 最近的目标节点子集）
+  aStarBudget: 12000,           // 每请求 A* 扩展状态上限（节点数预算，非墙钟）
+  aStarGoals: 8,                // A* 目标节点数（离 source 最近的目标节点子集）
 };
 
 export type ConnectionTarget =
@@ -93,6 +93,16 @@ export type ConnectionProposal = {
 export type ConnectionResult =
   | ({ ok: true; version?: number } & ConnectionProposal)
   | { ok: false; reason: ConnectionFailure; attempted: number; detail?: string };
+
+/** 连接尝试的诊断记录（buildPlan 收集，经 plan.connections 导出；需求侧汇总见 intent.ts 的 unmet）。 */
+export type ConnectionAttempt = {
+  id: string;
+  purpose: ConnectionPurpose;
+  ok: boolean;
+  strategy?: ConnectionStrategy;
+  reason?: ConnectionFailure;
+  detail?: string;
+};
 
 export type ConnectorWorld = {
   network: Network & { version?: number };
@@ -340,11 +350,18 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
     .filter((g) => g.id !== sourceId && !network.edges.has([sourceId, g.id].sort().join("/"))) // 已直连的节点（源悬挂边对端）不是目标
     .filter((g) => g.d <= request.maxLength).slice(0, CONNECTOR_CONFIG.aStarGoals);
   if (!goals.length) return { ok: false, reason: "no-target", detail: `no target node within ${request.maxLength}` };
+  const cellMemo = new Map<string, boolean>(); // 胞元可通过性只依赖 geo/用地（请求内不变），按格记忆化
   const cellBlocked = (cx: number, cz: number) => {
+    const ck = `${cx},${cz}`;
+    const memo = cellMemo.get(ck);
+    if (memo !== undefined) return memo;
     const p = { x: cx * step, z: cz * step };
-    if (world.geo.height(p.x, p.z) <= 0.5 || world.inRiver(p.x, p.z)) return true;
-    if (!world.geo.buildable(p.x, p.z) || world.geo.terrain.slope(p.x, p.z) > policy.maxSlope) return true;
-    return policy.sites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + policy.siteMargin);
+    let blocked = true;
+    if (world.geo.height(p.x, p.z) > 0.5 && !world.inRiver(p.x, p.z) && world.geo.buildable(p.x, p.z) && world.geo.terrain.slope(p.x, p.z) <= policy.maxSlope) {
+      blocked = policy.sites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + policy.siteMargin);
+    }
+    cellMemo.set(ck, blocked);
+    return blocked;
   };
   const goalCell = (g: { p: Vec2 }) => ({ x: Math.round(g.p.x / step), z: Math.round(g.p.z / step) });
   const heuristic = (cx: number, cz: number) => { // 到最近目标的欧氏距离（≤ 剩余长度 ≤ 剩余成本，可证不高估）

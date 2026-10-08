@@ -36,8 +36,9 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
 assert(totals.acute <= 2, `acute junctions ${totals.acute} > 2 across ${totals.islands} islands (was 45 before R1, 8 before the solve repairs)`);
 assert(totals.inside <= 8, `sites with a road through them ${totals.inside} > 8 (was 196 before R2)`);
 // 2026-10-08 网络优先批次 1：断头豁免从 height≥2.5 地形代理改为语义判定（planner/endpoints.ts），检测口径 30 岛实测 65；
-// 修复策略同步语义化后回落到 16；批次 3-2（repairs.ts 全部 height 门切语义 + 河岸段豁免合并）后 9。上限=实测值。
-assert(totals.loose <= 9, `loose inland road ends ${totals.loose} > 9 over 30 islands`);
+// 修复策略同步语义化后回落到 16；批次 3-2（repairs.ts 全部 height 门切语义 + 河岸段豁免合并）后 9；
+// 批次 4-3（孤立分量 tolerance 不校验直连删除）后 10——被水/地形围死的分量保持隔离，断头如实计数。上限=实测值。
+assert(totals.loose <= 10, `loose inland road ends ${totals.loose} > 10 over 30 islands`);
 assert(totals.far <= 5, `sites without a road at the door ${totals.far} > 3`);
 assert(totals.crowded <= 5, `crowded arterial pairs ${totals.crowded} > 5`);
 console.log(`City planning: ${totals.islands} islands — acute junctions ${totals.acute}, roads through sites ${totals.inside}, sites without access ${totals.far}, crowded arterials ${totals.crowded}, loose inland ends ${totals.loose} passed.`);

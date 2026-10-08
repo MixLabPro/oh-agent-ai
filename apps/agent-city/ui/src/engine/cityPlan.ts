@@ -19,7 +19,7 @@ import { isDeepWater, isDry, polylineDistance, wetCount } from "./planner/footpr
 import { buildGeography } from "./planner/geography";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
-import { runConnection, endpointClear, type ConnectorWorld } from "./planner/connect";
+import { runConnection, endpointClear, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -940,17 +940,25 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
 
-  // 连通：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含核心的分量用一条支路
-  // 接到最近的主干道节点（主干道都从核心出发，彼此已连通）。
+  // ── 连通（网络优先批次 4-3）：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含
+  // 主网的分量经统一连接器接入。主网目标 = intent.primaryComponentId 的分量（离核心最近路端所在，
+  // 批次 2 的主网定义），不许「接最近分量」——两个孤岛互连不等于接入主网。
+  // 设计明令删除的 tolerance=[1,0.7,0] 不校验直连兜底（2026-10-08 实测：150 岛 141 条兜底边里
+  // 63 条穿水、16 条不可建、2 条陡坡、9 条穿既有路）：禁止用降低硬约束换连通；失败进诊断
+  // （intent 需求体系记 unmet + 本处 connectionLog 记原因），必要时允许局部分量保持隔离。
+  const connectionLog: ConnectionAttempt[] = [];
   {
     const parent = new Map<string, string>();
     const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
     for (const id of nodes.keys()) parent.set(id, id);
     for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
-    const coreId = trunks.length ? roadNodeId(key(trunks[0].points[0])) : roadNodeId(key(core));
-    // 每个孤立分量按 localConstraints 垂直接入「含核心的分量」；接上一个就重算分量。
-    // 逐级放宽：严格（≤220、≥60°）→ 放远放宽（≤400、≥35°）→ 最后才退回旧的直连最近节点，保证全网连通。
-    const coreRoot = () => find(coreId);
+    // 主网锚点：离核心最近的路端（与 intent.primaryComponentId 同规则；环路围绕核心，正常落在骨架分量上）。
+    let primaryNodeId: string | null = null;
+    let primaryDist = Infinity;
+    for (const node of nodes.values()) { const d = Math.hypot(node.x - core.x, node.z - core.z); if (d < primaryDist) { primaryDist = d; primaryNodeId = node.id; } }
+    const coreRoot = () => (primaryNodeId && nodes.has(primaryNodeId) ? find(primaryNodeId) : null);
+    // 每个孤立分量按 localConstraints 垂直接入主网分量；接上一个就重算分量。
+    // 逐级放宽：严格（≤220、≥60°）→ 放远放宽（≤400、≥35°）→ 连接器兜底阶梯（并线/绕行/有界 A*，全程校验）。
     const recompute = () => {
       for (const id of nodes.keys()) if (!parent.has(id)) parent.set(id, id);
       for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
@@ -960,40 +968,18 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const groupsNow = new Map<string, RoadNode[]>();
       for (const node of nodes.values()) { const r = find(node.id); const list = groupsNow.get(r); if (list) list.push(node); else groupsNow.set(r, [node]); }
       for (const [root, members] of groupsNow) {
-        if (!nodes.has(coreId) || root === coreRoot()) continue;
         const target = coreRoot();
-        const outside = (edge: RoadEdge) => find(edge.from) !== target;
+        if (!target || root === target) continue;
+        const isPrimaryNode = (id: string) => find(id) === target;
         const ordered = [...members].sort((a, b) => distanceToTrunks(a) - distanceToTrunks(b)).slice(0, 12);
         let linked = false;
         for (const member of ordered) {
-          if (pass === 0 ? connectToNetwork(member, 220, false, outside) : connectToNetwork(member, 400, false, outside, 35)) { linked = true; break; }
-        }
-        if (!linked && pass === 2) {
-          let best: { a: RoadNode; b: RoadNode; d: number } | null = null;
-          // 最后手段也先选不穿过用地/地标的直连；实在没有才不限。
-          // 中间档 0.7r+3：roadThroughSite 的通过线（步 4 实测：核心挪位后孤立分量用「不限」档
-          // 直连，连线从 villa-complex 中心 14.7 处穿过，seed 2000523645——连接器只看点不看线的病根，
-          // 见 docs/CITY_PLANNER_V2_FINDINGS.md §4）。
-          const clearOfSites = (a: Vec2, b: Vec2, tolerance: number) => {
-            const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 4));
-            for (let k = 0; k <= n; k += 1) {
-              const q = { x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n };
-              if (reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius * tolerance + 3)) return false;
-            }
-            return true;
-          };
-          for (const tolerance of [1, 0.7, 0]) {
-            for (const a of members) for (const b of nodes.values()) {
-              if (find(b.id) !== target) continue;
-              const d = Math.hypot(a.x - b.x, a.z - b.z);
-              if (best && d >= best.d) continue;
-              if (tolerance > 0 && !clearOfSites(a, b, tolerance)) continue;
-              best = { a, b, d };
-            }
-            if (best) break;
-          }
-          const chosen = best as { a: RoadNode; b: RoadNode; d: number } | null;
-          if (chosen) addEdge(chosen.a, chosen.b, false);
+          const base = { source: member, target: { kind: "primary", isPrimaryNode } as const, purpose: "district-access", allowBridge: false, roadClass: "local" } as const;
+          const result = pass < 2
+            ? runConnection({ ...base, id: `isolate:${pass}:${member.id}`, maxLength: pass === 0 ? 220 : 400, minAngleDeg: pass === 0 ? 60 : 35 }, connectorWorld, { strategies: ["direct-projection"] })
+            : runConnection({ ...base, id: `isolate:${pass}:${member.id}`, maxLength: 700 }, connectorWorld, { strategies: ["node-merge", "detour", "grid-astar"] });
+          if (pass === 2) connectionLog.push({ id: `isolate:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
+          if (result.ok) { linked = true; break; }
         }
         recompute();
       }
@@ -1193,7 +1179,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   }
 
   return { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
-    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside };
+    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside,
+    connections: connectionLog };
 }
 
 /** 悬索大桥：有河桥时把最长的那座做成悬索桥（地标，不改路网）。曾按 55% 概率：用户的岛恰好没抽中。 */
