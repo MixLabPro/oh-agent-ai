@@ -4,7 +4,9 @@
 // 断言每条约束的「违例岛数」不超过该档上限；同时输出各档平均分（scorePlan 只作规划器对比，不作验收）。
 // 上限：tier1 沿用 150 种子折算；tier 3/5/10 = 2026-10-08 实测 + 余量。
 // looseInlandRoadEnds 2026-10-08：断头豁免改语义判定后平岛盲区首次可见（检测口径 t1 45/t3 26/t5 18/t10 7）；
-// 修复策略同步语义化后实测 t1 29/t3 8/t5 8/t10 2；批次 3-2 repairs.ts 两处 height 门亦切语义后 t1 15/t3 5/t5 6/t10 2，上限=实测值。
+// 修复策略同步语义化后实测 t1 29/t3 8/t5 8/t10 2；批次 3-2 repairs.ts 两处 height 门亦切语义后 t1 15/t3 5/t5 6/t10 2；
+// 批次 4-3（孤立分量 tolerance 不校验直连删除、失败进诊断）后实测 t1 17/t3 4/t5 5/t10 2（t1 +2：被水/地形
+// 围死的分量不再被非法直连掩盖，其断头如实计数；t3/t5 反降——见提交说明）。上限=实测值。
 // 失败时先跑 `node scripts/city-kit/survey.mjs 150 1`（或对应档位）
 // 看是哪类约束、典型种子，再决定修规划还是（有理由时）调上限。
 import assert from "node:assert/strict";
@@ -17,15 +19,20 @@ const TIERS = [
   { tier: 10, seeds: 10 },
 ];
 // 0 = 当前实测为 0 的约束必须保持为 0；非 0 的是已知残留。tier>1 的表覆盖 tier1 表（未列键沿用）。
+// disconnectedComponents / bridgeheadContinuity（批次 5-3 新增，诊断口径，阈值=实测值）：
+// 批次 4-3c 加了跨河档（bridge-candidate ≤84 连续水段）与帆形歌剧院岸点选址避让后实测
+// t1 2 / t3 1 / t5 1 / t10 0 岛（前值 19/10/3/3——多数孤立分量隔河而居，跨河桥是设计 §4.2
+// 的正解）；悬空桥头 t1 8 / t3 5 / t5 4 / t10 1（桥建成后接续地面路被后续阶段删除——批次前不可见）。
 const CEILING = {
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
   stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,
-  suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 15, acuteJunctions: 5, crowdedArterials: 4,
+  suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 17, acuteJunctions: 5, crowdedArterials: 4,
+  disconnectedComponents: 2, bridgeheadContinuity: 8,
 };
 const TIER_CEILING = {
-  3: { siteInWater: 4, looseInlandRoadEnds: 5, acuteJunctions: 2, crowdedArterials: 2 },
-  5: { siteInWater: 2, looseInlandRoadEnds: 6, acuteJunctions: 4, crowdedArterials: 3 },
-  10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3 },
+  3: { siteInWater: 4, looseInlandRoadEnds: 4, acuteJunctions: 1, crowdedArterials: 0, disconnectedComponents: 1, bridgeheadContinuity: 5 },
+  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 1, bridgeheadContinuity: 4 },
+  10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 0, bridgeheadContinuity: 1 },
 };
 const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],

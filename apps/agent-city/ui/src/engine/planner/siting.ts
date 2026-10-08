@@ -185,6 +185,10 @@ export function settleSailOperaOffshore(ctx: ShoreMoveContext): void {
       const deep = isDeepWater(footprintGeo, c, site.radius);
       if (!deep || others.some((o) => Math.hypot(o.x - c.x, o.z - c.z) < o.radius + site.radius + (o.kind === "harbor" ? 120 : 30))) continue;
       if (height(shore.x - out.x * 6, shore.z - out.z * 6) < 0.3) continue; // 堤道陆地端要踩在实地上
+      // 岸点落路净空（A 轨 4-3c 移植）：岸点被其它用地圈住时（实测 seed 42：villa-complex 挪到
+      // 歌剧院岸点 21 单位处，路网变化后入口路全失败、堤道两头悬空），选址期直接避开，不靠修复遍。
+      const landing = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
+      if (others.some((o) => Math.hypot(o.x - landing.x, o.z - landing.z) < o.radius + 30)) continue;
       site.x = c.x; site.z = c.z; site.shore = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
       site.yaw = -Math.atan2(out.z, out.x);
       break;

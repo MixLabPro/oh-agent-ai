@@ -16,6 +16,7 @@
 import type { createCityPlan } from "../cityPlan";
 import { isPlannedRoadEnd } from "./endpoints";
 import { wetCount } from "./footprint";
+import { componentOf, primaryComponentId } from "./intent";
 
 export type CityPlan = ReturnType<typeof createCityPlan>;
 export type Violation = { constraint: string; site?: string; at?: { x: number; z: number }; detail: string };
@@ -228,8 +229,56 @@ export const crowdedArterials: Constraint = {
   },
 };
 
+// ── 网络优先批次 5-3（设计 §4.2/§6）：最终连通与桥头连续 ─────────────────────────────────
+
+/** 最终连通：除主网（intent.primaryComponentId 分量）外没有孤立路网分量。批次 4-3 删除
+ *  tolerance 不校验直连后，被水/地形围死的分量如实保持隔离并在此计数（需求侧汇总见
+ *  intent.ts 的 unmet district 需求；两个口径同源：都按 primary 分量判定）。 */
+export const disconnectedComponents: Constraint = {
+  id: "disconnectedComponents", description: "最终连通：除主网分量外没有孤立路网分量（被水/地形围死的分量如实计数，不再被非法直连掩盖）",
+  measure(plan) {
+    const comp = componentOf(plan);
+    const primary = primaryComponentId(plan, comp);
+    if (!primary) return [{ constraint: "disconnectedComponents", detail: "primary component missing (civic skeleton absent)" }];
+    const seen = new Set<string>([primary]);
+    const out: Violation[] = [];
+    for (const n of plan.roadNodes) {
+      const c = comp.get(n.id);
+      if (!c || c === primary || seen.has(c)) continue;
+      seen.add(c);
+      out.push({ constraint: "disconnectedComponents", at: { x: n.x, z: n.z }, detail: `component ${c} not merged into the primary network` });
+    }
+    return out;
+  },
+};
+
+/** 桥头连续：每条桥面的两端必须接着地面路（桥头悬空 = 桥接到虚无）。海上地标
+ *  （shore 存在）的岛侧桥头是堤道尽端、即该地标的 site-access 入口，按端点角色豁免。 */
+export const bridgeheadContinuity: Constraint = {
+  id: "bridgeheadContinuity", description: "桥头连续：桥边两端各至少接一条非桥边（海上地标岛侧堤道尽端豁免）",
+  measure(plan) {
+    const out: Violation[] = [];
+    const grounded = new Map<string, boolean>();
+    for (const e of plan.roadEdges) if (!e.bridge) for (const id of [e.from, e.to]) grounded.set(id, true);
+    const nodes = new Map<string, Site>(plan.roadNodes.map((n: Site) => [n.id, n]));
+    const islandSites = planSites(plan).filter((s: Site) => s.shore);
+    for (const e of plan.roadEdges) {
+      if (!e.bridge) continue;
+      for (const id of [e.from, e.to]) {
+        if (grounded.get(id)) continue;
+        const node = nodes.get(id);
+        if (!node) continue;
+        if (islandSites.some((s: Site) => Math.hypot(s.x - node.x, s.z - node.z) < s.radius + 12)) continue; // 堤道尽端 = 地标入口
+        out.push({ constraint: "bridgeheadContinuity", at: { x: node.x, z: node.z }, detail: `bridge ${e.id} end ${id} has no ground road` });
+      }
+    }
+    return out;
+  },
+};
+
 export const CONSTRAINTS: Constraint[] = [
   siteInWater, siteWithoutDoorRoad, roadThroughSite, sitesOverlap, parcelInsideSite,
   stationStadiumSetback, stationDoorFacesRoad, archStraddlesRoad, civicPlazaCentred,
   suspensionBridgeClearOfHighways, looseInlandRoadEnds, acuteJunctions, crowdedArterials,
+  disconnectedComponents, bridgeheadContinuity,
 ];

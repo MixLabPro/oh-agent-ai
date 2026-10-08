@@ -9,6 +9,7 @@ import { fbm } from "../cityNoise";
 import { segmentDistance, type Landmark } from "../cityPlan";
 import type { CityLayout, PublicSite, Vec2 } from "../cityLayout";
 import { addNetworkEdge, keyOf, type Network } from "./network";
+import { chordClearsDisc, commitFixedLink, reStickClearance, walkableCorridor } from "./connect";
 import type { Geography } from "./geography";
 
 /** 环线高架在方位角 t 处的采样点（唯一公式，chooseCore 的成活率估计与 buildSkeleton 共用）。 */
@@ -180,6 +181,10 @@ export function buildSkeleton(opts: {
   if (run.length >= 6) ringRuns.push(run);
   // Highway fragments stop at the coast today, where the deck still hangs above
   // the ground. Trim each end to buildable land, then connect it to a nearby arterial.
+  // 批次 5-2：出口接驳弦的净空/可走校验改走连接器共享的 corridor validator（connect.ts），
+  // 不再当 69 特例——公式同源（re-stick 净空 5.25 + hypot(88,88)/2 + 1，向上取整 = 69）。
+  // 落点的拆边经 commitFixedLink 事务提交（保持历史「强制 arterial」口径以不动基线）。
+  const chordClearance = reStickClearance(88, 88); // 88 = 高架双车道幅面（clearsHighways 同尺寸）
   for (let r = ringRuns.length - 1; r >= 0; r -= 1) {
     const points = ringRuns[r];
     if (Math.hypot(points[0].x - points[points.length - 1].x, points[0].z - points[points.length - 1].z) < 0.01) continue;
@@ -197,25 +202,32 @@ export function buildSkeleton(opts: {
         const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
         const p = key({ x: a.x + t * dx, z: a.z + t * dz });
         if (Math.hypot(p.x - core.x, p.z - core.z) < 110) continue; // 出口不能落在环岛附近：高架贴到市政广场（半径 44 + 避让 ≈ 69）会把广场推离核心点
-        if (segmentDistance(core, end, p) < 69) continue; // 出口接驳弦本身也不得切近广场：端点 ≥110 不够，弦可从核心旁切过（seed 2002199309 实测弦离核心 56.7，把广场推走 72）；69 = re-stick 净空（5.25 + hypot(88,88)/2 + 1 ≈ 68.5）刚过线
+        if (!chordClearsDisc(end, p, core, chordClearance)) continue; // 出口接驳弦本身也不得切近广场：端点 ≥110 不够，弦可从核心旁切过（seed 2002199309 实测弦离核心 56.7，把广场推走 72）；69 = re-stick 净空刚过线
         const distance = Math.hypot(p.x - end.x, p.z - end.z);
-        const samples = Math.max(1, Math.ceil(distance / 4));
-        let clear = true;
-        for (let k = 0; k <= samples; k += 1) {
-          if (!safe({ x: end.x + (p.x - end.x) * k / samples, z: end.z + (p.z - end.z) * k / samples })) { clear = false; break; }
-        }
-        if (clear) candidates.push({ p, distance });
+        if (walkableCorridor(geo, end, p)) candidates.push({ p, distance });
       }
       candidates.sort((a, b) => a.distance - b.distance);
       if (candidates[0]) exits.push(candidates[0].p);
     }
     if (exits.length !== 2) { ringRuns.splice(r, 1); continue; }
     ringRuns[r] = [exits[0], ...points, exits[1]].filter((p, i, all) => i === 0 || Math.hypot(p.x - all[i - 1].x, p.z - all[i - 1].z) > 0.01);
-    for (const endpoint of exits) for (const edge of [...edges.values()]) {
-      if (edge.bridge || segmentDistance(endpoint, edge.points[0], edge.points[1]) > 0.02) continue;
-      edges.delete(edge.id);
-      addEdge(edge.points[0], endpoint, true);
-      addEdge(endpoint, edge.points[1], true);
+    for (const endpoint of exits) {
+      const hosts = [...edges.values()].filter((edge) => !edge.bridge && segmentDistance(endpoint, edge.points[0], edge.points[1]) <= 0.02);
+      const patchOps = hosts.flatMap((edge) => [
+        { a: edge.points[0], b: endpoint, arterial: true },
+        { a: endpoint, b: edge.points[1], arterial: true },
+      ]);
+      if (hosts.length) {
+        edges.delete(hosts[0].id); // 多条宿主边同点拆分时逐条事务提交（与历史顺序一致）
+        commitFixedLink({ network, geo, inRiver, reservations: () => [] }, patchOps.slice(0, 2));
+        for (let h = 1; h < hosts.length; h += 1) {
+          edges.delete(hosts[h].id);
+          commitFixedLink({ network, geo, inRiver, reservations: () => [] }, [
+            { a: hosts[h].points[0], b: endpoint, arterial: true },
+            { a: endpoint, b: hosts[h].points[1], arterial: true },
+          ]);
+        }
+      }
     }
   }
   return { trunks, bridges, ringRuns };
