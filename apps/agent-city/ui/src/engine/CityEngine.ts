@@ -45,7 +45,7 @@ const CINEMATIC_HOUR_FROM = 15;
 const CINEMATIC_HOUR_TO = 19.6;
 
 export type EngineQualityMode = "auto" | "high" | "eco";
-export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean };
+export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean; geometries: number; textures: number };
 export type PhotoView = { position: number[]; target: number[]; fov: number; elapsed: number; cursorMs: number | null };
 /** 相机所有权（游戏模式 §4）：同一帧只允许一个所有者推进相机。 */
 export type CameraOwner = "orbit" | "cinematic" | "game";
@@ -1718,6 +1718,8 @@ export class CityEngine {
       this.options.onStats?.({
         fps: Math.round(measured),
         drawCalls: this.renderer.info.render.calls,
+        geometries: this.renderer.info.memory.geometries,
+        textures: this.renderer.info.memory.textures,
         triangles: this.renderer.info.render.triangles,
         buildings: this.model?.buildings.length ?? 0,
         quality: this.quality,
