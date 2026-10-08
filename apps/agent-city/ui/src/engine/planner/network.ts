@@ -38,11 +38,14 @@ export type NetworkPatch = {
   baseVersion: number;
   addEdges: Array<{ a: Vec2; b: Vec2; arterial: boolean; bridge?: boolean; primary?: boolean }>;
   removeEdgeIds: string[];
+  /** 顺带清掉因此无任何关联边的孤立节点（重锚/裁断的合并残点；桥头落地环批次）。
+   *  提交时该节点必须已是草稿里的孤立点（应用全部操作后无任何边引用），否则拒绝。 */
+  removeNodeIds?: string[];
   /** 把一条边在 t 点拆成两段（T 口）：保留原边等级/宽度/桥标记，属性继承不丢失。 */
   splits: Array<{ edgeId: string; at: Vec2 }>;
 };
 
-export type PatchResult = { ok: true; version: number } | { ok: false; reason: "stale-base" | "unknown-edge" | "validation" | "self-loop" | "off-line-split"; detail?: string };
+export type PatchResult = { ok: true; version: number } | { ok: false; reason: "stale-base" | "unknown-edge" | "validation" | "self-loop" | "off-line-split" | "node-in-use"; detail?: string };
 
 const clone = (network: Network): Network => ({
   nodes: new Map([...network.nodes].map(([k, n]) => [k, { ...n }])),
@@ -82,6 +85,14 @@ function applyOps(draft: Network, patch: NetworkPatch): PatchResult {
   }
   for (const e of patch.addEdges) {
     addNetworkEdge(draft, e.a, e.b, e.arterial, e.bridge ?? false, e.primary ?? false);
+  }
+  // 节点清除放在全部操作之后：此刻仍被引用的节点不许删（调用方对合并残点的判断错了就如实拒绝）。
+  for (const id of patch.removeNodeIds ?? []) {
+    if (!draft.nodes.has(id)) return { ok: false, reason: "node-in-use", detail: `missing node ${id}` };
+    let used = false;
+    for (const e of draft.edges.values()) if (e.from === id || e.to === id) { used = true; break; }
+    if (used) return { ok: false, reason: "node-in-use", detail: `node ${id} still has edges` };
+    draft.nodes.delete(id);
   }
   return { ok: true, version: 0 };
 }

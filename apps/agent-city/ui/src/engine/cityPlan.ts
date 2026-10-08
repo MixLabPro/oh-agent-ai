@@ -25,6 +25,7 @@ import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import { connectServiceLoops } from "./planner/loop";
+import { buildLandingCircles } from "./planner/landing";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -1017,6 +1018,22 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     for (const id of [...nodes.keys()]) if (![...edges.values()].some((e) => e.from === id || e.to === id)) nodes.delete(id);
   }
 
+  // ── 桥头落地环（E 轨 2026-10-08，planner/landing.ts）：桥全部生成、断头收尾之后、solve 之前的一遍。
+  // 桥的地面端方向失配（桥轴向与接地路向夹角 >25°）或接地路缺失/可被 solve 的 pruneShortSpurs
+  // 删除时，桥头插入半径 10–14 的落地环——桥面端点落在环上、接地路接入环，环形吸收方向差，
+  // 桥头的地面度数 ≥2 使「桥 +1 地面边」不再被当断头链删除。桥边与 bridges 注册表不动
+  // （悬索桥装饰选址 withBridgeLandmark、nearBridgeEnd 桥头避让全部保持兼容）。树先于此遍放置，
+  // 落到新增地面边上的按报告清除（与放置时的 width/2+3 同口径）。
+  {
+    const landingReport = buildLandingCircles({ network, geo, inRiver, sites: reservations, carPaths });
+    if (landingReport.addedEdges.length) {
+      for (let t = parkTrees.length - 1; t >= 0; t -= 1) {
+        const tree = parkTrees[t];
+        if (landingReport.addedEdges.some((e) => segmentDistance(tree, e.a, e.b) < e.width / 2 + 3)) parkTrees.splice(t, 1);
+      }
+    }
+  }
+
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
@@ -1043,14 +1060,53 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
     // 贴主干道那条边不再单独成路：绕街区一圈的车流若经过不存在的路段就整条丢弃（不让车开在没有路的地方）。
     const pairs = new Set([...edges.values()].map((edge) => [edge.from, edge.to].sort().join("/")));
+    // 落地环批（2026-10-08）：桥头落地环会把既有路段重锚到环缘（桥头→环缘→对端，新折点不在原线段上），
+    // 车流折线里失效的相邻对不再整条丢弃，而是改走当前路网的最短路（例如经落地环绕行）；
+    // 折点本身被合并残点清除的（近失误重锚的 0.x–2 并点）先吸附 ≤2 内最近现存节点。仍无路可代才丢弃。
+    const adjacency = new Map<string, string[]>();
+    for (const id of nodes.keys()) adjacency.set(id, []);
+    for (const edge of edges.values()) { adjacency.get(edge.from)?.push(edge.to); adjacency.get(edge.to)?.push(edge.from); }
+    const bfsMiddle = (from: string, to: string): string[] | null => {
+      if (from === to) return [];
+      const previous = new Map<string, string | null>([[from, null]]); const queue = [from];
+      for (let i = 0; i < queue.length && !previous.has(to); i += 1) {
+        for (const next of adjacency.get(queue[i]) ?? []) if (!previous.has(next)) { previous.set(next, queue[i]); queue.push(next); }
+      }
+      if (!previous.has(to)) return null;
+      const chain: string[] = [];
+      for (let cursor: string | null = to; cursor && cursor !== from; cursor = previous.get(cursor) ?? null) chain.push(cursor);
+      chain.shift(); // 去掉 to 本身（调用方随后压入 cur）
+      return chain.reverse();
+    };
     for (let r = carPaths.length - 1; r >= 0; r -= 1) {
       // 碎边合并/断头清理后，折线里可能留下相距 <1 的两个点（原来的碎边已并成一个节点）：把中间点并掉再核对，
       // 不因为一个 0.4 长的碎边就丢掉整条 220 点的车流回路（海滨大道回路因此消失，滨海车流守卫抓到）。
       const raw = carPaths[r];
       const route = raw.filter((q, i) => i === 0 || i === raw.length - 1 || Math.hypot(q.x - raw[i + 1].x, q.z - raw[i + 1].z) >= 1);
-      carPaths[r] = route;
-      const ok = route.every((p, i) => i === 0 || pairs.has([roadNodeId(key(route[i - 1])), roadNodeId(key(p))].sort().join("/")));
-      if (!ok) carPaths.splice(r, 1);
+      // 折点被落地环并点/吞并清除的：≤2 内吸附最近现存节点（近失误重锚的 0.x–2 并点）；
+      // 更远的（环内被吞节点）直接剔除折点——相邻存活点由下方的最短路经环绕行接回。
+      const resnap: Vec2[] = [];
+      for (const q of route) {
+        if (nodes.has(roadNodeId(key(q)))) { resnap.push(q); continue; }
+        let best: RoadNode | null = null;
+        for (const n of nodes.values()) if (!best || Math.hypot(n.x - q.x, n.z - q.z) < Math.hypot(best.x - q.x, best.z - q.z)) best = n;
+        if (best && Math.hypot(best.x - q.x, best.z - q.z) <= 2) resnap.push({ x: best.x, z: best.z });
+      }
+      const out: Vec2[] = [];
+      let ok = true;
+      for (let i = 0; i < resnap.length && ok; i += 1) {
+        const cur = resnap[i];
+        if (i > 0) {
+          const prev = out[out.length - 1];
+          if (roadNodeId(key(prev)) !== roadNodeId(key(cur)) && !pairs.has([roadNodeId(key(prev)), roadNodeId(key(cur))].sort().join("/"))) {
+            const middle = bfsMiddle(roadNodeId(key(prev)), roadNodeId(key(cur)));
+            if (!middle) { ok = false; break; }
+            for (const id of middle) { const n = nodes.get(id); if (n) out.push({ x: n.x, z: n.z }); }
+          }
+        }
+        if (!out.length || roadNodeId(key(out[out.length - 1])) !== roadNodeId(key(cur))) out.push(cur);
+      }
+      if (!ok) carPaths.splice(r, 1); else carPaths[r] = out;
     }
   }
   // 终筛：所有改路步骤（接入路、断头路收尾、碎边合并）之后，对每个地块统一核对「到任何路段的距离」。

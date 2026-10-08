@@ -28,15 +28,18 @@ const TIERS = [
 // 15 处违例逐个核对均为环契约外的形态：多岔 4/5 路 ×8、桥腿 ×3、近共线 0.68°/2.77° 对 ×2、腿过短 ×1、
 // 预留地压环带 ×1）——不放松硬约束换数字，阈值维持；收益是形态层（建环保边替代删枝，
 // 见 docs/CITY_PLANNER_V2_FINDINGS §5）。
+// 桥头落地环批（E 轨 2026-10-08，planner/landing.ts：失配 >25°/缺失/可删风险 → 半径 10–14 落地环）
+// 实测 t1 8→4 / t3 5→5 / t5 4→1 / t10 1→1；残留全部是安全检查如实 declined（water-span 无干环位 /
+// no-ground-reach 环缘外 ≤26 无路 / edge-inside / acute）。副作用：disconnectedComponents t1 2→0。
 const CEILING = {
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
   stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,
   suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 17, acuteJunctions: 5, crowdedArterials: 4,
-  disconnectedComponents: 2, bridgeheadContinuity: 8,
+  disconnectedComponents: 2, bridgeheadContinuity: 4,
 };
 const TIER_CEILING = {
   3: { siteInWater: 4, looseInlandRoadEnds: 4, acuteJunctions: 1, crowdedArterials: 0, disconnectedComponents: 1, bridgeheadContinuity: 5 },
-  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 1, bridgeheadContinuity: 4 },
+  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 1, bridgeheadContinuity: 1 },
   10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 0, bridgeheadContinuity: 1 },
 };
 const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity({
