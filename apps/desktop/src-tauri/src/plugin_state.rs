@@ -32,19 +32,23 @@ fn state_path(data_home: &std::path::Path, plugin_id: &str, key: &str) -> std::p
     data_home.join(format!("state/plugins/{plugin_id}/state/{safe_key}.json"))
 }
 
+/// 有界读取：`take(MAX+1)` 截断读取流——超大/损坏文件的内存分配封顶在
+/// 32 KiB + 1 字节，超限即判损坏，不整读进内存后再检查。
 fn load(path: &std::path::Path) -> Result<Option<(u64, Value)>, &'static str> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            // 读路径同限 32 KiB：正常写入的文档（含信封）不会超限；超限视为损坏/被篡改。
-            if bytes.len() > MAX_DOCUMENT_BYTES { return Err("state_unavailable"); }
-            let parsed: Value = serde_json::from_slice(&bytes).map_err(|_| "state_unavailable")?;
-            let revision = parsed["revision"].as_u64().ok_or("state_unavailable")?;
-            let value = parsed.get("value").cloned().unwrap_or(Value::Null);
-            Ok(Some((revision, value)))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err("state_unavailable"),
-    }
+    use std::io::Read;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("state_unavailable"),
+    };
+    let mut bytes = Vec::new();
+    let mut bounded = file.take(MAX_DOCUMENT_BYTES as u64 + 1);
+    bounded.read_to_end(&mut bytes).map_err(|_| "state_unavailable")?;
+    if bytes.len() > MAX_DOCUMENT_BYTES { return Err("state_unavailable"); }
+    let parsed: Value = serde_json::from_slice(&bytes).map_err(|_| "state_unavailable")?;
+    let revision = parsed["revision"].as_u64().ok_or("state_unavailable")?;
+    let value = parsed.get("value").cloned().unwrap_or(Value::Null);
+    Ok(Some((revision, value)))
 }
 
 /// 通用端口入口：read → {value, revision}；write → {revision}（成功后的新版本）。

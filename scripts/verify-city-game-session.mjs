@@ -111,6 +111,7 @@ function fakeEngine() {
   assert.equal(session.snapshot().controller.phase, "countdown");
   assert.ok(session.snapshot().mission, "挑战带任务实例");
   const missionFirst = session.snapshot().mission;
+  const courseFirst = session.snapshot().courseId;
   // 帧钩子推进倒计时（3s × 60fps）。
   for (let frame = 0; frame < 200; frame += 1) engine.frame(1 / 60);
   assert.equal(session.snapshot().controller.phase, "racing", "倒计时结束进入比赛");
@@ -122,6 +123,31 @@ function fakeEngine() {
   assert.equal(after.controller.phase, "countdown", "重赛回到倒计时");
   assert.ok(after.mission && after.mission !== missionFirst, "restart 重建任务实例");
   assert.equal(after.mission.progress, 0);
+  assert.equal(after.courseId, courseFirst, "重试复用原路线（courseId 不变）");
+  session.exit();
+}
+
+// ── 2b) 结果页「换一条路线」：必须回到倒计时（审查 P1 回归——曾卡死在 result）且
+//        variant 恰好 +1（courseId 变化；不双递增到 +2 的可比对）。──
+{
+  const engine = fakeEngine();
+  engine.currentLayout = layout; engine.currentModel = model;
+  const session = new GameSession(engine, { onState: () => {}, onExited: () => {} });
+  assert.ok(session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok);
+  for (let frame = 0; frame < 200; frame += 1) engine.frame(1 / 60);
+  session.controller.raceFinished();
+  assert.equal(session.snapshot().controller.phase, "result");
+  const before = session.snapshot().courseId;
+  session.newCourse();
+  const afterNew = session.snapshot();
+  assert.equal(afterNew.controller.phase, "countdown", "换路线后立即进入新倒计时（不再卡 result）");
+  assert.ok(afterNew.mission && afterNew.mission.progress === 0, "新路线带全新任务");
+  assert.notEqual(afterNew.courseId, before, "路线身份摘要变化（variant 生效）");
+  // 精确校验 variant 单次递增：连续再换一次，与「重试」路径对照——重试不得改 courseId。
+  const second = afterNew.courseId;
+  session.controller.raceFinished();
+  session.restart();
+  assert.equal(session.snapshot().courseId, second, "结果页重试不换路线");
   session.exit();
 }
 

@@ -109,6 +109,14 @@ async function nativeWrite(revision: number, value: FlightProfileV1): Promise<nu
   return response.result.revision;
 }
 
+/** 原生 IO 面（注入点：测试用假实现替换，不触达 host 信封）。 */
+export type NativeStateIo = {
+  read: typeof nativeRead;
+  write: typeof nativeWrite;
+};
+
+const defaultNativeIo: NativeStateIo = { read: nativeRead, write: nativeWrite };
+
 function localRead(): { value: unknown } | null {
   try {
     const text = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -127,13 +135,15 @@ function localWrite(value: FlightProfileV1): void {
 }
 
 /**
- * 载入档案：优先原生端口（真实 WebView）；预览/独立页用 localStorage；失败进内存档。
- * 返回的 port 供后续保存（记住 tier 与 revision）。
+ * 载入档案：优先原生端口（真实 WebView）。原生读取报「损坏」（state_unavailable）时
+ * 先尝试一次修复写（revision 0 + 空档案）——宿主会备份损坏副本并重建文件，原生层
+ * 自愈后再继续用原生；修复失败或其他错误（端口不存在/未授权）才降级 localStorage。
+ * 不做修复写的旧问题：原生持续损坏、成绩永远只落在回退层（Rust 端备份逻辑永不触发）。
  */
-export async function loadProfilePort(): Promise<ProfilePort> {
+export async function loadProfilePort(native: NativeStateIo = defaultNativeIo): Promise<ProfilePort> {
   if (embedded() && window.__AV_PLUGIN_INSTANCE__) {
     try {
-      const read = await nativeRead();
+      const read = await native.read();
       const parsed = read && read.value !== null ? parseProfile(read.value) : null;
       return {
         tier: "native",
@@ -141,8 +151,19 @@ export async function loadProfilePort(): Promise<ProfilePort> {
         readOnly: parsed?.readOnly ?? false,
         revision: read?.revision ?? 0,
       } as ProfilePort & { revision: number };
-    } catch {
-      // 原生端口不可用（预览 iframe / 宿主旧版本）：降到 localStorage。
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      if (code === "state_unavailable") {
+        try {
+          // 修复写：宿主端 load() 仍读出损坏 → 备份 .corrupt-* → 落新档。
+          // （若此刻文件已变有效会得到 revision_conflict，同样落到降级分支。）
+          const revision = await native.write(0, { ...EMPTY_PROFILE });
+          return { tier: "native", profile: { ...EMPTY_PROFILE }, readOnly: false, revision } as ProfilePort & { revision: number };
+        } catch {
+          // 修复失败（IO 故障/宿主拒绝）：降级。
+        }
+      }
+      // 原生端口不可用（预览 iframe / 宿主旧版本 / 持续 IO 故障）：降到 localStorage。
     }
   }
   const local = localRead();

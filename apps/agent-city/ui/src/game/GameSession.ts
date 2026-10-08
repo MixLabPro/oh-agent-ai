@@ -40,6 +40,8 @@ export type GameSessionSnapshot = {
   mission: RaceMissionSnapshot | null;
   /** 本路线最佳（含跨会话载入的档案成绩）。 */
   best: RaceResult | null;
+  /** 当前路线身份摘要（无业务标识几何摘要；测试与调试用）。 */
+  courseId: string | null;
 };
 
 export class GameSession {
@@ -63,6 +65,8 @@ export class GameSession {
   private variant = 0;
   private course: RaceCourse | null = null;
   private mission: RaceMission | null = null;
+  /** 最近一次准备失败的原因（驱动「生成失败重试换 variant」的判定）。 */
+  private lastPrepareFailure: string | null = null;
   private bestByCourse = new Map<string, RaceResult>();
 
   constructor(
@@ -80,7 +84,7 @@ export class GameSession {
     if (!attempt.ok) return { ok: false, reason: attempt.refusal };
     const build = this.ensureRunObjects(kind);
     if (!build.ok) {
-      this.settleFailure(build.message);
+      this.settleFailure(build.message, build.reason);
       return { ok: false, reason: build.reason };
     }
     this.attachRun();
@@ -192,26 +196,52 @@ export class GameSession {
     this.emit(true);
   }
 
-  /** 显式「新路线」：variant+1 重新生成（§7.1）。 */
+  /** 显式「新路线」：variant+1 重新生成（§7.1）。variant 在此递增且仅此一次；
+   *  result/paused 走 restart 语义（控制器回 preparing→prepareDone），错误面板走
+   *  retryPrepare——后者不得再推断式递增（曾因 result 阶段 retryPrepare 空转导致
+   *  variant 双递增且相位卡死在 result）。 */
   newCourse(): void {
-    if (this.controller.snapshot.selection?.mode !== "race") return;
+    const snapshot = this.controller.snapshot;
+    if (snapshot.selection?.mode !== "race") return;
+    if (snapshot.error) {
+      this.variant += 1;
+      this.course = null;
+      this.retryPrepare();
+      return;
+    }
+    if (snapshot.phase !== "result" && !snapshot.paused) return;
+    // restart 语义（result/paused → preparing → prepareDone）。先按新 variant 生成路线，
+    // 失败则保留原路线退回结果页（本次换线未生效），不带空路线进比赛。
+    const previousCourse = this.course;
     this.variant += 1;
     this.course = null;
-    if (this.controller.snapshot.phase === "result" || this.controller.snapshot.paused || this.controller.snapshot.error) {
-      this.retryPrepare();
+    this.lastPrepareFailure = null;
+    const build = this.ensureRunObjects({ mode: "race" });
+    if (!build.ok) {
+      this.course = previousCourse;
+      this.lastPrepareFailure = build.reason;
+      this.emit(true);
+      return;
     }
+    for (const event of this.controller.restart()) {
+      if (event.type === "restarted") this.attachRun();
+    }
+    this.emit(true);
   }
 
   retryPrepare(): void {
     const selection = this.controller.snapshot.selection;
     if (!selection) return;
-    const hadNoCourse = selection.mode === "race" && !this.course;
+    // 生成失败后的重试换 variant，不再撞同一条死路；其他失败（未就绪/无出生点/
+    // 相机占用）不换——路线本身没有被否决。
+    const failedCourseGeneration = this.lastPrepareFailure === "no-course";
+    this.lastPrepareFailure = null;
     this.controller.retryPrepare();
-    if (hadNoCourse) this.variant += 1; // 生成失败的重试换 variant，不再撞同一条死路
+    if (failedCourseGeneration && selection.mode === "race") this.variant += 1;
     // 完整重建（对象缺失时从引擎现状态补齐；相机/返回视角只在首次接管时捕获）。
     const build = this.ensureRunObjects(selection);
     if (!build.ok) {
-      this.settleFailure(build.message);
+      this.settleFailure(build.message, build.reason);
       return;
     }
     this.attachRun();
@@ -257,6 +287,7 @@ export class GameSession {
       collisions: this.collisions,
       mission: this.mission?.snapshot() ?? null,
       best: this.course ? this.bestByCourse.get(this.course.courseId) ?? null : null,
+      courseId: this.course?.courseId ?? null,
     };
   }
 
@@ -420,7 +451,8 @@ export class GameSession {
     this.emit(true);
   }
 
-  private settleFailure(message: string): void {
+  private settleFailure(message: string, reason?: string): void {
+    this.lastPrepareFailure = reason ?? null;
     this.controller.fail(message);
     this.emit(true);
   }

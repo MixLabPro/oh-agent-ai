@@ -7,13 +7,15 @@ import { createRequire } from "node:module";
 
 const require = createRequire(new URL("../apps/desktop/ui-dev/package.json", import.meta.url));
 const { buildSync } = require("esbuild");
-const code = buildSync({ entryPoints: [new URL("../apps/agent-city/ui/src/data/profile.ts", import.meta.url).pathname],
-  bundle: true, write: false, format: "cjs", platform: "node" }).outputFiles[0].text;
-const mod = { exports: {} };
-const windowStub = {};
-windowStub.parent = windowStub; // host.ts 顶层探测 iframe：parent === window → 非嵌入
-vm.runInNewContext(code, { module: mod, exports: mod.exports, console, JSON, Number, window: windowStub });
-const { parseProfile, mergeRecord, EMPTY_PROFILE } = mod.exports;
+const load = (windowStub) => {
+  const code = buildSync({ entryPoints: [new URL("../apps/agent-city/ui/src/data/profile.ts", import.meta.url).pathname],
+    bundle: true, write: false, format: "cjs", platform: "node" }).outputFiles[0].text;
+  const mod = { exports: {} };
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, console, JSON, Number, Error, URL, location: { href: "http://localhost/" }, window: windowStub });
+  return mod.exports;
+};
+const standalone = {}; standalone.parent = standalone; // host.ts 顶层探测：parent === window → 非嵌入
+const { parseProfile, mergeRecord, EMPTY_PROFILE } = load(standalone);
 
 // ── 解析验证 ──
 {
@@ -74,6 +76,46 @@ const { parseProfile, mergeRecord, EMPTY_PROFILE } = mod.exports;
   assert.equal(profile.records.length, 20, "超额淘汰最旧访问记录");
   assert.ok(!profile.records.some((r) => r.courseId === "b"), "最早未再访问的 b 被淘汰");
   assert.ok(profile.records.some((r) => r.courseId === "a"), "中途再访问的 a 保留");
+}
+
+// ── 原生损坏自愈（审查 P3 回归）：read 报损坏 → 修复写 revision 0 → 原生层保留 ──
+{
+  // 以「嵌入原生」视角重新装载模块（window.parent !== window 且带实例 id）。
+  const embeddedWindow = { parent: {}, __AV_PLUGIN_INSTANCE__: "plugin-city-1" };
+  const embedded = load(embeddedWindow);
+  const calls = [];
+  const ioRepair = {
+    read: async () => { throw new Error("state_unavailable"); },
+    write: async (revision, value) => { calls.push({ revision, records: value.records.length }); return 1; },
+  };
+  const repaired = await embedded.loadProfilePort(ioRepair);
+  assert.equal(repaired.tier, "native", "修复写成功后保留原生层");
+  assert.equal(repaired.profile.records.length, 0);
+  assert.equal(calls.length, 1, "恰好一次修复写");
+  assert.equal(calls[0].revision, 0, "修复写使用 revision 0（触发宿主备份损坏副本并重建）");
+  assert.equal(repaired.revision, 1);
+  // 修复写失败（IO 持续故障）：降级，不再停留原生。
+  const ioBroken = {
+    read: async () => { throw new Error("state_unavailable"); },
+    write: async () => { throw new Error("state_unavailable"); },
+  };
+  const fallen = await embedded.loadProfilePort(ioBroken);
+  assert.equal(fallen.tier, "memory", "修复失败降级（vm 无 localStorage → 内存档）");
+  // 非损坏错误（端口未授权/宿主旧版）：不发起修复写。
+  const denied = [];
+  const ioDenied = {
+    read: async () => { throw new Error("state_key_denied"); },
+    write: async (revision) => { denied.push(revision); return 1; },
+  };
+  const downgraded = await embedded.loadProfilePort(ioDenied);
+  assert.equal(downgraded.tier, "memory", "非损坏错误直接降级");
+  assert.equal(denied.length, 0, "未发起修复写");
+  // 正常读取路径不受影响。
+  const ioOk = { read: async () => ({ value: { schemaVersion: 1, records: [{ courseId: "c", bestTimeMs: 5, collisions: 0 }] }, revision: 7 }), write: async () => 8 };
+  const okPort = await embedded.loadProfilePort(ioOk);
+  assert.equal(okPort.tier, "native");
+  assert.equal(okPort.profile.records.length, 1);
+  assert.equal(okPort.revision, 7);
 }
 
 console.log("verify-city-game-profile: ok");
