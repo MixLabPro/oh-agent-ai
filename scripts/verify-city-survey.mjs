@@ -23,15 +23,18 @@ const TIERS = [
 // 批次 4-3c 加了跨河档（bridge-candidate ≤84 连续水段）与帆形歌剧院岸点选址避让后实测
 // t1 2 / t3 1 / t5 1 / t10 0 岛（前值 19/10/3/3——多数孤立分量隔河而居，跨河桥是设计 §4.2
 // 的正解）；悬空桥头 t1 8 / t3 5 / t5 4 / t10 1（桥建成后接续地面路被后续阶段删除——批次前不可见）。
+// 桥头落地环批（E 轨 2026-10-08，planner/landing.ts：失配 >25°/缺失/可删风险 → 半径 10–14 落地环）
+// 实测 t1 8→4 / t3 5→5 / t5 4→1 / t10 1→1；残留全部是安全检查如实 declined（water-span 无干环位 /
+// no-ground-reach 环缘外 ≤26 无路 / edge-inside / acute）。副作用：disconnectedComponents t1 2→0。
 const CEILING = {
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
   stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,
   suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 17, acuteJunctions: 5, crowdedArterials: 4,
-  disconnectedComponents: 2, bridgeheadContinuity: 8,
+  disconnectedComponents: 2, bridgeheadContinuity: 4,
 };
 const TIER_CEILING = {
   3: { siteInWater: 4, looseInlandRoadEnds: 4, acuteJunctions: 1, crowdedArterials: 0, disconnectedComponents: 1, bridgeheadContinuity: 5 },
-  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 1, bridgeheadContinuity: 4 },
+  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 1, bridgeheadContinuity: 1 },
   10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 0, bridgeheadContinuity: 1 },
 };
 const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity({
