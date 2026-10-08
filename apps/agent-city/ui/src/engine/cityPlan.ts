@@ -133,8 +133,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const geo = buildGeography(seed, R, shape);
   const { coast, bbox, hasRiver, river, riverShift, riverX, riverWidth, coastDistance, landClearance, hillAngle, hillDir, hillLine, hillProj, height, buildable, terrain } = geo;
 
-  // ── 核心点（V2 步 2a：逐字迁至 planner/skeleton.ts::chooseCore）──
-  let core = chooseCore(geo, random);
+  // ── 核心点（V2 步 2a 迁出；步 4 起带环线成活率降分与出口弦净空，见 skeleton.ts）──
+  let core = chooseCore(geo, seed, random);
 
   /** 从名义位置就近找可建地：同心环搜索，离岸/离河至少 clearance，与已放置点保持间距。 */
   const snap = (nominal: Vec2, clearance: number, placed: Array<Vec2 & { radius: number }>, radius: number, accept?: (q: Vec2) => boolean): Vec2 => {
@@ -164,8 +164,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     publicSites.push({ id, kind, x: q.x, z: q.z, radius, yaw });
   };
   place("civic-square", "civic", core, 44, -0.15);
-  // 广场被 snap 推离核心点（核心离水/河不够远）时，环岛、放射主干道、高架都还围着旧核心点画，于是市政广场孤零零
-  // 偏在一旁、环岛中间是空的（用户截图；30 岛里 10 个岛偏 12–60）。广场挪到哪里，核心点就跟到哪里。
+  // 步 4 起 chooseCore 的硬门保证 snap 的环 0 必然命中（广场 === 核心点，civicPlazaCentred 构造成立）；
+  // 无门控候选的小岛仍走旧口径：广场被推离核心时，广场挪到哪里核心点就跟到哪里，
+  // 否则环岛、放射主干道、高架都围着旧核心画，广场孤悬一旁（用户截图；30 岛里 10 个偏 12–60）。
   { const plaza = publicSites[publicSites.length - 1]; core = { x: plaza.x, z: plaza.z }; }
   place("observation-tower", "tower", around(turn + 0.9, 0.16 * R), 26, 0);
   place("central-station", "station", around(turn + 2.2, 0.38 * R), 46, 0.12);
@@ -995,20 +996,23 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         if (!linked && pass === 2) {
           let best: { a: RoadNode; b: RoadNode; d: number } | null = null;
           // 最后手段也先选不穿过用地/地标的直连；实在没有才不限。
-          const clearOfSites = (a: Vec2, b: Vec2) => {
+          // 中间档 0.7r+3：roadThroughSite 的通过线（步 4 实测：核心挪位后孤立分量用「不限」档
+          // 直连，连线从 villa-complex 中心 14.7 处穿过，seed 2000523645——连接器只看点不看线的病根，
+          // 见 docs/CITY_PLANNER_V2_FINDINGS.md §4）。
+          const clearOfSites = (a: Vec2, b: Vec2, tolerance: number) => {
             const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 4));
             for (let k = 0; k <= n; k += 1) {
               const q = { x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n };
-              if (reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 3)) return false;
+              if (reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius * tolerance + 3)) return false;
             }
             return true;
           };
-          for (const strict of [true, false]) {
+          for (const tolerance of [1, 0.7, 0]) {
             for (const a of members) for (const b of nodes.values()) {
               if (find(b.id) !== target) continue;
               const d = Math.hypot(a.x - b.x, a.z - b.z);
               if (best && d >= best.d) continue;
-              if (strict && !clearOfSites(a, b)) continue;
+              if (tolerance > 0 && !clearOfSites(a, b, tolerance)) continue;
               best = { a, b, d };
             }
             if (best) break;

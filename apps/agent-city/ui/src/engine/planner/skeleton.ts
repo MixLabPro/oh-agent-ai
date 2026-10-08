@@ -11,9 +11,29 @@ import type { CityLayout, PublicSite, Vec2 } from "../cityLayout";
 import { addNetworkEdge, keyOf, type Network } from "./network";
 import type { Geography } from "./geography";
 
-export function chooseCore(geo: Geography, random: (key: string) => number): Vec2 {
+/** 环线高架在方位角 t 处的采样点（唯一公式，chooseCore 的成活率估计与 buildSkeleton 共用）。 */
+function ringPointAt(core: Vec2, R: number, seed: number, t: number): Vec2 {
+  const r = 0.55 * R * (1 + 0.08 * fbm(Math.cos(t) * 1.7, Math.sin(t) * 1.7, seed + 91, 2));
+  return { x: core.x + Math.cos(t) * r, z: core.z + Math.sin(t) * r };
+}
+
+export function chooseCore(geo: Geography, seed: number, random: (key: string) => number): Vec2 {
   const { R, bbox, buildable, coastDistance, riverX, riverWidth, hasRiver, hillProj, hillLine, riverShift } = geo;
   // ── 城市核心点：可建地上评分最高处——离岸约 0.32R、离山脊远、靠河（有河时）。
+  // V2 步 4（§5.4，按普查实证收敛）：核心与广场的联合决定由两半构造——
+  // ① 出口接驳弦净空（buildSkeleton）：环线高架不再从广场上空切过，re-stick 不再推走广场；
+  // ② 广场落位后核心跟随（cityPlan）：snap 即使推开广场，环岛/放射主干仍围着广场画。
+  // 曾试「候选核心硬门（landClearance ≥ 58 + isDry 52）」：civicPlazaCentred 同样归零，但核心被
+  // 推离地理最优，四档普查平均分下降（t1 −0.019），不采用——约束已由 ①② 构造成立，见步 4 提交。
+  // 环线高架绕核心画：96 采样成活 < 最短 run（6 点）的核心降分——环合不拢的核只配当次选（§5.4）。
+  const ringSurvival = (c: Vec2): number => {
+    let alive = 0;
+    for (let i = 0; i < 96; i += 1) {
+      const q = ringPointAt(c, R, seed, (i / 96) * Math.PI * 2);
+      if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12) alive += 1;
+    }
+    return alive / 96;
+  };
   let core: Vec2 = { x: riverShift, z: 0 };
   let best = -Infinity;
   for (let gx = 0; gx <= 24; gx += 1) for (let gz = 0; gz <= 24; gz += 1) {
@@ -23,7 +43,8 @@ export function chooseCore(geo: Geography, random: (key: string) => number): Vec
     const shore = coastDistance(x, z);
     const riverGap = hasRiver ? Math.abs(Math.abs(x - riverX(z)) - riverWidth(z) - 70) : 0;
     const score = -Math.abs(shore - 0.32 * R) - riverGap * 0.6 - Math.max(0, hillProj(x, z) - hillLine * 0.4) * 0.8 + random(`core${gx}:${gz}`) * 8;
-    if (score > best) { best = score; core = { x, z }; }
+    const total = score - (ringSurvival({ x, z }) < 6 / 96 ? 40 : 0);
+    if (total > best) { best = total; core = { x, z }; }
   }
   return core;
 }
@@ -146,13 +167,11 @@ export function buildSkeleton(opts: {
     }
   }
   // 环线高架：半径 0.55R ± fbm，河流/河岸连续跨越，仅出海或进山时断开。
-  const ringRadius = 0.55 * R;
   const ringRuns: Vec2[][] = [];
   let run: Vec2[] = [];
   for (let i = 0; i <= 96; i += 1) {
     const t = (i / 96) * Math.PI * 2;
-    const r = ringRadius * (1 + 0.08 * fbm(Math.cos(t) * 1.7, Math.sin(t) * 1.7, seed + 91, 2));
-    const q = { x: core.x + Math.cos(t) * r, z: core.z + Math.sin(t) * r };
+    const q = ringPointAt(core, R, seed, t);
     if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12) run.push(q);
     else { if (run.length >= 6) ringRuns.push(run); run = []; }
   }
@@ -176,6 +195,7 @@ export function buildSkeleton(opts: {
         const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
         const p = key({ x: a.x + t * dx, z: a.z + t * dz });
         if (Math.hypot(p.x - core.x, p.z - core.z) < 110) continue; // 出口不能落在环岛附近：高架贴到市政广场（半径 44 + 避让 ≈ 69）会把广场推离核心点
+        if (segmentDistance(core, end, p) < 69) continue; // 出口接驳弦本身也不得切近广场：端点 ≥110 不够，弦可从核心旁切过（seed 2002199309 实测弦离核心 56.7，把广场推走 72）；69 = re-stick 净空（5.25 + hypot(88,88)/2 + 1 ≈ 68.5）刚过线
         const distance = Math.hypot(p.x - end.x, p.z - end.z);
         const samples = Math.max(1, Math.ceil(distance / 4));
         let clear = true;

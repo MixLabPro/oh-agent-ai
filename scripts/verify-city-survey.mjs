@@ -17,7 +17,7 @@ const TIERS = [
 // 0 = 当前实测为 0 的约束必须保持为 0；非 0 的是已知残留。tier>1 的表覆盖 tier1 表（未列键沿用）。
 const CEILING = {
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
-  stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 2,
+  stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,
   suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 2, acuteJunctions: 5, crowdedArterials: 4,
 };
 const TIER_CEILING = {
