@@ -101,6 +101,108 @@ export function crosses(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
   return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
 }
 
+// ── 网络优先批次 6a-2：实际占地几何原语（设计 §2 P2「圆形稀疏占地采样 → 实际 footprint 终筛」）──
+// 旧口径全部以「中心 + 半径」采样：长条/旋转模型的角点可以越过采样圈压路、悬空（设计 §8.1 走廊
+// 矩阵「旋转长条角点」）。这里提供定向矩形与凸多边形的精确距离原语 + 「16 采样点初筛 → 一次精确
+// 复核」的组合闸门。全部纯函数；多边形输入须为凸且逆时针（orientedRectPolygon 构造保证，
+// isConvexCounterClockwise 供守卫/调用方自检）。首批只有凸包形状——模型多组成部分时用若干凸
+// 多边形分别终筛（设计 §5），不建通用几何框架。
+
+/** 定向矩形（中心 + yaw + 宽深；width 沿局部 x、depth 沿局部 z）。 */
+export type OrientedRect = Vec2 & { yaw: number; width: number; depth: number };
+
+/** 定向矩形的四个角点（逆时针；绕 yaw 旋转后的 ±width/2、±depth/2）。 */
+export function orientedRectPolygon(rect: OrientedRect): Vec2[] {
+  const c = Math.cos(rect.yaw); const s = Math.sin(rect.yaw);
+  const hw = rect.width / 2; const hd = rect.depth / 2;
+  const corner = (lx: number, lz: number): Vec2 => ({ x: rect.x + c * lx - s * lz, z: rect.z + s * lx + c * lz });
+  return [corner(-hw, -hd), corner(hw, -hd), corner(hw, hd), corner(-hw, hd)];
+}
+
+/** 多边形是否凸且逆时针（叉积同号；面积 0 视为非法）。 */
+export function isConvexCounterClockwise(polygon: Vec2[]): boolean {
+  if (polygon.length < 3) return false;
+  let area = 0; let sign = 0;
+  for (let i = 0; i < polygon.length; i += 1) {
+    const a = polygon[i]; const b = polygon[(i + 1) % polygon.length]; const c = polygon[(i + 2) % polygon.length];
+    area += a.x * b.z - b.x * a.z;
+    const cross = (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
+    if (Math.abs(cross) > 1e-12) { const s = cross > 0 ? 1 : -1; if (sign && s !== sign) return false; sign = s; }
+  }
+  return area / 2 > 0;
+}
+
+/** 点是否在（凸、逆时针）多边形内或边界上。 */
+export function convexContains(polygon: Vec2[], p: Vec2): boolean {
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[j]; const b = polygon[i];
+    if ((b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x) < -1e-9) return false;
+  }
+  return true;
+}
+
+/** 点到凸多边形的距离：在内部/边界上为 0，否则为到各边的最近距离。 */
+export function pointToPolygonDistance(polygon: Vec2[], p: Vec2): number {
+  if (convexContains(polygon, p)) return 0;
+  let d = Infinity;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) d = Math.min(d, segmentDistance(p, polygon[j], polygon[i]));
+  return d;
+}
+
+/** 两线段的最短距离（相交/共端点为 0）。 */
+export function segmentToSegmentDistance(a: Vec2, b: Vec2, c: Vec2, d: Vec2): number {
+  if (crosses(a, b, c, d)) return 0;
+  return Math.min(segmentDistance(a, c, d), segmentDistance(b, c, d), segmentDistance(c, a, b), segmentDistance(d, a, b));
+}
+
+/** 线段到凸多边形的距离：相交或端点落入多边形为 0，否则为到各边线段距离的最小值。 */
+export function segmentToPolygonDistance(a: Vec2, b: Vec2, polygon: Vec2[]): number {
+  if (convexContains(polygon, a) || convexContains(polygon, b)) return 0;
+  let d = Infinity;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) d = Math.min(d, segmentToSegmentDistance(a, b, polygon[j], polygon[i]));
+  return d;
+}
+
+/**
+ * 占地多边形与「道路中心线 ab 按半宽 halfWidth 扫掠出的路面带」的净空：
+ * = 多边形到中心线段的距离 − halfWidth；负值 = 侵入带内的深度（压路）。
+ * 这是有误差界的连续几何检查（设计 §4.5），不是采样点近似。
+ */
+export function sweptBandClearance(polygon: Vec2[], a: Vec2, b: Vec2, halfWidth: number): number {
+  return segmentToPolygonDistance(a, b, polygon) - halfWidth;
+}
+
+/** 与 wetCount 同圈型的 16 采样点（奇数点外圈 r、偶数点内圈 0.6r）——初筛与现有口径共用的采样几何。 */
+export function ringSamples16(center: Vec2, radius: number): Vec2[] {
+  const out: Vec2[] = [];
+  for (let k = 0; k < 16; k += 1) {
+    const t = (k / 16) * Math.PI * 2; const r = k % 2 ? radius : radius * 0.6;
+    out.push({ x: center.x + Math.cos(t) * r, z: center.z + Math.sin(t) * r });
+  }
+  return out;
+}
+
+/**
+ * 「16 采样点初筛 → 一次精确复核」组合闸门：占地（凸多边形，如 orientedRectPolygon 的产物）
+ * 是否与任一路段的扫掠带保持 ≥ margin 净空。
+ *   初筛：采样圈（boundingRadius）上任一点进入带内（含 margin）即整体拒绝——保守淘汰，
+ *         可能误拒（boundingRadius 高估实际轮廓时），绝不误放；
+ *   复核：初筛通过后对每段做一次精确 sweptBandClearance——旋转长条角点越过采样圈的盲区
+ *         （旧圆形口径）由此补上；初筛通过 + 复核拒绝的样本见 verify-city-footprint-geoms。
+ * 纯函数、无随机：同输入同输出（守卫双跑证明）。
+ */
+export function footprintClearsRoadBand(polygon: Vec2[], center: Vec2, boundingRadius: number, runs: Vec2[][], halfWidth: number, margin = 0): boolean {
+  for (const p of ringSamples16(center, boundingRadius)) {
+    for (const run of runs) for (let k = 1; k < run.length; k += 1) {
+      if (segmentDistance(p, run[k - 1], run[k]) < halfWidth + margin) return false;
+    }
+  }
+  for (const run of runs) for (let k = 1; k < run.length; k += 1) {
+    if (sweptBandClearance(polygon, run[k - 1], run[k], halfWidth) < margin) return false;
+  }
+  return true;
+}
+
 /** 两点连线能否通过（可建、坡度可走、不穿预留地）。reservations = publicSites + landmarks。 */
 export function safeRoadLink(geo: { buildable: (x: number, z: number) => boolean; terrain: { slope: (x: number, z: number) => number } }, reservations: Array<{ x: number; z: number; radius: number }>, a: Vec2, b: Vec2): boolean {
   const distance = Math.hypot(b.x - a.x, b.z - a.z);

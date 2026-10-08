@@ -1,7 +1,8 @@
 import { DetMath as Math } from "../detMath";
-import { clearsHighways } from "../cityPlan";
-import type { Vec2 } from "../cityLayout";
-import { nearBridgeEnd, polylineDistance, wetCount } from "./footprint";
+import { clearsHighways, type Landmark } from "../cityPlan";
+import type { PublicSite, Vec2 } from "../cityLayout";
+import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount } from "./footprint";
+import { coastalSitingKinds } from "./sitespec";
 import type { RepairContext } from "./context";
 
 // 选址后置（CITY_ARCHITECTURE §6 步）：候选表 + 路网后落位。
@@ -57,4 +58,140 @@ export function resiteViolatingSites(ctx: RepairContext): number {
     for (const block of ctx.blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - s.x, pc.z - s.z) >= s.radius + 9);
   }
   return moved;
+}
+
+// ── 岸线挪动四遍（V2 网络优先批次 6b-1：从 buildPlan 逐字迁出，闭包改显式 ctx；迭代顺序、
+// 步长、阈值与注释一律不变——行为保持由计划/场景基线哈希证明）─────────────────────────
+// 岸边类集合由 sitespec 表派生（coastalSitingKinds === cityPlan 的 SHORE_SITE_KINDS，守卫证值相等）：
+// 表成为唯一数据源后，行为变更批改表即可改临水语义，不再改散落的 Set 字面量。
+
+/** 岸线挪动四遍共用的只读依赖 + 可变用地表（publicSites/landmarks 是 buildPlan 的同一份引用，原地改）。 */
+export type ShoreMoveContext = {
+  publicSites: PublicSite[];
+  landmarks: Landmark[];
+  core: Vec2;
+  coast: Vec2[];
+  coastDistance: (x: number, z: number) => number;
+  height: (x: number, z: number) => number;
+  inRiver: (x: number, z: number) => boolean;
+  riverBank: (x: number, z: number, bank: number) => boolean;
+  trunkRuns: Vec2[][];
+  bridges: Array<{ from: Vec2; to: Vec2 }>;
+  ringRuns: Vec2[][];
+};
+
+const SHORE_KINDS = coastalSitingKinds();
+
+/**
+ * 岸边内移遍（原 buildPlan「岸边地标向核心方向内移」）：占地圈落水 >3 点时朝核心走（步长 3、最多 20 步），
+ * 每步要求中心在陆上、不在河里、不压主干道（r+4）与桥头；任一不过即停。
+ */
+export function retreatShoreSitesToDryLand(ctx: ShoreMoveContext): void {
+  const { landmarks, core, height, inRiver, trunkRuns, bridges } = ctx;
+  const footprintGeo = { height: ctx.height, inRiver: ctx.inRiver, riverBank: ctx.riverBank };
+  const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
+  for (const site of landmarks) {
+    if (!site.radius || !SHORE_KINDS.has(site.kind)) continue;
+    const wetCountAt = (c: Vec2) => wetCount(footprintGeo, c, site.radius); // 内移判据：只看地形水位（不含河道），与原实现同口径
+    const dx = core.x - site.x; const dz = core.z - site.z; const len = Math.hypot(dx, dz) || 1;
+    // 每步都要求中心仍在陆上、不在河里：直线朝核心走可能跨过河道（geography 守卫 seed 3668352332 抓到摩天轮进河）。
+    for (let step = 0; step < 20 && wetCountAt(site) > 3; step += 1) {
+      const nx = site.x + (dx / len) * 3; const nz = site.z + (dz / len) * 3;
+      if (height(nx, nz) <= 0.5 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || nearBridgeEnd(bridges, nx, nz, site.radius)) break; // 也不推到主干道/桥头上
+      site.x = nx; site.z = nz;
+    }
+  }
+}
+
+/**
+ * 港口贴岸遍（原 buildPlan「港口最后贴回岸线」）：前面的避让会把港口推进内陆——朝最近岸点
+ * 逐步移动（步长 3、最多 80 步）到中心离岸 ≤ 12（码头半边伸进水面），朝向重设为岸→核心反方向。
+ */
+export function settleHarborOnCoast(ctx: ShoreMoveContext): void {
+  const { publicSites, coast, coastDistance, core } = ctx;
+  for (const site of publicSites) {
+    if (site.kind !== "harbor") continue;
+    let nearest = coast[0];
+    for (const q of coast) if (Math.hypot(q.x - site.x, q.z - site.z) < Math.hypot(nearest.x - site.x, nearest.z - site.z)) nearest = q;
+    for (let step = 0; step < 80 && coastDistance(site.x, site.z) > 12; step += 1) {
+      const dx = nearest.x - site.x; const dz = nearest.z - site.z; const len = Math.hypot(dx, dz) || 1;
+      site.x += (dx / len) * 3; site.z += (dz / len) * 3;
+    }
+    site.yaw = -Math.atan2(nearest.z - core.z, nearest.x - core.x);
+  }
+}
+
+/**
+ * 贴岸遍（原 buildPlan「岸边地标贴回岸线」）：对每个岸边地标试最近的 8 个岸点，朝每个岸点滑移
+ * （步长 3、最多 100 步）到离岸 ≈ 0.7 半径；滑移不得落水 >3（含河道+河岸带 14）、进河、压桥头/主干道/
+ * 高架/其它用地。取最终离岸最近的落点；落点压主干道（< 0.7 半径）则留在原位；仍 >3 点在水上时
+ * 在 70 内环形搜索干燥落点（wet ≤2）。
+ */
+export function settleShoreSitesOnCoast(ctx: ShoreMoveContext): void {
+  const { publicSites, landmarks, coast, coastDistance, height, inRiver, trunkRuns, bridges, ringRuns } = ctx;
+  const footprintGeo = { height: ctx.height, inRiver: ctx.inRiver, riverBank: ctx.riverBank };
+  const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
+  for (const site of landmarks) {
+    if (!site.radius || !SHORE_KINDS.has(site.kind)) continue;
+    const wet = (x: number, z: number) => wetCount(footprintGeo, { x, z }, site.radius, { river: true, riverBank: 14 }); // 河道及两岸 14 内也算水：歌剧院曾立在河口上（用户截图）
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    // 试最近的 8 个岸点，取最终离岸最近的落点（一条路径被别的用地挡住时换个方向贴岸）。
+    const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 8);
+    let best = { x: site.x, z: site.z, d: coastDistance(site.x, site.z) };
+    for (const target of targets) {
+      let x = site.x; let z = site.z;
+      for (let step = 0; step < 100 && coastDistance(x, z) > site.radius * 0.7; step += 1) {
+        const dx = target.x - x; const dz = target.z - z; const len = Math.hypot(dx, dz) || 1;
+        const nx = x + (dx / len) * 3; const nz = z + (dz / len) * 3;
+        if (wet(nx, nz) > 3 || inRiver(nx, nz) || nearBridgeEnd(bridges, nx, nz, site.radius) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || !clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) break; // 不滑到主干道上
+        x = nx; z = nz;
+      }
+      const d = coastDistance(x, z);
+      if (d < best.d) best = { x, z, d };
+    }
+    if (wet(best.x, best.z) <= 3 && (distanceToTrunks(best) >= site.radius * 0.7 || distanceToTrunks(site) < site.radius * 0.7)) { site.x = best.x; site.z = best.z; } // 落点压到主干道上就留在原位
+    // 仍有 >3 点在水上（原位本就半悬空，核心方向也可能隔着水）：在 70 内按距离由近到远搜一个占地干燥、不压主干道/其它用地的落点。
+    if (wet(site.x, site.z) > 3) {
+      let found: Vec2 | null = null;
+      for (let rr = 6; rr <= 70 && !found; rr += 6) {
+        for (let k = 0; k < 24 && !found; k += 1) {
+          const a = (k / 24) * Math.PI * 2; const nx = site.x + Math.cos(a) * rr; const nz = site.z + Math.sin(a) * rr;
+          if (wet(nx, nz) > 2 || height(nx, nz) <= 0.5 || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4) continue;
+          if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
+          found = { x: nx, z: nz };
+        }
+      }
+      if (found) { site.x = found.x; site.z = found.z; }
+    }
+  }
+}
+
+/**
+ * 海上岛遍（原 buildPlan「帆形歌剧院改立海上小岛」）：取离当前最近的 40 个岸点，岸外 radius+40 处
+ * 整个占地圈必须是深水（不在河口），且离港口 ≥ r_o+r+120 / 其它用地 ≥ +30；堤道陆地端（岸点向内 6）
+ * 要踩在实地上（height ≥ 0.3）。首个满足者即落位（朝向沿离核向外，shore 记堤道端）。
+ */
+export function settleSailOperaOffshore(ctx: ShoreMoveContext): void {
+  const { publicSites, landmarks, coast, core, height } = ctx;
+  const footprintGeo = { height: ctx.height, inRiver: ctx.inRiver, riverBank: ctx.riverBank };
+  for (const site of landmarks) {
+    if (site.kind !== "sail-opera") continue;
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 40);
+    for (const shore of targets) {
+      const len = Math.hypot(shore.x - core.x, shore.z - core.z) || 1;
+      const out = { x: (shore.x - core.x) / len, z: (shore.z - core.z) / len };
+      const c = { x: shore.x + out.x * (site.radius + 40), z: shore.z + out.z * (site.radius + 40) };
+      const deep = isDeepWater(footprintGeo, c, site.radius);
+      if (!deep || others.some((o) => Math.hypot(o.x - c.x, o.z - c.z) < o.radius + site.radius + (o.kind === "harbor" ? 120 : 30))) continue;
+      if (height(shore.x - out.x * 6, shore.z - out.z * 6) < 0.3) continue; // 堤道陆地端要踩在实地上
+      // 岸点落路净空（A 轨 4-3c 移植）：岸点被其它用地圈住时（实测 seed 42：villa-complex 挪到
+      // 歌剧院岸点 21 单位处，路网变化后入口路全失败、堤道两头悬空），选址期直接避开，不靠修复遍。
+      const landing = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
+      if (others.some((o) => Math.hypot(o.x - landing.x, o.z - landing.z) < o.radius + 30)) continue;
+      site.x = c.x; site.z = c.z; site.shore = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
+      site.yaw = -Math.atan2(out.z, out.x);
+      break;
+    }
+  }
 }

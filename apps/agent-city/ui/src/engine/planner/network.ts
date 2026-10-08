@@ -26,3 +26,97 @@ export function addNetworkEdge(network: Network, a0: Vec2, b0: Vec2, arterial: b
   network.nodes.set(from, { ...a, id: from }); network.nodes.set(to, { ...b, id: to });
   if (!network.edges.has(id)) network.edges.set(id, { id, from, to, width: primary ? 12 : arterial ? 8 : 5, kind: arterial ? "arterial" : "local", points: [a, b], bridge });
 }
+
+// ── 网络优先批次 3：事务式 NetworkPatch（设计 §4.3 / §5B）─────────────────────────────
+// 补丁 = 在 baseVersion 之上的一组原子操作（加边、删边、拆边成 T 口）。提交流程：
+// 草稿（深拷贝）上应用 → 校验 → 版本匹配 → 一次替换正式网络；任一步失败丢弃草稿，
+// 正式网络零改动（失败无副作用，设计 §5A-7）。本批只提供原语与守卫证明，
+// connectToNetwork 等调用方的迁移随后分批（迁移期间基线必须保持不变）。
+
+export type NetworkPatch = {
+  /** 基于的正式网络版本（乐观锁：提交时 network.version 必须相等）。 */
+  baseVersion: number;
+  addEdges: Array<{ a: Vec2; b: Vec2; arterial: boolean; bridge?: boolean; primary?: boolean }>;
+  removeEdgeIds: string[];
+  /** 顺带清掉因此无任何关联边的孤立节点（重锚/裁断的合并残点；桥头落地环批次）。
+   *  提交时该节点必须已是草稿里的孤立点（应用全部操作后无任何边引用），否则拒绝。 */
+  removeNodeIds?: string[];
+  /** 把一条边在 t 点拆成两段（T 口）：保留原边等级/宽度/桥标记，属性继承不丢失。 */
+  splits: Array<{ edgeId: string; at: Vec2 }>;
+};
+
+export type PatchResult = { ok: true; version: number } | { ok: false; reason: "stale-base" | "unknown-edge" | "validation" | "self-loop" | "off-line-split" | "node-in-use"; detail?: string };
+
+const clone = (network: Network): Network => ({
+  nodes: new Map([...network.nodes].map(([k, n]) => [k, { ...n }])),
+  edges: new Map([...network.edges].map(([k, e]) => [k, { ...e, points: e.points.map((p) => ({ ...p })) }])),
+});
+
+/** 在草稿上应用补丁操作（只动草稿）。 */
+function applyOps(draft: Network, patch: NetworkPatch): PatchResult {
+  for (const id of patch.removeEdgeIds) {
+    if (!draft.edges.has(id)) return { ok: false, reason: "unknown-edge", detail: id };
+    draft.edges.delete(id);
+  }
+  for (const s of patch.splits) {
+    const host = draft.edges.get(s.edgeId);
+    if (!host) return { ok: false, reason: "unknown-edge", detail: s.edgeId };
+    const at = keyOf(s.at);
+    if (roadNodeId(at) === host.from || roadNodeId(at) === host.to) return { ok: false, reason: "self-loop", detail: `split at endpoint of ${s.edgeId}` };
+    // 在册校验（评审 P1-4）：拆分点必须落在宿主段上——离线拆分会把直路「拆」成绕向路外的折线。
+    {
+      const [a, b] = [host.points[0], host.points[host.points.length - 1]];
+      const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((at.x - a.x) * dx + (at.z - a.z) * dz) / l2));
+      const off = Math.hypot(a.x + dx * t - at.x, a.z + dz * t - at.z);
+      if (off > 0.05) return { ok: false, reason: "off-line-split", detail: `split point ${Math.round(off)} off ${s.edgeId}` };
+    }
+    draft.edges.delete(s.edgeId);
+    // 属性完整继承（评审 P1-4）：直接按宿主原值构造两半，不走 addNetworkEdge 的 {5,8,12} 宽度映射
+    // （宽度 9 曾被重建为 8）。节点注册沿用规范化键。
+    const half = (u: Vec2, v: Vec2) => {
+      const uf = keyOf(u); const vf = keyOf(v);
+      const id = [roadNodeId(uf), roadNodeId(vf)].sort().join("/");
+      draft.nodes.set(roadNodeId(uf), { ...uf, id: roadNodeId(uf) });
+      draft.nodes.set(roadNodeId(vf), { ...vf, id: roadNodeId(vf) });
+      draft.edges.set(id, { id, from: roadNodeId(uf), to: roadNodeId(vf), width: host.width, kind: host.kind, points: [uf, vf], bridge: host.bridge });
+    };
+    half(host.points[0], at); half(at, host.points[host.points.length - 1]);
+  }
+  for (const e of patch.addEdges) {
+    addNetworkEdge(draft, e.a, e.b, e.arterial, e.bridge ?? false, e.primary ?? false);
+  }
+  // 节点清除放在全部操作之后：此刻仍被引用的节点不许删（调用方对合并残点的判断错了就如实拒绝）。
+  for (const id of patch.removeNodeIds ?? []) {
+    if (!draft.nodes.has(id)) return { ok: false, reason: "node-in-use", detail: `missing node ${id}` };
+    let used = false;
+    for (const e of draft.edges.values()) if (e.from === id || e.to === id) { used = true; break; }
+    if (used) return { ok: false, reason: "node-in-use", detail: `node ${id} still has edges` };
+    draft.nodes.delete(id);
+  }
+  return { ok: true, version: 0 };
+}
+
+/**
+ * 事务提交：baseVersion 不匹配（stale-base）或校验不过 → 正式网络保持原样。
+ * validate 在草稿上跑（连通/净空等调用方语义）；拆边保留原边属性是原语承诺。
+ */
+export function commitNetworkPatch(
+  network: Network & { version?: number },
+  patch: NetworkPatch,
+  validate?: (draft: Network) => string | null,
+): PatchResult {
+  if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: `base ${patch.baseVersion} != current ${network.version ?? 0}` };
+  const draft = clone(network);
+  const applied = applyOps(draft, patch);
+  if (!applied.ok) return applied;
+  const problem = validate?.(draft) ?? null;
+  if (problem) return { ok: false, reason: "validation", detail: problem };
+  // §4.3「版本匹配后一次替换」：交换前复核（validate 回调不得重入提交同一网络——契约见函数头）。
+  if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: "version changed during validation" };
+  // 批次 4-2：就地清写而非换 Map——buildPlan 顶部解构的 { nodes, edges } 引用在事务提交后仍指向正式网络。
+  network.nodes.clear(); for (const [k, n] of draft.nodes) network.nodes.set(k, n);
+  network.edges.clear(); for (const [k, e] of draft.edges) network.edges.set(k, e);
+  network.version = (network.version ?? 0) + 1;
+  return { ok: true, version: network.version };
+}

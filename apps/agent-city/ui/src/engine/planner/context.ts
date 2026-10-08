@@ -1,5 +1,6 @@
 import type { Landmark } from "../cityPlan";
 import type { CityBlock, PublicSite, Vec2 } from "../cityLayout";
+import type { SeasideBand } from "../citySeaside";
 import type { Network } from "./network";
 import type { Geography } from "./geography";
 
@@ -29,4 +30,12 @@ export interface RepairContext {
   SHORE_SITE_KINDS: Set<string>;
   /** 车流折线（海滨大道回路、街区回路）：去冗余的修复不得拆掉它们走的路段，否则整条回路被丢弃。 */
   carPaths: Vec2[][];
+  /** 海滨带（plannedEndWorld 的滨海大道合法断点来源；网络优先批次 1）。 */
+  seaside: SeasideBand | null;
+  /** 沿海/河岸路各 run 的首尾点（计划内终点；批次 1）。 */
+  coastRoadRunEnds: Vec2[];
+  /** 沿海路段（批次 8：solve 的违例测量需要 plan 视图）。 */
+  coastRoadRuns: Vec2[][];
+  /** 河岸路段（同上）。 */
+  riverRoadRuns: Vec2[][];
 }

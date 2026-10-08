@@ -94,7 +94,9 @@ export function scoreTerms(plan: CityPlan): Record<ScoreTerm, number> {
     doorAlignment: doorN ? doorSum / doorN : 1,
     shoreHug: shoreN ? shoreSum / shoreN : 1,
     landmarkSpread: marks.length > 1 ? clamp01(minGap / (plan.islandRadius * 0.5)) : 1,
-    networkQuality: clamp01(1 - softViolations / 12),
+    // 2026-10-08 重标定：断头盲区可见后软违例规模扩大（t1 均值 ~9、峰 30+），/12 会让多数岛饱和到 0 失去区分度；
+    // /40 ≈ 当前工作点，让统一连接器批次的改进落在量程内。改归一化按改 golden 对待（本提交注明）。
+    networkQuality: clamp01(1 - softViolations / 40),
     parcelYield: clamp01(parcels / targetParcels(plan.scaleTier)),
   };
 }

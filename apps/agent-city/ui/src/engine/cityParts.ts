@@ -32,7 +32,7 @@ import { roadPaintPlan } from "./cityRoadPaint";
 import { buildGroundSpill, buildSeaMountains, buildTerrain, buildWater, type TerrainHost } from "./systems/terrainSystem";
 import { applyFlora, buildTrees, type NatureHost } from "./systems/natureSystem";
 import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type AmbientHost } from "./systems/ambientSystem";
-import { buildInfrastructure, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
+import { buildInfrastructure, buildCulDeSacBulbs, buildChannelizedJunctions, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
 import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
@@ -175,6 +175,8 @@ export class CityParts {
       (this.disposables as Array<{ dispose: () => void }>) = staticBucket;
       this.buildTerrain();
       this.buildInfrastructure();
+      this.buildCulDeSacBulbs();
+      this.buildChannelizedJunctions();
       this.buildDistrictExpressways();
       this.nightLights = this.buildNightLights();
       this.buildPublicSites();
@@ -492,6 +494,13 @@ export class CityParts {
 
   /** Batched city furniture and waterfront infrastructure, not selectable data. */
   private buildInfrastructure(): void { buildInfrastructure(this as unknown as RoadHost); }
+
+  /** 尽端回车圈（形态批 §5-3）：合法尽端（culDeSacEnds）的回车圆盘 + 路缘描边，
+   *  纯渲染装饰、不改路网拓扑；见 systems/roadSystem.ts。 */
+  private buildCulDeSacBulbs(): void { buildCulDeSacBulbs(this as unknown as RoadHost); }
+
+  /** 渠化 T 路口（渲染级）：30–50° 边缘带三岔的喇叭口 + 分流岛，见 roadSystem.buildChannelizedJunctions。 */
+  private buildChannelizedJunctions(): void { buildChannelizedJunctions(this as unknown as RoadHost); }
 
   /** 区界高架：与北环高架同视觉语言（桥面/车道线/护栏/桥墩），
    *  沿规划折线分段铺装 —— harness 城区之间可辨认的硬边界。 */
