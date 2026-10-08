@@ -38,6 +38,7 @@ import { LIGHT_BUDGET, nightFactor } from "./cityLightBudget";
 import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 import { buildingFrame, isSelectionGesture } from "./cityCameraInteraction";
+import type { ReturnCameraView } from "../game/types";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -46,6 +47,8 @@ const CINEMATIC_HOUR_TO = 19.6;
 export type EngineQualityMode = "auto" | "high" | "eco";
 export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean };
 export type PhotoView = { position: number[]; target: number[]; fov: number; elapsed: number; cursorMs: number | null };
+/** 相机所有权（游戏模式 §4）：同一帧只允许一个所有者推进相机。 */
+export type CameraOwner = "orbit" | "cinematic" | "game";
 
 export type CityEngineOptions = {
   canvas: RenderCanvas;
@@ -156,6 +159,10 @@ export class CityEngine {
   private mirror: Reflector | null = null;
   private readonly mirrorMatrix = new THREE.Matrix4();
   private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number; pace: number } | null = null;
+  // 游戏模式（§4）：相机所有权 + 每帧钩子。game 拥有相机时禁用 OrbitControls/回放推进/
+  // tween/拾取，唯一的相机更新来自 gameFrame 回调（由 GameModeController 侧注册）。
+  private cameraOwner: CameraOwner = "orbit";
+  private gameFrame: ((dt: number) => void) | null = null;
 
   constructor(private readonly options: CityEngineOptions) {
     const canvas = options.canvas;
@@ -458,6 +465,69 @@ export class CityEngine {
     this.camera.position.fromArray(view.position); this.controls.target.fromArray(view.target);
     this.camera.fov = view.fov; this.camera.updateProjectionMatrix();
     this.parts?.applyCursor(view.cursorMs ?? this.model?.windowEndMs ?? Date.now(), view.cursorMs === null);
+    this.updateScene(0);
+  }
+
+  get owner(): CameraOwner {
+    return this.cameraOwner;
+  }
+
+  /** 相机所有权切换（§4）。game 接管要求航拍未在进行（互斥由调用方先拒，这里兜底返回 false）；
+   *  orbit 归还时恢复 controls；cinematic 所有权由 startCinematic/stopCinematic 自管。 */
+  setCameraOwner(owner: CameraOwner): boolean {
+    if (owner === this.cameraOwner) return true;
+    if (owner === "game") {
+      if (this.cinematic) return false;
+      this.controls.enabled = false;
+      this.controls.autoRotate = false;
+      this.tween = null;
+      this.attracted = false;
+      this.camera.up.set(0, 1, 0); // 游戏相机可能滚转了 up，归还前复位
+    } else if (owner === "orbit") {
+      if (this.cinematic) return false; // 航拍持有期间不得改判
+      this.controls.enabled = true;
+    }
+    this.cameraOwner = owner;
+    return true;
+  }
+
+  /** 游戏每帧回调：owner === "game" 时在 updateScene 中调用（dt 秒），不启动第二个绘制循环。 */
+  setGameFrameHook(fn: ((dt: number) => void) | null): void {
+    this.gameFrame = fn;
+  }
+
+  /** 进入游戏前保存返回视角（§8 ReturnState 相机部分；与 photoView 分离，互不复用生命周期）。 */
+  captureReturnView(): ReturnCameraView {
+    return {
+      position: this.camera.position.toArray() as [number, number, number],
+      target: this.controls.target.toArray() as [number, number, number],
+      up: this.camera.up.toArray() as [number, number, number],
+      fov: this.camera.fov,
+      controls: {
+        minDistance: this.controls.minDistance,
+        maxDistance: this.controls.maxDistance,
+        enablePan: this.controls.enablePan,
+        zoomToCursor: this.controls.zoomToCursor,
+        orbitLockedId: this.orbitLockedId,
+      },
+    };
+  }
+
+  /** 退出游戏后恢复返回视角：取消未完成 tween、复位 up/FOV/OrbitControls 参数。 */
+  restoreReturnView(view: ReturnCameraView): void {
+    this.tween = null;
+    this.attracted = false;
+    this.camera.up.fromArray(view.up);
+    this.camera.position.fromArray(view.position);
+    this.controls.target.fromArray(view.target);
+    this.camera.fov = view.fov;
+    this.camera.updateProjectionMatrix();
+    this.controls.minDistance = view.controls.minDistance;
+    this.controls.maxDistance = view.controls.maxDistance;
+    this.controls.enablePan = view.controls.enablePan;
+    this.controls.zoomToCursor = view.controls.zoomToCursor;
+    this.clearCameraMomentum();
+    this.camera.lookAt(this.controls.target);
     this.updateScene(0);
   }
 
@@ -1109,7 +1179,8 @@ export class CityEngine {
     this.elapsed += dt;
     this.noteActivityIfNeeded();
 
-    const idle = now - this.lastActivityAt > IDLE_AFTER_MS && !this.tween && !this.playing;
+    // 游戏持有相机时不进入空闲降帧：飞行是持续活动，20fps 环境帧率会打断手感与物理步进节奏。
+    const idle = this.cameraOwner !== "game" && now - this.lastActivityAt > IDLE_AFTER_MS && !this.tween && !this.playing;
     if (idle && !this.surfaceDirty && !this.qualityDirty && now - this.lastRenderAt < IDLE_FRAME_INTERVAL_MS) return;
 
     this.updateScene(dt);
@@ -1128,8 +1199,10 @@ export class CityEngine {
     if (this.controls.autoRotate || this.tween) this.lastActivityAt = performance.now();
   }
 
-  /** 开拍：镜头接管相机与时间游标；用户点/拖画布即中止。 */
+  /** 开拍：镜头接管相机与时间游标；用户点/拖画布即中止。
+   *  游戏持有相机期间拒绝开拍（§5 互斥；正常入口在进入游戏前已被禁用，此处兜底）。 */
   startCinematic(cut: CinematicCut = "full"): CinematicPlan | null {
+    if (this.cameraOwner === "game") return null;
     if (!this.layout || !this.model || !this.parts) return null;
     this.releaseOrbitLock();
     const plan = planCinematic(this.layout, this.model, this.parts.anchors(), { cut });
@@ -1535,6 +1608,13 @@ export class CityEngine {
     // 雨丝层贴相机前方；航拍期间强制晴朗（applyWeather 不跑，手动关掉防残留）。
     if (this.cinematic) this.rain?.setAmount(0);
     else this.rain?.update(dt, this.elapsed, this.camera);
+    // 游戏模式：环境装饰照常更新，但回放推进/tween/轨道相机/地形夹取/拾取全部让位——
+    // 相机与模拟只由 gameFrame 回调推进（单一所有权，§4）。渲染仍走本循环。
+    if (this.cameraOwner === "game" && this.gameFrame) {
+      this.gameFrame(dt);
+      this.parts?.update(dt, this.elapsed);
+      return;
+    }
     if (this.updateCinematic()) {
       this.parts?.update(dt, this.elapsed);
       return;
@@ -1638,6 +1718,8 @@ export class CityEngine {
   dispose(): void {
     this.disposed = true;
     this.stopLoop();
+    this.gameFrame = null;
+    this.cameraOwner = "orbit";
     this.observers.forEach((cleanup) => cleanup());
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
