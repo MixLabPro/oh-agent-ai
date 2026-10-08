@@ -25,14 +25,16 @@ export function chooseCore(geo: Geography, seed: number, random: (key: string) =
   // ② 广场落位后核心跟随（cityPlan）：snap 即使推开广场，环岛/放射主干仍围着广场画。
   // 曾试「候选核心硬门（landClearance ≥ 58 + isDry 52）」：civicPlazaCentred 同样归零，但核心被
   // 推离地理最优，四档普查平均分下降（t1 −0.019），不采用——约束已由 ①② 构造成立，见步 4 提交。
-  // 环线高架绕核心画：96 采样成活 < 最短 run（6 点）的核心降分——环合不拢的核只配当次选（§5.4）。
+  // 环线高架绕核心画：成活判据与生成端同口径（0..96 顺序、不跨首尾合并、run 需连续 ≥6 点）——
+  // 统计最长连续成活段，< 6 的核心降分：散点再多也拼不出一段合法高架（§5.4；评审 P2）。
   const ringSurvival = (c: Vec2): number => {
-    let alive = 0;
-    for (let i = 0; i < 96; i += 1) {
+    let longest = 0; let run = 0;
+    for (let i = 0; i <= 96; i += 1) {
       const q = ringPointAt(c, R, seed, (i / 96) * Math.PI * 2);
-      if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12) alive += 1;
+      if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12) { run += 1; if (run > longest) longest = run; }
+      else run = 0;
     }
-    return alive / 96;
+    return longest;
   };
   let core: Vec2 = { x: riverShift, z: 0 };
   let best = -Infinity;
@@ -43,7 +45,7 @@ export function chooseCore(geo: Geography, seed: number, random: (key: string) =
     const shore = coastDistance(x, z);
     const riverGap = hasRiver ? Math.abs(Math.abs(x - riverX(z)) - riverWidth(z) - 70) : 0;
     const score = -Math.abs(shore - 0.32 * R) - riverGap * 0.6 - Math.max(0, hillProj(x, z) - hillLine * 0.4) * 0.8 + random(`core${gx}:${gz}`) * 8;
-    const total = score - (ringSurvival({ x, z }) < 6 / 96 ? 40 : 0);
+    const total = score - (ringSurvival({ x, z }) < 6 ? 40 : 0);
     if (total > best) { best = total; core = { x, z }; }
   }
   return core;
