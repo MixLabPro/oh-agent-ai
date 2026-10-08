@@ -179,7 +179,8 @@ export const looseInlandRoadEnds: Constraint = {
     const world = {
       sites: planSites(plan),
       boulevardEnds: (plan.seaside?.samples ?? []).filter((s: Site) => s.valid && s.boulevard).map((s: Site) => s.boulevard),
-      coastRoadRunEnds: (plan.coastRoads ?? []).flatMap((r: Site[]) => [r[0], r[r.length - 1]]),
+      // 海段 + 河岸段（批次 3-2 清偿切片分歧：曾只看海段，宽河 run 端 >40 时修复豁免、检测计违例）
+      coastRoadRunEnds: [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])].flatMap((r: Site[]) => [r[0], r[r.length - 1]]),
       coast: plan.coast ?? [], river: plan.river ?? null,
     };
     for (const [id, d] of deg) { if (d !== 1) continue; const q = nodes.get(id); if (!q || isPlannedRoadEnd(q, world)) continue; out.push({ constraint: "looseInlandRoadEnds", at: { x: q.x, z: q.z }, detail: `node ${id}` }); }

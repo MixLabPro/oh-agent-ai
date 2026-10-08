@@ -4,6 +4,19 @@ import type { RoadEdge, Vec2 } from "../cityLayout";
 import { polylineClosest, wetCount } from "./footprint";
 import { addNetworkEdge, keyOf } from "./network";
 import { crosses, nearBridgeEnd, polylineDistance, safeRoadLink } from "./footprint";
+import { isPlannedRoadEnd } from "./endpoints";
+
+/** 与 constraints/networkRepairs 同一计划内终点视图（批次 3-2：repairs 的两处 height 门切语义判定）。 */
+function plannedEndWorld(ctx: RepairContext) {
+  const sites = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius);
+  return {
+    sites,
+    boulevardEnds: (ctx.seaside?.samples ?? []).filter((x: { valid: boolean; boulevard?: Vec2 }) => x.valid && x.boulevard).map((x: { boulevard?: Vec2 }) => x.boulevard!),
+    coastRoadRunEnds: ctx.coastRoadRunEnds,
+    coast: ctx.coast,
+    river: ctx.geo.river,
+  };
+}
 import type { RepairContext } from "./context";
 
 // 规划尾部的修复遍（CITY_ARCHITECTURE §2 迁移步 5b）：逐字从 cityPlan.ts 的 buildPlan 尾部搬来，闭包引用改为 ctx 解构，
@@ -140,7 +153,7 @@ export function detourAroundSites(ctx: RepairContext): number {
     const solid = () => [...edges.values()].filter((e) => !e.bridge);
     const degree = new Map<string, RoadEdge[]>();
     for (const e of solid()) for (const id of [e.from, e.to]) (degree.get(id) ?? degree.set(id, []).get(id)!).push(e);
-    const loose = [...degree.entries()].filter(([, list]) => list.length === 1).map(([id, list]) => ({ id, edge: list[0], at: nodes.get(id)! })).filter((x) => x.at && height(x.at.x, x.at.z) >= 2.5);
+    const loose = [...degree.entries()].filter(([, list]) => list.length === 1).map(([id, list]) => ({ id, edge: list[0], at: nodes.get(id)! })).filter((x) => x.at && !isPlannedRoadEnd(x.at, plannedEndWorld(ctx)));
     const sitesAll = [...publicSites, ...landmarks].filter((o) => o.radius);
     const crosses = (a: Vec2, b: Vec2) => solid().some((e) => {
       const [c, d] = e.points; if (roadNodeId(c) === roadNodeId(a) || roadNodeId(d) === roadNodeId(a) || roadNodeId(c) === roadNodeId(b) || roadNodeId(d) === roadNodeId(b)) return false;
@@ -192,7 +205,7 @@ export function extendLooseEnds(ctx: RepairContext): number {
       let healed = 0;
       for (const [id, list] of inc) {
         if (list.length !== 1) continue;
-        const at = nodes.get(id); if (!at || height(at.x, at.z) < 2.5) continue;
+        const at = nodes.get(id); if (!at || isPlannedRoadEnd(at, plannedEndWorld(ctx))) continue;
         if (sitesAll2.some((o) => Math.hypot(o.x - at.x, o.z - at.z) < o.radius + 12)) continue; // 伸进用地边缘的门前路是正常终点
         const own = list[0]; const [p0, p1] = own.points; const from = roadNodeId(p0) === id ? p1 : p0;
         const dx = at.x - from.x; const dz = at.z - from.z; const dl = Math.hypot(dx, dz); if (dl < 1) continue;

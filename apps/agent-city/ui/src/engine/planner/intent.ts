@@ -81,7 +81,7 @@ export function deriveDemands(plan: CityPlan, comp: Map<string, string>, primary
   }
   const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius) as Site[];
   for (const s of sites) demands.push({ id: `site:${s.id ?? s.kind}`, class: "site-access", required: true, anchor: s.id ?? s.kind });
-  (plan.coastRoads ?? []).forEach((_run, i) => demands.push({ id: `coastal:${i}`, class: "coastal-link", required: true, anchor: `run ${i}` }));
+  [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])].forEach((_run, i) => demands.push({ id: `coastal:${i}`, class: "coastal-link", required: true, anchor: `run ${i}` }));
   return demands;
 }
 
@@ -104,7 +104,7 @@ export function evaluateDemands(plan: CityPlan, comp: Map<string, string>, prima
       const satisfied = near <= s.radius + 20;
       return { demand: d, satisfied, reason: satisfied ? undefined : `no road within radius+20 of the plot edge (nearest centre distance ${Math.round(near)})` };
     }
-    const run = (plan.coastRoads ?? [])[Number(d.anchor.replace("run ", ""))] ?? [];
+    const run = [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])][Number(d.anchor.replace("run ", ""))] ?? [];
     // 挂接判定按几何邻接（run 折线点与节点 id 的浮点键不稳定）：任一端 1 单位内有主网分量节点。
     const primaryNodes = plan.roadNodes.filter((n) => comp.get(n.id) === primary);
     const attached = [run[0], run[run.length - 1]].some((end: Vec2 | undefined) => end && primaryNodes.some((n) => Math.hypot(n.x - end.x, n.z - end.z) < 1));
@@ -122,7 +122,7 @@ export function classifyEndpoints(plan: CityPlan, comp: Map<string, string>, pri
   const nodes = new Map(plan.roadNodes.map((n) => [n.id, n]));
   const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius) as Site[];
   const boulevardEnds = (plan.seaside?.samples ?? []).filter((s: { valid: boolean; boulevard?: Vec2 }) => s.valid && s.boulevard).map((s: { boulevard?: Vec2 }) => s.boulevard!);
-  const coastRoadRunEnds = (plan.coastRoads ?? []).flatMap((r: Vec2[]) => [r[0], r[r.length - 1]]);
+  const coastRoadRunEnds = [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])].flatMap((r: Vec2[]) => [r[0], r[r.length - 1]]);
   const out: EndpointDiagnostic[] = [];
   for (const [id, d] of deg) {
     if (d !== 1) continue;
