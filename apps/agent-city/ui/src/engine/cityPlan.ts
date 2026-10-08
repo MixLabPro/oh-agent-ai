@@ -23,6 +23,7 @@ import { buildGeography } from "./planner/geography";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
+import { connectServiceLoops } from "./planner/loop";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -874,6 +875,15 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       }
     }
   }
+
+  // ── 尽端环路（lollipop service loop，G 批 2026-10-08）：连接器孤立分量阶梯之后的专用遍
+  // （planner/loop.ts）。「包含/紧邻用地服务环的孤立分量」（体育场类：环形服务路不接主网、
+  // 通向用地的路断头，用户截图 ②）以单入口接入——一根入口路从主网最近边（split 成 T 口）连到
+  // 环上，环保持闭环。判据/入口角/确定性排序见 LOOP_CONFIG；入口路走 direct-projection 的地面
+  // 走廊校验（水/坡/用地/交叉），事务提交；失败进 connectionLog（id 前缀 loop:），不静默。
+  // 非服务环形态的残余分量（混合等级街区残片、<6 边碎枝）不属于本遍：如实保持隔离并计入
+  // disconnectedComponents 诊断。
+  connectServiceLoops({ world: connectorWorld, core, log: connectionLog });
 
   const parkTrees: CityLayout["parkTrees"] = [];
   const spanX = bbox.maxX - bbox.minX + 120; const spanZ = bbox.maxZ - bbox.minZ + 120;
