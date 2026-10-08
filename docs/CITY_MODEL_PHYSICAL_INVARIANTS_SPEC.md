@@ -85,16 +85,36 @@ type EdgeStructure =
 
 普查收益估算：120 岛 × ~10 用地的落水/压路扫描 → 15 行声明的一致性断言 + 放置期 O(候选) 求交。
 
-## 5. 新风险与对策：属性会说谎
+## 5. 三层承载与「属性会说谎」的对策
 
-属性与真实几何失配时，属性化把错误**藏深**（所有下游都信声明）。对策分三层：
+不变量按承载层分三级（2026-10-08 评审定稿）：**结构进类型、自洽进工厂、关系留守卫**。
 
-1. **声明一致性守卫**（新）：对每个建模建筑，用其几何构建代码的输出反算 footprint（顶点包围 →
-   凸包 → 与声明比对），偏差 > 0.5 即红。单点、离线、进 verify:city。
-2. **属性版本化**：PhysicalFootprint / EdgeStructure 携带 version；改模型几何必须同步改声明，
-   golden 把两者钉在一起（改其一不变另一个 = 守卫红）。
-3. **抽样回归网**：保留现普查的 5–10% 种子跑旧外部判据，作为属性路径的对照（防「一致性守卫
-   自己也错了」的共模失效）；两个季度无分歧后可撤。
+- **类型层（判别联合/interface）**：结构不变量——`EdgeStructure` 联合使「无 anchors 的 bridge」
+  不可表达；switch 穷尽性强制新增 kind 时全消费方适配；interface 保证每行必带
+  footprint/entrance/version。零运行时成本。
+- **构造层（工厂函数 + Object.freeze）**：声明自洽性——模型只能经注册入口产生：
+
+  ```ts
+  export function defineSiteSpec(row: SiteSpecInput): SiteSpec {
+    assert(row.physical.footprint.shape !== "rect" || row.physical.footprint.width > 0);
+    assert(reverseEngineeredBounds(row).within(row.physical.footprint, 0.5), "声明与几何失配");
+    return Object.freeze({ ...row, version: nextVersion() });
+  }
+  ```
+
+  选择工厂而非抽象类：模型是数据行 + 纯函数（渲染走 InstancedMesh 共享批次，无逐建筑实例可挂
+  方法；planner v2 的 D5 刚把闭包袋改纯数据，继承树是回退）。抽象类留给真正有行为的对象
+  （CityEngine/CityParts）。
+- **守卫层（跨对象关系）**：连通/锐角/净空求交，无归属对象，不可吸收。
+
+「属性会说谎」的对策随之收口为三条：
+
+1. **注册期一致性**（上面 defineSiteSpec 内嵌）：几何构建代码反算包围（顶点→凸包）与声明比对，
+   偏差 > 0.5 拒绝注册；表加载时全量跑一遍——守卫从逐岛扫描变为逐模型一次。
+2. **属性版本化**：PhysicalFootprint / EdgeStructure 携带 version；改几何必须同步改声明，
+   golden 把两者钉在一起（改其一不变另一个 = 红）。
+3. **抽样回归网**：普查保留 5–10% 种子跑旧外部判据作对照（防一致性检查自身共模失效）；
+   两个季度无分歧后可撤。
 
 ## 6. 分批落地
 
