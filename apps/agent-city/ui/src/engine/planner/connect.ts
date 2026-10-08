@@ -30,6 +30,11 @@ export type ConnectionFailure =
   | "water-span" | "slope" | "site-clearance" | "junction-angle" | "search-budget"
   | "no-target" | "stale-base" | "projection-loss" | "crossing";
 export type ConnectionStrategy = "direct-projection" | "node-merge" | "detour" | "grid-astar" | "bridge-candidate";
+// 形态 backlog（2026-10-08 盘点，详见 docs/CITY_PLANNER_V2_FINDINGS §5）：
+//  - "mini-roundabout"：三岔夹角 30–50° 灰区的候选档——用小型交通环消解冲突，替代「删短枝」，
+//    顺带压 acuteJunctions 残留（质量项，非装饰）。接线批之后立项。
+//  - 高架匝道/互通：不在此加档，随 RoadEdge 立体分层批次（设计 §4.2）。
+//  - 尽端回车圈（cul-de-sac bulb）：EndpointRole planned-local 的渲染层装饰，内容打磨批。
 const FAILURES: readonly string[] = ["water-span", "slope", "site-clearance", "junction-angle", "search-budget", "no-target", "stale-base", "projection-loss", "crossing"];
 
 /** 版本化连接器配置（设计 §6.3：参数取值实测后锁入版本化配置，禁散落默认数值）。 */
