@@ -56,7 +56,6 @@ addNetworkEdge(net2, { x: 100, z: 0 }, { x: 200, z: 0 }, false);
 commitNetworkPatch(net2, { baseVersion: 0, addEdges: [], removeEdgeIds: [], splits: [{ edgeId: "0:0/100:0", at: { x: 50, z: 0 } }] });
 commitNetworkPatch(net2, { baseVersion: 1, addEdges: [{ a: { x: 0, z: 0 }, b: { x: 0, z: 90 }, arterial: false }], removeEdgeIds: [], splits: [] });
 assert.equal(snap(net2), snap(net), "same patches must yield identical networks");
-<<<<<<< HEAD
 // 评审 P1-4 反例：离线拆分拒绝；宽度 9 完整继承
 const net3 = emptyNetwork();
 addNetworkEdge(net3, { x: 0, z: 0 }, { x: 100, z: 0 }, true);
@@ -67,8 +66,6 @@ r = commitNetworkPatch(net3, { baseVersion: 0, addEdges: [], removeEdgeIds: [], 
 assert.ok(r.ok, "on-line split must pass");
 assert.ok([...net3.edges.values()].every((e) => e.width === 9), "width 9 must be inherited by both halves");
 
-console.log("City network patch: split attribute inheritance, stale-base/validation/unknown-edge rejections with zero side effects, versioned atomic commit, deterministic.");
-=======
 
 // (f) removeNodeIds（桥头落地环批次）：孤立残点随补丁清除；仍被引用的节点拒绝且零副作用。
 {
@@ -85,4 +82,3 @@ console.log("City network patch: split attribute inheritance, stale-base/validat
   assert.equal(snap(net3), frozen3, "node-in-use commit mutated the network");
 }
 console.log("City network patch: split attribute inheritance, stale-base/validation/unknown-edge rejections with zero side effects, versioned atomic commit, orphan-node removal, deterministic.");
->>>>>>> city-bridgehead
