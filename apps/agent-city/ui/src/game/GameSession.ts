@@ -42,6 +42,8 @@ export type GameSessionSnapshot = {
   best: RaceResult | null;
   /** 当前路线身份摘要（无业务标识几何摘要；测试与调试用）。 */
   courseId: string | null;
+  /** 当前路线变体（测试与调试用）。 */
+  variant: number;
 };
 
 export class GameSession {
@@ -68,11 +70,16 @@ export class GameSession {
   /** 最近一次准备失败的原因（驱动「生成失败重试换 variant」的判定）。 */
   private lastPrepareFailure: string | null = null;
   private bestByCourse = new Map<string, RaceResult>();
+  /** 路线工厂（测试注入点：真实布局几乎不会生成失败，无法覆盖 no-course 分支）。 */
+  private readonly courseFactory: typeof generateRaceCourse;
 
   constructor(
     private readonly engine: CityEngine,
     private readonly events: GameSessionEvents,
-  ) {}
+    courseFactory?: typeof generateRaceCourse,
+  ) {
+    this.courseFactory = courseFactory ?? generateRaceCourse;
+  }
 
   /** 宿主互斥状态快照（进入判定用；由 React 层如实填充）。 */
   hostState(cinemaActive: boolean, filmActive: boolean, busy: boolean): EnterHostState {
@@ -108,7 +115,7 @@ export class GameSession {
     }
     if (kind.mode === "race") {
       if (!this.course) {
-        const course = generateRaceCourse({ world: this.world, params: this.params, citySeed: this.citySeed, physicsVersion: PHYSICS_VERSION, variant: this.variant });
+        const course = this.courseFactory({ world: this.world, params: this.params, citySeed: this.citySeed, physicsVersion: PHYSICS_VERSION, variant: this.variant });
         if (!course) return { ok: false, reason: "no-course", message: "这条航线暂时无法生成安全路线，可重试或先自由练习。" };
         this.course = course;
       }
@@ -204,8 +211,11 @@ export class GameSession {
     const snapshot = this.controller.snapshot;
     if (snapshot.selection?.mode !== "race") return;
     if (snapshot.error) {
+      // 显式换线是唯一的 variant 递增来源：清除失败标记，retryPrepare 不得再按
+      // no-course 推断递增（曾因此双递增、跳过一个 variant）。
       this.variant += 1;
       this.course = null;
+      this.lastPrepareFailure = null;
       this.retryPrepare();
       return;
     }
@@ -288,6 +298,7 @@ export class GameSession {
       mission: this.mission?.snapshot() ?? null,
       best: this.course ? this.bestByCourse.get(this.course.courseId) ?? null : null,
       courseId: this.course?.courseId ?? null,
+      variant: this.variant,
     };
   }
 

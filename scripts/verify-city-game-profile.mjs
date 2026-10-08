@@ -116,6 +116,20 @@ const { parseProfile, mergeRecord, EMPTY_PROFILE } = load(standalone);
   assert.equal(okPort.tier, "native");
   assert.equal(okPort.profile.records.length, 1);
   assert.equal(okPort.revision, 7);
+  // 结构损坏（审查 P2-2 回归）：信封有效但档案不合法 → 只读降级，saveProfile 不写回。
+  const structWrites = [];
+  const ioStruct = {
+    read: async () => ({ value: { totally: "garbage" }, revision: 3 }),
+    write: async (revision, value) => { structWrites.push({ revision, records: value.records.length }); return 4; },
+  };
+  const structPort = await embedded.loadProfilePort(ioStruct);
+  assert.equal(structPort.tier, "native", "结构损坏保留原生层身份");
+  assert.ok(structPort.readOnly, "结构损坏只读降级（不覆盖原件）");
+  assert.equal(structPort.profile.records.length, 0);
+  assert.equal(structPort.revision, 3);
+  const afterSave = await embedded.saveProfile(structPort, { ...embedded.EMPTY_PROFILE, records: [{ courseId: "x", bestTimeMs: 1, collisions: 0 }] });
+  assert.equal(structWrites.length, 0, "只读端口不得发起写回（原件完整保留在原生存储）");
+  assert.ok(afterSave.readOnly, "保存后仍只读");
 }
 
 console.log("verify-city-game-profile: ok");

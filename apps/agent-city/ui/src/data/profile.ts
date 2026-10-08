@@ -144,11 +144,30 @@ export async function loadProfilePort(native: NativeStateIo = defaultNativeIo): 
   if (embedded() && window.__AV_PLUGIN_INSTANCE__) {
     try {
       const read = await native.read();
-      const parsed = read && read.value !== null ? parseProfile(read.value) : null;
+      if (read && read.value !== null) {
+        const parsed = parseProfile(read.value);
+        if (parsed) {
+          return {
+            tier: "native",
+            profile: parsed.profile,
+            readOnly: parsed.readOnly,
+            revision: read.revision,
+          } as ProfilePort & { revision: number };
+        }
+        // 结构损坏（宿主信封有效、档案内容不合法）：只读降级——原件原封保留在
+        // 原生存储（宿主按设计不感知业务 schema，不会备份这类文件），空档案仅在
+        // 内存启用，绝不写回覆盖（§9「不能静默覆盖」；新成绩经 HUD 标注未保存）。
+        return {
+          tier: "native",
+          profile: { ...EMPTY_PROFILE },
+          readOnly: true,
+          revision: read.revision,
+        } as ProfilePort & { revision: number };
+      }
       return {
         tier: "native",
-        profile: parsed?.profile ?? { ...EMPTY_PROFILE },
-        readOnly: parsed?.readOnly ?? false,
+        profile: { ...EMPTY_PROFILE },
+        readOnly: false,
         revision: read?.revision ?? 0,
       } as ProfilePort & { revision: number };
     } catch (error) {

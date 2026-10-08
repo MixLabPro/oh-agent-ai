@@ -197,4 +197,26 @@ function fakeEngine() {
   session.exit();
 }
 
+// ── 5) variant 计数（审查 P2-1 回归）：生成失败重试 +1/次；错误面板「换路线」恰好 +1/次 ──
+{
+  const engine = fakeEngine();
+  engine.currentLayout = layout; engine.currentModel = model;
+  // 注入「总是失败」的路线工厂：真实布局不会生成失败，无法覆盖 no-course 分支。
+  const session = new GameSession(engine, { onState: () => {}, onExited: () => {} }, () => null);
+  const host = { cityReady: true, cinemaActive: false, filmActive: false, busy: false };
+  const refused = session.enter({ mode: "race" }, host);
+  assert.ok(!refused.ok && refused.reason === "no-course", "注入工厂令生成失败");
+  assert.ok(session.controller.snapshot.error, "进入错误面板");
+  const v0 = session.snapshot().variant;
+  // 错误面板「重试准备」：no-course 失败 → variant +1（仍失败）。
+  session.retryPrepare();
+  assert.equal(session.snapshot().variant, v0 + 1, "生成失败的重试换 variant");
+  // 错误面板「换一条路线」：恰好 +1（曾与重试推断叠加成 +2）。
+  session.newCourse();
+  assert.equal(session.snapshot().variant, v0 + 2, "换路线只递增一次");
+  session.newCourse();
+  assert.equal(session.snapshot().variant, v0 + 3, "再次换路线仍只 +1");
+  session.exit();
+}
+
 console.log("verify-city-game-session: ok");
