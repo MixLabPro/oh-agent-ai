@@ -20,19 +20,19 @@ const TIERS = [
 ];
 // 0 = 当前实测为 0 的约束必须保持为 0；非 0 的是已知残留。tier>1 的表覆盖 tier1 表（未列键沿用）。
 // disconnectedComponents / bridgeheadContinuity（批次 5-3 新增，诊断口径，阈值=实测值）：
-// 前者度量最终图的孤立分量（多数为断头收尾/修复删边再造的隔离——批次 4-3b 加了角度从宽的
-// 并线末档后实测 t1 19/t3 10/t5 3/t10 3 岛，前值 24/12/6/3；被水/地形围死的分量保持隔离），
-// 后者度量悬空桥头（16/9/6/1 岛 → 15/9/5/1；桥建成后接续地面路被后续阶段删除——批次前不可见）。
+// 批次 4-3c 加了跨河档（bridge-candidate ≤84 连续水段）与帆形歌剧院岸点选址避让后实测
+// t1 2 / t3 1 / t5 1 / t10 0 岛（前值 19/10/3/3——多数孤立分量隔河而居，跨河桥是设计 §4.2
+// 的正解）；悬空桥头 t1 8 / t3 5 / t5 4 / t10 1（桥建成后接续地面路被后续阶段删除——批次前不可见）。
 const CEILING = {
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
   stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,
   suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 17, acuteJunctions: 5, crowdedArterials: 4,
-  disconnectedComponents: 19, bridgeheadContinuity: 15,
+  disconnectedComponents: 2, bridgeheadContinuity: 8,
 };
 const TIER_CEILING = {
-  3: { siteInWater: 4, looseInlandRoadEnds: 4, acuteJunctions: 2, crowdedArterials: 2, disconnectedComponents: 10, bridgeheadContinuity: 9 },
-  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 3, bridgeheadContinuity: 5 },
-  10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 3, bridgeheadContinuity: 1 },
+  3: { siteInWater: 4, looseInlandRoadEnds: 4, acuteJunctions: 1, crowdedArterials: 0, disconnectedComponents: 1, bridgeheadContinuity: 5 },
+  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 1, bridgeheadContinuity: 4 },
+  10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 0, bridgeheadContinuity: 1 },
 };
 const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],

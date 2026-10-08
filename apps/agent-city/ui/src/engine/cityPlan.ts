@@ -447,6 +447,12 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const deep = isDeepWater(footprintGeo, c, site.radius);
       if (!deep || others.some((o) => Math.hypot(o.x - c.x, o.z - c.z) < o.radius + site.radius + (o.kind === "harbor" ? 120 : 30))) continue;
       if (height(shore.x - out.x * 6, shore.z - out.z * 6) < 0.3) continue; // 堤道陆地端要踩在实地上
+      // 岸点本身要有落路空间：岸点是被其它用地圈住时（实测 seed 42/无配置档：villa-complex 后来
+      // 挪到离帆形歌剧院岸点 21 单位处，修复挪位是网络优先批次后路网变化引发的），门口到最近路
+      // 的每条候选线都从用地圈里出发，入口路全部失败、堤道两头悬空（bridgeheadContinuity）。
+      // 选址期直接避开，不靠修复遍「恰好不撞」。
+      const landing = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
+      if (others.some((o) => Math.hypot(o.x - landing.x, o.z - landing.z) < o.radius + 30)) continue;
       site.x = c.x; site.z = c.z; site.shore = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
       site.yaw = -Math.atan2(out.z, out.x);
       break;
@@ -968,6 +974,20 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
             const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: false, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["node-merge"], anglePolicy: "relaxed" });
             connectionLog.push({ id: `isolate-relaxed:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
             if (result.ok) { linked = true; break; }
+          }
+        }
+        if (!linked && pass === 2) {
+          // 跨河档（设计 §4.2「跨河允许 ground→bridge→ground」）：连续水段 ≤84 才可成桥——跨距上限
+          // 本身就排除了跨海长桥（不从「遇水」自动推断可修桥的落点）。桥头干地/用地避让/落点拆边
+          // 全在 bridge-candidate 判据内；桥梁注册表同步登记。实测 seed 123456789/t2：143 节点分量与
+          // 主网隔一条 ~40 宽的河口，前几档全部 slope/water-span 拒绝。
+          for (const member of ordered) {
+            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: true, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { blockers: reservations() }, crossings: false });
+            connectionLog.push({ id: `isolate-bridge:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
+            if (result.ok) {
+              for (const span of result.bridgeSpans) bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
+              linked = true; break;
+            }
           }
         }
         recompute();
