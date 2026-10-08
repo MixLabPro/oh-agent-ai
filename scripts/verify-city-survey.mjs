@@ -39,6 +39,32 @@ const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity
   "engine/planner/constraints.ts": ["CONSTRAINTS"], "engine/planner/score.ts": ["scorePlan"],
 });
 const summaries = [];
+// 独立验收集（评审 2026-10-09：seed 只进测试、不决定规则；调参集 2_000_000_000 系与验收集分离）。
+// 3_000_000_000 系从未参与本线任何调试/阈值决策，同上限独立跑一遍——过拟合在它面前现形。
+const ACCEPT_BASE = 3_000_000_000;
+const acceptance = [];
+const ACCEPT_CEILING = { siteWithoutDoorRoad: 1, looseInlandRoadEnds: 16, acuteJunctions: 4, crowdedArterials: 2, bridgeheadContinuity: 5 };
+// 2026-10-09 独立验收集（3_000_000_000 系）首测基线=实测值（棘轮起点，只降不升）：t1 门路 1（seed 3005341179
+// villa-complex 门链全败）、t1 断头 16、t3 断头 7/锐角 4、扎堆 t1 2/t3 1、桥头 t1 5/t10 3——调参集（2_000_000_000 系）上限不泛化的直接证据；逐项修复后归零回落。
+for (const { tier, seeds } of TIERS) {
+  const ceiling = { ...CEILING, ...(TIER_CEILING[tier] ?? {}) };
+  const islands = new Map(CONSTRAINTS.map((c) => [c.id, []]));
+  for (let i = 0; i < seeds; i += 1) {
+    const seed = ACCEPT_BASE + i * 104_729;
+    const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
+    for (const c of CONSTRAINTS) if (c.measure(plan).length) islands.get(c.id).push(seed);
+  }
+  const problems = [];
+  for (const c of CONSTRAINTS) {
+    const n = islands.get(c.id).length;
+    const accCeil = c.id in ACCEPT_CEILING ? ACCEPT_CEILING[c.id] : (ceiling[c.id] ?? 0);
+    if (n > accCeil) problems.push(`tier ${tier} ${c.id}: ${n}/${seeds} (acceptance ceiling ${accCeil}) e.g. ${islands.get(c.id).slice(0, 2).join(", ")}`);
+  }
+  assert.equal(problems.length, 0, `INDEPENDENT ACCEPTANCE SET regressed (overfitting signal):\n  ${problems.join("\n  ")}`);
+  const residual = [...islands].map(([id, l]) => `${id} ${l.length}`).filter((x) => !x.endsWith(" 0")).join(", ");
+  acceptance.push(`t${tier}: ${residual || "clean"}`);
+}
+console.log(`City acceptance (independent seeds, never used for tuning): ${acceptance.join(" | ")}.`);
 for (const { tier, seeds } of TIERS) {
   const ceiling = { ...CEILING, ...(TIER_CEILING[tier] ?? {}) };
   const islands = new Map(CONSTRAINTS.map((c) => [c.id, []]));
