@@ -29,17 +29,19 @@ export type RoadClass = "arterial" | "collector" | "local";
 export type ConnectionFailure =
   | "water-span" | "slope" | "site-clearance" | "junction-angle" | "search-budget"
   | "no-target" | "stale-base" | "projection-loss" | "crossing";
-export type ConnectionStrategy = "direct-projection" | "node-merge" | "detour" | "grid-astar" | "bridge-candidate";
+export type ConnectionStrategy = "direct-projection" | "node-merge" | "detour" | "grid-astar" | "bridge-candidate" | "mini-roundabout";
 // 形态 backlog（2026-10-08 盘点，详见 docs/CITY_PLANNER_V2_FINDINGS §5）：
-//  - "mini-roundabout"：三岔夹角 30–50° 灰区的候选档——用小型交通环消解冲突，替代「删短枝」，
-//    顺带压 acuteJunctions 残留（质量项，非装饰）。接线批之后立项。
+//  - "mini-roundabout"（city-roundabout 批次已立项，见下方「策略档」一节）：三岔夹角灰带用小型
+//    交通环消解冲突，替代「删短枝」，压 acuteJunctions 残留。不在 DEFAULT_LADDER——它修复
+//    既有路口，不是「从源到目标」的连接搜索；入口在 networkRepairs.resolveAcuteJunctions（删是最后手段）。
 //  - 高架匝道/互通：不在此加档，随 RoadEdge 立体分层批次（设计 §4.2）。
 //  - 尽端回车圈（cul-de-sac bulb）：EndpointRole planned-local 的渲染层装饰，内容打磨批。
 const FAILURES: readonly string[] = ["water-span", "slope", "site-clearance", "junction-angle", "search-budget", "no-target", "stale-base", "projection-loss", "crossing"];
 
-/** 版本化连接器配置（设计 §6.3：参数取值实测后锁入版本化配置，禁散落默认数值）。 */
+/** 版本化连接器配置（设计 §6.3：参数取值实测后锁入版本化配置，禁散落默认数值）。
+ *  v2（city-roundabout 批次）：新增 mini-roundabout 策略档参数，旧键不动。 */
 export const CONNECTOR_CONFIG = {
-  version: 1,
+  version: 2,
   minJunctionAngleDeg: 60,      // 直连落点在中段时的最小夹角（connectToNetwork 历史默认档）
   endpointClearAngleDeg: 35,    // 端点处与既有路的净空角（clearAngle 历史口径）
   snapEndDistance: 12,          // 垂足离路段端 <12 吸附到端点（不留碎段）
@@ -57,6 +59,14 @@ export const CONNECTOR_CONFIG = {
   bridgeSampleSpacing: 6,       // 显式桥候选的连线采样步长（入口路历史口径）
   bridgeMaxSpanSamples: 14,     // 连续水段 ≤ 14 采样 ≈ 84 单位才可成桥（入口路历史口径）
   bridgeCandidates: 40,         // 桥候选按距离取前 N 个投影点（入口路历史口径；界限是候选数不是半径）
+  // mini-roundabout 策略档（半径 10–14 的交叉口环，4–6 段弧边；见 proposeMiniRoundabout）
+  roundaboutRadii: [10, 12, 14],       // 半径尝试档（确定性顺序，区间 10–14）
+  roundaboutMaxPairAngleDeg: 50,       // 策略带宽：路口相邻边最小夹角 < 50° 才建环（30–50° 灰区；<30° 对按阈值放宽 (b) 接纳）
+  roundaboutArcStepDeg: 90,            // 单段弧边跨越的最大圆心角（三岔口按角差 ceil 分段，合计恒 4–6 段）
+  roundaboutMinSegments: 4,            // 弧段数下限（契约：环是 4–6 段）
+  roundaboutMaxSegments: 6,            // 弧段数上限
+  roundaboutMinChord: 3,               // 弧段最小弦长（防碎边；对夹角 <≈12° 三档半径都建不成，如实退回删除）
+  roundaboutMinOuter: 6,               // 切点之后腿的剩余长度下限（不切出短残腿；不足则该档半径作废）
 };
 
 export type ConnectionTarget =
@@ -509,6 +519,166 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
     return { ok: true, join: { edge: candidate.edge, at: join, onEnd }, polyline, cost, bridgeSpans: span ? [{ from: span[0], to: span[1] }] : [] };
   }
   return { ok: false, reason: nearestReject, detail: `no bridge candidate within ${CONNECTOR_CONFIG.bridgeCandidates} projections (${nearestReject})` };
+}
+
+// ── 策略档（不在 DEFAULT_LADDER）：mini-roundabout 小型交通环（city-roundabout 批次，形态盘点 §5-1）──
+// 作用对象：三岔口（共享端点 V 的 3 条腿）里相邻边最小夹角落入灰带（< roundaboutMaxPairAngleDeg=50°，
+// 覆盖 30–50° 灰区；acuteJunctions 标记的 <30° 对按「阈值放宽 (b)」接纳——只要建环后新路口的
+// 相邻边夹角全部 ≥30°，原本 <30° 的对也以环消解）。做法：以 V 为圆心、半径 10–14 建环，三条腿在
+// 环上切断（切点 = 腿方向上距 V 半径处），环按相邻切点的角差分段（每段 ≤90°，三岔口合计恒 4–6 段）；
+// 补丁 = 删 3 条整腿 + 加「腿剩余段（arterial/primary 标志精确重建 5/8/12 宽；主干允许进环，桥腿不参与）
+// + 全部弧段（local 5 宽环流）」，等价于 split 后去掉 V→切点的残头，一次性经 commitNetworkPatch 事务
+// 提交（§4.3：草稿复核 → 版本匹配 → 一次替换，失败零副作用）。弧段逐条过 corridorFailure 地面校验
+// 与既有路交叉检查；提交期还在草稿上复核「环上每个 ≥3 度路口相邻边夹角 ≥30°」（acuteJunctions 同款
+// 判据——阈值放宽的后验门）。调用方（networkRepairs.resolveAcuteJunctions）把本档排在「删短枝」之前：
+// 删除是建环失败后的最后手段。
+
+export type RoundaboutResult =
+  | { ok: true; version: number; strategy: "mini-roundabout"; patch: NetworkPatch; radius: number; ring: Vec2[] }
+  | { ok: false; reason: ConnectionFailure; detail: string };
+
+/** 腿可重建：拆掉重加须由 arterial/primary 标志精确恢复宽度（local 5 / arterial 8 / 主干 12——主干
+ *  允许进环：市政广场外环本就有主干放射其上，环是路口形态不是删路，不违反删除路径的主干保护）。
+ *  桥腿不参与（环段是地面弧边，不能替换桥跨）。环段一律 local 5 宽：环是慢行环流，等级在进口
+ *  保留；同时避免 4/6 段环的对边平行弧段触发 crowdedArterials（该约束先于环存在，不为其豁免）。 */
+function roundaboutRebuildable(edge: RoadEdge): boolean {
+  return !edge.bridge && (edge.kind === "arterial" ? edge.width === 8 || edge.width === 12 : edge.width === 5);
+}
+
+/** 提案：几何 + 走廊 + 交叉 + 环上角度复核；半径按 [10,12,14] 顺序试第一档全过的（确定性）。 */
+function proposeMiniRoundabout(
+  world: ConnectorWorld,
+  center: { id: string; x: number; z: number },
+  legs: RoadEdge[],
+): { patch: NetworkPatch; radius: number; ring: Vec2[] } | { reason: ConnectionFailure; detail: string } {
+  const centerId = center.id;
+  if (legs.length !== 3) return { reason: "no-target", detail: `mini-roundabout needs a 3-way junction, got ${legs.length} legs` };
+  for (const leg of legs) {
+    if (leg.from !== centerId && leg.to !== centerId) return { reason: "no-target", detail: `leg ${leg.id} not incident to ${centerId}` };
+    if (!roundaboutRebuildable(leg)) return { reason: "no-target", detail: `leg ${leg.id} not rebuildable (bridge, or width ${leg.width}/kind ${leg.kind} outside the 5/8/12 reconstruction set)` };
+  }
+  // 腿方向（V → 远端），按角度排序（稳定次级键 = 腿 id）；夹角灰带之外不是本档的活。
+  const directed = legs.map((leg) => {
+    const far = leg.from === centerId ? leg.points[leg.points.length - 1] : leg.points[0];
+    const a = Math.atan2(far.z - center.z, far.x - center.x);
+    return { leg, far, a: ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2), len: Math.hypot(far.x - center.x, far.z - center.z) };
+  }).sort((x, y) => x.a - y.a || (x.leg.id < y.leg.id ? -1 : 1));
+  let minGap = Infinity;
+  for (let k = 0; k < directed.length; k += 1) {
+    const next = k + 1 < directed.length ? directed[k + 1].a : directed[0].a + Math.PI * 2;
+    minGap = Math.min(minGap, next - directed[k].a);
+  }
+  if (minGap >= (CONNECTOR_CONFIG.roundaboutMaxPairAngleDeg * Math.PI) / 180) {
+    return { reason: "junction-angle", detail: `junction min gap ${Math.round((minGap * 180) / Math.PI)}deg outside the roundabout band (<${CONNECTOR_CONFIG.roundaboutMaxPairAngleDeg}deg)` };
+  }
+  const policy = fallbackPolicy(world);
+  const legIds = new Set(legs.map((e) => e.id));
+  let last: { reason: ConnectionFailure; detail: string } = { reason: "no-target", detail: "no radius candidate" };
+  for (const radius of CONNECTOR_CONFIG.roundaboutRadii) {
+    // 切点 + 腿剩余段（剩余 < roundaboutMinOuter 的档作废——不切出短残腿）。
+    let outerOk = true;
+    for (const d of directed) {
+      if (d.len - radius < CONNECTOR_CONFIG.roundaboutMinOuter) {
+        last = { reason: "no-target", detail: `leg ${d.leg.id} remainder ${Math.round(d.len - radius)} < ${CONNECTOR_CONFIG.roundaboutMinOuter} at r=${radius}` };
+        outerOk = false; break;
+      }
+    }
+    if (!outerOk) continue;
+    // 环点：切点 + 各角差的中间点（每段 ≤90°，ceil 分段）；三岔口合计 4–6 段（弧段数 = 环点数，首尾相接）。
+    const ring: Array<{ p: Vec2; leg: number }> = [];
+    for (let k = 0; k < directed.length; k += 1) {
+      const d = directed[k];
+      ring.push({ p: keyOf({ x: center.x + ((d.far.x - center.x) / d.len) * radius, z: center.z + ((d.far.z - center.z) / d.len) * radius }), leg: k });
+      const a0 = d.a;
+      const a1 = k + 1 < directed.length ? directed[k + 1].a : directed[0].a + Math.PI * 2;
+      const span = a1 - a0;
+      const n = Math.max(1, Math.ceil((span * 180) / Math.PI / CONNECTOR_CONFIG.roundaboutArcStepDeg));
+      for (let s = 1; s < n; s += 1) ring.push({ p: keyOf({ x: center.x + radius * Math.cos(a0 + (span * s) / n), z: center.z + radius * Math.sin(a0 + (span * s) / n) }), leg: -1 });
+    }
+    if (ring.length < CONNECTOR_CONFIG.roundaboutMinSegments || ring.length > CONNECTOR_CONFIG.roundaboutMaxSegments) {
+      last = { reason: "no-target", detail: `ring has ${ring.length} arc segments (band ${CONNECTOR_CONFIG.roundaboutMinSegments}..${CONNECTOR_CONFIG.roundaboutMaxSegments}) at r=${radius}` };
+      continue;
+    }
+    // 弧段硬检查：弦长下限（防碎边）+ corridorFailure 地面校验（不过水/可建/坡度/避让用地）+ 不与既有路交叉（被替换的三条腿除外）。
+    let failure: ConnectionFailure | null = null;
+    let detail = "";
+    for (let k = 0; k < ring.length && !failure; k += 1) {
+      const p = ring[k].p; const q = ring[(k + 1) % ring.length].p;
+      if (Math.hypot(q.x - p.x, q.z - p.z) < CONNECTOR_CONFIG.roundaboutMinChord) { failure = "no-target"; detail = `arc chord ${k} shorter than ${CONNECTOR_CONFIG.roundaboutMinChord} at r=${radius}`; break; }
+      const corridor = corridorFailure(world, p, q, policy);
+      if (corridor) { failure = corridor; detail = `arc chord ${k} failed ${corridor} at r=${radius}`; break; }
+      for (const other of world.network.edges.values()) {
+        if (legIds.has(other.id)) continue;
+        if (crosses(p, q, other.points[0], other.points[1])) { failure = "crossing"; detail = `arc chord ${k} crosses edge ${other.id} at r=${radius}`; break; }
+      }
+    }
+    if (!failure) {
+      // 环上角度复核（acuteJunctions 同款判据）：切点 = 腿剩余段 + 两侧弧段；中间点 = 两侧弧段。
+      // 构造上夹角 ≥90°（径向 vs 弦切向 ±半步、弧段间 180°−步长），此处显式复核防数值退化。
+      for (let k = 0; k < ring.length && !failure; k += 1) {
+        const cur = ring[k]; const prev = ring[(k + ring.length - 1) % ring.length]; const next = ring[(k + 1) % ring.length];
+        const dirs = [Math.atan2(prev.p.z - cur.p.z, prev.p.x - cur.p.x), Math.atan2(next.p.z - cur.p.z, next.p.x - cur.p.x)];
+        if (cur.leg >= 0) dirs.push(Math.atan2(directed[cur.leg].far.z - cur.p.z, directed[cur.leg].far.x - cur.p.x));
+        const sorted = dirs.map((a) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)).sort((x, y) => x - y);
+        for (let m = 0; m < sorted.length && !failure; m += 1) {
+          const gap = (m + 1 < sorted.length ? sorted[m + 1] : sorted[0] + Math.PI * 2) - sorted[m];
+          if (gap < (30 * Math.PI) / 180) { failure = "junction-angle"; detail = `ring junction ${k} gap ${Math.round((gap * 180) / Math.PI)}deg < 30deg at r=${radius}`; }
+        }
+      }
+    }
+    if (failure) { last = { reason: failure, detail }; continue; }
+    // 补丁：删 3 条整腿，加腿剩余段（arterial/primary 标志精确重建 5/8/12 宽）+ 弧段（local 5 宽的环流）。
+    const addEdges: NetworkPatch["addEdges"] = directed.map((d, k) => ({ a: ring.find((r) => r.leg === k)!.p, b: d.far, arterial: d.leg.kind === "arterial", primary: d.leg.width >= 12 }));
+    for (let k = 0; k < ring.length; k += 1) addEdges.push({ a: ring[k].p, b: ring[(k + 1) % ring.length].p, arterial: false });
+    return { patch: { baseVersion: world.network.version ?? 0, removeEdgeIds: legs.map((e) => e.id), splits: [], addEdges }, radius, ring: ring.map((r) => r.p) };
+  }
+  return last;
+}
+
+/** 建环并事务提交。成功后清掉环心 V（三条腿全删后成为孤立节点——componentOf 按节点并查集算分量，
+ *  孤立节点会被 disconnectedComponents 计成新分量；applyOps 无节点删除原语，这里与 dropEdge 同款
+ *  只在成功提交后清这一个 id，且仅当它确实无关联边）。 */
+export function runMiniRoundabout(world: ConnectorWorld, center: { id: string; x: number; z: number }, legs: RoadEdge[]): RoundaboutResult {
+  const live = legs.map((e) => world.network.edges.get(e.id)).filter((e): e is RoadEdge => !!e);
+  if (live.length !== legs.length) return { ok: false, reason: "projection-loss", detail: `only ${live.length}/${legs.length} legs still in the network` };
+  const proposal = proposeMiniRoundabout(world, center, live);
+  if ("reason" in proposal) return { ok: false, reason: proposal.reason, detail: proposal.detail };
+  const legIds = new Set(live.map((e) => e.id));
+  const committed = commitNetworkPatch(world.network, proposal.patch, (draft) => {
+    for (let k = 0; k < proposal.ring.length; k += 1) {
+      const p = proposal.ring[k]; const q = proposal.ring[(k + 1) % proposal.ring.length];
+      for (const other of draft.edges.values()) {
+        if (legIds.has(other.id)) continue; // 腿剩余段与弧段共线/共享端点，strict crosses 不计
+        if (crosses(p, q, other.points[0], other.points[1])) return `crossing ${other.id}`;
+      }
+    }
+    for (const point of proposal.ring) {
+      const id = roadNodeId(keyOf(point));
+      const node = draft.nodes.get(id);
+      if (!node) continue;
+      const dirs: number[] = [];
+      for (const e of draft.edges.values()) {
+        if (e.from !== id && e.to !== id) continue;
+        const other = e.from === id ? e.points[e.points.length - 1] : e.points[0];
+        dirs.push(Math.atan2(other.z - node.z, other.x - node.x));
+      }
+      if (dirs.length < 3) continue; // 环上中间点是 2 度折点；角度守卫只量 ≥3 度路口
+      const sorted = dirs.map((a) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)).sort((x, y) => x - y);
+      for (let m = 0; m < sorted.length; m += 1) {
+        const gap = (m + 1 < sorted.length ? sorted[m + 1] : sorted[0] + Math.PI * 2) - sorted[m];
+        if (gap < (30 * Math.PI) / 180) return `junction-angle ring node ${id} gap ${Math.round((gap * 180) / Math.PI)}deg < 30deg`;
+      }
+    }
+    return null;
+  });
+  if (!committed.ok) {
+    const failure = (committed.detail ?? "").split(" ")[0];
+    return { ok: false, reason: committed.reason === "stale-base" ? "stale-base" : FAILURES.includes(failure) ? failure as ConnectionFailure : "projection-loss", detail: committed.detail ?? committed.reason };
+  }
+  let incident = false;
+  for (const e of world.network.edges.values()) if (e.from === center.id || e.to === center.id) { incident = true; break; }
+  if (!incident) world.network.nodes.delete(center.id);
+  return { ok: true, version: committed.version, strategy: "mini-roundabout", patch: proposal.patch, radius: proposal.radius, ring: proposal.ring };
 }
 
 // ── 阶梯汇总 + 事务提交（§4.3：草稿验证、失败零副作用）───────────────────────────────────
