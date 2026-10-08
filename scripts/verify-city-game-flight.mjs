@@ -98,7 +98,7 @@ const flatLayout = {
   assert.equal(sweepFlight(world, { x: 90, y: 45, z: 0 }, { x: 110, y: 45, z: 0 }, 1.5), null, "楼顶上方通过不误报");
 }
 
-// ── 4) FlightInput：映射/输入框忽略/失焦清空（DOM shim）──
+// ── 4) FlightInput：映射/焦点门槛/输入框忽略/失焦清空（DOM shim）──
 {
   class HTMLElement {}
   const listeners = new Map();
@@ -106,26 +106,35 @@ const flatLayout = {
     addEventListener: (type, fn) => { const list = listeners.get(`${target}:${type}`) ?? []; list.push(fn); listeners.set(`${target}:${type}`, list); },
     removeEventListener: (type, fn) => { const list = (listeners.get(`${target}:${type}`) ?? []).filter((item) => item !== fn); listeners.set(`${target}:${type}`, list); },
   });
-  const documentShim = { visibilityState: "visible", addEventListener: emitter("document").addEventListener, removeEventListener: emitter("document").removeEventListener };
+  const documentShim = { visibilityState: "visible", activeElement: null, addEventListener: emitter("document").addEventListener, removeEventListener: emitter("document").removeEventListener };
+  let canvasFocused = false;
   const { FlightInput } = load("game/FlightInput.ts", { window: emitter("window"), document: documentShim, HTMLElement });
   const interrupts = [];
-  const input = new FlightInput({ shouldConsumeArrows: () => true, onInterrupt: (reason) => interrupts.push(reason) });
+  const input = new FlightInput({ isGameFocused: () => canvasFocused, shouldConsumeArrows: () => canvasFocused, onInterrupt: (reason) => interrupts.push(reason) });
   input.attach();
   const key = (code, target = null, extra = {}) => (listeners.get("window:keydown") ?? []).forEach((fn) => fn({ code, target, isComposing: false, repeat: false, preventDefault: () => {}, ...extra }));
   const keyUp = (code) => (listeners.get("window:keyup") ?? []).forEach((fn) => fn({ code, target: null }));
+  // 画布未聚焦：按键不进入飞行状态（HUD 按钮/宿主控件聚焦时不误控飞机）。
+  key("KeyW");
+  assert.equal(input.snapshot().throttleUp, false, "未聚焦时 WASD 不进入飞行状态");
+  canvasFocused = true;
   key("KeyW"); key("KeyA"); key("ArrowUp");
   const snapshotEqual = (value, expected, label) => {
     for (const field of Object.keys(expected)) assert.equal(value[field], expected[field], `${label}: ${field}`);
   };
   snapshotEqual(input.snapshot(), { throttleUp: true, throttleDown: false, turnLeft: true, turnRight: false, pitchUp: true, pitchDown: false }, "按键映射");
   // 输入框/输入法期间不处理。
-  key("KeyD", new HTMLElement()); // 非 typing target：正常生效
-  keyUp("KeyD");
   key("KeyS", Object.assign(Object.create(HTMLElement.prototype), { tagName: "INPUT", isContentEditable: false }));
   assert.equal(input.snapshot().throttleDown, false, "输入框内的按键不进入游戏");
   key("KeyS", null, { isComposing: true });
   assert.equal(input.snapshot().throttleDown, false, "输入法组合期间的按键不进入游戏");
+  // 焦点离开画布后的 keyup 仍要清除（不粘键）。
+  canvasFocused = false;
+  keyUp("KeyW");
+  assert.equal(input.snapshot().throttleUp, false, "未聚焦时 keyup 仍清除状态");
   // 失焦：清空按键 + focus-lost 回调。
+  canvasFocused = true;
+  key("KeyW");
   (listeners.get("window:blur") ?? []).forEach((fn) => fn());
   snapshotEqual(input.snapshot(), { throttleUp: false, throttleDown: false, turnLeft: false, turnRight: false, pitchUp: false, pitchDown: false }, "失焦清空按键");
   assert.equal(interrupts.at(-1), "focus-lost");
@@ -137,10 +146,8 @@ const flatLayout = {
   assert.equal(interrupts.at(-1), "host-hidden");
   // detach 后监听成对释放。
   input.detach();
-  const before = listeners.get("window:keydown")?.length ?? 0;
-  assert.equal(before, 0, "detach 后 keydown 监听为空");
-  const blurCount = listeners.get("window:blur")?.length ?? 0;
-  assert.equal(blurCount, 0, "detach 后 blur 监听为空");
+  assert.equal(listeners.get("window:keydown")?.length ?? 0, 0, "detach 后 keydown 监听为空");
+  assert.equal(listeners.get("window:blur")?.length ?? 0, 0, "detach 后 blur 监听为空");
 }
 
 console.log("verify-city-game-flight: ok");

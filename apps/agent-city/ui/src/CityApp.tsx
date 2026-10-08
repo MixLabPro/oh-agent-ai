@@ -204,8 +204,8 @@ export function CityApp() {
     : !dataAvailable || projection.status === "empty" ? status : null;
   return cityView((
     <section className="city-app" aria-label="Agent City">
-      <canvas className="city-canvas" ref={canvasRef} aria-label="Agent City 三维城市" style={{ visibility: sceneMessage ? "hidden" : "visible" }} />
-      {sceneMessage && <p className="city-scene-message" role="status">{sceneMessage}</p>}
+      <canvas className="city-canvas" ref={canvasRef} aria-label="Agent City 三维城市" style={{ visibility: sceneMessage && !game.active ? "hidden" : "visible" }} />
+      {sceneMessage && !game.active && <p className="city-scene-message" role="status">{sceneMessage}</p>}
       {!embedded() && <header className="city-header">
         <div className="city-local-toolbar">{tools.map((tool) => tool.kind === "select"
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>

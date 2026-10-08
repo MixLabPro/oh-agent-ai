@@ -78,68 +78,76 @@ export class GameSession {
   enter(kind: GameSelection, host: EnterHostState): { ok: true } | { ok: false; reason: string } {
     const attempt = this.controller.enter(kind, host);
     if (!attempt.ok) return { ok: false, reason: attempt.refusal };
-    const layout = this.engine.currentLayout;
-    const model = this.engine.currentModel;
-    if (!layout || !model) {
-      this.settleFailure("城市尚未就绪，暂时无法起飞。");
-      return { ok: false, reason: "not-ready" };
+    const build = this.ensureRunObjects(kind);
+    if (!build.ok) {
+      this.settleFailure(build.message);
+      return { ok: false, reason: build.reason };
     }
-    this.citySeed = layout.seed;
-    const world = new FlightWorld({ layout, model, cursorMs: this.engine.replayCursor });
-    const diagonal = Math.hypot(layout.urbanBounds.right - layout.urbanBounds.left, layout.urbanBounds.south - layout.urbanBounds.north);
-    const params = flightParamsFor(diagonal);
+    this.attachRun();
+    return { ok: true };
+  }
+
+  /**
+   * 准备/重试共用的对象保障：world/params 优先沿用既有冻结快照（重试复用原世界），
+   * 缺失时从引擎现状态重建；race 缺 course 时按当前 variant 生成；出生点与相机接管
+   * 在此检查。失败返回可识别原因——调用方进入错误面板，绝不带着半套对象起跑。
+   */
+  private ensureRunObjects(kind: GameSelection): { ok: true } | { ok: false; reason: string; message: string } {
+    if (!this.world || !this.params) {
+      const layout = this.engine.currentLayout;
+      const model = this.engine.currentModel;
+      if (!layout || !model) return { ok: false, reason: "not-ready", message: "城市尚未就绪，暂时无法起飞。" };
+      this.citySeed = layout.seed;
+      this.world = new FlightWorld({ layout, model, cursorMs: this.engine.replayCursor });
+      const diagonal = Math.hypot(layout.urbanBounds.right - layout.urbanBounds.left, layout.urbanBounds.south - layout.urbanBounds.north);
+      this.params = flightParamsFor(diagonal);
+    }
     if (kind.mode === "race") {
-      const course = generateRaceCourse({ world, params, citySeed: layout.seed, physicsVersion: PHYSICS_VERSION, variant: this.variant });
-      if (!course) {
-        this.settleFailure("这条航线暂时无法生成安全路线，可重试或先自由练习。");
-        return { ok: false, reason: "no-course" };
+      if (!this.course) {
+        const course = generateRaceCourse({ world: this.world, params: this.params, citySeed: this.citySeed, physicsVersion: PHYSICS_VERSION, variant: this.variant });
+        if (!course) return { ok: false, reason: "no-course", message: "这条航线暂时无法生成安全路线，可重试或先自由练习。" };
+        this.course = course;
       }
-      this.course = course;
     } else {
       this.course = null;
     }
-    const spawn = this.spawnFor(params, world);
-    if (!spawn) {
-      this.settleFailure("没有可用的安全出生点，暂不能进入飞行。");
-      return { ok: false, reason: "no-safe-spawn" };
+    if (!this.spawnFor(this.params, this.world)) {
+      return { ok: false, reason: "no-safe-spawn", message: "没有可用的安全出生点，暂不能进入飞行。" };
     }
     // 接管相机与循环（§4：同帧单一所有者；startCinematic 在 game 持有时会被拒绝）。
-    if (!this.engine.setCameraOwner("game")) {
-      this.controller.fail("相机被占用，暂时无法起飞。");
-      this.emit(true);
-      return { ok: false, reason: "camera-busy" };
+    if (this.engine.owner !== "game" && !this.engine.setCameraOwner("game")) {
+      return { ok: false, reason: "camera-busy", message: "相机被占用，暂时无法起飞。" };
     }
-    this.returnCamera = this.engine.captureReturnView();
-    this.world = world;
-    this.params = params;
-    this.sim = initialSimState(spawn, params);
-    this.prevSim = this.sim;
-    this.renderSim = this.sim;
-    this.lastSafe = { x: spawn.x, y: spawn.y, z: spawn.z };
-    this.collisions = 0;
-    this.softOutside = false;
-    this.accumulator = 0;
-    this.visuals = new FlightVisuals(params);
-    this.engine.attachGameObjects(this.visuals.group);
-    if (this.course) {
-      this.visuals.setRings(this.course.rings);
-      this.mission = new RaceMission(this.course, params);
-    } else {
-      this.mission = null;
+    if (!this.returnCamera) this.returnCamera = this.engine.captureReturnView();
+    return { ok: true };
+  }
+
+  /** 挂载运行件（幂等）：造型/相机/输入/帧钩子/任务，随后重置到出生点并落成准备。 */
+  private attachRun(): void {
+    const params = this.params!;
+    if (!this.visuals) {
+      this.visuals = new FlightVisuals(params);
+      this.engine.attachGameObjects(this.visuals.group);
     }
-    const reducedMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-    this.camera = new FlightCamera(this.engine.renderCamera, reducedMotion);
-    this.camera.reset(this.sim, params);
-    this.visuals.update(this.sim, 0);
-    this.input = new FlightInput({
-      shouldConsumeArrows: () => this.controller.simulating && this.canvasFocused(),
-      onInterrupt: (reason) => this.interrupt(reason),
-    });
-    this.input.attach();
+    if (this.course) this.visuals.setRings(this.course.rings);
+    else this.visuals.clearRings();
+    this.mission = this.course ? new RaceMission(this.course, params) : null;
+    if (!this.camera) {
+      const reducedMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+      this.camera = new FlightCamera(this.engine.renderCamera, reducedMotion);
+    }
+    if (!this.input) {
+      this.input = new FlightInput({
+        isGameFocused: () => this.canvasFocused(),
+        shouldConsumeArrows: () => this.controller.simulating && this.canvasFocused(),
+        onInterrupt: (reason) => this.interrupt(reason),
+      });
+      this.input.attach();
+    }
     this.engine.setGameFrameHook(this.frame);
+    this.resetToSpawn();
     this.controller.prepareDone();
     this.emit(true);
-    return { ok: true };
   }
 
   /** 出生点：挑战取首环后方进近位（沿切线），练习取世界安全位。 */
@@ -165,17 +173,21 @@ export class GameSession {
 
   resume(): void {
     if (!this.controller.snapshot.paused) return;
-    // §5：恢复需重新确认焦点 + 清空旧键值。
+    // §5：恢复需重新确认焦点 + 清空旧键值——把焦点还给画布（点击「继续」时焦点在按钮上），
+    // 之后飞行输入立即生效；焦点获取失败则等待用户点击画布。
     this.input?.clear();
+    const canvas = this.engine.domCanvas;
+    if (canvas instanceof HTMLElement) canvas.focus({ preventScroll: true });
     this.controller.resume();
     this.accumulator = 0;
     this.emit(true);
   }
 
-  /** 重试/重新开始：挑战复用原路线（variant 不变，§7.1）。 */
+  /** 重试/重新开始：挑战复用原路线（variant 不变，§7.1）；任务实例必须重建
+   *  （上一局的 mission 已终态，不重建则重赛进度永远冻结）。 */
   restart(): void {
     for (const event of this.controller.restart()) {
-      if (event.type === "restarted") this.resetToSpawn();
+      if (event.type === "restarted") this.attachRun();
     }
     this.emit(true);
   }
@@ -191,26 +203,18 @@ export class GameSession {
   }
 
   retryPrepare(): void {
-    const hadNoCourse = this.controller.snapshot.selection?.mode === "race" && !this.course;
+    const selection = this.controller.snapshot.selection;
+    if (!selection) return;
+    const hadNoCourse = selection.mode === "race" && !this.course;
     this.controller.retryPrepare();
     if (hadNoCourse) this.variant += 1; // 生成失败的重试换 variant，不再撞同一条死路
-    // 重试准备：重建任务（练习直接重新出生；挑战沿用/重生成路线后重摆）。
-    if (this.controller.snapshot.selection?.mode === "race") {
-      const world = this.world;
-      const params = this.params;
-      if (world && params && !this.course) {
-        this.course = generateRaceCourse({ world, params, citySeed: this.citySeed, physicsVersion: PHYSICS_VERSION, variant: this.variant });
-        if (!this.course) {
-          this.settleFailure("这条航线暂时无法生成安全路线，可重试或先自由练习。");
-          return;
-        }
-        this.visuals?.setRings(this.course.rings);
-      }
-      if (this.course) this.mission = new RaceMission(this.course, params!);
+    // 完整重建（对象缺失时从引擎现状态补齐；相机/返回视角只在首次接管时捕获）。
+    const build = this.ensureRunObjects(selection);
+    if (!build.ok) {
+      this.settleFailure(build.message);
+      return;
     }
-    this.resetToSpawn();
-    this.controller.prepareDone();
-    this.emit(true);
+    this.attachRun();
   }
 
   /** 退出（幂等）：停输入与模拟 → 移除对象 → 归还相机 → 通知 React 恢复与刷新。 */
@@ -219,6 +223,7 @@ export class GameSession {
     this.mission?.abort();
     this.controller.exit();
     this.input?.detach();
+    this.input = null;
     this.engine.setGameFrameHook(null);
     if (this.visuals) {
       this.engine.detachGameObjects(this.visuals.group);

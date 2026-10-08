@@ -556,7 +556,7 @@ pub fn plugin_invalidate(app: tauri::AppHandle, webview: Webview, state: tauri::
 }
 
 #[tauri::command]
-pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: tauri::State<'static PluginHost>, request: PluginRequestV1) -> Result<PluginResponseV1, String> {
+pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, request: PluginRequestV1) -> Result<PluginResponseV1, String> {
     let (allowed, navigation, state_keys, plugin_id) = {
         let host = state.0.lock().unwrap();
         let i = host.current.as_ref().ok_or("plugin_instance_unavailable")?;

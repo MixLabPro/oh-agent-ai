@@ -423,9 +423,10 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <details className="city-settings-help"><summary>导出说明</summary><p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p></details>
       {gameDev && <div className="city-game-entry">
         <label style={{ fontSize: 12, color: "var(--city-muted)" }}>{gameText("游戏模式（开发预览）", language === "en" ? "en" : "zh-Hans")}</label>
+        {/* 空投影也允许在生成的空岛练习（§1.1）：门槛是「城市已建模」而非 sceneReady。 */}
         <div style={{ display: "flex", gap: 8 }}>
-          <button disabled={locked || gameActive} onClick={() => { ui.setOptions(false); game.enterPractice(); }}>{gameText("自由练习", language === "en" ? "en" : "zh-Hans")}</button>
-          <button disabled={locked || gameActive} onClick={() => { ui.setOptions(false); game.enterRace(); }}>{gameText("穿环挑战", language === "en" ? "en" : "zh-Hans")}</button>
+          <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); game.enterPractice(); }}>{gameText("自由练习", language === "en" ? "en" : "zh-Hans")}</button>
+          <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); game.enterRace(); }}>{gameText("穿环挑战", language === "en" ? "en" : "zh-Hans")}</button>
         </div>
         {game.entryError && <p role="alert">{game.entryError}</p>}
         <p>{gameText("进入后用 W/S/A/D 与方向键飞行，Esc 暂停。", language === "en" ? "en" : "zh-Hans")}</p>

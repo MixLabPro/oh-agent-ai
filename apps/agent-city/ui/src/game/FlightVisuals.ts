@@ -40,7 +40,9 @@ export class FlightVisuals {
     fuselageMesh.rotation.z = Math.PI / 2; // 机身沿 +X（前向）
     const wingMain = new THREE.Mesh(wing, cloth); wingMain.position.set(r * 0.1, r * 0.55, 0);
     const wingLow = new THREE.Mesh(wing, cloth); wingLow.position.set(r * 0.1, -r * 0.35, 0);
-    const strut = new THREE.Mesh(new THREE.BoxGeometry(r * 0.08, r * 0.9, r * 0.08), dark); strut.position.set(r * 0.1, r * 0.1, 0);
+    const strutGeometry = new THREE.BoxGeometry(r * 0.08, r * 0.9, r * 0.08);
+    this.disposables.push(strutGeometry);
+    const strut = new THREE.Mesh(strutGeometry, dark); strut.position.set(r * 0.1, r * 0.1, 0);
     const tailMesh = new THREE.Mesh(tail, cloth); tailMesh.position.set(-r * 1.55, 0, 0);
     const finMesh = new THREE.Mesh(fin, body); finMesh.position.set(-r * 1.55, r * 0.45, 0);
     this.propeller = new THREE.Mesh(new THREE.BoxGeometry(r * 0.06, r * 1.5, r * 0.16), dark);
