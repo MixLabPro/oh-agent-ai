@@ -180,12 +180,13 @@ export class FlightWorld {
   /**
    * 安全出生点（§6.3）：优先海面一侧、朝向城市的弧位；机位与机后相机锚点都需净空。
    * 确定性：环形扫描，无随机数。找不到返回 null（调用方拒绝开始，给自由练习/重新生成）。
+   * 出生环必须在软边界以内（曾从 0.82×hard 起——软边界在 0.78×hard，出生即告警）。
    */
   findSafeSpawn(clearance: number, cameraBack: number, cameraUp: number): SpawnPoint | null {
     const { bounds } = this;
     const altitude = Math.min(bounds.maxY - clearance * 2, Math.max(30, (bounds.maxY - 40) * 0.55 + 26));
     for (let ring = 0; ring < 5; ring += 1) {
-      const radius = bounds.hardRadius * (0.82 + ring * 0.06);
+      const radius = bounds.softRadius * (0.9 + ring * 0.04);
       const steps = 24;
       const offset = ring * 0.13; // 环之间错开半个步角
       for (let step = 0; step < steps; step += 1) {
@@ -199,9 +200,9 @@ export class FlightWorld {
         if (planeOk && camOk) return { x, y: altitude, z, heading };
       }
     }
-    // 后备：任意净空的环形位（含陆地上空），从外向内收。
+    // 后备：任意净空的环形位（含陆地上空），从软边界内向外收。
     for (let ring = 0; ring < 12; ring += 1) {
-      const radius = bounds.hardRadius * (0.95 - ring * 0.07);
+      const radius = bounds.softRadius * (0.95 - ring * 0.08);
       for (let step = 0; step < 24; step += 1) {
         const angle = (step / 24) * Math.PI * 2;
         const x = bounds.centerX + Math.cos(angle) * radius;

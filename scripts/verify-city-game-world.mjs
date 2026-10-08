@@ -79,6 +79,7 @@ for (const sessionCount of [0, 1, 90, 500]) {
     assert.ok(world.isPointClear(camX, spawn.y + 6, camZ, 2), `${sessionCount}/${seed} 机后相机锚点不净空`);
     const toward = Math.hypot(bounds.centerX - spawn.x, bounds.centerZ - spawn.z);
     assert.ok(toward > bounds.hardRadius * 0.1, `${sessionCount}/${seed} 出生点朝向必须指向城市`);
+    assert.ok(toward <= bounds.softRadius, `${sessionCount}/${seed} 出生点必须在软边界内（不出生即告警）`);
     assert.ok(spawn.y >= bounds.minY && spawn.y <= bounds.maxY, `${sessionCount}/${seed} 出生点越界`);
     totalBoxes += boxes.length;
   }

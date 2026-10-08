@@ -472,6 +472,37 @@ export class CityEngine {
     return this.cameraOwner;
   }
 
+  /** 游戏模式（GameSession）需要的只读入口：布局/模型/回放游标/画布。 */
+  get currentLayout(): CityLayout | null {
+    return this.layout;
+  }
+
+  get currentModel(): CityModel | null {
+    return this.model;
+  }
+
+  get replayCursor(): number | null {
+    return this.cursorMs;
+  }
+
+  get domCanvas(): RenderCanvas {
+    return this.options.canvas;
+  }
+
+  /** 游戏相机控制入口：仅 game 拥有相机期间由 GameSession/FlightCamera 写入。 */
+  get renderCamera(): THREE.PerspectiveCamera {
+    return this.camera;
+  }
+
+  /** 游戏对象挂载/摘除（飞机、圆环等）；渲染管线与既有场景不动。 */
+  attachGameObjects(...objects: THREE.Object3D[]): void {
+    this.scene.add(...objects);
+  }
+
+  detachGameObjects(...objects: THREE.Object3D[]): void {
+    this.scene.remove(...objects);
+  }
+
   /** 相机所有权切换（§4）。game 接管要求航拍未在进行（互斥由调用方先拒，这里兜底返回 false）；
    *  orbit 归还时恢复 controls；cinematic 所有权由 startCinematic/stopCinematic 自管。 */
   setCameraOwner(owner: CameraOwner): boolean {

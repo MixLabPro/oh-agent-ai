@@ -9,6 +9,7 @@ import { CityExperience, useCityExperience } from "./CityExperience";
 import { supportsBackgroundFilm } from "./export/filmJob";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { replayStartMs } from "./replayRange";
+import { useCityGame } from "./game/useCityGame";
 
 const windowOptions = [7, 30, 90, 366] as const;
 type WindowDays = (typeof windowOptions)[number];
@@ -37,6 +38,25 @@ export function CityApp() {
   const [cinema, setCinema] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const experience = useCityExperience(engineRef, projection);
+  // 游戏模式（G1）：开发开关下从城市设置进入；未验收不默认开放（§11 G1 交付）。
+  // 必须先于引擎创建 effect 声明——卸载清理时先退出游戏（归还相机）再销毁引擎。
+  const gameDev = new URLSearchParams(location.search).has("cityGame") || (() => { try { return localStorage.getItem("cityGameDev") === "1"; } catch { return false; } })();
+  const labelsRef = useRef(labels);
+  labelsRef.current = labels;
+  const cinemaRef = useRef(cinema);
+  cinemaRef.current = cinema;
+  const filmRef = useRef(!!experience.film);
+  filmRef.current = !!experience.film;
+  const busyRef = useRef(experience.busy);
+  busyRef.current = experience.busy;
+  const game = useCityGame(engineRef, {
+    cinemaActive: () => cinemaRef.current,
+    filmActive: () => filmRef.current,
+    busy: () => busyRef.current,
+    labelsVisible: () => labelsRef.current,
+    requestRefresh: () => setRefresh((value) => value + 1),
+    locale: () => (language === "en" ? "en" : "zh-Hans"),
+  });
   const appliedWindow = useRef<number | null>(null);
   const fingerprint = useRef("");
   useEffect(() => observeHealth(() => engineRef.current?.diagnosticState() ?? { engineMissing: true }), []);
@@ -142,15 +162,15 @@ export function CityApp() {
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
   const toolbarReady = dataLoaded && (sceneUnavailable || !dataAvailable || projection.status === "empty" || firstModelFrame);
   const tools: Tool[] = [
-    { id: "window", commandId: "city.window", label: "时间范围", kind: "select", enabled: !cinema && !experience.busy, value: String(windowDays), options: windowOptions.map((days) => ({ value: String(days), label: `${days} 天` })) },
+    { id: "window", commandId: "city.window", label: "时间范围", kind: "select", enabled: !cinema && !game.active && !experience.busy, value: String(windowDays), options: windowOptions.map((days) => ({ value: String(days), label: `${days} 天` })) },
     // 工具栏上限 8 项（host 校验）：画质移入城市设置，让位给「建筑说明」（用户：按钮放在顶部导航）。
-    { id: "catalog", commandId: "city.catalog", label: "建筑说明", kind: "button", enabled: !cinema },
-    { id: "labels", commandId: "city.labels", label: labels ? "隐藏标签" : "显示标签", kind: "button", enabled: sceneReady && !cinema && !experience.busy },
-    { id: "reset", commandId: "city.reset", label: "重置视角", kind: "button", enabled: sceneReady && !cinema && !experience.busy },
-    { id: "cinema", commandId: "city.cinema", label: cinema ? "停止航拍" : "航拍", kind: "button", enabled: sceneReady && !experience.busy },
-    { id: "photo", commandId: "city.photo", label: experience.photoBusy ? "正在拍照" : "拍照", kind: "button", enabled: sceneReady && !cinema && !experience.busy && !experience.film },
-    { id: "film", commandId: "city.film", label: experience.film ? `取消导出 · ${Math.round(experience.film.frame / experience.film.total * 100)}%` : "导出视频", kind: "button", enabled: !!experience.film || (sceneReady && !cinema && !experience.busy && supportsBackgroundFilm()) },
-    { id: "settings", commandId: "city.settings", label: "城市设置", kind: "button", enabled: !cinema },
+    { id: "catalog", commandId: "city.catalog", label: "建筑说明", kind: "button", enabled: !cinema && !game.active },
+    { id: "labels", commandId: "city.labels", label: labels ? "隐藏标签" : "显示标签", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy },
+    { id: "reset", commandId: "city.reset", label: "重置视角", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy },
+    { id: "cinema", commandId: "city.cinema", label: cinema ? "停止航拍" : "航拍", kind: "button", enabled: sceneReady && !experience.busy && !game.active },
+    { id: "photo", commandId: "city.photo", label: experience.photoBusy ? "正在拍照" : "拍照", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy && !experience.film },
+    { id: "film", commandId: "city.film", label: experience.film ? `取消导出 · ${Math.round(experience.film.frame / experience.film.total * 100)}%` : "导出视频", kind: "button", enabled: !!experience.film || (sceneReady && !cinema && !game.active && !experience.busy && supportsBackgroundFilm()) },
+    { id: "settings", commandId: "city.settings", label: "城市设置", kind: "button", enabled: !cinema && !game.active },
   ].map((tool) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
   const execute = (commandId: string, value?: string) => {
     const engine = engineRef.current;
@@ -179,7 +199,7 @@ export function CityApp() {
   useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, experience.busy, experience.cut, experience.options, experience.catalog, experience.film]);
   // Publishing the first toolbar is the host's ready handshake. An empty scene
   // or loaded DTO alone must not arm the runtime watchdog during shader boot.
-  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, experience.busy, experience.film?.frame, experience.film?.total]);
+  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, experience.busy, experience.film?.frame, experience.film?.total]);
   const sceneMessage = sceneUnavailable ? "当前环境无法显示三维城市，仍可查看会话摘要。"
     : !dataAvailable || projection.status === "empty" ? status : null;
   return cityView((
@@ -191,7 +211,7 @@ export function CityApp() {
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
           : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>
       </header>}
-      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality}
+      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} gameDev={gameDev}
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} />
     </section>
   ), language);
