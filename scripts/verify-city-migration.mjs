@@ -26,15 +26,15 @@ const loop = [{ x: 0, z: 0 }, { x: 100, z: 0 }, { x: 100, z: 100 }, { x: 0, z: 1
 const wildlife = new CityWildlife({ x: 50, z: 50 }, 150, [], [], [loop], () => 3);
 const wings = wildlife.group.getObjectByName("city-bird-wings");
 const birds = wildlife.group.getObjectByName("city-birds");
-const people = wildlife.group.getObjectByName("city-pedestrians");
+// 街头行人已在 dfdf9ea6 移除（改为 cityParts 的静态海滩人 city-beach-people）；
+// 鸟群仍是 CityWildlife 中唯一带动画的实例组。
+assert.equal(wildlife.group.getObjectByName("city-pedestrians"), undefined);
 assert.equal(wings.count, birds.count * 2);
 wings.geometry.computeBoundingBox();
 assert.ok(wings.geometry.boundingBox.max.y - wings.geometry.boundingBox.min.y >= 0.05, "bird wings retain visible low-poly thickness");
 birds.geometry.computeBoundingBox();
 assert.ok(birds.geometry.boundingBox.max.x > 1 && birds.geometry.boundingBox.min.x < -1, "bird silhouette includes beak and tail");
-assert.ok(people.count > 0 && people.count <= 220);
 wildlife.setNight(0, to); wildlife.update(0, 0);
-const start = Array.from(people.instanceMatrix.array);
 const birdStart = Array.from(birds.instanceMatrix.array);
 const wingStart = Array.from(wings.instanceMatrix.array);
 const birdPositions = Array.from({ length: birds.count }, (_, i) => [birdStart[i * 16 + 12], birdStart[i * 16 + 13], birdStart[i * 16 + 14]]);
@@ -53,17 +53,15 @@ assert.ok(Math.abs(secondFlockY - firstFlockY) > 30, "separate flocks occupy dis
 wildlife.update(1, 1);
 assert.notDeepEqual(Array.from(birds.instanceMatrix.array), birdStart, "flock follows a moving route");
 assert.notDeepEqual(Array.from(wings.instanceMatrix.array), wingStart);
-assert.notDeepEqual(Array.from(people.instanceMatrix.array), start);
 wildlife.update(0, 0);
 assert.deepEqual(Array.from(birds.instanceMatrix.array), birdStart, "flight path rewinds deterministically");
 assert.deepEqual(Array.from(wings.instanceMatrix.array), wingStart, "wing phase rewinds deterministically");
-assert.deepEqual(Array.from(people.instanceMatrix.array), start, "replay/export rewind is deterministic");
 let disposed = 0;
-for (const mesh of [birds, wings, people]) {
+for (const mesh of [birds, wings]) {
   mesh.geometry.addEventListener("dispose", () => disposed++);
   mesh.material.addEventListener("dispose", () => disposed++);
 }
-wildlife.dispose(); assert.equal(disposed, 6);
+wildlife.dispose(); assert.equal(disposed, 4);
 const empty = new CityWildlife({ x: 0, z: 0 }, 150, [], [], [], () => 0);
 assert.equal(empty.group.getObjectByName("city-pedestrians"), undefined); empty.dispose();
 const ambient = new CityAmbient({ x: 0, z: 0 }, 150, () => -10, []);
@@ -84,4 +82,4 @@ assert.ok(balloons.every((balloon) => balloon.children.filter((child) => child.i
 ambient.setNight(0);
 assert.ok(balloons.every((balloon) => balloon.children.filter((child) => child.isPointLight).every((light) => !light.visible)), "balloon lights switch off during daytime");
 ambient.dispose();
-console.log("City migration: passed (replay, wildlife motion/formation, balloon geometry, bounded walkers, rewind, disposal, empty scene).");
+console.log("City migration: passed (replay, wildlife motion/formation, balloon geometry, rewind, disposal, empty scene).");

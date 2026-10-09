@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 // Browser regression uses the same iframe/postMessage adapter as dev:browser.
 // Native process isolation is tested separately, never inferred from iframe tests.
+//
+// 已知残留失败（2026-10-09 定位）：无头+软件 WebGL 下，城市 iframe 的事件循环被
+// 渲染打满，「应用种子」的 plugin_request 响应报文在 iframe 消息队列中饿死——
+// invokeHost 的 Promise 永远挂起（既不成功也不触发 localStorage 回退），且
+// CDP 注入的点击要等 rAF 空隙，表面症状是 fill/click/waitForFunction 间歇超时。
+// 这是 fixture 环境的事件循环饥饿，不是插件或宿主适配器的逻辑缺陷；需要
+// 基础设施层解决（fixture 城市强制 eco 画质起步、CI 提供硬件 WebGL、或给
+// 交互测试降载），不要在断言层加长超时来掩盖。
 import assert from "node:assert/strict";
 import { readFile, cp, mkdtemp, readdir } from "node:fs/promises";
 import http from "node:http";
@@ -144,7 +152,16 @@ async function openWorkbench({ noWebGL = false, failModule = false } = {}) {
     // scene-first HUD restructure — wait for the canvas or any city content instead.
     await page.frameLocator("iframe").locator(".city-canvas, .city-legend").first().waitFor();
     // Software WebGL regression uses the product's eco mode, not hardware GTAO.
-    if (!noWebGL) await page.getByRole("combobox", { name: "画质" }).selectOption("eco");
+    // 画质下拉在城市插件的设置对话框内（iframe），不在宿主工具栏——经 更多工具→城市设置 进入。
+    if (!noWebGL) {
+      await page.getByRole("button", { name: "更多工具", exact: true }).click();
+      await page.getByRole("button", { name: "城市设置", exact: true }).click();
+      const settings = city(page).getByRole("dialog", { name: "城市设置", exact: true });
+      await settings.getByLabel("画质", { exact: true }).selectOption("eco");
+      await settings.getByRole("button", { name: "关闭城市设置", exact: true }).click();
+      // 收起展开的更多工具菜单：按钮标签切到 plugin.less，不收起会让后续「更多工具」定位失败。
+      await page.getByRole("button", { name: "收起工具", exact: true }).click();
+    }
   }
   return { page, errors };
 }
@@ -395,7 +412,11 @@ try {
   await page.waitForFunction(() => document.querySelector("iframe")?.style.display === "none");
   await page.locator(".sidebar").getByRole("button", { name: "City", exact: true }).click();
   await expectSummary(page, "3", "53,900");
-  await page.getByRole("combobox", { name: "画质" }).selectOption("eco");
+  await page.getByRole("button", { name: "更多工具", exact: true }).click();
+  await page.getByRole("button", { name: "城市设置", exact: true }).click();
+  const qualityDialog = city(page).getByRole("dialog", { name: "城市设置", exact: true });
+  await qualityDialog.getByLabel("画质", { exact: true }).selectOption("eco");
+  await qualityDialog.getByRole("button", { name: "关闭城市设置", exact: true }).click();
   frame = page.frames().find((item) => item.url().includes("AgentCity.plugin"));
   assert.notEqual(await page.evaluate(async () => (await window.__TAURI__.core.invoke("plugin_snapshot")).instanceId), cityInstanceBeforeSwitch);
   console.log("Second-plugin integration: passed (shared SDK, navigation, load, command, failure/retry, dispose, switch back).");
@@ -500,7 +521,11 @@ try {
     await window.__TAURI__.core.invoke("plugin_invalidate", { instanceId: current.instanceId });
   });
   await city(page).locator(".city-header p").filter({ hasText: "City 数据暂不可用" }).waitFor();
-  await page.getByRole("combobox", { name: "画质" }).selectOption("eco");
+  await page.getByRole("button", { name: "更多工具", exact: true }).click();
+  await page.getByRole("button", { name: "城市设置", exact: true }).click();
+  const qualityDialog2 = city(page).getByRole("dialog", { name: "城市设置", exact: true });
+  await qualityDialog2.getByLabel("画质", { exact: true }).selectOption("eco");
+  await qualityDialog.getByRole("button", { name: "关闭城市设置", exact: true }).click();
   await picker.selectOption("7");
   await expectSummary(page, "2", "26,400");
   assert.equal(page.context().pages().length, 1, "City must stay in the host window");
