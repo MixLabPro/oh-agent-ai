@@ -68,7 +68,7 @@ export function buildSkeleton(opts: {
   network: Network;
   /** buildPlan 的河道闭包（含 coastDistance>0 短路）——geography 阶段尚未收编，先作参数。 */
   inRiver: (x: number, z: number) => boolean;
-}): { trunks: TrunkRun[]; bridges: CityLayout["bridges"]; ringRuns: Vec2[][] } {
+}): { trunks: TrunkRun[]; bridges: CityLayout["bridges"]; ringRuns: Vec2[][]; primaryAnchorNodeId: string | null; primaryAnchorNodeIds: string[] } {
   const { geo, seed, core, publicSites, landmarks, random, network } = opts;
   const SHORE_SITE_KINDS = opts.shoreSiteKinds;
   const { R, hasRiver, coastDistance, hillDir, hillProj, hillLine, buildable } = geo;
@@ -153,6 +153,9 @@ export function buildSkeleton(opts: {
     trunks.push({ angle, points });
   }
   trunks.sort((p, q) => p.angle - q.angle);
+  let primaryAnchorNodeId: string | null = null;
+  let primaryAnchorDistance = Infinity;
+  const civicNodes = new Map<string, Vec2>();
   // 广场环路：经过每条主干道的起点，其余按 24 等分补点；跨河/不可建的弧段不修。
   {
     const angles = [...trunks.map((t) => ((t.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)),
@@ -167,6 +170,14 @@ export function buildSkeleton(opts: {
       const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
       if (inRiver(mid.x, mid.z) || inRiver(a.x, a.z) || inRiver(b.x, b.z) || coastDistance(mid.x, mid.z) <= 0) continue;
       addEdge(a, b, true);
+      for (const p of [a, b]) {
+        const id = `${keyOf(p).x}:${keyOf(p).z}`;
+        civicNodes.set(id, keyOf(p));
+        const q = keyOf(p); const distance = Math.hypot(q.x - core.x, q.z - core.z);
+        if (distance < primaryAnchorDistance || (distance === primaryAnchorDistance && (primaryAnchorNodeId === null || id < primaryAnchorNodeId))) {
+          primaryAnchorNodeId = id; primaryAnchorDistance = distance;
+        }
+      }
     }
   }
   // 环线高架：半径 0.55R ± fbm，河流/河岸连续跨越，仅出海或进山时断开。
@@ -234,5 +245,9 @@ export function buildSkeleton(opts: {
       }
     }
   }
-  return { trunks, bridges, ringRuns };
+  const primaryAnchorNodeIds = [...civicNodes.keys()].sort((a, b) => {
+    const p = civicNodes.get(a)!; const q = civicNodes.get(b)!;
+    return Math.hypot(p.x - core.x, p.z - core.z) - Math.hypot(q.x - core.x, q.z - core.z) || (a < b ? -1 : a > b ? 1 : 0);
+  });
+  return { trunks, bridges, ringRuns, primaryAnchorNodeId, primaryAnchorNodeIds };
 }

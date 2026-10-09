@@ -11,10 +11,12 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { runConnection, proposeConnection, commitConnection, commitFixedLink, runMiniRoundabout, corridorFailure, validateCandidate, CONNECTOR_CONFIG, VALIDATION_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
+const { runConnection, proposeConnection, commitConnection, commitFixedLink, runMiniRoundabout, corridorFailure, validateCandidate, connectGroundJunctions, roadPaintPlan, CONNECTOR_CONFIG, VALIDATION_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
   "engine/planner/connect.ts": ["runConnection", "proposeConnection", "commitConnection", "commitFixedLink", "runMiniRoundabout", "corridorFailure", "CONNECTOR_CONFIG", "VALIDATION_CONFIG"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
   "engine/planner/validation.ts": ["validateCandidate"],
+  "engine/planner/junctions.ts": ["connectGroundJunctions"],
+  "engine/cityRoadPaint.ts": ["roadPaintPlan"],
   "engine/planner/constraints.ts": ["acuteJunctions"],
 });
 
@@ -365,6 +367,34 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.ok(r.ok && r.strategy === "bridge-candidate", `gentle unbuildable beachfront approach must pass: ${JSON.stringify(r)}`);
   assert.ok(w.network.edges.size > 1, "beachfront gate must commit its edges");
   assert.ok([...w.network.edges.values()].every((e) => !e.bridge), "no deck is needed on dry beachfront");
+}
+
+// J：地面交叉真实并网，宿主属性继承，多次拆边确定；桥/不安全走廊保持原图。
+{
+  const build = (reverse = false, blocked = false, bridge = false) => {
+    const w = makeWorld({ sites: blocked ? [{ x: 0, z: 0, radius: 10 }] : [] });
+    const links = [[{ x: -100, z: 0 }, { x: 100, z: 0 }], [{ x: 0, z: -100 }, { x: 0, z: 100 }], [{ x: 50, z: -100 }, { x: 50, z: 100 }]];
+    for (const [a, b] of reverse ? [...links].reverse() : links) addNetworkEdge(w.network, a, b, true, bridge);
+    return w;
+  };
+  const w = build();
+  const report = connectGroundJunctions(w);
+  assert.equal(report.connected, 2, "multiple intersections split the current host, not a removed original edge");
+  assert.equal(w.network.edges.size, 7);
+  assert.ok(connected(w.network, "-100:0", "50:100"), "crossing roads must now share graph nodes");
+  for (const id of ["0:0", "50:0"]) assert.equal([...w.network.edges.values()].filter((e) => e.from === id || e.to === id).length, 4);
+  const paint = roadPaintPlan([...w.network.edges.values()]);
+  for (const id of ["0:0", "50:0"]) assert.ok(paint.junctions.has(id), "render geometry must consume the same shared junction nodes");
+  assert.ok([...w.network.edges.values()].every((e) => e.width === 8 && e.kind === "arterial"));
+  const reversed = build(true); connectGroundJunctions(reversed);
+  const digest = (world) => JSON.stringify([...world.network.edges.values()].sort((a, b) => a.id.localeCompare(b.id)));
+  assert.equal(digest(reversed), digest(w), "junction topology must not depend on enumeration order");
+  assert.equal(connectGroundJunctions(w).connected, 0, "normalization is idempotent");
+  for (const world of [build(false, true), build(false, false, true)]) {
+    const before = snap(world.network);
+    assert.equal(connectGroundJunctions(world).connected, 0);
+    assert.equal(snap(world.network), before, "unsupported/unsafe intersections have zero side effects");
+  }
 }
 
 // 提交期复核：提案之后出现的新障碍不能靠门路用途免查；拒绝时正式图不变。

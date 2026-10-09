@@ -520,7 +520,7 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
     for (const edge of plan.roadEdges) if (keep.has(edge.id)) { const a = find(edge.from); const b = find(edge.to); if (a !== b) parent.set(a, b); }
     return { parent, find };
   };
-  const primaryId = plan.roadEdges.find((edge) => edge.width >= 12 && !edge.bridge)?.from;
+  const primaryId = plan.primaryAnchorNodeId ?? undefined;
   for (let guard = 0; guard < 200 && primaryId; guard += 1) {
     const { parent, find } = components();
     const main = find(primaryId);

@@ -27,6 +27,7 @@ import { roadNodeId } from "../cityPlan";
 import type { RoadEdge, RoadNode, Vec2 } from "../cityLayout";
 import { keyOf, type Network } from "./network";
 import { commitConnection, proposeConnection, type ConnectionAttempt, type ConnectorWorld } from "./connect";
+import { districtDemands } from "./intent";
 
 /** 版本化尽端环路配置（数值在守卫合成场景中标定）。 */
 export const LOOP_CONFIG = {
@@ -104,6 +105,7 @@ function serviceLoopSignature(
 export function connectServiceLoops(opts: {
   world: ConnectorWorld;
   core: Vec2;
+  primaryAnchorNodeId?: string | null;
   log?: ConnectionAttempt[];
 }): number {
   const { world, core, log } = opts;
@@ -116,8 +118,9 @@ export function connectServiceLoops(opts: {
     const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
     for (const id of network.nodes.keys()) parent.set(id, id);
     for (const edge of network.edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
-    let primaryNodeId: string | null = null; let primaryDist = Infinity;
-    for (const node of network.nodes.values()) { const d = Math.hypot(node.x - core.x, node.z - core.z); if (d < primaryDist || (d === primaryDist && node.id < primaryNodeId!)) { primaryDist = d; primaryNodeId = node.id; } }
+    let primaryNodeId: string | null = opts.primaryAnchorNodeId ?? null; let primaryDist = Infinity;
+    if (opts.primaryAnchorNodeId === undefined) for (const node of network.nodes.values()) { const d = Math.hypot(node.x - core.x, node.z - core.z); if (d < primaryDist || (d === primaryDist && node.id < primaryNodeId!)) { primaryDist = d; primaryNodeId = node.id; } }
+    if (primaryNodeId && !network.nodes.has(primaryNodeId)) primaryNodeId = null;
     return { find, primaryRoot: primaryNodeId ? find(primaryNodeId) : null };
   };
   let state = snapshot();
@@ -125,9 +128,10 @@ export function connectServiceLoops(opts: {
   // 分量按 root id 排序（确定性；root 是分量内某节点 id，Map 迭代序不参与判定）。
   const groups = new Map<string, RoadNode[]>();
   for (const node of network.nodes.values()) { const r = state.find(node.id); const list = groups.get(r); if (list) list.push(node); else groups.set(r, [node]); }
+  const required = new Set(districtDemands(new Map([...network.nodes.keys()].map((id) => [id, state.find(id)])), state.primaryRoot).filter((d) => d.required).map((d) => d.anchor));
   let connected = 0;
   for (const [root, members] of [...groups].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-    if (root === state.primaryRoot) continue;
+    if (!required.has(root)) continue;
     if (state.find(members[0].id) === state.primaryRoot) continue; // 此前候选的提交已把它并入主网
     const memberSet = new Set(members.map((m) => m.id));
     const compEdges = [...network.edges.values()].filter((e) => memberSet.has(e.from) && memberSet.has(e.to) && !e.bridge);

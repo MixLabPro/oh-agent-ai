@@ -55,7 +55,17 @@ for (const [tier, i, cfg] of ISLANDS) {
   };
   const dd = diagnoseNetwork(fakePlan);
   const station = dd.demands.find((x) => x.demand.id === "site:station-x");
-  assert.ok(station && !station.satisfied && /not on the primary network/.test(station.reason ?? ""), `isolated-road door must be unmet, got ${JSON.stringify(station)}`);
+  assert.ok(station && !station.satisfied && /no road within|not on the primary network/.test(station.reason ?? ""), `isolated-road door must be unmet, got ${JSON.stringify(station)}`);
+  const anchored = { ...fakePlan, primaryAnchorNodeId: "p1", core: lonelyA };
+  assert.equal(diagnoseNetwork(anchored).primaryComponentId, componentOf(anchored).get("p1"), "nearer isolated road cannot replace the skeleton anchor");
+  assert.equal(diagnoseNetwork({ ...anchored, primaryAnchorNodeId: "missing" }), null, "missing declared anchor fails explicitly");
+  const nearBoth = { ...anchored, publicSites: [{ id: "station-x", kind: "station", x: 50, z: 10, radius: 30 }],
+    roadNodes: [...fakePlan.roadNodes, node(40, 10, "s1"), node(60, 10, "s2")],
+    roadEdges: [...fakePlan.roadEdges, road(node(40, 10, "s1"), node(60, 10, "s2"))] };
+  for (const roadEdges of [nearBoth.roadEdges, [...nearBoth.roadEdges].reverse()]) {
+    const d = diagnoseNetwork({ ...nearBoth, roadEdges });
+    assert.ok(d.demands.find((x) => x.demand.id === "site:station-x").satisfied, "nearer isolated road must not hide a qualifying primary road");
+  }
 }
 
 console.log(`City intent diagnostics: ${ISLANDS.length} islands — every degree-1 endpoint classified, every required demand verdicted, read-only and deterministic.`);

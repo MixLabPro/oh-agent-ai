@@ -48,7 +48,7 @@ const seg = (p: Vec2, a: Vec2, b: Vec2) => {
 /** 意图诊断实际消费的 plan 结构子集（structural typing）：createCityPlan 的完整产物满足，
  *  cityPlan 组装中的中间产物（尚未补 scaleTier/biome 等外层字段）也满足——形态批 §5-3
  *  在 buildPlan 末尾直接取 cul-de-sac 端点而无需等外层包装。 */
-export type NetworkIntentPlan = Pick<CityPlan, "roadNodes" | "roadEdges" | "publicSites" | "landmarks" | "seaside" | "coastRoads" | "riverRoadRuns" | "coast" | "river" | "core">;
+export type NetworkIntentPlan = Pick<CityPlan, "roadNodes" | "roadEdges" | "publicSites" | "landmarks" | "seaside" | "coastRoads" | "riverRoadRuns" | "coast" | "river" | "core"> & { primaryAnchorNodeId?: string | null };
 
 /** 连通分量（桥计入连通——车能过桥）。返回 node id → 分量 id（复用 roadNodeId 作分量代表）。 */
 export function componentOf(plan: NetworkIntentPlan): Map<string, string> {
@@ -64,26 +64,24 @@ export function componentOf(plan: NetworkIntentPlan): Map<string, string> {
 /** 主网 = 含 civic/plaza 骨架节点的分量：取离核心最近的路端（环岛节点围绕核心，半径 52；
  *  无任何路端时返回 null —— civic 骨架缺失，按设计属于规划失败，这里只作诊断输出）。 */
 export function primaryComponentId(plan: NetworkIntentPlan, comp: Map<string, string>): string | null {
+  // 新生产产物必须消费骨架锚点；显式缺失/已删除不退回最近支路。
+  if (plan.primaryAnchorNodeId !== undefined) return plan.primaryAnchorNodeId ? comp.get(plan.primaryAnchorNodeId) ?? null : null;
   let best: { id: string; d: number } | null = null;
   for (const n of plan.roadNodes) {
     const d = Math.hypot(n.x - plan.core.x, n.z - plan.core.z);
-    if (!best || d < best.d) best = { id: n.id, d };
+    if (!best || d < best.d || (d === best.d && n.id < best.id)) best = { id: n.id, d };
   }
   return best ? (comp.get(best.id) ?? null) : null;
 }
 
 /** 后验派生需求：非主网分量要接主网（district-access）、每个用地要有门前路（site-access）、
  *  每段沿海/河岸路要挂进主网（coastal-link）。id 稳定（分量代表 id / 用地 id / 段序号）。 */
+export function districtDemands(comp: Map<string, string>, primary: string): ConnectionDemand[] {
+  return [...new Set(comp.values())].filter((c) => c !== primary).sort().map((c) => ({ id: `district:${c}`, class: "district-access", required: true, anchor: c }));
+}
+
 export function deriveDemands(plan: NetworkIntentPlan, comp: Map<string, string>, primary: string): ConnectionDemand[] {
-  const demands: ConnectionDemand[] = [];
-  const seen = new Set<string>();
-  for (const n of plan.roadNodes) {
-    const c = comp.get(n.id)!;
-    if (c !== primary && !seen.has(c)) {
-      seen.add(c);
-      demands.push({ id: `district:${c}`, class: "district-access", required: true, anchor: c });
-    }
-  }
+  const demands: ConnectionDemand[] = districtDemands(comp, primary);
   const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius) as Site[];
   for (const s of sites) demands.push({ id: `site:${s.id ?? s.kind}`, class: "site-access", required: true, anchor: s.id ?? s.kind });
   [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])].forEach((_run, i) => demands.push({ id: `coastal:${i}`, class: "coastal-link", required: true, anchor: `run ${i}` }));
@@ -110,8 +108,8 @@ export function evaluateDemands(plan: NetworkIntentPlan, comp: Map<string, strin
       for (const e of plan.roadEdges) {
         const d0 = seg(s, e.points[0], e.points[e.points.length - 1]);
         const onPrimary = comp.get(e.from) === primary || comp.get(e.to) === primary;
-        if (!best || d0 < best.d) best = { d: d0, onPrimary };
-        if (best.d <= s.radius + 20 && best.onPrimary) break;
+        // 主网道路独立取最小距离；孤立近路不能掩盖稍远但合格的主网接入。
+        if (!best || (onPrimary && !best.onPrimary) || (onPrimary === best.onPrimary && d0 < best.d)) best = { d: d0, onPrimary };
       }
       const near = best?.d ?? Infinity;
       const satisfied = near <= s.radius + 20 && !!best?.onPrimary;

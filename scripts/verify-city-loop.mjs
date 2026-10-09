@@ -64,6 +64,17 @@ const buildLoopWorld = (opts = {}) => {
 const ringIds = octagon.map((p) => `${p.x}:${p.z}`);
 const ringEdgeIds = new Set(Array.from({ length: 8 }, (_, k) => edgeId(ringIds[k], ringIds[(k + 1) % 8])));
 
+// J：核心附近的孤立环不能抢走已声明主网；生产锚点优先于最近节点。
+{
+  const w = buildLoopWorld({ sites: [STADIUM] });
+  assert.equal(connectServiceLoops({ world: w, core: STADIUM, primaryAnchorNodeId: "-300:0" }), 1);
+  assert.ok(connected(w.network, ringIds[0], "-300:0"));
+  const missing = buildLoopWorld({ sites: [STADIUM] });
+  const before = JSON.stringify([...missing.network.edges]);
+  assert.equal(connectServiceLoops({ world: missing, core: STADIUM, primaryAnchorNodeId: "missing" }), 0);
+  assert.equal(JSON.stringify([...missing.network.edges]), before);
+}
+
 // (a)+(b) 孤立服务环 → 单入口环路：一根入口路、T 口拆边、环闭环、两侧入口角 ≥60°。
 {
   const w = buildLoopWorld({ sites: [STADIUM] });

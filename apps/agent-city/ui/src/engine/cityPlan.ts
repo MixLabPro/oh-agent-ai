@@ -25,6 +25,7 @@ import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, parseFailure, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import { connectServiceLoops } from "./planner/loop";
+import { connectGroundJunctions } from "./planner/junctions";
 import { buildLandingCircles } from "./planner/landing";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
@@ -304,7 +305,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 岸边类集合由 sitespec 表派生（V2 网络优先 6b-2：值 === 原 Set 字面量，守卫 verify-city-sitespec 证相等）。
   const SHORE_SITE_KINDS = coastalSitingKinds(); // 庄园：临水拱廊，同属岸边地标
   // ── 骨架（V2 步 2b-full：逐字迁至 planner/skeleton.ts::buildSkeleton）──
-  const { trunks, bridges, ringRuns } = buildSkeleton({ geo, seed, core, publicSites, landmarks, shoreSiteKinds: SHORE_SITE_KINDS, random, network, inRiver });
+  const { trunks, bridges, ringRuns, primaryAnchorNodeId, primaryAnchorNodeIds } = buildSkeleton({ geo, seed, core, publicSites, landmarks, shoreSiteKinds: SHORE_SITE_KINDS, random, network, inRiver });
   const trunkRuns = trunks.map((trunk) => trunk.points);
   const trunkIndex = new SegmentIndex(trunkRuns);
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
@@ -806,6 +807,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
 
+  const junctionReport = connectGroundJunctions(connectorWorld);
   // ── 连通（网络优先批次 4-3）：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含
   // 主网的分量经统一连接器接入。主网目标 = intent.primaryComponentId 的分量（离核心最近路端所在，
   // 批次 2 的主网定义），不许「接最近分量」——两个孤岛互连不等于接入主网。
@@ -818,9 +820,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     for (const id of nodes.keys()) parent.set(id, id);
     for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
     // 主网锚点：离核心最近的路端（与 intent.primaryComponentId 同规则；环路围绕核心，正常落在骨架分量上）。
-    let primaryNodeId: string | null = null;
-    let primaryDist = Infinity;
-    for (const node of nodes.values()) { const d = Math.hypot(node.x - core.x, node.z - core.z); if (d < primaryDist) { primaryDist = d; primaryNodeId = node.id; } }
+    const primaryNodeId = primaryAnchorNodeId;
     const coreRoot = () => (primaryNodeId && nodes.has(primaryNodeId) ? find(primaryNodeId) : null);
     // 每个孤立分量按 localConstraints 垂直接入主网分量；接上一个就重算分量。
     // 逐级放宽：严格（≤220、≥60°）→ 放远放宽（≤400、≥35°）→ 连接器兜底阶梯（并线/绕行/有界 A*，全程校验）。
@@ -893,7 +893,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 走廊校验（水/坡/用地/交叉），事务提交；失败进 connectionLog（id 前缀 loop:），不静默。
   // 非服务环形态的残余分量（混合等级街区残片、<6 边碎枝）不属于本遍：如实保持隔离并计入
   // disconnectedComponents 诊断。
-  connectServiceLoops({ world: connectorWorld, core, log: connectionLog });
+  connectServiceLoops({ world: connectorWorld, core, primaryAnchorNodeId, log: connectionLog });
 
   const parkTrees: CityLayout["parkTrees"] = [];
   const spanX = bbox.maxX - bbox.minX + 120; const spanZ = bbox.maxZ - bbox.minZ + 120;
@@ -1149,7 +1149,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 已证诊断前后 plan 深比较一致），不改任何路网/用地字段，计划基线哈希不受影响。
   const plan = { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
     urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside,
-    connections: connectionLog };
+    // 修复可能合并掉一个 civic 节点；只在骨架预先声明的锚点集合内重绑，不能选附近支路。
+    connections: connectionLog, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, junctionReport };
   const culDeSacEnds: Vec2[] = (diagnoseNetwork(plan)?.endpoints ?? [])
     .filter((endpoint) => endpoint.role.kind === "cul-de-sac")
     .map((endpoint) => endpoint.at);
