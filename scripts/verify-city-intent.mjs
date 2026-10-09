@@ -8,12 +8,32 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { createCityPlan, MIAMI_COASTAL, diagnoseNetwork, componentOf } = await loadCity({
+const { createCityPlan, MIAMI_COASTAL, diagnoseNetwork, componentOf, preserveDemandPaths } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/constraints.ts": ["CONSTRAINTS"],
   "engine/planner/intent.ts": ["diagnoseNetwork", "componentOf"],
+  "engine/planner/retention.ts": ["preserveDemandPaths"],
 });
 const ISLANDS = [[1, 0, null], [2, 3, MIAMI_COASTAL], [5, 7, MIAMI_COASTAL], [1, 11, null], [2, 13, MIAMI_COASTAL], [5, 17, null], [3, 21, MIAMI_COASTAL], [2, 23, MIAMI_COASTAL]];
+// 展示保路使用长度而不是边数，走完整规划图（允许穿过已保留的中间分量），不改变原边。
+{
+  const node = (id, x, z) => ({ id, x, z });
+  const a = node("a", 0, 0); const b = node("b", 10, 0); const c = node("c", 20, 0); const d = node("d", 30, 0); const far = node("far", 0, 100); const e = node("e", 40, 0);
+  const edge = (p, q) => ({ id: [p.id, q.id].sort().join("/"), from: p.id, to: q.id, width: 5, kind: "local", points: [p, q] });
+  const roads = [edge(a, far), edge(far, d), edge(a, b), edge(b, c), edge(c, d), edge(d, e)];
+  const selected = new Set([edge(b, c).id, edge(d, e).id]);
+  const before = JSON.stringify(roads);
+  const first = preserveDemandPaths(roads, selected, "a", ["d", "e", "missing"]);
+  assert.deepEqual(first.restored, ["a/b", "c/d"]);
+  assert.deepEqual(first.unresolved, ["missing"]);
+  assert.equal(JSON.stringify(roads), before);
+  assert.deepEqual([...selected].sort(), ["b/c", "d/e"]);
+  const second = preserveDemandPaths([...roads].reverse(), selected, "a", ["missing", "e", "d"]);
+  assert.deepEqual([...first.keep].sort(), [...second.keep].sort());
+  assert.deepEqual(second.unresolved, first.unresolved);
+  assert.ok(preserveDemandPaths(roads, selected, "absent", ["d"]).anchorMissing);
+  assert.equal(preserveDemandPaths(roads, first.keep, "a", ["d", "e"]).restored.length, 0);
+}
 const shadow = [];
 for (const [tier, i, cfg] of ISLANDS) {
   const seed = 1703294958 + i * 7919;

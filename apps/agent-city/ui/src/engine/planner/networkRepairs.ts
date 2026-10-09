@@ -5,7 +5,7 @@ import { addNetworkEdge, keyOf } from "./network";
 import { crosses, safeRoadLink } from "./footprint";
 import type { RepairContext } from "./context";
 import { isPlannedRoadEnd, type PlannedEndInputs } from "./endpoints";
-import { runMiniRoundabout, type ConnectorWorld } from "./connect";
+import { runConnection, runMiniRoundabout, type ConnectorWorld } from "./connect";
 
 // 路网修复手段（CITY_ROAD_NETWORK_SPEC §6：no-parallel / no-acute / no-loose-end）。与 repairs.ts 不同，这些会**改变**规划结果
 // （删冗余路段），所以每条都有三道保险：① 只删窄路（局部街 5 / 次干 8），主干 12、桥、沿岸大道一律不动；
@@ -169,6 +169,8 @@ export function pruneShortSpurs(ctx: RepairContext): number {
         if (len >= 60) { ok = false; break; }
       }
       if (!ok || len >= 60 || (deg.get(cur)?.length ?? 0) < 3) continue;
+      // 非桥度数会把桥头唯一引道误当短枝；删链必须同时保留桥头的地面邻接。
+      if (chain.some((e) => [...ctx.network.edges.values()].some((b) => b.bridge && [b.from, b.to].some((id) => id === e.from || id === e.to)))) continue;
       if (!chain.every((e) => keepsSiteDoors(ctx, e) && !onCarPath(ctx, e))) continue;
       for (const e of chain) dropEdge(ctx, e);
       removed += chain.length; changed += 1;
@@ -189,10 +191,12 @@ export function joinNearMissEnds(ctx: RepairContext): number {
   const plannedWorld = plannedEndWorld(ctx, sites);
   const deg = new Map<string, RoadEdge[]>();
   for (const e of ctx.network.edges.values()) if (!e.bridge) for (const id of [e.from, e.to]) (deg.get(id) ?? deg.set(id, []).get(id)!).push(e);
-  for (const [id, list] of deg) {
+  for (const [id, list] of [...deg].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)) {
     if (list.length !== 1) continue;
     const node = ctx.network.nodes.get(id); if (!node || isPlannedRoadEnd(node, plannedWorld)) continue;
     const own = list[0];
+    // 之前的候选可能已经接入这个端点；重新查当前图，不使用旧度数提交第二条近接路。
+    if ([...ctx.network.edges.values()].filter((e) => !e.bridge && (e.from === id || e.to === id)).length !== 1) continue;
     let best: { edge: RoadEdge; p: { x: number; z: number }; d: number } | null = null;
     for (const e of ctx.network.edges.values()) {
       if (e.bridge || e === own || e.from === id || e.to === id) continue;
@@ -205,21 +209,15 @@ export function joinNearMissEnds(ctx: RepairContext): number {
       best = { edge: e, p, d };
     }
     if (!best) continue;
-    const target = keyOf(best.p);
-    if (!safeRoadLink(ctx.geo, [...ctx.publicSites, ...ctx.landmarks], node, target)) continue;
-    let crossing = false;
-    for (const e of ctx.network.edges.values()) if (e !== best.edge && crosses(node, target, e.points[0], e.points[1])) { crossing = true; break; }
-    if (crossing) continue;
-    const [a, b] = best.edge.points;
-    const onEnd = (target.x === a.x && target.z === a.z) || (target.x === b.x && target.z === b.z);
-    if (!onEnd && ctx.network.edges.has(best.edge.id)) {
-      const host = best.edge;
-      ctx.network.edges.delete(host.id);
-      addNetworkEdge(ctx.network, a, target, host.kind === "arterial", false, host.width >= 12);
-      addNetworkEdge(ctx.network, target, b, host.kind === "arterial", false, host.width >= 12);
-    }
-    addNetworkEdge(ctx.network, node, target, own.kind === "arterial", false, own.width >= 12);
-    joined += 1;
+    const world: ConnectorWorld = { network: ctx.network, geo: ctx.geo, inRiver: ctx.inRiver, reservations: () => [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius) };
+    const result = runConnection({ id: `near-junction:${id}`, source: node,
+      target: { kind: "edges", include: (e) => !e.bridge && e.id !== own.id && e.from !== id && e.to !== id },
+      purpose: "district-access", allowBridge: false, maxLength: 24,
+      roadClass: own.kind === "arterial" ? "arterial" : "local", primary: own.width >= 12,
+    }, world, { strategies: ["direct-projection"] });
+    ctx.connectionLog?.push({ id: `near-junction:${id}`, purpose: "district-access", ok: result.ok,
+      ...(result.ok ? { strategy: result.strategy } : { reason: result.reason, detail: result.detail }) });
+    if (result.ok) joined += 1;
   }
   return joined;
 }

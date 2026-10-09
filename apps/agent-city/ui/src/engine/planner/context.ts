@@ -3,6 +3,7 @@ import type { CityBlock, PublicSite, Vec2 } from "../cityLayout";
 import type { SeasideBand } from "../citySeaside";
 import type { Network } from "./network";
 import type { Geography } from "./geography";
+import type { ConnectionAttempt } from "./connect";
 
 /**
  * 规划尾部修复遍用到的成员（CITY_ARCHITECTURE §2 迁移步 5b；V2 步 2b-lite 起路网原语走 network 对象）。
@@ -12,6 +13,7 @@ import type { Geography } from "./geography";
  */
 export interface RepairContext {
   network: Network;
+  connectionLog?: ConnectionAttempt[];
   height: (x: number, z: number) => number;
   inRiver: (x: number, z: number) => boolean;
   publicSites: PublicSite[];

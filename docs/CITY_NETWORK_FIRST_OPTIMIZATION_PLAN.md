@@ -2,7 +2,7 @@
 
 日期：2026-10-09。状态：分阶段实施方案；本次更新加入真机截图与当前运行版复核，不代表路网形态改造已完成。
 依据：路网方案源自 worktree-city-network-first @ 90399ced；当前代码复核至 main @ 0ead24bf。
-关联：CITY_NETWORK_FIRST_CODE_DESIGN.md、CITY_MODEL_PHYSICAL_INVARIANTS_SPEC.md。
+关联：CITY_NETWORK_FIRST_CODE_DESIGN.md、CITY_MODEL_PHYSICAL_INVARIANTS_SPEC.md、CITY_OPT_COMPLETION_AUDIT.md。
 
 ### 接管与集成记录（2026-10-09）
 
@@ -194,6 +194,31 @@ mini-roundabout、桥头落地环及 intent 诊断是复用基础，不代表它
 中断仍如实失败，转 A 的桥头重选或 D 的联合落位；J 不承诺解决所有断连。
 
 ### A：收口安全检查（所有行为补丁的门禁）
+
+2026-10-09 持续实施（相对 `7edabf98` 的代码/测试 diff SHA-256：
+`3e2da9919bc0f2f6fa2e925ee2a9e772d993ae89fcfac2f4c4da4f30df89e555`）：
+
+- 近接 T 的生产修复 `joinNearMissEnds` 已迁入统一连接器，按当前端点度数复查、事务拆边继承
+  自定义宽度，拒绝留诊断且正式图不变；仍未覆盖共线、多岔及折线的全部几何契约。
+- 展示保路 `preserveDemandPaths` 消费完整规划图，按折线实际长度恢复所需路径，允许穿过已保留
+  的中间分量。已接通需求不重复恢复支路；missing anchor/不可达节点进入 retentionReport。
+  当前 required 是已选择骨架/服务边的节点集合；真实设施 owner/入口路径与最终安全守卫仍未完成。
+- 普通/桥连接提交重新读取当前 reservations；桥入口 owner 记录位置/半径快照，搬迁、缺失或
+  身份歧义拒绝旧提案。外部 blockers 仍作附加保守限制；明确自身建筑入口通道/非圆占地仍待 D。
+- 桥跨候选用 ≤2 单位纵向、≤4 横向的实际路幅识别水段；跨水长度仍限 84，不扩大历史能力。
+  两端接入复核净空角；新源点必须有干地引道，不能因 gate 用途直接从零长引道起桥。
+- 管线收尾和 pruneShortSpurs 两处禁止删除桥头邻接引道。合成回归覆盖 2 单位短引道、近接 T
+  自定义宿主宽度、长度/边数选择冲突、预留数组整体替换、owner 搬迁及侧缘水塘桥跨。
+
+初版全宽水段识别曾令独立集桥头连续失败增至 28/60，已据此增加桥头/净空接受与删枝保护，
+不采用该中间结果作为新阈值。后续验收和完整目标状态记入完成审计台账，不能将此批定义为全部完成。
+
+此源码的 typecheck/build、connect、network-patch、loop、landing、intent、solve、layout 通过；
+cross-engine 的 30 个布局一致。独立集 tier 1 仍失败：缺门路 2/60（上限 1）、主干扎堆 3/60（2）、
+断连 7/60（2）、桥头连续失败 6/60（5，上一提交为 8）。其余验收档位没有运行，未刷新 golden。
+显示 fixture `523001688/t2` 的可接近缺口由 J 首批 11 降到 9，未连接交叉仍 0，服务率仍 1；
+`2000733103/t1` 的跨水断连和缺门路仍存在，不能以中间放过零长引道的结果冒充修复。
+事务求解、真实入口/联合落位、道路优先街区、预算/视觉与完整验收继续实施，不标目标 complete。
 
 先在 connect.ts 抽出共享候选表示与纯验证入口：
 

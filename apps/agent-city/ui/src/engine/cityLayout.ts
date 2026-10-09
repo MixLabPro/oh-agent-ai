@@ -3,6 +3,7 @@ import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath
 import { hashSeed, type CityModel } from "../cityModel";
 import { clearsHighways, createCityPlan, polygonDistance, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
 import { seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
+import { preserveDemandPaths } from "./planner/retention";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
@@ -511,49 +512,10 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
     return anchors.some((anchor) => Math.hypot(anchor.x - m.x, anchor.z - m.z) < anchor.r);
   };
   // 骨架（宽 12、桥）永远保留；宽 ≤8 的街道只在服务活动区时保留。
-  const keep = new Set(plan.roadEdges.filter((edge) => edge.bridge || edge.width >= 12 || serves(edge)).map((edge) => edge.id));
-  const dropped = plan.roadEdges.filter((edge) => !keep.has(edge.id));
-  const components = () => {
-    const parent = new Map<string, string>();
-    const find = (x: string): string => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x)!)!); x = parent.get(x)!; } return x; };
-    for (const edge of plan.roadEdges) if (keep.has(edge.id)) for (const id of [edge.from, edge.to]) if (!parent.has(id)) parent.set(id, id);
-    for (const edge of plan.roadEdges) if (keep.has(edge.id)) { const a = find(edge.from); const b = find(edge.to); if (a !== b) parent.set(a, b); }
-    return { parent, find };
-  };
-  const primaryId = plan.primaryAnchorNodeId ?? undefined;
-  for (let guard = 0; guard < 200 && primaryId; guard += 1) {
-    const { parent, find } = components();
-    const main = find(primaryId);
-    const stray = [...parent.keys()].filter((id) => find(id) !== main);
-    if (!stray.length) break;
-    // 碎片里有没有活动：它的边是否服务活动区。
-    const strayRoots = new Set(stray.map(find));
-    let changed = false;
-    for (const root of strayRoots) {
-      const members = new Set(stray.filter((id) => find(id) === root));
-      // 含骨架（宽 12 / 桥）或服务活动区的分量必须接回主网；只有纯空置支路碎片才删。
-      const hasLife = plan.roadEdges.some((edge) => keep.has(edge.id) && members.has(edge.from) && (edge.width >= 12 || edge.bridge || serves(edge)));
-      if (!hasLife) { for (const edge of plan.roadEdges) if (keep.has(edge.id) && members.has(edge.from) && edge.width < 12 && !edge.bridge) keep.delete(edge.id); changed = true; continue; }
-      // 只加回一条最短的接回路径（经被删边 BFS 到主网任一节点）；曾整圈整圈加回，几乎把空置街网全长回来了。
-      const viaDropped = new Map<string, RoadEdge[]>();
-      for (const edge of dropped) if (!keep.has(edge.id)) for (const id of [edge.from, edge.to]) (viaDropped.get(id) ?? viaDropped.set(id, []).get(id)!).push(edge);
-      const back = new Map<string, RoadEdge | null>([...members].map((id) => [id, null]));
-      const queue = [...members]; let reached: string | null = null;
-      for (let q = 0; q < queue.length && !reached; q += 1) {
-        for (const edge of viaDropped.get(queue[q]) ?? []) {
-          const next = edge.from === queue[q] ? edge.to : edge.from;
-          if (back.has(next)) continue;
-          back.set(next, edge); queue.push(next);
-          if (parent.has(next) && find(next) === main) { reached = next; break; }
-        }
-      }
-      for (let cursor = reached; cursor && back.get(cursor); ) {
-        const edge = back.get(cursor)!; keep.add(edge.id); changed = true;
-        cursor = edge.from === cursor ? edge.to : edge.from;
-      }
-    }
-    if (!changed) break;
-  }
+  const selected = new Set(plan.roadEdges.filter((edge) => edge.bridge || edge.width >= 12 || serves(edge)).map((edge) => edge.id));
+  const required = plan.roadEdges.filter((edge) => selected.has(edge.id)).flatMap((edge) => [edge.from, edge.to]);
+  const retention = preserveDemandPaths(plan.roadEdges, selected, plan.primaryAnchorNodeId, required);
+  const keep = retention.keep;
   const roadEdges = plan.roadEdges.filter((edge) => keep.has(edge.id));
   const nodeIds = new Set(roadEdges.flatMap((edge) => [edge.from, edge.to]));
   const roadNodes = plan.roadNodes.filter((node) => nodeIds.has(node.id));
@@ -561,7 +523,7 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
   for (const district of districts) {
     district.carPaths = district.carPaths.filter((route) => route.every((p, i) => i === 0 || pairs.has([`${route[i - 1].x}:${route[i - 1].z}`, `${p.x}:${p.z}`].sort().join("/"))));
   }
-  return { blocks, roadEdges, roadNodes, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
+  return { blocks, roadEdges, roadNodes, retentionReport: { restored: retention.restored, unresolved: retention.unresolved, anchorMissing: retention.anchorMissing }, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。

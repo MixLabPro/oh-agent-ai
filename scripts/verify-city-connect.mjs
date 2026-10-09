@@ -11,12 +11,13 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { runConnection, proposeConnection, commitConnection, commitFixedLink, runMiniRoundabout, corridorFailure, validateCandidate, connectGroundJunctions, roadPaintPlan, CONNECTOR_CONFIG, VALIDATION_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
+const { runConnection, proposeConnection, commitConnection, commitFixedLink, runMiniRoundabout, corridorFailure, validateCandidate, connectGroundJunctions, joinNearMissEnds, pruneShortSpurs, roadPaintPlan, CONNECTOR_CONFIG, VALIDATION_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
   "engine/planner/connect.ts": ["runConnection", "proposeConnection", "commitConnection", "commitFixedLink", "runMiniRoundabout", "corridorFailure", "CONNECTOR_CONFIG", "VALIDATION_CONFIG"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
   "engine/planner/validation.ts": ["validateCandidate"],
   "engine/planner/junctions.ts": ["connectGroundJunctions"],
   "engine/cityRoadPaint.ts": ["roadPaintPlan"],
+  "engine/planner/networkRepairs.ts": ["joinNearMissEnds", "pruneShortSpurs"],
   "engine/planner/constraints.ts": ["acuteJunctions"],
 });
 
@@ -189,7 +190,9 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.ok(!noBridge.ok && ["water-span", "slope", "no-target", "search-budget"].includes(noBridge.reason), `ground ladder must refuse to cross the river: ${JSON.stringify(noBridge)}`);
   assert.ok(!connected(w.network, "-100:0", "220:0"), "ground-only request must not reach the far bank");
   assert.ok([...w.network.edges.values()].every((e) => !e.bridge), "ground-only request must not sneak a bridge edge in");
-  const br = runConnection(request({ id: "bridge", source: { x: -100, z: 0 }, maxLength: 400, allowBridge: true }), w, { strategies: ["bridge-candidate"], crossings: false });
+  const beforeProposal = snap(w.network);
+  const br = proposeConnection(request({ id: "bridge", source: { x: -100, z: 0 }, maxLength: 400, allowBridge: true }), w, { strategies: ["bridge-candidate"], crossings: false });
+  assert.equal(snap(w.network), beforeProposal, "bridge proposal must not pre-commit its own corridor");
   assert.ok(br.ok && br.strategy === "bridge-candidate", `bridge candidate expected: ${JSON.stringify(br)}`);
   assert.equal(br.patch.addEdges.length, 3, `ground-bridge-ground needs 3 segments, got ${br.patch.addEdges.length}`);
   assert.equal(br.patch.addEdges.filter((e) => e.bridge).length, 1, "exactly the middle segment is the bridge");
@@ -361,12 +364,46 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
 // (i5) 正向对照（前滩引道）：干地但 buildable=false（前滩）、坡度 0.2（≤6）——引道按道路可行条件放行，
 //      不套建筑 buildable 判据（「前滩地面不必满足建筑 buildable，但须按明确道路可行条件验证」）。
 {
-  const w = makeWorld({ unbuildable: [{ x: 0, z: 60, r: 30 }] });
+  const self = { id: "beach-owner", x: 0, z: -14, radius: 10 };
+  const w = makeWorld({ unbuildable: [{ x: 0, z: 60, r: 30 }], sites: [self] });
   addNetworkEdge(w.network, { x: -40, z: 150 }, { x: 40, z: 150 }, true);
-  const r = runConnection(request({ id: "beach-gate", allowBridge: true, maxLength: 300 }), w, { strategies: ["bridge-candidate"], bridge: { self: { x: 0, z: -14, radius: 10 }, blockers: [], siteGate: true }, crossings: false });
+  const r = runConnection(request({ id: "beach-gate", allowBridge: true, maxLength: 300 }), w, { strategies: ["bridge-candidate"], bridge: { self, blockers: [], siteGate: true }, crossings: false });
   assert.ok(r.ok && r.strategy === "bridge-candidate", `gentle unbuildable beachfront approach must pass: ${JSON.stringify(r)}`);
   assert.ok(w.network.edges.size > 1, "beachfront gate must commit its edges");
   assert.ok([...w.network.edges.values()].every((e) => !e.bridge), "no deck is needed on dry beachfront");
+}
+
+// J：生产近接 T 使用连接器事务，属性继承；陡坡拒绝零副作用。
+{
+  const w = makeWorld();
+  addNetworkEdge(w.network, { x: 0, z: -100 }, { x: 0, z: 0 }, false);
+  addNetworkEdge(w.network, { x: -100, z: 12 }, { x: 100, z: 12 }, true);
+  const host = [...w.network.edges.values()].find((e) => e.width === 8); host.width = 9;
+  const log = [];
+  const ctx = { network: w.network, geo: w.geo, inRiver: w.inRiver, publicSites: [], landmarks: [], coast: [], seaside: null, coastRoadRunEnds: [], connectionLog: log };
+  assert.equal(joinNearMissEnds(ctx), 1, "near T goes through the production repair's transaction connector");
+  assert.ok(connected(w.network, "0:-100", "100:12"));
+  assert.equal([...w.network.edges.values()].filter((e) => e.width === 9).length, 2, "host custom width survives both split halves");
+  assert.ok(log.some((entry) => entry.ok));
+  const bad = makeWorld({ slopeDisc: { x: 0, z: 6, r: 4 } });
+  addNetworkEdge(bad.network, { x: 0, z: -100 }, { x: 0, z: 0 }, false);
+  addNetworkEdge(bad.network, { x: -100, z: 12 }, { x: 100, z: 12 }, true);
+  const frozen = snap(bad.network);
+  assert.equal(joinNearMissEnds({ ...ctx, network: bad.network, geo: bad.geo, inRiver: bad.inRiver }), 0);
+  assert.equal(snap(bad.network), frozen, "unsafe near T leaves both hosts intact");
+}
+
+// 桥头短引道不是可删短枝：即便非桥子图把它列为度 1，删枝也不能移除唯一接地关系。
+{
+  const w = makeWorld();
+  addNetworkEdge(w.network, { x: -30, z: 0 }, { x: -2, z: 0 }, false, true);
+  addNetworkEdge(w.network, { x: -2, z: 0 }, { x: 0, z: 0 }, false);
+  addNetworkEdge(w.network, { x: 0, z: 0 }, { x: 100, z: 0 }, false);
+  addNetworkEdge(w.network, { x: 0, z: 0 }, { x: 0, z: 100 }, false);
+  const frozen = snap(w.network);
+  const ctx = { network: w.network, geo: w.geo, inRiver: w.inRiver, publicSites: [], landmarks: [], coast: [], seaside: null, coastRoadRunEnds: [], carPaths: [] };
+  assert.equal(pruneShortSpurs(ctx), 0);
+  assert.equal(snap(w.network), frozen);
 }
 
 // J：地面交叉真实并网，宿主属性继承，多次拆边确定；桥/不安全走廊保持原图。
@@ -410,6 +447,45 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   const committed = commitConnection(w, proposed);
   assert.ok(!committed.ok && /site-clearance/.test(committed.detail), "gate revalidates blockers before commit");
   assert.equal(snap(w.network), frozen);
+}
+
+// 预留数组整体替换也必须失效；不能只对同一数组 push 的反例有效。
+for (const bridge of [false, true]) {
+  let current = [];
+  const w = makeWorld(); w.reservations = () => current;
+  addNetworkEdge(w.network, { x: -40, z: 150 }, { x: 40, z: 150 }, true);
+  const proposal = proposeConnection(request({ purpose: bridge ? "site-access" : "district-access", allowBridge: bridge }), w,
+    bridge ? { strategies: ["bridge-candidate"], bridge: { blockers: [] } } : { strategies: ["direct-projection"] });
+  assert.ok(proposal.ok);
+  current = [{ x: 0, z: 75, radius: 10 }];
+  const before = snap(w.network);
+  assert.ok(!commitConnection(w, proposal).ok, "commit must query current reservations, not a detached proposal array");
+  assert.equal(snap(w.network), before);
+}
+
+// 桥跨提出阶段也消费全路幅：中心线干地、侧缘水塘应产生 deck 而不是反复提出非法引道。
+{
+  const self = { id: "entrance-owner", x: 0, z: -20, radius: 5 };
+  const w = makeWorld({ sites: [self] });
+  addNetworkEdge(w.network, { x: -40, z: 150 }, { x: 40, z: 150 }, true);
+  const proposal = proposeConnection(request({ purpose: "site-access", allowBridge: true }), w,
+    { strategies: ["bridge-candidate"], bridge: { self, blockers: [] } });
+  assert.ok(proposal.ok);
+  self.x = 20;
+  const before = snap(w.network);
+  const result = commitConnection(w, proposal);
+  assert.ok(!result.ok && /owner moved/.test(result.detail), "owner mutation invalidates the old entrance proposal");
+  assert.equal(snap(w.network), before);
+}
+
+// 桥跨提出阶段也消费全路幅：中心线干地、侧缘水塘应产生 deck 而不是反复提出非法引道。
+{
+  const w = makeWorld();
+  w.geo.height = (x, z) => Math.abs(x) < 10 && z > 1 ? -1 : 2;
+  addNetworkEdge(w.network, { x: 80, z: -50 }, { x: 80, z: 50 }, true);
+  const r = runConnection(request({ source: { x: -80, z: 0 }, allowBridge: true, roadClass: "arterial" }), w, { strategies: ["bridge-candidate"] });
+  assert.ok(r.ok && r.bridgeSpans.length === 1, `full-width wet analysis must find a legal deck: ${JSON.stringify(r)}`);
+  assert.ok(r.patch.addEdges.some((e) => e.bridge));
 }
 
 // 宽度必须跟实际加边一致：collector、桥候选引道、固定主干全部拒绝侧缘压入安全余量。

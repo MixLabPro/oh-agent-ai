@@ -107,6 +107,8 @@ export type ConnectionProposal = {
   crossings: boolean;
   /** 显式桥段（原始坐标；调用方据此登记桥梁注册表 bridges）。 */
   bridgeSpans: BridgeSpan[];
+  /** 仅自身入口兼容排除；提交时仍刷新所有其他预留。 */
+  reservationOwner?: { id?: string; x: number; z: number; radius: number };
 };
 export type ConnectionResult =
   | ({ ok: true; version?: number } & ConnectionProposal)
@@ -451,7 +453,7 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
 // 引道本就穿过不可建的前滩带（历史口径；地形批 TerrainPatch 落地前的已知豁免，见设计 §5.1）。
 
 export type BridgeSpan = { from: Vec2; to: Vec2 };
-type BridgeOptions = { self?: { x: number; z: number; radius: number }; blockers: Array<{ x: number; z: number; radius: number }>; siteGate?: boolean };
+type BridgeOptions = { self?: { id?: string; x: number; z: number; radius: number }; blockers: Array<{ x: number; z: number; radius: number }>; siteGate?: boolean };
 const bridgePolicy = (bridge: BridgeOptions, request: ConnectionRequest): CorridorPolicy => ({ requireBuildable: false, maxSlope: VALIDATION_CONFIG.roadApproachMaxSlope, sites: bridge.blockers, siteMargin: 2, roadWidth: roadWidthOf(request), siteGate: bridge.siteGate ?? false });
 
 function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorld, bridge: BridgeOptions, crossings: boolean): (StrategyOutcome & { bridgeSpans: BridgeSpan[] }) | { ok: false; reason: ConnectionFailure; detail: string } {
@@ -475,12 +477,24 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
   for (const edge of world.network.edges.values()) if (!edge.bridge && (edge.from === sourceId || edge.to === sourceId)) { sourceHasRoad = true; break; } // 桥链末端的节点度>0 但无地面路，不算
   for (const candidate of candidates.slice(0, CONNECTOR_CONFIG.bridgeCandidates)) {
     if (candidate.d < CONNECTOR_CONFIG.minLinkDistance) continue; // 源自身悬挂边的投影（d≈0）：连到原地不是连接
+    if (!endpointClear(network, request.source, candidate.p) || !endpointClear(network, candidate.p, request.source)) { nearestReject = "junction-angle"; continue; }
     // 连线水段分析：首/末水采样界定连续水段；无水 = 纯地面引道。
     // 6 单位采样只用于提出桥跨候选；最终各段按统一路幅终筛，不以历史漏检授予豁免。
-    const n = Math.max(4, Math.ceil(Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z) / CONNECTOR_CONFIG.bridgeSampleSpacing));
-    const maxWetSamples = CONNECTOR_CONFIG.bridgeMaxSpanSamples;
+    const n = Math.max(4, Math.ceil(Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z) / (VALIDATION_CONFIG.sampleSpacing / 2)));
+    const maxWetLength = CONNECTOR_CONFIG.bridgeMaxSpanSamples * CONNECTOR_CONFIG.bridgeSampleSpacing;
     const at = (k: number) => ({ x: request.source.x + (candidate.p.x - request.source.x) * (k / n), z: request.source.z + (candidate.p.z - request.source.z) * (k / n) });
-    const wet = (k: number) => { const q = at(k); return world.geo.height(q.x, q.z) <= 0.5 || world.inRiver(q.x, q.z); };
+    const width = roadWidthOf(request);
+    const distance = Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z);
+    const nx = -(candidate.p.z - request.source.z) / distance; const nz = (candidate.p.x - request.source.x) / distance;
+    const lateralSteps = 2 * Math.ceil(width / (2 * VALIDATION_CONFIG.sampleSpacing));
+    const wet = (k: number) => {
+      const q = at(k);
+      for (let j = 0; j <= lateralSteps; j += 1) {
+        const offset = width * (j / lateralSteps - 0.5);
+        if (world.geo.height(q.x + nx * offset, q.z + nz * offset) <= 0.5 || world.inRiver(q.x + nx * offset, q.z + nz * offset)) return true;
+      }
+      return false;
+    };
     let first = -1; let last = -1; let blocked = false;
     for (let k = 1; k < n; k += 1) {
       const q = at(k);
@@ -499,7 +513,7 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
       //    （实测 3005969553：first≥2 误杀门路 → siteWithoutDoorRoad）；
       // ② 源头本就是带地面边的路端节点（isolate 场景）。远端落点必在既有路边（T 拆分后两侧
       //    有地面路），维持历史 last≤n-2。
-      if (last - first + 1 > maxWetSamples || first < (request.purpose === "site-access" || sourceHasRoad ? 1 : 2) || last > n - 2) { nearestReject = "water-span"; continue; }
+      if ((last - first + 1) * distance / n > maxWetLength || first < (sourceHasRoad ? 1 : 2) || last > n - 2) { nearestReject = "water-span"; continue; }
       let continuous = true;
       for (let k = first; k <= last; k += 1) if (!wet(k)) { continuous = false; break; }
       if (!continuous) { nearestReject = "water-span"; continue; }
@@ -733,10 +747,15 @@ function buildPatch(world: ConnectorWorld, request: ConnectionRequest, join: Joi
 export function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal, draft: Network): string | null {
   const approach = proposed.strategy === "bridge-candidate";
   const adds = proposed.patch.addEdges;
+  const owner = proposed.reservationOwner;
+  const reservations = world.reservations();
+  const matches = owner ? reservations.filter((s) => owner.id ? (s as { id?: string }).id === owner.id : s.x === owner.x && s.z === owner.z && s.radius === owner.radius) : [];
+  if (owner && (matches.length !== 1 || matches[0].x !== owner.x || matches[0].z !== owner.z || matches[0].radius !== owner.radius)) return "projection-loss entrance owner moved, missing or ambiguous";
+  const currentSites = reservations.filter((s) => s !== matches[0]);
   const candidate: RouteCandidate = {
     id: proposed.strategy,
     crossings: proposed.crossings,
-    blockers: approach ? proposed.policy.sites : [], // 非桥策略全是 ground-road 段（用 roadPolicy.sites），blockers 无消费方
+    blockers: approach ? [...proposed.policy.sites, ...currentSites] : [],
     gate: approach && proposed.purpose === "site-access",
     segments: adds.map((e, k) => ({
       a: e.a,
@@ -746,7 +765,7 @@ export function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal
       touchesDeck: approach && !e.bridge && ((k > 0 && adds[k - 1].bridge) || (k < adds.length - 1 && adds[k + 1].bridge)),
     })),
   };
-  const verdict = validateCandidate(world, draft, candidate, { roadPolicy: proposed.policy });
+  const verdict = validateCandidate(world, draft, candidate, { roadPolicy: { ...proposed.policy, sites: reservations } });
   if (verdict.ok) return null;
   const v = verdict.violations[0];
   return v.kind === "crossing" ? `${proposed.strategy}-crossing ${v.detail}` : `${v.kind} ${v.detail}`;
@@ -769,7 +788,7 @@ export function proposeConnection(request: ConnectionRequest, world: ConnectorWo
         : strategy === "bridge-candidate" ? bridgePolicy(options.bridge ?? { blockers: world.reservations() }, request)
         : fallbackPolicy(world, request, strategy === "node-merge" ? options.siteMargin : undefined);
       const bridgeAt = strategy === "bridge-candidate" ? [2] : []; // 三段中的中段是桥（无水时 polyline 只有 2 点，不含索引 2）
-      return { ok: true, patch: buildPatch(world, request, outcome.join, outcome.polyline, bridgeAt), cost: outcome.cost, strategy, policy, purpose: request.purpose, crossings: options.crossings !== false, bridgeSpans: outcome.bridgeSpans ?? [] };
+      return { ok: true, patch: buildPatch(world, request, outcome.join, outcome.polyline, bridgeAt), cost: outcome.cost, strategy, policy, purpose: request.purpose, crossings: options.crossings !== false, bridgeSpans: outcome.bridgeSpans ?? [], ...(strategy === "bridge-candidate" && options.bridge?.self ? { reservationOwner: { ...options.bridge.self } } : {}) };
     }
     lastReason = outcome.reason;
     failures.push(`${strategy}:${outcome.reason}`);
