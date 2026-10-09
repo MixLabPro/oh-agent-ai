@@ -11,8 +11,8 @@ for (const group of ["network", "sites", "planning", "display", "game"]) assert(
 assert(manifest.some((s) => s.env.CITY_SEASIDE_TIER === "10"));
 assert(manifest.some((s) => s.file === "verify-city-cross-engine.mjs" && !s.shared));
 assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
-// Preserve all 32 original stages plus six game guards and exact terrain regression.
-assert.equal(manifest.length, 39);
+// Preserve all 32 original stages plus six game guards, exact terrain regression, and the physical-declaration guard.
+assert.equal(manifest.length, 40);
 assert.equal(selectStages("module", "game").length, 6);
 let calls = 0;
 const factory = (seed, tier, config, opts) => ({ seed, tier, config: { ...config }, opts, call: ++calls });

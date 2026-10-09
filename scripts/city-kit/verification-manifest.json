@@ -140,6 +140,12 @@
     "shared": false
   },
   {
+    "id": "verify-city-physical",
+    "file": "verify-city-physical.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-city-solve",
     "file": "verify-city-solve.mjs",
     "env": {},

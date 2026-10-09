@@ -1,4 +1,5 @@
 import type { BuildingModel, Part } from "../model";
+import { declarePhysical } from "../physical";
 
 const STONE = "#ece5d6";
 const TRIM = "#d6ccb7";
@@ -16,6 +17,29 @@ export const archModel: BuildingModel = {
   title: "凯旋拱门",
   body: "立在主干道旁的纪念拱门。由岛屿种子挑选，不代表会话。",
   sitingKey: "landmark:arch",
+  /** 物理声明（批 A）：占地 = 两墩并集，|x|<8 的开口是路面（凸包会把它误判成实体，spec §9 反例）。
+   *  cap 只影响高度（h = min(cap,26)），XY 外廓与 cap 无关；基座 plinth [9×12]@±12.5 是地面接触面。 */
+  physical: declarePhysical({
+    modelId: "arch",
+    modelRevision: "A1",
+    footprint: { parts: [
+      { shape: "rect", center: { x: -12.5, z: 0 }, width: 9, depth: 12 },
+      { shape: "rect", center: { x: 12.5, z: 0 }, width: 9, depth: 12 },
+    ] },
+    /** 上层悬挑：拱券实体/檐口/顶楼横跨开口上方（x 至 ±16.3、z 至 ±5.3）——按设计悬在路面之上，不是地面障碍。 */
+    overhang: { parts: [{ shape: "rect", center: { x: 0, z: 0 }, width: 33, depth: 11 }] },
+    foundation: { kind: "ground", support: { parts: [
+      { shape: "rect", center: { x: -12.5, z: 0 }, width: 9, depth: 12 },
+      { shape: "rect", center: { x: 12.5, z: 0 }, width: 9, depth: 12 },
+    ] }, maxRelief: 1.5, maxGap: 0.2, maxEmbed: 0.8, baseOffset: 0 },
+    entrances: [
+      { id: "north-passage", local: { x: 0, z: 6 }, outward: { x: 0, z: 1 }, width: 16, mode: "vehicle", required: true,
+        approach: { parts: [{ shape: "rect", center: { x: 0, z: 12 }, width: 16, depth: 12 }] } },
+      { id: "south-passage", local: { x: 0, z: -6 }, outward: { x: 0, z: -1 }, width: 16, mode: "vehicle", required: true,
+        approach: { parts: [{ shape: "rect", center: { x: 0, z: -12 }, width: 16, depth: 12 }] } },
+    ],
+    notes: "两墩之间（|x|<8）是路面：并集空洞是契约核心反例；拱上构件（拱券/檐口）为上层悬挑。",
+  }),
   geometry: ({ sizing }) => {
     const h = Math.min(sizing?.cap ?? 70, 26);
     const W = 31; const D = 9; const pierW = 7.5; const openW = W - pierW * 2; const springY = h * 0.55; // 开口 16：骑在 12 宽主干道上
