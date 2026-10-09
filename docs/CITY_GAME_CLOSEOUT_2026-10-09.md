@@ -27,7 +27,7 @@
 | `verify-react-city-runtime.mjs` 完整运行 | 退出码 0；包括数据状态/竞态、故障恢复、Tab 保留、语言、第二插件、resize、PNG 与导出取消 |
 | `verify-react-city-runtime.mjs --film-only` | 退出码 0；122 帧、320×180 MP4 可解码，前台仍响应，`renderErrors=0`，无 Worker 缓冲错误。该小尺寸测试使用 1 FPS；它不代替生产 30 FPS 性能验收 |
 | UAT 原生 bundle 构建 | `AGENT_VITALS_CITY_GAME_UAT=1 cargo tauri build --bundles app` 退出码 0 |
-| `verify:city` 全链 | 正在运行；不能标记为全链通过 |
+| `verify:city` 全链 | session `42779` 退出码 0，42 阶段全部通过；JSON 报告 `/tmp/city-game-closeout-full.json`。包括新增键盘→物理→12 环成功结算及一次保存回调守卫 |
 
 ## 原生验收进展与剩余门槛
 
@@ -39,4 +39,4 @@
 
 为避免多份同 bundle id 的 App 被 Computer Use 错认，这段使用临时副本 `/tmp/agent-vitals-city-uat.jyB1Hh/agent-vitals-game-uat.app`，仅 Info.plist 的名称与 bundle id 改为 `Agent Vitals Game UAT` / `com.mixlabpro.agent-vitals.city-game-uat` 后 ad-hoc 签名。前端与可执行代码来自已构建的工作树 UAT bundle；OS 身份和签名与正式包不同，因此不能替代正式身份相关验收。未覆盖项仍需使用最终包补齐。
 
-原生挑战成功、换路线、重启成绩持久化，以及性能分档、布局矩阵仍待完成。后台全量验证的 session `42779` 仍在运行，已通过场景 golden，当前执行 survey；不能将尚未结束的运行记为通过。现有瞬时闪白状态未在本次宣称解决。
+原生挑战成功、换路线、重启成绩持久化，以及性能分档、布局矩阵仍待完成。后台全量验证的 session `42779` 已退出 0；`4e8af385` 的新增成功路径守卫在这次全链执行到该阶段之前提交，并被该次执行覆盖。该逻辑守卫不替代原生落盘和重启验证。现有瞬时闪白状态未在本次宣称解决。
