@@ -1,0 +1,27 @@
+/* 游戏模式局部样式（GameHud）。复用 city.css 的 --city-* 令牌；不覆盖宿主导航。 */
+.city-app .city-game-hud { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+.city-app .city-game-hud > * { pointer-events: auto; }
+.city-game-chip { padding: 8px 12px; border-radius: 10px; background: var(--city-surface); border: 1px solid var(--city-border); font-size: 12px; line-height: 1.4; }
+.city-game-topleft { position: absolute; top: 76px; left: 24px; display: grid; gap: 6px; }
+.city-game-topleft .city-game-chip strong { font-size: 13px; }
+.city-game-topright { position: absolute; top: 76px; right: 24px; display: grid; gap: 6px; text-align: right; }
+.city-game-telemetry { display: inline-flex; gap: 12px; font-variant-numeric: tabular-nums; }
+.city-game-telemetry span { color: var(--city-muted); margin-right: 4px; }
+.city-game-warn { border-color: #d8a24a; color: #ffd9a0; }
+.city-game-keys { position: absolute; right: 24px; bottom: 84px; width: 218px; padding: 10px 12px; }
+.city-game-keys summary { list-style: none; cursor: pointer; color: var(--city-muted); font-size: 11px; }
+.city-game-keys summary::-webkit-details-marker { display: none; }
+.city-game-keys dl { margin: 8px 0 0; gap: 4px 10px; font-size: 11px; }
+.city-game-keys dt { color: var(--city-text); font-weight: 600; }
+.city-game-keys dd { margin: 0; color: var(--city-muted); }
+.city-game-panel { position: absolute; inset: 0; display: grid; place-items: center; background: #020a14a8; }
+.city-game-panel > div { width: min(360px, calc(100% - 48px)); padding: 20px; border-radius: 12px; background: #101d2f; border: 1px solid var(--city-border); display: grid; gap: 10px; }
+.city-game-panel h2 { margin: 0; font-size: 18px; }
+.city-game-panel p { margin: 0; color: var(--city-muted); font-size: 12px; line-height: 1.5; }
+.city-game-panel .city-game-actions { display: grid; gap: 8px; margin-top: 4px; }
+.city-game-panel .city-game-actions button { min-height: 36px; }
+.city-game-panel .city-game-danger { border-color: #7c3a3a; }
+.city-game-paused dl { margin: 10px 0 0; gap: 4px 10px; font-size: 12px; }
+.city-game-paused dt { color: var(--city-text); font-weight: 600; }
+.city-game-paused dd { margin: 0; color: var(--city-muted); font-variant-numeric: tabular-nums; }
+.city-game-countdown { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; font-weight: 700; color: #eaf6ff; text-shadow: 0 2px 24px #0a2033cc; pointer-events: none; }

@@ -14,6 +14,11 @@ import { describeDecor, isDecorId } from "./engine/cityDecor";
 import { CATALOG_GROUPS, CATALOG_KIND_LABEL, CITY_CATALOG } from "./cityCatalog";
 import { scaleTierFor } from "./engine/cityPlan";
 import { cityText, cityView, useCityLanguage } from "./i18n";
+import { GameHud } from "./game/GameHud";
+import { gameText } from "./game/gameCopy";
+import type { useCityGame } from "./game/useCityGame";
+
+declare const __CITY_GAME_UAT__: boolean;
 
 const dateLabel = (ms: number) => new Date(ms).toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
 const tokens = (n: number) => n.toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
@@ -224,15 +229,22 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     lockSelection: (id: string) => engine.current?.lockSelection(id) };
 }
 
-export function CityExperience({ ui, disabled, cinema, status, quality, onQuality }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void }) {
+export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, gameDev }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; gameDev: boolean }) {
   const language = useCityLanguage();
+  const gameActive = game.active;
+  // 游戏接管时收起模态与侧栏（native dialog 在 top layer，会盖住游戏 HUD）。
+  useEffect(() => {
+    if (!gameActive) return;
+    ui.setOptions(false); ui.setDetails(false); ui.setCatalog(false);
+  }, [gameActive]);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const summaryButton = useRef<HTMLButtonElement>(null);
   const replayButton = useRef<HTMLButtonElement>(null);
   const timelineRef = useRef<HTMLElement>(null);
   const compact = (n: number) => new Intl.NumberFormat(language === "en" ? "en-US" : "zh-CN", { notation: "compact", maximumFractionDigits: 2 }).format(n);
-  const totalTokens = ui.projection?.sessions.reduce((sum, session) => sum + session.tokens.total, 0);
+  const availableProjection = ui.projection?.status === "unavailable" ? null : ui.projection;
+  const totalTokens = availableProjection?.sessions.reduce((sum, session) => sum + session.tokens.total, 0);
   useEffect(() => { if (ui.selected || ui.catalog) setSummaryOpen(false); }, [ui.selected, ui.catalog]);
   useEffect(() => {
     const element = timelineRef.current;
@@ -275,13 +287,13 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   useEffect(() => { if (ui.details && session) detailsRef.current?.showModal(); else detailsRef.current?.close(); }, [ui.details, session?.id]);
   return cityView(<>
     <div className="city-tooltip" ref={ui.tooltipRef} aria-hidden="true" />
-    {!cinema && <button ref={summaryButton} className="city-summary-trigger" aria-label="城市摘要" aria-expanded={summaryOpen} aria-controls="city-summary-panel" onClick={() => { ui.clearSelection(); ui.setCatalog(false); setSummaryOpen(!summaryOpen); }}>
-      <span>{ui.projection ? compact(ui.projection.coverage.returned) : "—"} 会话 · {totalTokens === undefined ? "—" : compact(totalTokens)} tokens</span>
+    {!cinema && !gameActive && <button ref={summaryButton} className="city-summary-trigger" aria-label="城市摘要" aria-expanded={summaryOpen} aria-controls="city-summary-panel" onClick={() => { ui.clearSelection(); ui.setCatalog(false); setSummaryOpen(!summaryOpen); }}>
+      <span>{availableProjection ? compact(availableProjection.coverage.returned) : "—"} 会话 · {totalTokens === undefined ? "—" : compact(totalTokens)} tokens</span>
       {ui.projection?.coverage.truncated && <span className="city-coverage-badge">已截断</span>}
       {ui.projection?.source === "fixture" && <span className="city-coverage-badge">演示</span>}
       <span aria-hidden="true">{summaryOpen ? "−" : "›"}</span>
     </button>}
-    {!cinema && summaryOpen && <section id="city-summary-panel" className="city-legend" aria-label="城市摘要">
+    {!cinema && !gameActive && summaryOpen && <section id="city-summary-panel" className="city-legend" aria-label="城市摘要">
       <h2>城市摘要</h2>
       <p>{status}</p>
       <dl><dt>已载入会话</dt><dd>{ui.projection?.coverage.returned ?? "—"} / {ui.projection?.coverage.total ?? "—"}</dd><dt>Token</dt><dd>{totalTokens === undefined ? "—" : tokens(totalTokens)}</dd><dt>活跃</dt><dd>{model?.stats.activeCount ?? "—"}</dd></dl>
@@ -296,7 +308,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <p>会话楼高表示 token 规模；施工状态和生长进度是可视化估算，不代表任务完成度。</p>
       <p>{ui.projection?.source === "local" ? "本机只读投影 · 不上传数据" : "本地演示数据 · 尚未接入真实数据源"}</p>
     </section>}
-    {catalog && !cinema && <aside className="city-catalog" aria-label="建筑说明">
+    {catalog && !cinema && !gameActive && <aside className="city-catalog" aria-label="建筑说明">
       <button className="city-close" aria-label="关闭建筑说明" onClick={() => setCatalog(false)}>×</button>
       <h2>建筑说明</h2>
       <p>City 里每类建筑的样子与用途。「代表会话」的楼来自你的数据；其余是城市规模配套或装饰。点「查看实时模型」把镜头飞到岛上的实物。</p>
@@ -309,7 +321,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         </div>
       </li>)}</ul></section>)}
     </aside>}
-    {!cinema && <section ref={timelineRef} className={`city-timeline${replayOpen ? " is-expanded" : ""}`} aria-label="时间回放">
+    {!cinema && !gameActive && <section ref={timelineRef} className={`city-timeline${replayOpen ? " is-expanded" : ""}`} aria-label="时间回放">
       <button ref={replayButton} type="button" aria-expanded={replayOpen} aria-controls="city-replay-controls" onClick={() => setReplayOpen(!replayOpen)}>{replayOpen ? "收起回放" : "时间回放"}</button>
       <span className="city-replay-status">{ui.cursor === null ? "实时" : dateLabel(ui.cursor)}{ui.playing && <span aria-label="正在回放"> · ▶</span>}</span>
       {replayOpen && <div id="city-replay-controls" className="city-replay-controls">
@@ -325,7 +337,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <div className="city-cinema-top" /><div className="city-cinema-bottom"><span style={{ transform: `scaleX(${ui.progress})` }} /></div>
       {card && <div className="city-cinema-card"><p>{"eyebrow" in card ? card.eyebrow : ""}</p><h2>{card.title}</h2><p>{card.subtitle}</p></div>}
     </div>}
-    {ui.selected === "decor:site:civic" && !cinema && model && (() => {
+    {ui.selected === "decor:site:civic" && !cinema && !gameActive && model && (() => {
       // 市政厅 = 全城的功能性标志：面板展示全城概况（用户：「市政广场的市政厅能提供哪些功能性信息」）。
       const total = model.stats.totalSessions || 1;
       const tier = scaleTierFor(model.buildings.length);
@@ -347,7 +359,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {decorCamera}
       </aside>;
     })()}
-    {ui.selected && ui.selected.startsWith("decor:landmark:district:") && !cinema && (() => {
+    {ui.selected && ui.selected.startsWith("decor:landmark:district:") && !cinema && !gameActive && (() => {
       // 城区地标 = 城区的功能性标志：面板展示该执行环境城区的数据（用户：把城区信息放到「城区地标」说明上）。
       const districtId = ui.selected.slice("decor:landmark:district:".length);
       const district = model?.districts.find((d) => d.id === districtId);
@@ -362,7 +374,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {decorCamera}
       </aside>;
     })()}
-    {ui.selected && isDecorId(ui.selected) && !ui.selected.startsWith("decor:landmark:district:") && ui.selected !== "decor:site:civic" && !cinema && (() => {
+    {ui.selected && isDecorId(ui.selected) && !ui.selected.startsWith("decor:landmark:district:") && ui.selected !== "decor:site:civic" && !cinema && !gameActive && (() => {
       const info = describeDecor(ui.selected);
       if (!info) return null;
       return <aside className="city-detail-panel" aria-label="建筑详情">
@@ -373,7 +385,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {decorCamera}
       </aside>;
     })()}
-    {selected && !cinema && <aside className="city-detail-panel" aria-label="建筑详情">
+    {selected && !cinema && !gameActive && <aside className="city-detail-panel" aria-label="建筑详情">
       <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
       <p>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</p>
       {model && selected.tokensTotal >= Math.max(...model.buildings.map((b) => b.tokensTotal)) && <p className="city-hero-note">全城之最：本窗口 token 最多的会话。它戴尖顶冠，夜里顶上亮一道探照光柱，方便在全城找到它。</p>}<h2>{model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}</h2>
@@ -412,6 +424,17 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <label htmlFor="city-quality">画质</label><select id="city-quality" value={quality} onChange={(e) => onQuality(e.target.value)}><option value="auto">自动</option><option value="high">高画质</option><option value="eco">节能</option></select>
       <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
       <details className="city-settings-help"><summary>导出说明</summary><p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p></details>
+      {gameDev && <div className="city-game-entry">
+        <label style={{ fontSize: 12, color: "var(--city-muted)" }}>{gameText("游戏模式（开发预览）", language === "en" ? "en" : "zh-Hans")}</label>
+        {/* 空投影也允许在生成的空岛练习（§1.1）：门槛是「城市已建模」而非 sceneReady。 */}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); game.enterPractice(); }}>{gameText("自由练习", language === "en" ? "en" : "zh-Hans")}</button>
+          <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); game.enterRace(); }}>{gameText("穿环挑战", language === "en" ? "en" : "zh-Hans")}</button>
+          {typeof __CITY_GAME_UAT__ !== "undefined" && __CITY_GAME_UAT__ && <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); void game.enterUatRace(); }}>UAT keyboard pilot</button>}
+        </div>
+        {game.entryError && <p role="alert">{game.entryError}</p>}
+        <p>{gameText("进入后用 W/S/A/D 与方向键飞行，Esc 暂停。", language === "en" ? "en" : "zh-Hans")}</p>
+      </div>}
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
       {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}
       <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.lockSelection(e.target.value); else ui.clearSelection(); ui.setOptions(false); }}>
@@ -427,6 +450,9 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <small>实际生成帧 · 预览最多 2 FPS，成片 30 FPS</small>
     </section>}
     {ui.error && !ui.options && <div className="city-feature-error" role="alert">{ui.error}<button aria-label="关闭提示" onClick={() => ui.setError(null)}>×</button></div>}
-    {debug && ui.stats && <p className="city-perf">{ui.stats.fps} FPS · {ui.stats.drawCalls} draw calls · {ui.stats.buildings} buildings · quality {ui.stats.quality}</p>}
+    {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} persist={{ tier: game.persistTier, saveFailed: game.saveFailed }} actions={{
+      onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse,
+    }} />}
+    {debug && ui.stats && <p className="city-perf">{ui.stats.fps} FPS · {ui.stats.drawCalls} draw calls · {ui.stats.buildings} buildings · geo {ui.stats.geometries} · tex {ui.stats.textures} · quality {ui.stats.quality}</p>}
   </>, language);
 }

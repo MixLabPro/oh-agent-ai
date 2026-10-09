@@ -1,6 +1,6 @@
 {
  "380/day": {
-  "all": "820a271e74e10489",
+  "all": "4f4a755b815cd4df",
   "sections": {
    "city-beach": "1:ef6ab491f41f",
    "city-beach-furniture": "3:4f930ee69984",
@@ -30,7 +30,7 @@
    "city-landmark-tv-tower": "12:cc4c5fe3a6a7",
    "city-landmark-twisting-deco-tower": "1:96f3d5ae7948",
    "city-landmark-villa-complex": "18:7824b97455f9",
-   "city-lifeguard-towers": "1:5a667429946a",
+   "city-lifeguard-towers": "1:2a91d4678d0c",
    "city-marina": "3:52f31066fa5b",
    "city-promenade": "1:f371a0bb2536",
    "city-promenade-props": "2:f4c520005c90",
@@ -59,7 +59,7 @@
   }
  },
  "380/night": {
-  "all": "a4eb42aaeee32541",
+  "all": "e96b3044c862b98c",
   "sections": {
    "city-beach": "1:ef6ab491f41f",
    "city-beach-furniture": "3:4f930ee69984",
@@ -89,7 +89,7 @@
    "city-landmark-tv-tower": "12:cc4c5fe3a6a7",
    "city-landmark-twisting-deco-tower": "1:ef904f99664d",
    "city-landmark-villa-complex": "18:7824b97455f9",
-   "city-lifeguard-towers": "1:5a667429946a",
+   "city-lifeguard-towers": "1:2a91d4678d0c",
    "city-marina": "3:52f31066fa5b",
    "city-promenade": "1:f371a0bb2536",
    "city-promenade-props": "2:5748c776660c",
@@ -118,7 +118,7 @@
   }
  },
  "1600/day": {
-  "all": "3206787a80dfce43",
+  "all": "355923fdc0abaa6b",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -151,7 +151,7 @@
    "city-landmark-tv-tower": "12:d0a601095de8",
    "city-landmark-twisting-deco-tower": "1:3102616b7b90",
    "city-landmark-villa-complex": "18:7d5682b2080e",
-   "city-lifeguard-towers": "1:53f45e978ee2",
+   "city-lifeguard-towers": "1:c291b7446865",
    "city-marina": "3:970db2377c3c",
    "city-promenade": "2:bed4bd8c69e4",
    "city-promenade-props": "4:7d0981ba6b75",
@@ -180,7 +180,7 @@
   }
  },
  "1600/night": {
-  "all": "7d0001f8117f629a",
+  "all": "0f2854b718d8fae4",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -213,7 +213,7 @@
    "city-landmark-tv-tower": "12:d0a601095de8",
    "city-landmark-twisting-deco-tower": "1:9db22c1d1af9",
    "city-landmark-villa-complex": "18:7d5682b2080e",
-   "city-lifeguard-towers": "1:53f45e978ee2",
+   "city-lifeguard-towers": "1:c291b7446865",
    "city-marina": "3:970db2377c3c",
    "city-promenade": "2:bed4bd8c69e4",
    "city-promenade-props": "4:ec76e3fe9f58",

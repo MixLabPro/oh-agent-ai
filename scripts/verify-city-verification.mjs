@@ -7,12 +7,13 @@ import { manifest, selectStages } from "./city-kit/verification.mjs";
 assert.equal(new Set(manifest.map((s) => s.id)).size, manifest.length);
 assert.deepEqual(selectStages("full").map((s) => s.id), manifest.map((s) => s.id));
 assert.throws(() => selectStages("module", "unknown"));
-for (const group of ["network", "sites", "planning", "display"]) assert(selectStages("module", group).length > 0);
+for (const group of ["network", "sites", "planning", "display", "game"]) assert(selectStages("module", group).length > 0);
 assert(manifest.some((s) => s.env.CITY_SEASIDE_TIER === "10"));
 assert(manifest.some((s) => s.file === "verify-city-cross-engine.mjs" && !s.shared));
 assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
-// Initial full-suite membership was copied verbatim from the old npm script.
-assert.equal(manifest.length, 32);
+// Preserve all 32 original stages plus six game guards and exact terrain regression.
+assert.equal(manifest.length, 39);
+assert.equal(selectStages("module", "game").length, 6);
 let calls = 0;
 const factory = (seed, tier, config, opts) => ({ seed, tier, config: { ...config }, opts, call: ++calls });
 const c = { margin: 1, version: 2 };

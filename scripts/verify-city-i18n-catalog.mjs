@@ -12,12 +12,17 @@ const src = path.join(repo, "apps/agent-city/ui/src");
 const i18n = fs.readFileSync(path.join(src, "i18n.tsx"), "utf8");
 const catalogBody = i18n.slice(i18n.indexOf("const english"), i18n.indexOf("};", i18n.indexOf("const english")));
 const keys = new Set([...catalogBody.matchAll(/"((?:[^"\\]|\\.)*)"\s*:/g)].map((m) => JSON.parse(`"${m[1]}"`)));
+// 游戏模式有自己的文案目录（game/gameCopy.ts，zh 为键 → en）：与主目录同等对待。
+const gameCopy = fs.readFileSync(path.join(src, "game/gameCopy.ts"), "utf8");
+const gameBody = gameCopy.slice(gameCopy.indexOf("const ENGLISH"), gameCopy.indexOf("};", gameCopy.indexOf("const ENGLISH")));
+for (const m of gameBody.matchAll(/"((?:[^"\\]|\\.)*)"\s*:/g)) keys.add(JSON.parse(`"${m[1]}"`));
 // cityText 里的模式规则（数字前缀/后缀类）：命中这些模式的字面量片段视为已覆盖。
 const patterns = [/^ 天$/, /^取消导出 · $/, /^ 个会话，一座城市$/, /^ 个会话$/, /^ 个城区 · 已载入的 token · 非费用账单$/, /^本机真实数据/];
 const cjk = /[㐀-鿿]/;
 const cityTextBody = i18n.slice(i18n.indexOf("export function cityText"), i18n.indexOf("export function cityView"));
 // engine/cityDecor.ts 是非会话建筑说明面板的文案源（cityView 渲染时查表）：曾不在扫描范围内，文案改了两轮目录都没跟上。
-const files = [...fs.readdirSync(src).filter((f) => f.endsWith(".tsx") && f !== "i18n.tsx"), "engine/cityDecor.ts", "cityCatalog.ts"];
+const files = [...fs.readdirSync(src).filter((f) => f.endsWith(".tsx") && f !== "i18n.tsx"), "engine/cityDecor.ts", "cityCatalog.ts",
+  ...fs.readdirSync(path.join(src, "game")).filter((f) => f.endsWith(".tsx")).map((f) => `game/${f}`)];
 const missing = [];
 for (const file of files) {
   const text = fs.readFileSync(path.join(src, file), "utf8")

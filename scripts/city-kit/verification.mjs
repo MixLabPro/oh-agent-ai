@@ -8,12 +8,13 @@ const groups = {
   sites: ["verify-city-footprint-geoms", "verify-city-sitespec", "verify-city-models", "verify-react-city-layout", "verify-city-intent"],
   planning: ["verify-city-planning", "verify-city-constraints", "verify-city-baseline", "verify-city-survey", "verify-city-cross-engine"],
   display: ["verify-city-active", "verify-react-city-layout", "verify-city-culdesac-bulbs", "verify-city-scene-baseline", "verify-react-city-seaside", "seaside-tier10"],
+  game: ["verify-city-game-session", "verify-city-game-controller", "verify-city-game-world", "verify-city-game-flight", "verify-city-game-race", "verify-city-game-profile"],
 };
 export function selectStages(mode, group) {
   if (mode === "full") return manifest;
   if (mode === "fast") return manifest.filter((s) => synthetic.includes(s.id));
   if (mode === "module" && groups[group]) return manifest.filter((s) => groups[group].includes(s.id));
-  throw new Error("Usage: verify-city-suite.mjs full|fast|module <network|sites|planning|display> [--no-cache] [--report <path>]");
+  throw new Error("Usage: verify-city-suite.mjs full|fast|module <network|sites|planning|display|game> [--no-cache] [--report <path>]");
 }
 export const typecheck = {
   id: "typecheck", cwd: fileURLToPath(new URL("../../apps/agent-city/ui/", import.meta.url)),

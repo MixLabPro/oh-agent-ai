@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // Browser regression uses the same iframe/postMessage adapter as dev:browser.
 // Native process isolation is tested separately, never inferred from iframe tests.
+//
+// macOS 使用新版 headless Chromium + Metal，避免旧 headless shell 的 CPU
+// SwiftShader 持续占满 GPU 进程。保留真实场景、交互与超时断言；初始化定位器
+// 接受系统语言（英文/中文）。失败诊断有独立上限，不能再把原始错误挂住。
 import assert from "node:assert/strict";
 import { readFile, cp, mkdtemp, readdir } from "node:fs/promises";
 import http from "node:http";
@@ -58,8 +62,7 @@ let browser, lastPage;
 async function openWorkbench({ noWebGL = false, failModule = false } = {}) {
   const page = await browser.newPage({ viewport: { width: 1100, height: 760 } });
   lastPage = page;
-  // CPU software WebGL can block the test-only same-process iframe during first
-  // render. Native plugin fault deadlines remain 5s/15s and are tested separately.
+  // Native plugin fault deadlines remain 5s/15s and are tested separately.
   page.setDefaultTimeout(45000);
   const errors = [];
   page.testErrors = errors;
@@ -131,7 +134,7 @@ async function openWorkbench({ noWebGL = false, failModule = false } = {}) {
     };
   }, { noWebGL, failModule });
   await page.goto(origin);
-  await page.locator(".sidebar").getByRole("button", { name: "Overview", exact: true }).waitFor();
+  await page.locator(".sidebar").getByRole("button", { name: /^(Overview|总览)$/ }).waitFor();
   await page.evaluate(async () => {
     await window.__TAURI__.core.invoke("save_ui_language_config", { language: "zh-Hans" });
     localStorage.setItem("agent-vitals.language", "zh-Hans");
@@ -142,14 +145,34 @@ async function openWorkbench({ noWebGL = false, failModule = false } = {}) {
   else {
     // Header may be position:absolute and not "visible" to Playwright after the
     // scene-first HUD restructure — wait for the canvas or any city content instead.
-    await page.frameLocator("iframe").locator(".city-canvas, .city-legend").first().waitFor();
-    // Software WebGL regression uses the product's eco mode, not hardware GTAO.
-    if (!noWebGL) await page.getByRole("combobox", { name: "画质" }).selectOption("eco");
+    await page.frameLocator("iframe").locator(".city-canvas, .city-legend").first().waitFor({ state: noWebGL ? "attached" : "visible" });
+    // Interaction regression starts in the product's eco mode.
+    // 画质下拉在城市插件的设置对话框内（iframe），不在宿主工具栏——经 更多工具→城市设置 进入。
+    if (!noWebGL) {
+      await page.getByRole("button", { name: "更多工具", exact: true }).click();
+      await page.getByRole("button", { name: "城市设置", exact: true }).click();
+      const settings = city(page).getByRole("dialog", { name: "城市设置", exact: true });
+      await settings.getByLabel("画质", { exact: true }).selectOption("eco");
+      await settings.getByRole("button", { name: "关闭城市设置", exact: true }).click();
+      // 收起展开的更多工具菜单：按钮标签切到 plugin.less，不收起会让后续「更多工具」定位失败。
+      await page.getByRole("button", { name: "收起工具", exact: true }).click();
+    }
   }
   return { page, errors };
 }
 
 function city(page) { return page.frameLocator("iframe"); }
+async function openCitySettings(page) {
+  const more = page.getByRole("button", { name: "更多工具", exact: true });
+  if (await more.count()) await more.click();
+  await page.getByRole("button", { name: "城市设置", exact: true }).click();
+  return city(page).getByRole("dialog", { name: "城市设置", exact: true });
+}
+async function cityStatus(page) {
+  const toggle = city(page).getByRole("button", { name: "城市摘要", exact: true });
+  if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
+  return city(page).locator(".city-legend p").first();
+}
 /** iframe 会被宿主重建（错误恢复/失效刷新）：跨步骤持有的 frame 句柄可能失效。
  *  对 iframe 内状态读写与条件等待一律经本助手——按需重取、失效重试（最长 5s），
  *  条件等待以轮询 Promise 表达（等价 waitForFunction 语义，重建风暴下仍收敛）。 */
@@ -175,14 +198,16 @@ async function cityWaitFor(page, fn, timeoutMs = 20000, arg) {
     await page.waitForTimeout(250);
   }
 }
-function summary(page, index) { return city(page).locator(".city-legend button strong, .city-legend button span").nth(index); }
-async function expectSummary(page, sessions, _tokens) {
+async function expectSummary(page, sessions, tokens) {
   // Readiness must not require opening an optional panel or changing its state.
-  try { await page.waitForFunction(() => {
+  try { await page.waitForFunction(({ sessions, tokens }) => {
     const frame = document.querySelector("iframe");
     const trigger = frame?.contentDocument?.querySelector(".city-summary-trigger");
-    return !!trigger && !trigger.textContent.includes("—");
-  }, undefined, { timeout: 45_000 }); }
+    const locale = frame?.contentWindow?.__AV_PLUGIN_LOCALE__ === "en" ? "en-US" : "zh-CN";
+    const compact = (value) => value === "—" ? value : new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 2 }).format(Number(value.replaceAll(",", "")));
+    const expected = `${compact(sessions)} ${locale === "en-US" ? "sessions" : "会话"} · ${compact(tokens)} tokens`;
+    return trigger?.querySelector("span")?.textContent === expected;
+  }, { sessions, tokens }, { timeout: 45_000 }); }
   catch (error) {
     console.error("city summary did not show expected data (sessions=" + sessions + ")");
     throw error;
@@ -190,10 +215,14 @@ async function expectSummary(page, sessions, _tokens) {
 }
 
 try {
-  browser = await chromium.launch({ headless: true, args: ["--enable-unsafe-swiftshader"] });
+  browser = await chromium.launch({ channel: "chromium", headless: true, args: ["--use-angle=metal"] });
   if (process.argv.includes("--film-only")) {
     const filmPage = await browser.newPage();
-    filmPage.on("console", (message) => { if (message.type() === "error" || message.type() === "warning") console.error("Film fixture:", message.text()); });
+    const gpuErrors = [];
+    filmPage.on("console", (message) => {
+      if (/GL_INVALID_OPERATION|Film draw error/.test(message.text())) gpuErrors.push(message.text());
+      if (message.type() === "error" || message.type() === "warning") console.error("Film fixture:", message.text());
+    });
     await filmPage.goto(`${origin}/film-test.html`);
     const result = filmPage.evaluate(() => window.runCityFilmTest()).then((film) => ({ film }), (error) => ({ error }));
     const first = await Promise.race([result, filmPage.waitForFunction(() => window.filmProgress > 0).then(() => null)]);
@@ -203,6 +232,8 @@ try {
     const completed = await result;
     if (completed.error) throw completed.error;
     const film = completed.film;
+    assert.equal(film.renderErrors, 0, "interactive scene must draw without WebGL errors");
+    assert.deepEqual(gpuErrors, [], "foreground and export worker must draw without invalid buffer errors");
     assert.equal(film.signature, "ftyp");
     assert.equal(film.type, "video/mp4");
     assert.ok(film.bytes > 1024 && film.frames > 10 && film.pulses > 10);
@@ -213,6 +244,7 @@ try {
     await filmPage.close();
   } else {
   const { page, errors } = await openWorkbench();
+  console.log("City browser fixture: initialized.");
   await expectSummary(page, "3", "53,900");
   let frame = page.frames().find((item) => item.url().includes("AgentCity.plugin"));
   const layout = await frame.evaluate(() => {
@@ -241,6 +273,7 @@ try {
   await settings.getByLabel("岛屿种子", { exact: true }).fill("12345");
   await settings.getByRole("button", { name: "应用种子", exact: true }).click();
   await page.waitForFunction(() => window.cityTest.seed === 12345);
+  console.log("City browser fixture: seed persisted through the injected provider.");
   await settings.getByLabel("选择会话（键盘入口）", { exact: true }).selectOption("fixture-session-001");
   await city(page).getByRole("button", { name: "查看会话详情", exact: true }).click();
   await city(page).getByRole("dialog", { name: "会话详情", exact: true }).getByText("合成测试：修复登录界面", { exact: true }).waitFor();
@@ -369,6 +402,10 @@ try {
   await frame.waitForFunction((before) => window.cityDrawCalls > before, pausedDraws);
   await page.getByRole("button", { name: "显示标签", exact: true }).click();
   console.log("City tab retention: passed (same instance/scene/settings, hidden rendering paused, resume draws).");
+  const summaryToggle = city(page).getByRole("button", { name: "城市摘要", exact: true });
+  if (await summaryToggle.getAttribute("aria-expanded") !== "true") await summaryToggle.click();
+  const replayToggle = city(page).getByRole("button", { name: "时间回放", exact: true });
+  if (await replayToggle.count()) await replayToggle.click();
   await page.evaluate(() => {
     localStorage.setItem("agent-vitals.language", "en");
     window.dispatchEvent(new Event("agent-vitals-language-changed"));
@@ -395,7 +432,9 @@ try {
   await page.waitForFunction(() => document.querySelector("iframe")?.style.display === "none");
   await page.locator(".sidebar").getByRole("button", { name: "City", exact: true }).click();
   await expectSummary(page, "3", "53,900");
-  await page.getByRole("combobox", { name: "画质" }).selectOption("eco");
+  const qualityDialog = await openCitySettings(page);
+  await qualityDialog.getByLabel("画质", { exact: true }).selectOption("eco");
+  await qualityDialog.getByRole("button", { name: "关闭城市设置", exact: true }).click();
   frame = page.frames().find((item) => item.url().includes("AgentCity.plugin"));
   assert.notEqual(await page.evaluate(async () => (await window.__TAURI__.core.invoke("plugin_snapshot")).instanceId), cityInstanceBeforeSwitch);
   console.log("Second-plugin integration: passed (shared SDK, navigation, load, command, failure/retry, dispose, switch back).");
@@ -446,7 +485,7 @@ try {
   await page.evaluate(() => { window.cityTest.mode = "stale"; });
   await picker.selectOption("7");
   await expectSummary(page, "2", "26,400");
-  await city(page).locator(".city-header p").filter({ hasText: "数据可能已过期" }).waitFor();
+  await (await cityStatus(page)).filter({ hasText: "数据可能已过期" }).waitFor();
 
   await page.evaluate(() => { window.cityTest.mode = "unavailable"; });
   await picker.selectOption("30");
@@ -463,8 +502,8 @@ try {
   await picker.selectOption("7");
   await expectSummary(page, "2", "26,400");
   await page.waitForTimeout(400);
-  assert.match(await city(page).locator(".city-header p").innerText(), /合成 fixture/, "A superseded request failure must not replace the active result");
-  assert.equal(await summary(page, 0).innerText(), "2");
+  assert.match(await (await cityStatus(page)).innerText(), /合成 fixture/, "A superseded request failure must not replace the active result");
+  await expectSummary(page, "2", "26,400");
 
   await page.evaluate(() => { window.cityTest.mode = "malformed"; window.cityTest.rejectDays = null; });
   await picker.selectOption("90");
@@ -473,7 +512,11 @@ try {
   await page.evaluate(() => { window.cityTest.mode = "ready"; });
   await page.locator(".plugin-fallback").getByRole("button", { name: "重试 City", exact: true }).click();
   await expectSummary(page, "3", "53,900");
-  try { await page.getByRole("combobox", { name: "画质" }).selectOption("eco"); }
+  try {
+    const retrySettings = await openCitySettings(page);
+    await retrySettings.getByLabel("画质", { exact: true }).selectOption("eco");
+    await retrySettings.getByRole("button", { name: "关闭城市设置", exact: true }).click();
+  }
   catch (error) {
     console.error("Host retry diagnostics", JSON.stringify(await page.evaluate(() => ({
       nav: document.querySelector('.nav-item-active')?.textContent,
@@ -499,8 +542,10 @@ try {
     const current = await window.__TAURI__.core.invoke("plugin_snapshot");
     await window.__TAURI__.core.invoke("plugin_invalidate", { instanceId: current.instanceId });
   });
-  await city(page).locator(".city-header p").filter({ hasText: "City 数据暂不可用" }).waitFor();
-  await page.getByRole("combobox", { name: "画质" }).selectOption("eco");
+  await city(page).getByRole("status").filter({ hasText: "City 数据暂不可用" }).waitFor();
+  const qualityDialog2 = await openCitySettings(page);
+  await qualityDialog2.getByLabel("画质", { exact: true }).selectOption("eco");
+  await qualityDialog2.getByRole("button", { name: "关闭城市设置", exact: true }).click();
   await picker.selectOption("7");
   await expectSummary(page, "2", "26,400");
   assert.equal(page.context().pages().length, 1, "City must stay in the host window");
@@ -523,10 +568,11 @@ try {
   }
   }
 } catch (error) {
-  if (lastPage && !lastPage.isClosed()) console.error("Browser fixture diagnostics", JSON.stringify(await lastPage.evaluate(async () => ({
+  if (lastPage && !lastPage.isClosed()) console.error("Browser fixture diagnostics", JSON.stringify(await Promise.race([lastPage.evaluate(async () => ({
     snapshot: await window.__TAURI__?.core?.invoke("plugin_snapshot"),
     fallback: document.querySelector(".plugin-fallback")?.textContent,
-  })).catch(() => null)));
+    url: location.href, body: document.body.innerText.slice(0, 1500),
+  })).catch(() => null), new Promise((resolve) => setTimeout(() => resolve({ diagnostics: "page_unresponsive" }), 3000))])));
   console.error("Browser fixture page errors", lastPage?.testErrors ?? []);
   throw error;
 } finally {

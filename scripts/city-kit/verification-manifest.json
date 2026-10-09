@@ -192,5 +192,13 @@
     "file": "verify-city-landing.mjs",
     "env": {},
     "shared": false
+  },
+  { "id": "verify-city-terrain-height", "file": "verify-city-terrain-height.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-game-session", "file": "verify-city-game-session.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-game-controller", "file": "verify-city-game-controller.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-game-world", "file": "verify-city-game-world.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-game-flight", "file": "verify-city-game-flight.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-game-race", "file": "verify-city-game-race.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-game-profile", "file": "verify-city-game-profile.mjs", "env": {}, "shared": false
   }
 ]

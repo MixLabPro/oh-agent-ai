@@ -84,7 +84,9 @@ struct Instance {
 #[serde(rename_all = "camelCase")]
 struct PluginDefinition { id: String, name: String, entry: String, command_namespace: String,
     #[serde(default)] data_projections: Vec<String>, #[serde(default)] allow_local_exports: bool,
-    #[serde(default)] navigation_targets: Vec<String> }
+    #[serde(default)] navigation_targets: Vec<String>,
+    /// 允许的 plugin.state.* 键（如 flight-profile:v1）；描述表声明即边界（游戏模式 §9）。
+    #[serde(default)] state_keys: Vec<String> }
 
 #[derive(Deserialize)]
 struct PluginRegistry { version: u16, plugins: Vec<PluginDefinition> }
@@ -555,7 +557,7 @@ pub fn plugin_invalidate(app: tauri::AppHandle, webview: Webview, state: tauri::
 
 #[tauri::command]
 pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, request: PluginRequestV1) -> Result<PluginResponseV1, String> {
-    let (allowed, navigation, plugin_id) = {
+    let (allowed, navigation, state_keys, plugin_id) = {
         let host = state.0.lock().unwrap();
         let i = host.current.as_ref().ok_or("plugin_instance_unavailable")?;
         if i.id != webview.label() || i.failed.is_some() || i.suspended || request.instance_id != i.id {
@@ -565,7 +567,7 @@ pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: taur
             return Ok(plugin_request_error(request.request_id, code, false));
         }
         let definition = definitions().iter().find(|p| p.id == i.plugin_id).ok_or("plugin_unknown")?;
-        (definition.data_projections.clone(), definition.navigation_targets.clone(), i.plugin_id.clone())
+        (definition.data_projections.clone(), definition.navigation_targets.clone(), definition.state_keys.clone(), i.plugin_id.clone())
     };
     if request.method == "ui.open-session" {
         if !navigation.iter().any(|n| n == "session") { return Ok(plugin_request_error(request.request_id, "navigation_denied", false)); }
@@ -581,6 +583,21 @@ pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: taur
     }
     let method = request.method.clone();
     let payload = request.payload.clone();
+    // 通用本地状态端口（游戏模式 §9）：文件操作在阻塞线程执行，响应送达前复验实例。
+    if matches!(method.as_str(), "plugin.state.read" | "plugin.state.write") {
+        let keys = state_keys;
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            crate::plugin_state::handle(&keys, &crate::overview::data_home(), &plugin_id, &method, &payload)
+        }).await.map_err(|_| "plugin_query_failed".to_string())?;
+        let host = state.0.lock().unwrap();
+        if !host.current.as_ref().is_some_and(|i| i.id == request.instance_id && i.failed.is_none() && !i.suspended) {
+            return Err("plugin_instance_mismatch".into());
+        }
+        return Ok(match result {
+            Ok(value) => PluginResponseV1 { version: 1, request_id: request.request_id, ok: true, result: Some(value), error: None },
+            Err(code) => plugin_request_error(request.request_id, code, matches!(code, "state_unavailable" | "revision_conflict")),
+        });
+    }
     let result = tauri::async_runtime::spawn_blocking(move || {
         crate::plugin_projections::read_for_plugin(&allowed, &method, &payload, &plugin_id)
     }).await.map_err(|_| "plugin_query_failed".to_string())?;

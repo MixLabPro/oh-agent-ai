@@ -12,6 +12,7 @@ mod budget_alerts;
 mod quota_alerts;
 mod plugin_host;
 mod plugin_projections;
+mod plugin_state;
 #[cfg(all(feature = "plugin-isolation-probe", target_os = "macos"))]
 mod plugin_isolation_probe;
 

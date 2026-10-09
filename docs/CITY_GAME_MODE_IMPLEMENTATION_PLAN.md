@@ -1,6 +1,6 @@
 # Agent City 飞机游戏模式：设计与实施方案
 
-日期：2026-10-04。状态：实施提案，尚未实现；本文的参数是首轮调试起点，性能数字是验收目标，不是现有测试结果。
+日期：2026-10-04。状态（2026-10-08 更新）：G1–G3 已在分支 `worktree-city-game-mode` 实现——状态机/FlightWorld/相机所有权（G1.1–G1.2）、飞行/输入/追尾相机/碰撞/练习 HUD/接入（G1.3–G1.5）、确定性路线与穿环任务闭环（G2）、plugin.state 端口与档案持久化（G3.1–G3.2）均已通过对应 verify 脚本（controller/world/flight/race/profile）与浏览器冒烟；Rust `cargo test --release`、`clippy -D warnings`、`cargo tauri build --bundles app` 通过。入口仍为开发开关（`?cityGame=1` 或 `localStorage.cityGameDev=1`，经城市设置进入）；**§12 的原生 bundle 全流程 UAT（练习→挑战→暂停→成功/失败→重试→退出→切 Overview→重启看成绩）尚未执行，验收前不得默认开放入口**。本文的参数是首轮调试起点，性能数字是验收目标，不是现有测试结果。
 
 ## 1. 交付目标
 
@@ -263,6 +263,8 @@ type FlightProfileV1 = {
 测试位置建议：`game/` 旁的纯逻辑测试，以及现有 scripts 中增加一个游戏行为验证入口；测试应验证任务规则与状态转移，不靠匹配源代码字符串宣称功能通过。
 
 原生 UAT 走 `.app` bundle，通过 Computer Use 完成练习→挑战→暂停→继续→成功/失败→重试→退出→切 Overview→重启看成绩。记录源码 commit（含未提交差异）、bundle SHA、配置、设备、帧率证据及未覆盖项。现有瞬时闪白为独立已知问题，游戏完成报告不得悄悄标记为已解决。
+
+原生验收包可用 `AGENT_VITALS_CITY_GAME_UAT=1 cargo tauri build --bundles app` 显式开启城市设置中的开发游戏入口（构建环境变量由 City Vite 编译为常量）。普通构建默认为关闭；证据必须注明该构建开关。浏览器的 `?cityGame=1` / `localStorage.cityGameDev=1` 入口继续有效。
 
 ## 13. 第二阶段：配送与成长
 
