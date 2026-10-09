@@ -18,6 +18,12 @@ export interface CompileTarget {
   spin?: BuildingModel["lifecycle"]["spin"];
   material: MaterialFactory;
   disposables: Array<{ dispose: () => void }>;
+  /**
+   * 编译回调（CITY_MODEL_PHYSICAL_INVARIANTS_SPEC §4.5）：每件落位并挂进场景树后回调一次，
+   * 给检查方 part ↔ 编译产物的唯一对应通道。检查器消费编译产物（世界矩阵/包围盒），
+   * 不自写变换累积；缺省 undefined，零行为影响。
+   */
+  onPart?: (part: Part, object: THREE.Object3D) => void;
 }
 
 /** 缺省锚点：实心棱柱/圆柱/圆锥以底面为 y，其余件以中心为 y。 */
@@ -62,7 +68,11 @@ function baseGeometry(part: Exclude<Part, GroupPart>): THREE.BufferGeometry {
   }
 }
 
-function placed(part: Exclude<Part, GroupPart>): THREE.BufferGeometry {
+/**
+ * 件几何的唯一实现（§4.5 变换唯一实现）：preShift → bake → anchor(base 抬升) → shift，全部烘进顶点。
+ * 检查器（verify-city-physical 等）与本编译器共用这一个函数；在守卫里重写等价累积 = 门禁失败。
+ */
+export function placedGeometry(part: Exclude<Part, GroupPart>): THREE.BufferGeometry {
   const g = baseGeometry(part);
   if (part.preShift) g.translate(...part.preShift);
   if (part.bake) {
@@ -76,6 +86,12 @@ function placed(part: Exclude<Part, GroupPart>): THREE.BufferGeometry {
   }
   if (part.shift) g.translate(...part.shift);
   return g;
+}
+
+/** 件位姿的唯一实现（§4.5）：网格/组件写 at（+ 可选 rot）；instanced 件只写 at（件内 pieces 自带位姿）。 */
+export function applyPartPlacement(object: THREE.Object3D, part: Part): void {
+  object.position.set(...part.at);
+  if (part.rot && part.kind !== "instanced") object.rotation.set(...part.rot);
 }
 
 /** role:"beam" 的共享材质：加色半透明（旧灯塔光束材质逐位照搬）；一次编译内同色共用一份，登记 dispose。 */
@@ -100,10 +116,10 @@ export function compileBuilding(plan: BuildingPlan, target: CompileTarget, input
   for (const part of plan) {
     if (part.kind === "group") {
       const g = new THREE.Group();
-      g.position.set(...part.at);
-      if (part.rot) g.rotation.set(...part.rot);
+      applyPartPlacement(g, part);
       parentOf(part).add(g);
       byId.set(part.id, g);
+      target.onPart?.(part, g);
       continue;
     }
     if (part.kind === "instanced") {
@@ -116,22 +132,23 @@ export function compileBuilding(plan: BuildingPlan, target: CompileTarget, input
         mesh.setMatrixAt(i, m);
         if (piece.color) mesh.setColorAt(i, new THREE.Color(resolveColor(piece.color, input)));
       });
-      mesh.position.set(...part.at);
+      applyPartPlacement(mesh, part);
       parentOf(part).add(mesh);
       target.disposables.push(unit);
       if (part.id) byId.set(part.id, mesh);
+      target.onPart?.(part, mesh);
       continue;
     }
-    const geometry = placed(part);
+    const geometry = placedGeometry(part);
     const color = resolveColor(part.color, input);
     const mesh = new THREE.Mesh(geometry, part.role === "beam" ? beamMaterial(color, target, beams) : target.material(color, part.emissive ?? 0, { side: part.side }));
-    mesh.position.set(...part.at);
-    if (part.rot) mesh.rotation.set(...part.rot);
+    applyPartPlacement(mesh, part);
     mesh.castShadow = part.role !== "beam";
     mesh.receiveShadow = part.role !== "beam";
     parentOf(part).add(mesh);
     target.disposables.push(geometry);
     if (part.id) byId.set(part.id, mesh);
+    target.onPart?.(part, mesh);
   }
   // lifecycle.spin：只登记本次 plan 里真有的件（灯塔光束只在霓虹开时出现）。
   for (const s of target.spin ?? []) for (const id of s.parts) { const object = byId.get(id); if (object) target.spinners?.push({ object, axis: s.axis, speed: s.speed }); }
