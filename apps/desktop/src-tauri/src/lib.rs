@@ -2304,7 +2304,31 @@ fn show_workbench(app: &AppHandle) {
     let shown = window.show();
     let webview_shown = main.as_ref().map(|view| view.show());
     let focused = window.set_focus();
-    if let Some(view) = &main { let _ = view.set_focus(); }
+    // 重锤兜底（2026-10-09 实测）：City 插件打开后关窗再唤起，tao 的 show/set_focus
+    // 返回 Ok 但 NSWindow 不排到前台（CGWindowList onScreen=false）。直接走 AppKit：
+    // 应用级激活 + 反最小化 + makeKeyAndOrderFront——分别覆盖「后台应用无权切 Space」
+    // 「窗口处于最小化」「orderFront 被吞」三类静默失败。
+    #[cfg(target_os = "macos")]
+    {
+        #[allow(unexpected_cfgs, clippy::undocumented_unsafe_blocks)]
+        unsafe {
+            use objc::{msg_send, sel, sel_impl};
+            let ns_app: *mut objc::runtime::Object = msg_send![objc::class!(NSApplication), sharedApplication];
+            #[allow(clippy::upper_case_acronyms)]
+            const YES: u8 = 1;
+            let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+            if let Ok(handle) = window.ns_window() {
+                let ns_window = handle as *mut objc::runtime::Object;
+                let miniaturized: bool = msg_send![ns_window, isMiniaturized];
+                if miniaturized {
+                    let nil: *mut objc::runtime::Object = std::ptr::null_mut();
+                    let _: () = msg_send![ns_window, deminiaturize: nil];
+                }
+                let nil2: *mut objc::runtime::Object = std::ptr::null_mut();
+                let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil2];
+            }
+        }
+    }
     agent_vitals_runtime::logging::log_info("workbench", &format!("show: show={shown:?} webview={webview_shown:?} focus={focused:?}"));
 }
 
