@@ -9,6 +9,8 @@ import { GameSession, type GameSessionSnapshot } from "./GameSession";
 import type { GameLocale } from "./gameCopy";
 import { EMPTY_PROFILE, loadProfilePort, mergeRecord, saveProfile, type FlightProfileV1, type ProfilePort } from "../data/profile";
 
+declare const __CITY_GAME_UAT__: boolean;
+
 export type GameHostBridge = {
   cinemaActive: () => boolean;
   filmActive: () => boolean;
@@ -27,6 +29,7 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
   const [persistTier, setPersistTier] = useState<"native" | "local" | "memory" | null>(null);
   const [saveFailed, setSaveFailed] = useState(false);
   const sessionRef = useRef<GameSession | null>(null);
+  const pilotRef = useRef<(() => void) | null>(null);
   const portRef = useRef<ProfilePort | null>(null);
   const profileRef = useRef<FlightProfileV1>({ ...EMPTY_PROFILE });
   const hostRef = useRef(host);
@@ -34,7 +37,7 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
 
   // 卸载清理：本 hook 在引擎创建 effect 之前声明，因此先于 engine.dispose() 运行，
   // 游戏退出（归还相机/恢复视角）发生在引擎还活着的时候。
-  useEffect(() => () => sessionRef.current?.dispose(), []);
+  useEffect(() => () => { pilotRef.current?.(); sessionRef.current?.dispose(); }, []);
 
   const getSession = useCallback((): GameSession | null => {
     if (!sessionRef.current && engine.current) {
@@ -145,6 +148,17 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     clearEntryError: () => setEntryError(null),
     enterPractice: () => enterGame("practice"),
     enterRace: () => enterGame("race"),
+    enterUatRace: async () => {
+      if (typeof __CITY_GAME_UAT__ === "undefined" || !__CITY_GAME_UAT__) return;
+      pilotRef.current?.();
+      enterGame("race");
+      const session = sessionRef.current;
+      const instance = engine.current;
+      if (!session || !instance || session.controller.snapshot.error) return;
+      const { startUatPilot } = await import("./uatPilot");
+      if (sessionRef.current !== session || engine.current !== instance || session.controller.snapshot.phase === "data") return;
+      pilotRef.current = startUatPilot(session, instance);
+    },
     pause: (reason: Parameters<GameSession["pause"]>[0]) => call("pause", reason),
     resume: () => call("resume"),
     restart: () => call("restart"),

@@ -260,4 +260,38 @@ function fakeEngine() {
   session.exit();
 }
 
+// UAT adapter uses the same DOM listeners and releases keys/timer on stop.
+{
+  let tick = null;
+  const pilotWindow = { ...windowShim,
+    setInterval: (fn) => { tick = fn; return 1; },
+    clearInterval: () => { tick = null; },
+    dispatchEvent: (event) => {
+      for (const fn of windowListeners.get(event.type) ?? []) fn(event);
+    },
+  };
+  const { startUatPilot } = load("game/uatPilot.ts", { window: pilotWindow, document: documentShim,
+    HTMLCanvasElement: class {}, KeyboardEvent: class {
+      constructor(type, options) { this.type = type; Object.assign(this, options); this.target = windowShim; }
+      preventDefault() {}
+    } });
+  const engine = fakeEngine();
+  engine.currentLayout = layout; engine.currentModel = model;
+  const session = new GameSession(engine, { onState: () => {}, onExited: () => {} });
+  assert.ok(session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok);
+  documentShim.activeElement = engine.domCanvas;
+  const stop = startUatPilot(session, engine);
+  for (let frame = 0; frame < 18000 && session.controller.snapshot.phase !== "result"; frame += 1) {
+    tick?.(); engine.frame(1 / 60);
+  }
+  assert.equal(session.snapshot().mission.result?.finished, true, "UAT driver flies the actual physics route");
+  tick?.();
+  assert.equal(tick, null, "result clears timer");
+  stop(); stop(); // idempotent cleanup
+  assert.deepEqual(JSON.parse(JSON.stringify(session.input.snapshot())), {
+    throttleUp: false, throttleDown: false, turnLeft: false, turnRight: false, pitchUp: false, pitchDown: false,
+  });
+  session.exit();
+}
+
 console.log("verify-city-game-session: ok");

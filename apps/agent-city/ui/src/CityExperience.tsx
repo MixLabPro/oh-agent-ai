@@ -18,6 +18,8 @@ import { GameHud } from "./game/GameHud";
 import { gameText } from "./game/gameCopy";
 import type { useCityGame } from "./game/useCityGame";
 
+declare const __CITY_GAME_UAT__: boolean;
+
 const dateLabel = (ms: number) => new Date(ms).toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
 const tokens = (n: number) => n.toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
 function download(blob: Blob, name: string) {
@@ -428,6 +430,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         <div style={{ display: "flex", gap: 8 }}>
           <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); game.enterPractice(); }}>{gameText("自由练习", language === "en" ? "en" : "zh-Hans")}</button>
           <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); game.enterRace(); }}>{gameText("穿环挑战", language === "en" ? "en" : "zh-Hans")}</button>
+          {typeof __CITY_GAME_UAT__ !== "undefined" && __CITY_GAME_UAT__ && <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); void game.enterUatRace(); }}>UAT keyboard pilot</button>}
         </div>
         {game.entryError && <p role="alert">{game.entryError}</p>}
         <p>{gameText("进入后用 W/S/A/D 与方向键飞行，Esc 暂停。", language === "en" ? "en" : "zh-Hans")}</p>
