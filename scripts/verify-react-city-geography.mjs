@@ -2,19 +2,11 @@
 // 种子地理守卫（CITY_PLANNING_SPEC §6）：不同种子必须是明显不同的岛，任何种子都是完整可用的城。
 // 曾经海岸是写死折线 + ±19 抖动，30 个种子的轮廓几乎完全重合——截图里「每个人的岛都一样」。
 import assert from "node:assert/strict";
-import path from "node:path";
-import vm from "node:vm";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { loadCity } from "./city-kit/index.mjs";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ui = path.join(repo, "apps/desktop/ui-dev");
-const city = path.join(repo, "apps/agent-city/ui/src");
-const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
-const out = buildSync({ entryPoints: [path.join(city, "engine/cityLayout.ts")], bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
-const mod = { exports: {} };
-vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
-const { layoutCity } = mod.exports;
+// Native execution; the seed set and every assertion below remain unchanged.
+// Cross-engine coverage is provided by verify-city-cross-engine, not this VM.
+const { layoutCity } = await loadCity({ "engine/cityLayout.ts": ["layoutCity"] });
 
 const harnesses = ["codex", "claude-code", "dsh", "harness:zcode"];
 const model = (count) => {

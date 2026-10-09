@@ -1,0 +1,196 @@
+[
+  {
+    "id": "verify-react-city-landmarks",
+    "file": "verify-react-city-landmarks.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-react-city-assets",
+    "file": "verify-react-city-assets.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-react-city-geography",
+    "file": "verify-react-city-geography.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-react-city-seaside",
+    "file": "verify-react-city-seaside.mjs",
+    "env": {},
+    "shared": true
+  },
+  {
+    "id": "seaside-tier10",
+    "file": "verify-react-city-seaside.mjs",
+    "env": {
+      "CITY_SEASIDE_TIER": "10"
+    },
+    "shared": true
+  },
+  {
+    "id": "verify-react-city-layout",
+    "file": "verify-react-city-layout.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-react-city-data",
+    "file": "verify-react-city-data.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-react-city-cinematic",
+    "file": "verify-react-city-cinematic.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-react-city-infrastructure",
+    "file": "verify-react-city-infrastructure.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-react-city-road-paint",
+    "file": "verify-react-city-road-paint.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-planning",
+    "file": "verify-city-planning.mjs",
+    "env": {},
+    "shared": true
+  },
+  {
+    "id": "verify-city-cross-engine",
+    "file": "verify-city-cross-engine.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-active",
+    "file": "verify-city-active.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-i18n-catalog",
+    "file": "verify-city-i18n-catalog.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-catalog",
+    "file": "verify-city-catalog.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-context",
+    "file": "verify-city-context.mjs",
+    "env": {},
+    "shared": true
+  },
+  {
+    "id": "verify-city-night",
+    "file": "verify-city-night.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-baseline",
+    "file": "verify-city-baseline.mjs",
+    "env": {},
+    "shared": true
+  },
+  {
+    "id": "verify-city-landmark-baseline",
+    "file": "verify-city-landmark-baseline.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-scene-baseline",
+    "file": "verify-city-scene-baseline.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-culdesac-bulbs",
+    "file": "verify-city-culdesac-bulbs.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-constraints",
+    "file": "verify-city-constraints.mjs",
+    "env": {},
+    "shared": true
+  },
+  {
+    "id": "verify-city-models",
+    "file": "verify-city-models.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-solve",
+    "file": "verify-city-solve.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-survey",
+    "file": "verify-city-survey.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-intent",
+    "file": "verify-city-intent.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-sitespec",
+    "file": "verify-city-sitespec.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-footprint-geoms",
+    "file": "verify-city-footprint-geoms.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-network-patch",
+    "file": "verify-city-network-patch.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-connect",
+    "file": "verify-city-connect.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-loop",
+    "file": "verify-city-loop.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-landing",
+    "file": "verify-city-landing.mjs",
+    "env": {},
+    "shared": false
+  }
+]

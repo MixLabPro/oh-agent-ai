@@ -1,19 +1,11 @@
 #!/usr/bin/env node
 // Execute the production layout, not a second implementation of its allocator.
 import assert from "node:assert/strict";
-import path from "node:path";
-import vm from "node:vm";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { loadCity } from "./city-kit/index.mjs";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ui = path.join(repo, "apps/desktop/ui-dev");
-const city = path.join(repo, "apps/agent-city/ui/src");
-const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
-const out = buildSync({ stdin: { contents: `export { layoutCity } from ${JSON.stringify(path.join(city, "engine/cityLayout.ts"))}; export { MIAMI_COASTAL } from ${JSON.stringify(path.join(city, "engine/citySeaside.ts"))};`, resolveDir: city }, bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
-const mod = { exports: {} };
-vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, setTimeout, clearTimeout });
-const { layoutCity, MIAMI_COASTAL } = mod.exports;
+const { layoutCity, MIAMI_COASTAL } = await loadCity({
+  "engine/cityLayout.ts": ["layoutCity"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
+});
 
 function model(count, harnesses = ["codex", "claude-code", "dsh", "harness:zcode"]) {
   const buildings = Array.from({ length: count }, (_, index) => ({
