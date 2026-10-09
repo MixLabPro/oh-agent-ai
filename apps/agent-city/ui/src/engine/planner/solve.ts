@@ -1,4 +1,5 @@
 import type { RepairContext } from "./context";
+import { CONSTRAINTS } from "./constraints";
 import { resiteViolatingSites } from "./siting";
 import { joinNearMissEnds, pruneShortSpurs, resolveAcuteJunctions, resolveCrowdedArterials } from "./networkRepairs";
 import { detourAroundSites, extendLooseEnds, frontStationsAndStadiums, nudgeSitesOffRoads } from "./repairs";
@@ -44,10 +45,28 @@ export const MAX_SOLVE_ROUNDS = 3;
  */
 export function solvePlan(ctx: RepairContext, maxRounds = MAX_SOLVE_ROUNDS): SolveReport {
   const report: SolveReport = REPAIR_STRATEGIES.map((s) => ({ constraint: s.constraint, name: s.name, changes: 0 }));
-  for (let round = 0; round < maxRounds; round += 1) {
-    let changed = 0;
-    REPAIR_STRATEGIES.forEach((s, i) => { const n = s.run(ctx); report[i].changes += n; changed += n; });
-    if (!changed) break;
+  // 违例驱动·保守版（批次 8，设计 §5.6）：首轮先量一遍全部策略约束，**全部为零才不进循环**。
+  // 逐策略门控的完整试验已做并回退：没有配套 §5.6-2「补丁不回退（字典序接受）」时，跳过
+  // 「自身约束已清零」的策略会丢掉它们的跨约束清理（实测 t1：acute 6>5、断分量 4>2、
+  // 桥头 10>8 三处回升）——两半不可分割，完整机制与 solve 守卫的逐约束单调松弛一并留给下批。
+  const ids = new Set(REPAIR_STRATEGIES.map((s) => s.constraint));
+  const anyViolation = CONSTRAINTS.some((c) => ids.has(c.id) && c.measure(planView(ctx)).length > 0);
+  if (anyViolation) {
+    for (let round = 0; round < maxRounds; round += 1) {
+      let changed = 0;
+      REPAIR_STRATEGIES.forEach((s, i) => { const n = s.run(ctx); report[i].changes += n; changed += n; });
+      if (!changed) break;
+    }
   }
   return report;
+}
+
+/** 约束 measure 可读的 ctx 视图：constraints.ts 只读下列字段（与 CityPlan 子集同构）。 */
+function planView(ctx: RepairContext) {
+  return {
+    roadEdges: [...ctx.network.edges.values()], roadNodes: [...ctx.network.nodes.values()],
+    publicSites: ctx.publicSites, landmarks: ctx.landmarks, blocks: ctx.blocks,
+    terrain: ctx.geo.terrain, seaside: ctx.seaside, coast: ctx.coast, river: ctx.geo.river,
+    core: ctx.core, coastRoads: ctx.coastRoadRuns, riverRoadRuns: ctx.riverRoadRuns,
+  } as unknown as Parameters<typeof CONSTRAINTS[0]["measure"]>[0];
 }

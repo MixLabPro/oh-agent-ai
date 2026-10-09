@@ -15,10 +15,17 @@ import { fbm, smoothstep } from "./cityNoise";
 import { boulevardSegments, buildSeasideBand, MIAMI_COASTAL, seasideStripContains, type CoastalConfig, type SeasideBand, type SeasideWorld } from "./citySeaside";
 import type { RepairContext } from "./planner/context";
 import { solvePlan } from "./planner/solve";
-import { isDeepWater, isDry, polylineDistance, wetCount } from "./planner/footprint";
+import { polylineDistance } from "./planner/footprint";
+import { coastalSitingKinds } from "./planner/sitespec";
+import { frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, type FrontageMoveContext } from "./planner/access";
+import { retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, type ShoreMoveContext } from "./planner/siting";
 import { buildGeography } from "./planner/geography";
+import { diagnoseNetwork } from "./planner/intent";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
+import { runConnection, endpointClear, commitFixedLink, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
+import { connectServiceLoops } from "./planner/loop";
+import { buildLandingCircles } from "./planner/landing";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -117,13 +124,15 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
   // 起始估计：390 半径 ≈ 一档 400 会话的地皮，再按实测地块数校正。
   let radius = 390 * Math.sqrt(tier);
   let plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve);
+  let radiusAttempts = 0; // 诊断（批次 8 §5.7「先测再做」）：半径校正实际重建次数的分布
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
     radius *= Math.sqrt(targetParcels(tier) / Math.max(1, parcels)) * 1.04;
     plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve);
+    radiusAttempts += 1;
   }
-  return { ...plan, scaleTier: tier, biome };
+  return { ...plan, scaleTier: tier, biome, radiusAttempts };
 }
 
 function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null, tier: number, skipSolve: boolean) {
@@ -292,165 +301,46 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // inRiver 不同，历史上就是两套判断，按原语义各自保留。
   const footprintGeo = { height, inRiver, riverBank: (x: number, z: number, bank: number) => hasRiver && Math.abs(x - riverX(z)) < riverWidth(z) + bank };
 
-  const SHORE_SITE_KINDS = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel", "villa-complex"]); // 庄园：临水拱廊，同属岸边地标
+  // 岸边类集合由 sitespec 表派生（V2 网络优先 6b-2：值 === 原 Set 字面量，守卫 verify-city-sitespec 证相等）。
+  const SHORE_SITE_KINDS = coastalSitingKinds(); // 庄园：临水拱廊，同属岸边地标
   // ── 骨架（V2 步 2b-full：逐字迁至 planner/skeleton.ts::buildSkeleton）──
   const { trunks, bridges, ringRuns } = buildSkeleton({ geo, seed, core, publicSites, landmarks, shoreSiteKinds: SHORE_SITE_KINDS, random, network, inRiver });
   const trunkRuns = trunks.map((trunk) => trunk.points);
   const trunkIndex = new SegmentIndex(trunkRuns);
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
 
+  // 主干按段（桥段剔除）与临路挪动四遍的显式依赖（V2 网络优先 6b-2：遍体逐字迁至 planner/access.ts；
+  // trunkSegments 提前到避高架遍之前定义——纯计算无副作用，snap/siteClearance 环搜闭包按引用传入）。
+  const trunkSegments = trunks.flatMap((trunk) => trunk.points.slice(1).map((b, k) => [trunk.points[k], b] as const))
+    .filter(([a, b]) => !bridges.some((bridge) => bridge.to === b || bridge.from === a && bridge.to === b));
+  const frontageCtx: FrontageMoveContext = { publicSites, landmarks, trunkRuns, trunkSegments, ringRuns, height, inRiver: footprintGeo.inRiver, riverBank: footprintGeo.riverBank, buildable, landClearance, snap, siteClearance };
+  // 岸线挪动四遍的显式依赖（V2 网络优先 6b-1：遍体逐字迁至 planner/siting.ts；此处只组 ctx，行为不变）。
+  const shoreCtx: ShoreMoveContext = { publicSites, landmarks, core, coast, coastDistance, height, inRiver: footprintGeo.inRiver, riverBank: footprintGeo.riverBank, trunkRuns, bridges, ringRuns };
   // 公共用地与地标先于环线选址，名义位置可能正压在高架上（clearsHighways 守卫只覆盖了地块/配套/花园）：
   // 环线只取决于核心点与岛半径，所以这里把压线的预留地原地重新贴到不压高架的位置；街区与地块都在此之后生成。
-  for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || clearsHighways(site, site.radius * 2, site.radius * 2, ringRuns)) continue;
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
-    const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius, (c) => clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
-    site.x = q.x; site.z = q.z;
-  }
+  restickSitesClearOfRingRuns(frontageCtx);
+  // 岸边地标（歌剧院、摩天轮、灯塔、庄园）向核心方向内移，直到占地圈 16 点里落在水上的 ≤3 个——
+  // 曾按「离核心最近的海岸点」放下就不管了，约三分之一占地悬在海面上（场景依赖守卫抓到）。港口本就临水，除外。
+  retreatShoreSitesToDryLand(shoreCtx);
   // ── 用地临街（R2）：内陆的公共用地与地标贴到最近主干道的一侧（边缘离路肩 6），朝向与道路对齐。
   // 曾在主干道之前按地理选址、之后互不避让：车站中心正压在主干道上，10 个对象没有一个与门前道路对齐。
   // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
-  // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
-  const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
-  const SHORE_BOUND = new Set([...SHORE_SITE_KINDS, "civic"]); // civic = 核心广场，四周是环路
-  // 桥头（过河桥两端）：用地不能贴着桥头——桥头必须接一条路回路网，那条路就只能从用地里穿过（庄园落在桥头旁 21，规划守卫抓到）。
-  const nearBridgeEnd = (x: number, z: number, radius: number) => bridges.some((b) => Math.hypot(b.from.x - x, b.from.z - z) < radius + 14 || Math.hypot(b.to.x - x, b.to.z - z) < radius + 14);
-  const trunkSegments = trunks.flatMap((trunk) => trunk.points.slice(1).map((b, k) => [trunk.points[k], b] as const))
-    .filter(([a, b]) => !bridges.some((bridge) => bridge.to === b || bridge.from === a && bridge.to === b));
-  // 岸边地标（歌剧院、摩天轮、灯塔、庄园）向核心方向内移，直到占地圈 16 点里落在水上的 ≤3 个——
-  // 曾按「离核心最近的海岸点」放下就不管了，约三分之一占地悬在海面上（场景依赖守卫抓到）。港口本就临水，除外。
-  for (const site of landmarks) {
-    if (!site.radius || !SHORE_SITE_KINDS.has(site.kind)) continue;
-    const wetCountAt = (c: Vec2) => wetCount(footprintGeo, c, site.radius); // 内移判据：只看地形水位（不含河道），与原实现同口径
-    const dx = core.x - site.x; const dz = core.z - site.z; const len = Math.hypot(dx, dz) || 1;
-    // 每步都要求中心仍在陆上、不在河里：直线朝核心走可能跨过河道（geography 守卫 seed 3668352332 抓到摩天轮进河）。
-    for (let step = 0; step < 20 && wetCountAt(site) > 3; step += 1) {
-      const nx = site.x + (dx / len) * 3; const nz = site.z + (dz / len) * 3;
-      if (height(nx, nz) <= 0.5 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || nearBridgeEnd(nx, nz, site.radius)) break; // 也不推到主干道/桥头上
-      site.x = nx; site.z = nz;
-    }
-  }
   // 跨路地标（门式）：凯旋门骑在主干道上、道路从拱券开口穿过——曾与其它用地一样贴到路旁，门下是草地
   // （用户截图：「凯旋门下面不是路？建筑物缺少约束」）。取最近主干道中段，开口轴（局部 z）沿道路方向。
-  const STRADDLE = new Set(["arch"]);
-  for (const site of landmarks) {
-    if (!STRADDLE.has(site.kind)) continue;
-    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d);
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    for (const { a, b } of ranked) {
-      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz);
-      if (len < 20) continue;
-      const q = { x: a.x + dx * 0.5, z: a.z + dz * 0.5 };
-      if (!buildable(q.x, q.z) || !footprintDry(q, site.radius)) continue;
-      if (!clearsHighways(q, site.radius * 2, site.radius * 2, ringRuns)) continue; // 不能压在环线高架下（geography 守卫）
-      if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
-      site.x = q.x; site.z = q.z; site.yaw = Math.atan2(dx, dz);
-      break;
-    }
-  }
-  for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || SHORE_BOUND.has(site.kind) || STRADDLE.has(site.kind)) continue;
-    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d).slice(0, 4);
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    let placed = false;
-    for (const { a, b } of ranked) {
-      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
-      const t = Math.max(0.2, Math.min(0.8, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (len * len)));
-      const foot = { x: a.x + dx * t, z: a.z + dz * t };
-      let nx = -dz / len; let nz = dx / len;
-      if ((site.x - foot.x) * nx + (site.z - foot.z) * nz < 0) { nx = -nx; nz = -nz; }
-      for (const sign of [1, -1]) {
-        const offset = site.radius + 12;
-        const q = { x: foot.x + nx * sign * offset, z: foot.z + nz * sign * offset };
-        // 整个占地都要在陆上：曾只要求中心离水 0.6 半径，双子塔（两塔各偏 13）一半立进河里（真机截图）。
-        if (!buildable(q.x, q.z) || landClearance(q.x, q.z) < site.radius + 4 || !footprintDry(q, site.radius)) continue;
-        if (distanceToTrunks(q) < site.radius + 8) continue;               // 别的主干道也不能穿过它
-        if (!clearsHighways(q, site.radius * 2, site.radius * 2, ringRuns)) continue;
-        if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
-        site.x = q.x; site.z = q.z; site.yaw = -Math.atan2(dz, dx);
-        placed = true; break;
-      }
-      if (placed) break;
-    }
-    // 找不到临街位置时，至少别让主干道从中间穿过：就近挪到离主干道 ≥ 半径+8 的位置。
-    if (!placed && distanceToTrunks(site) < site.radius + 6) {
-      const q = snap(site, siteClearance(site.kind, site.radius), others.map((o) => ({ x: o.x, z: o.z, radius: o.radius })), site.radius,
-        (c) => distanceToTrunks(c) >= site.radius + 8 && landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
-      site.x = q.x; site.z = q.z;
-    }
-  }
-  for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || SHORE_BOUND.has(site.kind) || STRADDLE.has(site.kind) || (landClearance(site.x, site.z) >= site.radius + 4 && footprintDry(site, site.radius))) continue;
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
-    const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius,
-      (c) => landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && distanceToTrunks(c) >= site.radius + 8 && clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
-    site.x = q.x; site.z = q.z;
-  }
+  straddleSitesAcrossTrunk(frontageCtx);
+  frontSitesOnTrunks(frontageCtx);
+  // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
+  // 仍不在干地的内陆用地（岸边/跨路/广场豁免，各有专属遍或构造保证）重贴到干地。
+  resnapSitesOntoDryLand(frontageCtx);
   // 港口最后贴回岸线：前面的避让（离其它用地、离环线高架）会把它推进内陆，港口离水上百（用户截图：港口在市中心）。
   // 朝最近的岸点逐步移动，直到中心离岸 ≤ 12（码头半边伸进水面）。
-  for (const site of publicSites) {
-    if (site.kind !== "harbor") continue;
-    let nearest = coast[0];
-    for (const q of coast) if (Math.hypot(q.x - site.x, q.z - site.z) < Math.hypot(nearest.x - site.x, nearest.z - site.z)) nearest = q;
-    for (let step = 0; step < 80 && coastDistance(site.x, site.z) > 12; step += 1) {
-      const dx = nearest.x - site.x; const dz = nearest.z - site.z; const len = Math.hypot(dx, dz) || 1;
-      site.x += (dx / len) * 3; site.z += (dz / len) * 3;
-    }
-    site.yaw = -Math.atan2(nearest.z - core.z, nearest.x - core.x);
-  }
+  settleHarborOnCoast(shoreCtx);
   // 岸边地标（帆形歌剧院、灯塔、摩天轮、庄园）同样贴回岸线（用户：「类似悉尼歌剧院的建筑不是应该在水边吗」）：
   // 朝最近岸点移动到中心离岸 ≈ 0.7 半径，同时占地圈 16 点落水不超过 3（立在水边、不悬空）。
-  for (const site of landmarks) {
-    if (!site.radius || !SHORE_SITE_KINDS.has(site.kind)) continue;
-    const wet = (x: number, z: number) => wetCount(footprintGeo, { x, z }, site.radius, { river: true, riverBank: 14 }); // 河道及两岸 14 内也算水：歌剧院曾立在河口上（用户截图）
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    // 试最近的 8 个岸点，取最终离岸最近的落点（一条路径被别的用地挡住时换个方向贴岸）。
-    const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 8);
-    let best = { x: site.x, z: site.z, d: coastDistance(site.x, site.z) };
-    for (const target of targets) {
-      let x = site.x; let z = site.z;
-      for (let step = 0; step < 100 && coastDistance(x, z) > site.radius * 0.7; step += 1) {
-        const dx = target.x - x; const dz = target.z - z; const len = Math.hypot(dx, dz) || 1;
-        const nx = x + (dx / len) * 3; const nz = z + (dz / len) * 3;
-        if (wet(nx, nz) > 3 || inRiver(nx, nz) || nearBridgeEnd(nx, nz, site.radius) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || !clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) break; // 不滑到主干道上
-        x = nx; z = nz;
-      }
-      const d = coastDistance(x, z);
-      if (d < best.d) best = { x, z, d };
-    }
-    if (wet(best.x, best.z) <= 3 && (distanceToTrunks(best) >= site.radius * 0.7 || distanceToTrunks(site) < site.radius * 0.7)) { site.x = best.x; site.z = best.z; } // 落点压到主干道上就留在原位
-    // 仍有 >3 点在水上（原位本就半悬空，核心方向也可能隔着水）：在 70 内按距离由近到远搜一个占地干燥、不压主干道/其它用地的落点。
-    if (wet(site.x, site.z) > 3) {
-      let found: Vec2 | null = null;
-      for (let rr = 6; rr <= 70 && !found; rr += 6) {
-        for (let k = 0; k < 24 && !found; k += 1) {
-          const a = (k / 24) * Math.PI * 2; const nx = site.x + Math.cos(a) * rr; const nz = site.z + Math.sin(a) * rr;
-          if (wet(nx, nz) > 2 || height(nx, nz) <= 0.5 || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4) continue;
-          if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
-          found = { x: nx, z: nz };
-        }
-      }
-      if (found) { site.x = found.x; site.z = found.z; }
-    }
-  }
+  settleShoreSitesOnCoast(shoreCtx);
   // 帆形歌剧院改立在海上小岛、以堤道连岸（用户：「歌剧院不应该在河里，需要在海上」「范式和机场一样」）。
   // 取离当前位置最近的几个岸点，岸外 radius+40 处整个占地圈必须是深水（不在河口），且离港口/其它用地够远。
-  for (const site of landmarks) {
-    if (site.kind !== "sail-opera") continue;
-    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 40);
-    for (const shore of targets) {
-      const len = Math.hypot(shore.x - core.x, shore.z - core.z) || 1;
-      const out = { x: (shore.x - core.x) / len, z: (shore.z - core.z) / len };
-      const c = { x: shore.x + out.x * (site.radius + 40), z: shore.z + out.z * (site.radius + 40) };
-      const deep = isDeepWater(footprintGeo, c, site.radius);
-      if (!deep || others.some((o) => Math.hypot(o.x - c.x, o.z - c.z) < o.radius + site.radius + (o.kind === "harbor" ? 120 : 30))) continue;
-      if (height(shore.x - out.x * 6, shore.z - out.z * 6) < 0.3) continue; // 堤道陆地端要踩在实地上
-      site.x = c.x; site.z = c.z; site.shore = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
-      site.yaw = -Math.atan2(out.z, out.x);
-      break;
-    }
-  }
+  settleSailOperaOffshore(shoreCtx);
   const ringIndex = new SegmentIndex(ringRuns);
   const distanceToRing = (p: Vec2) => polylineDistance(ringRuns, p);
 
@@ -588,60 +478,22 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 落点把那条路切成 T 路口；落点离路段端点 <12 时吸附到端点（不留碎段）。拒绝：与被接道路夹角 <60°、
   // 与其它道路交叉、穿过水面/陡坡/预留地。曾经直连「700/400 内最近的主干道节点」：
   // 不看角度、不看沿途道路——真机里那束 X 形长斜线与 8° 锐角路口都出自这里（docs/CITY_ROAD_PLANNING_AUDIT.md）。
-  const crosses = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
-    const o = (p: Vec2, q: Vec2, r: Vec2) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
-    return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
-  };
-  const clearAngle = (at: Vec2, toward: Vec2) => {
-    const id = roadNodeId(key(at));
-    const ux = toward.x - at.x; const uz = toward.z - at.z; const ul = Math.hypot(ux, uz) || 1;
-    for (const edge of edges.values()) {
-      if (edge.from !== id && edge.to !== id) continue;
-      const other = edge.from === id ? edge.points[edge.points.length - 1] : edge.points[0];
-      const vx = other.x - at.x; const vz = other.z - at.z; const vl = Math.hypot(vx, vz) || 1;
-      if ((ux * vx + uz * vz) / (ul * vl) > Math.cos((35 * Math.PI) / 180)) return false;
-    }
-    return true;
-  };
-  const connectToNetwork = (endpoint: Vec2, maxDistance: number, arterial: boolean, exclude: (edge: RoadEdge) => boolean = () => false, minAngle = 60): boolean => {
-    let best: { edge: RoadEdge; p: Vec2; d: number } | null = null;
-    for (const edge of edges.values()) {
-      if (edge.bridge || exclude(edge)) continue;
-      const [a, b] = edge.points;
-      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
-      const t = Math.max(0, Math.min(1, ((endpoint.x - a.x) * dx + (endpoint.z - a.z) * dz) / (len * len)));
-      let p = key({ x: a.x + dx * t, z: a.z + dz * t });
-      if (t * len < 12) p = a; else if ((1 - t) * len < 12) p = b;
-      const d = Math.hypot(p.x - endpoint.x, p.z - endpoint.z);
-      if (d < 0.5 || d > maxDistance || (best && d >= best.d)) continue;
-      // 夹角：落在路段中段时要求接近垂直（≥60°）；吸附到端点时由端点处的其它路决定，不再限制。
-      const onEnd = p === a || p === b;
-      if (!onEnd) {
-        const cos = Math.abs(((p.x - endpoint.x) * dx + (p.z - endpoint.z) * dz) / (d * len));
-        if (cos > Math.cos((minAngle * Math.PI) / 180)) continue;
-      }
-      if (!safeRoadLink(endpoint, p)) continue;
-      // 两端都不能和已有道路成 <35° 的夹角：吸附到端点时曾不查角度，接入路沿着被接道路折回去（0° 重叠 / 10° 三角）。
-      if (!clearAngle(p, endpoint) || !clearAngle(endpoint, p)) continue;
-      let blocked = false;
-      for (const other of edges.values()) {
-        if (other === edge) continue;
-        if (crosses(endpoint, p, other.points[0], other.points[1])) { blocked = true; break; }
-      }
-      if (blocked) continue;
-      best = { edge, p, d };
-    }
-    if (!best) return false;
-    const { edge, p } = best;
-    const [a, b] = edge.points;
-    if (p !== a && p !== b) {
-      edges.delete(edge.id);
-      const primary = edge.width >= 12; const art = edge.kind === "arterial";
-      addEdge(a, p, art, false, primary); addEdge(p, b, art, false, primary);
-    }
-    addEdge(endpoint, p, arterial);
-    return true;
-  };
+  // ── 统一连接器（网络优先批次 4-2）：本函数改走 planner/connect.ts 的 direct-projection 策略，
+  // 经 commitNetworkPatch 事务提交；搜索判据逐字保留（投影/吸附/夹角/safeRoadLink/clearAngle/交叉），
+  // 规划基线哈希不变是行为等价的证明。
+  const connectorWorld: ConnectorWorld = { network, geo, inRiver, reservations };
+  let connectSeq = 0;
+  const connectToNetwork = (endpoint: Vec2, maxDistance: number, arterial: boolean, exclude: (edge: RoadEdge) => boolean = () => false, minAngle = 60): boolean =>
+    runConnection({
+      id: `connect:${connectSeq += 1}`,
+      source: endpoint,
+      target: { kind: "edges", include: (edge) => !exclude(edge) },
+      purpose: "district-access",
+      allowBridge: false,
+      maxLength: maxDistance,
+      roadClass: arterial ? "arterial" : "local",
+      minAngleDeg: minAngle,
+    }, connectorWorld, { strategies: ["direct-projection"] }).ok;
   for (const p of trimmedTrunkEnds) connectToNetwork(p, 40, true, (edge) => !coastalRoadEdgeIds.has(edge.id), 35);
   for (const segment of coastalRoadRuns) {
     if (segment.length < 2) continue;
@@ -811,7 +663,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
 
   // 沿海路 / 河岸路的断头互接：一段的端点 80 内有另一段（或同段另一端）的断头，就直连成一条（不过水、不穿用地）。
   // 河岸路在入海口附近停下、环岛路在河口另一侧停下，两端都是断头却互不相接（真机截图）。
+  // 批次 4-2：互接的加边改走连接器 node-merge（目标 = 指名节点），校验口径保留历史档
+  // （safeRoadLink 同判据 + 两端净空角，不查交叉），经 commitNetworkPatch 事务提交。
   {
+    let coastalJoinSeq = 0;
     const deg = () => { const d = new Map<string, number>(); for (const e of edges.values()) for (const n of [e.from, e.to]) d.set(n, (d.get(n) ?? 0) + 1); return d; };
     const ends = coastRoadRuns.flatMap((run, r) => [{ p: run[0], r }, { p: run[run.length - 1], r }]);
     const joined = new Set<string>();
@@ -821,10 +676,19 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const mate = ends
         .filter((b) => b !== a && (d.get(roadNodeId(key(b.p))) ?? 0) === 1 && !joined.has(roadNodeId(key(b.p))))
         .map((b) => ({ b, dist: Math.hypot(b.p.x - a.p.x, b.p.z - a.p.z) }))
-        .filter(({ dist, b }) => dist > 1 && dist < 80 && safeRoadLink(a.p, b.p) && clearAngle(a.p, b.p) && clearAngle(b.p, a.p))
+        .filter(({ dist, b }) => dist > 1 && dist < 80 && safeRoadLink(a.p, b.p) && endpointClear(network, a.p, b.p) && endpointClear(network, b.p, a.p))
         .sort((x, y) => x.dist - y.dist)[0];
       if (!mate) continue;
-      addEdge(a.p, mate.b.p, true, false, true);
+      runConnection({
+        id: `coastal-join:${coastalJoinSeq += 1}`,
+        source: a.p,
+        target: { kind: "node", id: roadNodeId(key(mate.b.p)) },
+        purpose: "coastal-link",
+        allowBridge: false,
+        maxLength: 80,
+        roadClass: "arterial",
+        primary: true,
+      }, connectorWorld, { strategies: ["node-merge"], siteMargin: 5, crossings: false });
       joined.add(ida); joined.add(roadNodeId(key(mate.b.p)));
     }
   }
@@ -884,16 +748,19 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
 
   // 入口路（R2）：仍离路较远的用地/地标（岸边对象，或找不到临街位置的）从朝向最近道路的边缘
   // 拉一条支路接入路网——门前要有路（真机：双子塔、摩天轮、港口门前无路）。
+  // 批次 5-1 桥接统一：堤道与「过水门前路」都改走连接器的显式桥候选（ground→bridge→ground
+  // 三段、桥头干地与跨距校验、候选按距离前 40 个投影点），经事务补丁提交；判据逐字保留。
   for (const site of [...publicSites, ...landmarks]) {
     if (!site.radius) continue;
-    // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。
+    // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。落位期已验证
+    // （占地圈全深水、岸点在实地 ≥0.3），此处仅事务化提交（commitFixedLink）。
     const landmarkSite = site as typeof site & { shore?: Vec2 };
     const ref: Vec2 = landmarkSite.shore ?? site;
     if (landmarkSite.shore) {
       const l = Math.hypot(site.x - ref.x, site.z - ref.z) || 1;
       const edgePt = key({ x: site.x - ((site.x - ref.x) / l) * site.radius * 0.9, z: site.z - ((site.z - ref.z) / l) * site.radius * 0.9 });
       const shorePt = key(ref);
-      addEdge(shorePt, edgePt, false, true, false);
+      commitFixedLink(connectorWorld, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
       bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
     }
     let nearest: { p: Vec2; d: number; edge: RoadEdge } | null = null;
@@ -909,73 +776,46 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     // 岸边地标（灯塔在岬角尖上）门口常是不可建的岸滩：沿朝路方向往里走到可建地面再起路。
     let reach = landmarkSite.shore ? 0 : site.radius + 6;
     // 不再向内陆走到可建地：岬角灯塔会走 100+，入口路从远处的路边起步、根本到不了地标（用户：门前要有路）。
-    // 门口在不可建岸滩时，由下方的「全程在陆上」兜底直连。
+    // 门口在不可建岸滩时，由下方的显式桥候选兜底（全程在陆上或 ≤84 连续水段成桥）。
     const gate = key({ x: ref.x + ux * reach, z: ref.z + uz * reach });
     if (!connectToNetwork(gate, 240, false) && !connectToNetwork(gate, 700, false, () => false, 35)) {
-      // 兜底：岸边地标贴回水边后常在岬角上，到最近路面要穿过不可建的岸滩。在最近 6 个路面点里取第一条
-      // 「全程在陆上、不穿河、不穿其它用地」的直线连过去，并在落点切开宿主路段成 T 路口。
+      // 兜底（批次 5-1 起统一走 bridge-candidate）：门口 → 近岸 → 桥 → 对岸 → 接入点（无水时纯地面引道）。
+      // 地面引道不查 buildable/坡度（门前引道穿过不可建前滩带是历史口径，TerrainPatch 批次前的已知豁免）。
       const blockers = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-      const candidates: Array<{ p: Vec2; d: number; edge: RoadEdge }> = [];
-      for (const edge of edges.values()) {
-        if (edge.bridge) continue;
-        const [ea, eb] = edge.points; const ex = eb.x - ea.x; const ez = eb.z - ea.z; const el = ex * ex + ez * ez || 1;
-        const t = Math.max(0, Math.min(1, ((gate.x - ea.x) * ex + (gate.z - ea.z) * ez) / el));
-        const p = { x: ea.x + ex * t, z: ea.z + ez * t };
-        candidates.push({ p, d: Math.hypot(p.x - gate.x, p.z - gate.z), edge });
-      }
-      candidates.sort((x, y) => x.d - y.d);
-      // 返回连线上的水段（首/末水点）：无水 = 纯陆路；水段 ≤ 84 且两端是干地 = 可架短桥（岸边地标常与路网隔着河，
-      // 守卫抓到 3 例「门前无路」）；更宽或被其它用地挡住则不连。
-      const clear = (to: Vec2): { span: [Vec2, Vec2] | null } | null => {
-        const n = Math.max(4, Math.ceil(Math.hypot(to.x - gate.x, to.z - gate.z) / 6));
-        let first = -1; let last = -1;
-        for (let k = 1; k < n; k += 1) {
-          const x = gate.x + (to.x - gate.x) * (k / n); const z = gate.z + (to.z - gate.z) * (k / n);
-          if (height(x, z) <= 0.5 || inRiver(x, z)) { if (first < 0) first = k; last = k; }
-          if (blockers.some((o) => Math.hypot(o.x - x, o.z - z) < o.radius + 2)) return null;
-          if (Math.hypot(site.x - x, site.z - z) < site.radius) return null;
-        }
-        if (first < 0) return { span: null };
-        if (last - first + 1 > 14 || first < 1 || last > n - 2) return null;
-        for (let k = first; k <= last; k += 1) { // 水段必须连续（中间不能又是陆地再入水）
-          const x = gate.x + (to.x - gate.x) * (k / n); const z = gate.z + (to.z - gate.z) * (k / n);
-          if (!(height(x, z) <= 0.5 || inRiver(x, z))) return null;
-        }
-        const at = (k: number) => ({ x: gate.x + (to.x - gate.x) * (k / n), z: gate.z + (to.z - gate.z) * (k / n) });
-        if (Math.hypot(at(first - 1).x - site.x, at(first - 1).z - site.z) < site.radius + 2) return null; // 桥头不能落在用地圈里：路会从用地中间穿过（庄园跨河时）
-        return { span: [at(first - 1), at(last + 1)] };
-      };
-      const picked = candidates.slice(0, 40).map((c) => ({ c, plan: clear(c.p) })).find((x) => x.plan);
-      const pick = picked?.c;
-      if (pick) {
-        const host = pick.edge; const join = key(pick.p);
-        if (edges.has(host.id) && roadNodeId(join) !== host.from && roadNodeId(join) !== host.to) {
-          edges.delete(host.id);
-          addEdge(host.points[0], join, host.kind === "arterial", false, host.width >= 12);
-          addEdge(join, host.points[1], host.kind === "arterial", false, host.width >= 12);
-        }
-        const span = picked!.plan!.span;
-        if (span) { // 门口 → 近岸 → 桥 → 对岸 → 接入点
-          addEdge(gate, span[0], false);
-          addEdge(span[0], span[1], false, true, false);
-          bridges.push({ from: span[0], to: span[1], angle: Math.atan2(span[1].z - span[0].z, span[1].x - span[0].x), length: Math.hypot(span[1].x - span[0].x, span[1].z - span[0].z) });
-          addEdge(span[1], join, false);
-        } else addEdge(gate, join, false);
+      const bridged = runConnection({
+        id: `gate:${site.id ?? site.kind}`,
+        source: gate,
+        target: { kind: "edges", include: () => true },
+        purpose: "site-access",
+        allowBridge: true,
+        maxLength: 1e4, // 桥候选的界限是候选数（前 40 个投影点），不是半径（历史口径）
+        roadClass: "local",
+      }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { self: site, blockers, siteGate: true }, crossings: false });
+      for (const span of bridged.ok ? bridged.bridgeSpans : []) {
+        bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
       }
     }
   }
 
-  // 连通：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含核心的分量用一条支路
-  // 接到最近的主干道节点（主干道都从核心出发，彼此已连通）。
+  // ── 连通（网络优先批次 4-3）：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含
+  // 主网的分量经统一连接器接入。主网目标 = intent.primaryComponentId 的分量（离核心最近路端所在，
+  // 批次 2 的主网定义），不许「接最近分量」——两个孤岛互连不等于接入主网。
+  // 设计明令删除的 tolerance=[1,0.7,0] 不校验直连兜底（2026-10-08 实测：150 岛 141 条兜底边里
+  // 63 条穿水、16 条不可建、2 条陡坡、9 条穿既有路）：禁止用降低硬约束换连通；失败进诊断
+  // （intent 需求体系记 unmet + 本处 connectionLog 记原因），必要时允许局部分量保持隔离。
+  const connectionLog: ConnectionAttempt[] = [];
   {
     const parent = new Map<string, string>();
     const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
     for (const id of nodes.keys()) parent.set(id, id);
     for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
-    const coreId = trunks.length ? roadNodeId(key(trunks[0].points[0])) : roadNodeId(key(core));
-    // 每个孤立分量按 localConstraints 垂直接入「含核心的分量」；接上一个就重算分量。
-    // 逐级放宽：严格（≤220、≥60°）→ 放远放宽（≤400、≥35°）→ 最后才退回旧的直连最近节点，保证全网连通。
-    const coreRoot = () => find(coreId);
+    // 主网锚点：离核心最近的路端（与 intent.primaryComponentId 同规则；环路围绕核心，正常落在骨架分量上）。
+    let primaryNodeId: string | null = null;
+    let primaryDist = Infinity;
+    for (const node of nodes.values()) { const d = Math.hypot(node.x - core.x, node.z - core.z); if (d < primaryDist) { primaryDist = d; primaryNodeId = node.id; } }
+    const coreRoot = () => (primaryNodeId && nodes.has(primaryNodeId) ? find(primaryNodeId) : null);
+    // 每个孤立分量按 localConstraints 垂直接入主网分量；接上一个就重算分量。
+    // 逐级放宽：严格（≤220、≥60°）→ 放远放宽（≤400、≥35°）→ 连接器兜底阶梯（并线/绕行/有界 A*，全程校验）。
     const recompute = () => {
       for (const id of nodes.keys()) if (!parent.has(id)) parent.set(id, id);
       for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
@@ -985,45 +825,67 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const groupsNow = new Map<string, RoadNode[]>();
       for (const node of nodes.values()) { const r = find(node.id); const list = groupsNow.get(r); if (list) list.push(node); else groupsNow.set(r, [node]); }
       for (const [root, members] of groupsNow) {
-        if (!nodes.has(coreId) || root === coreRoot()) continue;
         const target = coreRoot();
-        const outside = (edge: RoadEdge) => find(edge.from) !== target;
-        const ordered = [...members].sort((a, b) => distanceToTrunks(a) - distanceToTrunks(b)).slice(0, 12);
+        if (!target || root === target) continue;
+        const isPrimaryNode = (id: string) => find(id) === target;
+        // pass 0/1 沿用历史的 top-12（按离主干距离）；pass 2 与历史兜底同覆盖面：并线遍历全部分量成员
+        // （实测 seed 1927/t4：381 节点的分量，唯一合法并线点排在 top-12 之外，只试 12 个会漏掉），
+        // 绕行/A* 只对头部成员执行（同分量内不同起点的可达性基本相同，A* 逐成员重跑纯费预算）。
+        const ordered = [...members].sort((a, b) => distanceToTrunks(a) - distanceToTrunks(b));
         let linked = false;
-        for (const member of ordered) {
-          if (pass === 0 ? connectToNetwork(member, 220, false, outside) : connectToNetwork(member, 400, false, outside, 35)) { linked = true; break; }
+        for (const member of pass < 2 ? ordered.slice(0, 12) : ordered) {
+          const base = { source: member, target: { kind: "primary", isPrimaryNode } as const, purpose: "district-access", allowBridge: false, roadClass: "local" } as const;
+          const result = pass < 2
+            ? runConnection({ ...base, id: `isolate:${pass}:${member.id}`, maxLength: pass === 0 ? 220 : 400, minAngleDeg: pass === 0 ? 60 : 35 }, connectorWorld, { strategies: ["direct-projection"] })
+            : runConnection({ ...base, id: `isolate:${pass}:${member.id}`, maxLength: 700 }, connectorWorld, { strategies: ["node-merge"] });
+          if (pass === 2) connectionLog.push({ id: `isolate:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
+          if (result.ok) { linked = true; break; }
         }
         if (!linked && pass === 2) {
-          let best: { a: RoadNode; b: RoadNode; d: number } | null = null;
-          // 最后手段也先选不穿过用地/地标的直连；实在没有才不限。
-          // 中间档 0.7r+3：roadThroughSite 的通过线（步 4 实测：核心挪位后孤立分量用「不限」档
-          // 直连，连线从 villa-complex 中心 14.7 处穿过，seed 2000523645——连接器只看点不看线的病根，
-          // 见 docs/CITY_PLANNER_V2_FINDINGS.md §4）。
-          const clearOfSites = (a: Vec2, b: Vec2, tolerance: number) => {
-            const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 4));
-            for (let k = 0; k <= n; k += 1) {
-              const q = { x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n };
-              if (reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius * tolerance + 3)) return false;
-            }
-            return true;
-          };
-          for (const tolerance of [1, 0.7, 0]) {
-            for (const a of members) for (const b of nodes.values()) {
-              if (find(b.id) !== target) continue;
-              const d = Math.hypot(a.x - b.x, a.z - b.z);
-              if (best && d >= best.d) continue;
-              if (tolerance > 0 && !clearOfSites(a, b, tolerance)) continue;
-              best = { a, b, d };
-            }
-            if (best) break;
+          for (const member of ordered.slice(0, 6)) {
+            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: false, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["detour", "grid-astar"] });
+            connectionLog.push({ id: `isolate:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
+            if (result.ok) { linked = true; break; }
           }
-          const chosen = best as { a: RoadNode; b: RoadNode; d: number } | null;
-          if (chosen) addEdge(chosen.a, chosen.b, false);
+        }
+        if (!linked && pass === 2) {
+          // 最后手段：并线角度从宽（转弯是软成本，设计 §4.1）——只放松端点净空角，走廊（水/坡/用地）
+          // 与交叉检查仍是硬约束；质量代价由 acuteJunctions 约束如实度量。被删除的 tolerance 兜底
+          // 连水/坡/用地/交叉都不查，本档是其合法化替代（实测 seed 1927/t4：381 节点分量与主网最近
+          // 一对仅隔 2.7 单位、走廊干净，唯端点角 <35°，严格档拒之门外会把整个街区留在主网之外）。
+          for (const member of ordered) {
+            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: false, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["node-merge"], anglePolicy: "relaxed" });
+            connectionLog.push({ id: `isolate-relaxed:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
+            if (result.ok) { linked = true; break; }
+          }
+        }
+        if (!linked && pass === 2) {
+          // 跨河档（设计 §4.2「跨河允许 ground→bridge→ground」）：连续水段 ≤84 才可成桥——跨距上限
+          // 本身就排除了跨海长桥（不从「遇水」自动推断可修桥的落点）。桥头干地/用地避让/落点拆边
+          // 全在 bridge-candidate 判据内；桥梁注册表同步登记。实测 seed 123456789/t2：143 节点分量与
+          // 主网隔一条 ~40 宽的河口，前几档全部 slope/water-span 拒绝。
+          for (const member of ordered) {
+            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: true, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { blockers: reservations(), siteGate: true }, crossings: false }); // 过河档干地段同属历史地面容差
+            connectionLog.push({ id: `isolate-bridge:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
+            if (result.ok) {
+              for (const span of result.bridgeSpans) bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
+              linked = true; break;
+            }
+          }
         }
         recompute();
       }
     }
   }
+
+  // ── 尽端环路（lollipop service loop，G 批 2026-10-08）：连接器孤立分量阶梯之后的专用遍
+  // （planner/loop.ts）。「包含/紧邻用地服务环的孤立分量」（体育场类：环形服务路不接主网、
+  // 通向用地的路断头，用户截图 ②）以单入口接入——一根入口路从主网最近边（split 成 T 口）连到
+  // 环上，环保持闭环。判据/入口角/确定性排序见 LOOP_CONFIG；入口路走 direct-projection 的地面
+  // 走廊校验（水/坡/用地/交叉），事务提交；失败进 connectionLog（id 前缀 loop:），不静默。
+  // 非服务环形态的残余分量（混合等级街区残片、<6 边碎枝）不属于本遍：如实保持隔离并计入
+  // disconnectedComponents 诊断。
+  connectServiceLoops({ world: connectorWorld, core, log: connectionLog });
 
   const parkTrees: CityLayout["parkTrees"] = [];
   const spanX = bbox.maxX - bbox.minX + 120; const spanZ = bbox.maxZ - bbox.minZ + 120;
@@ -1156,10 +1018,26 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     for (const id of [...nodes.keys()]) if (![...edges.values()].some((e) => e.from === id || e.to === id)) nodes.delete(id);
   }
 
+  // ── 桥头落地环（E 轨 2026-10-08，planner/landing.ts）：桥全部生成、断头收尾之后、solve 之前的一遍。
+  // 桥的地面端方向失配（桥轴向与接地路向夹角 >25°）或接地路缺失/可被 solve 的 pruneShortSpurs
+  // 删除时，桥头插入半径 10–14 的落地环——桥面端点落在环上、接地路接入环，环形吸收方向差，
+  // 桥头的地面度数 ≥2 使「桥 +1 地面边」不再被当断头链删除。桥边与 bridges 注册表不动
+  // （悬索桥装饰选址 withBridgeLandmark、nearBridgeEnd 桥头避让全部保持兼容）。树先于此遍放置，
+  // 落到新增地面边上的按报告清除（与放置时的 width/2+3 同口径）。
+  {
+    const landingReport = buildLandingCircles({ network, geo, inRiver, sites: reservations, carPaths });
+    if (landingReport.addedEdges.length) {
+      for (let t = parkTrees.length - 1; t >= 0; t -= 1) {
+        const tree = parkTrees[t];
+        if (landingReport.addedEdges.some((e) => segmentDistance(tree, e.a, e.b) < e.width / 2 + 3)) parkTrees.splice(t, 1);
+      }
+    }
+  }
+
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
-  const repairCtx: RepairContext = { network, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths };
+  const repairCtx: RepairContext = { network, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]), coastRoadRuns, riverRoadRuns: coastRoadRuns.slice(coastalRunCount) };
   if (!skipSolve) solvePlan(repairCtx);
   // 车流折线的收口放在求解之后：修复（删冗余路段、切 T 路口、近距接入）会增删路段，车流必须按最终路网校验——
   // 曾放在求解之前，删路后海滨车流折线引用了已不存在的路段（verify-react-city-seaside 抓到）。
@@ -1182,14 +1060,53 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
     // 贴主干道那条边不再单独成路：绕街区一圈的车流若经过不存在的路段就整条丢弃（不让车开在没有路的地方）。
     const pairs = new Set([...edges.values()].map((edge) => [edge.from, edge.to].sort().join("/")));
+    // 落地环批（2026-10-08）：桥头落地环会把既有路段重锚到环缘（桥头→环缘→对端，新折点不在原线段上），
+    // 车流折线里失效的相邻对不再整条丢弃，而是改走当前路网的最短路（例如经落地环绕行）；
+    // 折点本身被合并残点清除的（近失误重锚的 0.x–2 并点）先吸附 ≤2 内最近现存节点。仍无路可代才丢弃。
+    const adjacency = new Map<string, string[]>();
+    for (const id of nodes.keys()) adjacency.set(id, []);
+    for (const edge of edges.values()) { adjacency.get(edge.from)?.push(edge.to); adjacency.get(edge.to)?.push(edge.from); }
+    const bfsMiddle = (from: string, to: string): string[] | null => {
+      if (from === to) return [];
+      const previous = new Map<string, string | null>([[from, null]]); const queue = [from];
+      for (let i = 0; i < queue.length && !previous.has(to); i += 1) {
+        for (const next of adjacency.get(queue[i]) ?? []) if (!previous.has(next)) { previous.set(next, queue[i]); queue.push(next); }
+      }
+      if (!previous.has(to)) return null;
+      const chain: string[] = [];
+      for (let cursor: string | null = to; cursor && cursor !== from; cursor = previous.get(cursor) ?? null) chain.push(cursor);
+      chain.shift(); // 去掉 to 本身（调用方随后压入 cur）
+      return chain.reverse();
+    };
     for (let r = carPaths.length - 1; r >= 0; r -= 1) {
       // 碎边合并/断头清理后，折线里可能留下相距 <1 的两个点（原来的碎边已并成一个节点）：把中间点并掉再核对，
       // 不因为一个 0.4 长的碎边就丢掉整条 220 点的车流回路（海滨大道回路因此消失，滨海车流守卫抓到）。
       const raw = carPaths[r];
       const route = raw.filter((q, i) => i === 0 || i === raw.length - 1 || Math.hypot(q.x - raw[i + 1].x, q.z - raw[i + 1].z) >= 1);
-      carPaths[r] = route;
-      const ok = route.every((p, i) => i === 0 || pairs.has([roadNodeId(key(route[i - 1])), roadNodeId(key(p))].sort().join("/")));
-      if (!ok) carPaths.splice(r, 1);
+      // 折点被落地环并点/吞并清除的：≤2 内吸附最近现存节点（近失误重锚的 0.x–2 并点）；
+      // 更远的（环内被吞节点）直接剔除折点——相邻存活点由下方的最短路经环绕行接回。
+      const resnap: Vec2[] = [];
+      for (const q of route) {
+        if (nodes.has(roadNodeId(key(q)))) { resnap.push(q); continue; }
+        let best: RoadNode | null = null;
+        for (const n of nodes.values()) if (!best || Math.hypot(n.x - q.x, n.z - q.z) < Math.hypot(best.x - q.x, best.z - q.z)) best = n;
+        if (best && Math.hypot(best.x - q.x, best.z - q.z) <= 2) resnap.push({ x: best.x, z: best.z });
+      }
+      const out: Vec2[] = [];
+      let ok = true;
+      for (let i = 0; i < resnap.length && ok; i += 1) {
+        const cur = resnap[i];
+        if (i > 0) {
+          const prev = out[out.length - 1];
+          if (roadNodeId(key(prev)) !== roadNodeId(key(cur)) && !pairs.has([roadNodeId(key(prev)), roadNodeId(key(cur))].sort().join("/"))) {
+            const middle = bfsMiddle(roadNodeId(key(prev)), roadNodeId(key(cur)));
+            if (!middle) { ok = false; break; }
+            for (const id of middle) { const n = nodes.get(id); if (n) out.push({ x: n.x, z: n.z }); }
+          }
+        }
+        if (!out.length || roadNodeId(key(out[out.length - 1])) !== roadNodeId(key(cur))) out.push(cur);
+      }
+      if (!ok) carPaths.splice(r, 1); else carPaths[r] = out;
     }
   }
   // 终筛：所有改路步骤（接入路、断头路收尾、碎边合并）之后，对每个地块统一核对「到任何路段的距离」。
@@ -1217,8 +1134,18 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
 
-  return { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
-    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside };
+  // ── 尽端回车点（路网形态批 §5-3，docs/CITY_PLANNER_V2_FINDINGS.md §5）：合法尽端
+  // （EndpointRole cul-de-sac：滨海大道计划断点 planned-local / 近水终止 coast）语义上
+  // 是计划内终点，几何上却是路戛然而止——把它们的坐标作为加性字段输出，渲染层据此画
+  // 死胡同回车圈。classifyEndpoints 经 diagnoseNetwork 调用，只读（verify-city-intent
+  // 已证诊断前后 plan 深比较一致），不改任何路网/用地字段，计划基线哈希不受影响。
+  const plan = { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
+    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside,
+    connections: connectionLog };
+  const culDeSacEnds: Vec2[] = (diagnoseNetwork(plan)?.endpoints ?? [])
+    .filter((endpoint) => endpoint.role.kind === "cul-de-sac")
+    .map((endpoint) => endpoint.at);
+  return { ...plan, culDeSacEnds };
 }
 
 /** 悬索大桥：有河桥时把最长的那座做成悬索桥（地标，不改路网）。曾按 55% 概率：用户的岛恰好没抽中。 */

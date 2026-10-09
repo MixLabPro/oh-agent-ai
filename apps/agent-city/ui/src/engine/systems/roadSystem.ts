@@ -4,7 +4,8 @@
  */
 
 import * as THREE from "three";
-import type { CityLayout } from "../cityLayout";
+import type { CityLayout, Vec2 } from "../cityLayout";
+import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../render/shared";
 
 /** 本系统读写的 CityParts 成员（精确清单；CityParts 以 `this as unknown as RoadHost` 传入）。 */
@@ -86,6 +87,107 @@ export function buildInfrastructure(host: RoadHost): void {
   mesh.name = "city-infrastructure-decorative";
 }
 
+/** 渠化 T 路口（渲染级，规划拓扑零改动）：acuteJunctions 守卫同一算法选出的 30–50°
+ *  边缘带三岔（含 < 30° 普查残留违例；只挑宽 < 12 的窄路口，主干不渠化），把两个
+ *  锐角侧的口部画成喇叭渐变（路面色贴地多边形，随地形取样），支路口中央摆一座
+ *  低多边形水滴形分流岛（顶面植被色、侧壁路缘色）——视觉与车流语义都读成
+ *  「渠化汇入」而不是「锐角硬接」。全部口合并成两个批（喇叭一盘、岛一盘），
+ *  不是一口一 Mesh；喇叭抬 0.035（路漆 0.02–0.05 的既有 z-fighting 规避惯例，
+ *  路缘盒基面 0.02 / 沙滩带 0.05 之间）。 */
+export function buildChannelizedJunctions(host: RoadHost): void {
+  const mouths = channelizedTPlan(host.layout.roadEdges);
+  if (!mouths.length) return;
+  const terrain = host.layout.terrain;
+  // 与地面贴图（cityTextures 路漆盘）同色的沥青：喇叭就是「路口变宽」本身，不另配色。
+  const asphaltOf = (edge: { kind: string }) => (edge.kind === "arterial" ? "#505b60" : "#646c6b");
+  const flareTop = new THREE.Color();
+  const islandTop = new THREE.Color("#87a86f");
+  const islandSide = new THREE.Color("#cbc6ba");
+  const FLARE_LIFT = 0.035;
+  const flarePositions: number[] = [];
+  const flareColors: number[] = [];
+  const islandPositions: number[] = [];
+  const islandColors: number[] = [];
+  /** 喇叭渐变：从口部（d0，半宽 w/2+extra）线性收到正常路幅（d0+length，半宽 w/2），
+   *  沿边按 ~4.5 单位切片贴地取样（同沙滩带的细分惯例）。 */
+  const flare = (arm: ChannelizedArm, x: number, z: number) => {
+    const width = arm.edge.width;
+    const extra = Math.min(2.3, 0.45 * width);
+    const d0 = 2.2;
+    const length = 9 + width * 0.55;
+    const slices = Math.max(1, Math.ceil(length / 4.5));
+    const nx = -arm.dir.z; const nz = arm.dir.x;
+    const color = flareTop.set(asphaltOf(arm.edge));
+    const at = (d: number, half: number, sign: number) => {
+      const px = x + arm.dir.x * d + nx * half * sign;
+      const pz = z + arm.dir.z * d + nz * half * sign;
+      return [px, terrain.height(px, pz) + FLARE_LIFT, pz];
+    };
+    const left: number[] = [];
+    const right: number[] = [];
+    for (let s = 0; s <= slices; s += 1) {
+      const t = s / slices;
+      const half = width / 2 + extra * (1 - t);
+      left.push(...at(d0 + length * t, half, 1));
+      right.push(...at(d0 + length * t, half, -1));
+    }
+    for (let s = 0; s < slices; s += 1) {
+      const a = left.slice(s * 3, s * 3 + 3); const b = left.slice((s + 1) * 3, (s + 1) * 3 + 3);
+      const c = right.slice((s + 1) * 3, (s + 1) * 3 + 3); const e = right.slice(s * 3, s * 3 + 3);
+      for (const vertex of [a, b, c, a, c, e]) { flarePositions.push(...vertex); flareColors.push(color.r, color.g, color.b); }
+    }
+  };
+  /** 水滴形分流岛（低多边形棱台）：口部一侧圆头、向内收尖，顶面抬 0.22，侧壁插入地下 0.18。 */
+  const ISLAND_PROFILE = [
+    { d: 0.0, w: 1.0 }, { d: 0.16, w: 1.14 }, { d: 0.58, w: 0.55 }, { d: 1.0, w: 0.0 },
+    { d: 0.58, w: -0.55 }, { d: 0.16, w: -1.14 }, { d: 0.0, w: -1.0 },
+  ];
+  const island = (arm: ChannelizedArm, x: number, z: number) => {
+    const extra = Math.min(2.3, 0.45 * arm.edge.width);
+    const start = 2.2 + 2.2;
+    const length = 4.4 + arm.edge.width * 0.3;
+    const half = Math.min(0.8, extra * 0.4);
+    const nx = -arm.dir.z; const nz = arm.dir.x;
+    const ring = ISLAND_PROFILE.map((point) => ({
+      x: x + arm.dir.x * (start + length * point.d) + nx * half * point.w,
+      z: z + arm.dir.z * (start + length * point.d) + nz * half * point.w,
+    }));
+    const top = ring.map((point) => [point.x, terrain.height(point.x, point.z) + 0.22, point.z]);
+    const bottom = ring.map((point) => [point.x, terrain.height(point.x, point.z) - 0.18, point.z]);
+    const centroid = [
+      top.reduce((sum, vertex) => sum + vertex[0], 0) / top.length,
+      top.reduce((sum, vertex) => sum + vertex[1], 0) / top.length,
+      top.reduce((sum, vertex) => sum + vertex[2], 0) / top.length,
+    ];
+    for (let k = 0; k < ring.length; k += 1) {
+      const next = (k + 1) % ring.length;
+      for (const vertex of [top[k], top[next], centroid]) { islandPositions.push(...vertex); islandColors.push(islandTop.r, islandTop.g, islandTop.b); }
+      for (const vertex of [top[k], top[next], bottom[next], top[k], bottom[next], bottom[k]]) { islandPositions.push(...vertex); islandColors.push(islandSide.r, islandSide.g, islandSide.b); }
+    }
+  };
+  for (const mouth of mouths) {
+    flare(mouth.stem, mouth.x, mouth.z);
+    flare(mouth.host, mouth.x, mouth.z);
+    island(mouth.stem, mouth.x, mouth.z);
+  }
+  const build = (positions: number[], colors: number[], name: string, castShadow: boolean) => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+    geometry.computeVertexNormals();
+    // 双面渲染：绕序不挑（同沙滩带惯例），地形起伏下侧面朝向逐面有别。
+    const material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = name;
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = true;
+    host.group.add(mesh);
+    host.disposables.push(geometry, material);
+  };
+  build(flarePositions, flareColors, "city-channel-flares", false);
+  build(islandPositions, islandColors, "city-channel-islands", true);
+}
+
 /** 区界高架：与北环高架同视觉语言（桥面/车道线/护栏/桥墩），
  *  沿规划折线分段铺装 —— harness 城区之间可辨认的硬边界。 */
 export function buildDistrictExpressways(host: RoadHost): void {
@@ -159,6 +261,55 @@ export function buildDistrictExpressways(host: RoadHost): void {
   mesh.name = "city-district-expressways";
   host.group.add(mesh);
   host.disposables.push(geometry, mesh.material);
+}
+
+/** 尽端回车圈半径（形态批 §5-3）：所在路段半宽 + 2.5，夹在 6–9——与路宽协调
+ *  （支路 5 宽 → 6，主干/大道 12 宽 → 8.5）。守夜灯（nightLighting）同用此口径。 */
+export function culDeSacBulbRadius(roadWidth: number): number {
+  return Math.max(6, Math.min(9, roadWidth / 2 + 2.5));
+}
+
+/** 尽端回车圈（backlog 形态批 §5-3，docs/CITY_PLANNER_V2_FINDINGS.md §5）：合法尽端
+ *  （layout.culDeSacEnds，EndpointRole cul-de-sac）几何上是路戛然而止——在路尽头铺一块
+ *  平贴地面的回车圆盘 + 路缘色描边。纯渲染装饰，不改路网拓扑；一个 InstancedMesh 装全部
+ *  圆盘、一个装全部描边（同 buildTrussBridges 的合并批模式，不逐端点建 Mesh）。
+ *  高度按地形中心取样、法向贴合坡度（中心差分梯度），颜色用桥面/路缘同款涂装。 */
+export function buildCulDeSacBulbs(host: RoadHost): void {
+  const ends = host.layout.culDeSacEnds ?? [];
+  if (!ends.length) return;
+  // 所在点最宽的 incident 路段决定回车圈半径（找到的多为唯一悬挂边）。
+  const widthAt = new Map<string, number>();
+  for (const edge of host.layout.roadEdges) {
+    if (edge.bridge) continue;
+    for (const id of [edge.from, edge.to]) widthAt.set(id, Math.max(widthAt.get(id) ?? 0, edge.width));
+  }
+  const discs = host.makeInstanced(new THREE.CylinderGeometry(1, 1, 1, 20).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#6a7071" }), ends.length);
+  const rims = host.makeInstanced(new THREE.RingGeometry(0.86, 1, 28).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: "#cbc6ba" }), ends.length);
+  discs.name = "city-culdesac-bulb-disc";
+  rims.name = "city-culdesac-bulb-rim";
+  discs.receiveShadow = true;
+  const up = new THREE.Vector3(0, 1, 0);
+  const normal = new THREE.Vector3();
+  const height = host.layout.terrain.height;
+  ends.forEach((end: Vec2, index: number) => {
+    const radius = culDeSacBulbRadius(widthAt.get(`${end.x}:${end.z}`) ?? 9);
+    const base = Math.max(0, height(end.x, end.z));
+    // 圆盘贴合地形坡度：沿半径的两轴中心差分求梯度，法向 = (-gx, 1, -gz)。
+    const gx = (height(end.x + radius, end.z) - height(end.x - radius, end.z)) / (2 * radius);
+    const gz = (height(end.x, end.z + radius) - height(end.x, end.z - radius)) / (2 * radius);
+    normal.set(-gx, 1, -gz).normalize();
+    host.quaternion.setFromUnitVectors(up, normal);
+    host.positionVector.set(end.x, base + 0.02, end.z);
+    host.scaleVector.set(radius, 0.12, radius);
+    host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector);
+    discs.setMatrixAt(index, host.matrix);
+    // 描边圆环贴在圆盘顶面上（盘厚 0.12 + 0.01，防 z-fighting）。
+    host.positionVector.set(end.x, base + 0.15, end.z);
+    host.scaleVector.set(radius, 1, radius);
+    host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector);
+    rims.setMatrixAt(index, host.matrix);
+  });
+  for (const mesh of [discs, rims]) { mesh.count = ends.length; mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
 }
 
 /** 红色穿式桁架桥（backlog L-7）：悬索桥之外、跨距 40–160 的过河桥加一套格构桁架——上下弦 + 竖杆 + 交替斜腹杆，
