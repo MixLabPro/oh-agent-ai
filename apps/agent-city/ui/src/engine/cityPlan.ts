@@ -1045,8 +1045,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
-  const repairCtx: RepairContext = { network, connectionLog, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]), coastRoadRuns, riverRoadRuns: coastRoadRuns.slice(coastalRunCount) };
-  if (!skipSolve) solvePlan(repairCtx);
+  const repairCtx: RepairContext = { network, connectionLog, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]), coastRoadRuns, riverRoadRuns: coastRoadRuns.slice(coastalRunCount) };
+  const solveReport = skipSolve ? null : solvePlan(repairCtx);
   // 车流折线的收口放在求解之后：修复（删冗余路段、切 T 路口、近距接入）会增删路段，车流必须按最终路网校验——
   // 曾放在求解之前，删路后海滨车流折线引用了已不存在的路段（verify-react-city-seaside 抓到）。
   // 接入路把已有路段切成 T 路口后，车流折线还按旧端点走：把落在线段上的路口节点按顺序插回去。
@@ -1150,7 +1150,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const plan = { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
     urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside,
     // 修复可能合并掉一个 civic 节点；只在骨架预先声明的锚点集合内重绑，不能选附近支路。
-    connections: connectionLog, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, junctionReport };
+    connections: connectionLog, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, junctionReport, solveReport };
   const culDeSacEnds: Vec2[] = (diagnoseNetwork(plan)?.endpoints ?? [])
     .filter((endpoint) => endpoint.role.kind === "cul-de-sac")
     .map((endpoint) => endpoint.at);

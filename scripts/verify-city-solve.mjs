@@ -6,11 +6,11 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, REPAIR_STRATEGIES, solvePlan } = await loadCity({
+const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, REPAIR_STRATEGIES, solvePlan, runRepairTransaction } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/constraints.ts": ["CONSTRAINTS"],
-  "engine/planner/solve.ts": ["REPAIR_STRATEGIES", "solvePlan"],
+  "engine/planner/solve.ts": ["REPAIR_STRATEGIES", "solvePlan", "runRepairTransaction"],
 });
 
 const ids = new Set(CONSTRAINTS.map((c) => c.id));
@@ -21,6 +21,39 @@ for (const s of REPAIR_STRATEGIES) {
 }
 const targeted = [...new Set(REPAIR_STRATEGIES.map((s) => s.constraint))];
 
+// 拒绝和异常都不能泄漏草稿修改，包括数组/嵌套地块与日志；容量不许靠删地块过关。
+{
+  const ctx = { network: { nodes: new Map(), edges: new Map() }, publicSites: [], landmarks: [],
+    blocks: [{ id: "block", parcels: [{ id: "parcel", x: 0, z: 0 }] }], core: { x: 0, z: 0 },
+    geo: { terrain: { height: () => -1 }, river: null }, seaside: null, coast: [], coastRoadRuns: [], riverRoadRuns: [],
+    carPaths: [], bridges: [], connectionLog: [] };
+  const snapshot = () => JSON.stringify([ctx.publicSites, ctx.blocks, ctx.connectionLog, [...ctx.network.nodes], [...ctx.network.edges]]);
+  const before = snapshot();
+  const rejected = runRepairTransaction(ctx, { constraint: "siteInWater", name: "unsafe", run(draft) {
+    draft.publicSites.push({ id: "unsafe", kind: "park", x: 0, z: 0, radius: 10, yaw: 0 });
+    draft.blocks[0].parcels[0].x = 999; draft.connectionLog.push({ id: "draft", ok: true, purpose: "site-access" }); return 1;
+  } });
+  assert.ok(rejected.reason && !rejected.changes);
+  assert.equal(snapshot(), before);
+  const discarded = runRepairTransaction(ctx, { constraint: "parcelInsideSite", name: "discard", run(draft) { draft.blocks[0].parcels = []; return 1; } });
+  assert.match(discarded.reason, /capacity/);
+  assert.equal(snapshot(), before);
+  assert.throws(() => runRepairTransaction(ctx, { constraint: "siteInWater", name: "throw", run(draft) { draft.blocks[0].parcels = []; throw new Error("interrupted"); } }), /interrupted/);
+  assert.equal(snapshot(), before);
+  const blocksRef = ctx.blocks; const nodesRef = ctx.network.nodes;
+  const noProgress = runRepairTransaction(ctx, { constraint: "siteInWater", name: "no-progress", run(draft) { draft.blocks[0].parcels[0].x = 1; return 1; } });
+  assert.match(noProgress.reason, /no verified/);
+  assert.equal(snapshot(), before);
+  ctx.geo.terrain.height = (x) => x > 50 ? 1.2 : -1;
+  ctx.publicSites.push({ id: "wet", kind: "park", x: 0, z: 0, radius: 10, yaw: 0 });
+  const accepted = runRepairTransaction(ctx, { constraint: "siteInWater", name: "safe-data", run(draft) { draft.publicSites[0].x = 100; return 1; } });
+  assert.equal(accepted.changes, 1);
+  assert.equal(ctx.publicSites[0].x, 100);
+  assert.equal(ctx.blocks, blocksRef);
+  assert.equal(ctx.network.nodes, nodesRef);
+  assert.equal(ctx.network.version, 1);
+}
+
 const count = (plan, id) => CONSTRAINTS.find((c) => c.id === id).measure(plan).length;
 const islands = [[1, 0, null], [2, 3, MIAMI_COASTAL], [5, 7, MIAMI_COASTAL], [1, 11, null], [2, 13, MIAMI_COASTAL], [5, 17, null]];
 const rows = [];
@@ -30,11 +63,8 @@ for (const [tier, i, cfg] of islands) {
   const after = createCityPlan(seed, tier, cfg);
   for (const id of targeted) {
     const b = count(before, id); const a = count(after, id);
-    // 2026-10-08 网络优先批次 1 过渡豁免：断头检测语义化后，锐角/扎堆修复删边可能让端点 2->1，
-    // 留下的窄短枝若受车流/门前保护则 prune 正当地不收——软约束间的有界互换。允许净 +1，
-    // 统一连接器（批次 4）落地「接受检查」后收回此豁免。
-    const slack = id === "looseInlandRoadEnds" ? 1 : 0;
-    assert(a <= b + slack, `island seed=${seed} tier=${tier}: ${id} got worse after solve (${b} -> ${a})`);
+    // 事务接受后不再允许断头净增 1 的过渡松弛。
+    assert(a <= b, `island seed=${seed} tier=${tier}: ${id} got worse after solve (${b} -> ${a})`);
     rows.push(`${id} ${b}->${a}`);
   }
   assert.equal(JSON.stringify(createCityPlan(seed, tier, cfg)), JSON.stringify(after), `solve not deterministic for seed=${seed} tier=${tier}`);

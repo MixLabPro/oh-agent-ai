@@ -14,6 +14,7 @@ import type { ConnectionAttempt } from "./connect";
 export interface RepairContext {
   network: Network;
   connectionLog?: ConnectionAttempt[];
+  primaryAnchorNodeId?: string | null;
   height: (x: number, z: number) => number;
   inRiver: (x: number, z: number) => boolean;
   publicSites: PublicSite[];
