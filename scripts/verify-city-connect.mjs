@@ -11,18 +11,21 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { runConnection, proposeConnection, commitConnection, runMiniRoundabout, corridorFailure, CONNECTOR_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
-  "engine/planner/connect.ts": ["runConnection", "proposeConnection", "commitConnection", "runMiniRoundabout", "corridorFailure", "CONNECTOR_CONFIG"],
+const { runConnection, proposeConnection, commitConnection, commitFixedLink, runMiniRoundabout, corridorFailure, CONNECTOR_CONFIG, VALIDATION_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
+  "engine/planner/connect.ts": ["runConnection", "proposeConnection", "commitConnection", "commitFixedLink", "runMiniRoundabout", "corridorFailure", "CONNECTOR_CONFIG", "VALIDATION_CONFIG"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
   "engine/planner/constraints.ts": ["acuteJunctions"],
 });
 
-/** 合成地理：半径 1000 的平岛（高 1.2），可选竖直河道（x = riverX，宽 riverWidth）、圆形湖与陡坡盘。 */
-function makeWorld({ riverX = -400, riverWidth = 18, lake = null, slopeDisc = null, sites = [] } = {}) {
+/** 合成地理：半径 1000 的平岛（高 1.2），可选竖直河道（x = riverX，宽 riverWidth）、圆形湖与
+ *  陡坡盘（slopeDisc.value 自定坡度，缺省 2——批 A 引道阈值为实测 3，负例须 >3）、不可建盘
+ *  （干地但 buildable=false，模拟前滩：引道按道路可行条件放行，建筑判据不适用）。 */
+function makeWorld({ riverX = -400, riverWidth = 18, lake = null, slopeDisc = null, sites = [], unbuildable = [] } = {}) {
   const inLake = (x, z) => !!lake && Math.hypot(x - lake.x, z - lake.z) < lake.r;
   const inSlope = (x, z) => !!slopeDisc && Math.hypot(x - slopeDisc.x, z - slopeDisc.z) < slopeDisc.r;
+  const inUnbuildable = (x, z) => unbuildable.some((d) => Math.hypot(x - d.x, z - d.z) < d.r);
   const height = (x, z) => (Math.hypot(x, z) < 1000 && !inLake(x, z) && Math.abs(x - riverX) >= riverWidth) ? 1.2 : -1;
-  const buildable = (x, z) => Math.hypot(x, z) < 988 && !inLake(x, z) && Math.abs(x - riverX) > riverWidth + 12 && (!lake || Math.hypot(x - lake.x, z - lake.z) > lake.r + 12);
+  const buildable = (x, z) => Math.hypot(x, z) < 988 && !inLake(x, z) && Math.abs(x - riverX) > riverWidth + 12 && (!lake || Math.hypot(x - lake.x, z - lake.z) > lake.r + 12) && !inUnbuildable(x, z);
   const geo = {
     R: 1200, coast: [], bbox: { minX: -1000, maxX: 1000, minZ: -1000, maxZ: 1000 },
     hasRiver: true, river: [], riverShift: riverX, riverX: () => riverX, riverWidth: () => riverWidth,
@@ -30,7 +33,7 @@ function makeWorld({ riverX = -400, riverWidth = 18, lake = null, slopeDisc = nu
     landClearance: (x, z) => Math.min(1000 - Math.hypot(x, z), Math.abs(x - riverX) - riverWidth),
     hillAngle: 0, hillDir: { x: 0, z: 1 }, hillLine: 5000, hillProj: () => -1,
     height, buildable,
-    terrain: { height, slope: (x, z) => (inSlope(x, z) ? 2 : 0.2), buildable, center: { x: 0, z: 0 }, radius: 1200, coastRadius: () => 1200, hasRiver: true },
+    terrain: { height, slope: (x, z) => (inSlope(x, z) ? (slopeDisc?.value ?? 2) : 0.2), buildable, center: { x: 0, z: 0 }, radius: 1200, coastRadius: () => 1200, hasRiver: true },
   };
   return { network: emptyNetwork(), geo, inRiver: (x, z) => Math.abs(x - riverX) < riverWidth, reservations: () => sites };
 }
@@ -307,4 +310,60 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.equal(snap(wA.network), snap(wB.network), "same input must yield the identical ring network");
 }
 
-console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), fold-back endpoints refused, slope discs detoured, mini-roundabout rings dissolving acute 3-way junctions (radius ladder, corridor-checked arcs, guard-level angles, zero side effects), deterministic.");
+// ── 批 A 统一终筛门禁（CITY_NETWORK_FIRST_OPTIMIZATION_PLAN §4-A）──────────────────────────
+// 提议期预筛与提交期草稿复核共用 validateCandidate；策略级整体豁免已废除。四个负例 + 一个正向对照。
+
+// (i1) 无水陡坡桥策略：纯地面 bridge-candidate 引道穿坡度 9 盘（> 实测阈值 6）——拒（slope），零副作用。
+{
+  const w = makeWorld({ slopeDisc: { x: 0, z: 75, r: 20, value: 9 } });
+  addNetworkEdge(w.network, { x: -40, z: 150 }, { x: 40, z: 150 }, true);
+  const frozen = snap(w.network);
+  const r = runConnection(request({ id: "steep-dry", allowBridge: true, maxLength: 300 }), w, { strategies: ["bridge-candidate"], bridge: { blockers: [] } });
+  assert.ok(!r.ok && r.reason === "slope", `steep dry approach must be refused: ${JSON.stringify(r)}`);
+  assert.equal(snap(w.network), frozen, "refused steep approach mutated the network");
+}
+
+// (i2) 真实桥陡坡引道：跨河桥的西岸引道穿坡度 9 盘——deck 合法，但引道（ground-approach）拒 slope，零副作用。
+{
+  const w = makeWorld({ riverX: 0, slopeDisc: { x: -30, z: 0, r: 15, value: 9 } });
+  addNetworkEdge(w.network, { x: 60, z: 0 }, { x: 220, z: 0 }, true);
+  const frozen = snap(w.network);
+  const r = runConnection(request({ id: "steep-bank", source: { x: -60, z: 0 }, allowBridge: true, maxLength: 400 }), w, { strategies: ["bridge-candidate"], bridge: { blockers: [] } });
+  assert.ok(!r.ok && r.reason === "slope", `steep river-bank approach must be refused: ${JSON.stringify(r)}`);
+  assert.equal(snap(w.network), frozen, "refused steep bank approach mutated the network");
+}
+
+// (i3) siteGate 不再豁免坡度：门路（siteGate: true，purpose=site-access）引道穿坡度 9 盘、无 blockers——
+//      旧实现（整体豁免 + maxSlope=Infinity）会提交；批 A 起按 ground-approach 有限坡度（实测 6）拒 slope，零副作用。
+{
+  const w = makeWorld({ slopeDisc: { x: 0, z: 75, r: 20, value: 9 } });
+  addNetworkEdge(w.network, { x: -40, z: 150 }, { x: 40, z: 150 }, true);
+  const frozen = snap(w.network);
+  const r = runConnection(request({ id: "gate-steep", purpose: "site-access", allowBridge: true, maxLength: 300 }), w, { strategies: ["bridge-candidate"], bridge: { self: { x: 0, z: -14, radius: 10 }, blockers: [], siteGate: true }, crossings: false });
+  assert.ok(!r.ok && r.reason === "slope", `gate with a steep approach must be refused (no siteGate slope exemption): ${JSON.stringify(r)}`);
+  assert.equal(snap(w.network), frozen, "refused steep gate mutated the network");
+}
+
+// (i4) 固定路线冲突：堤道 deck 与既有路严格相交且无高程模型——vertical-clearance-unsupported 拒，零副作用。
+{
+  const w = makeWorld();
+  addNetworkEdge(w.network, { x: -100, z: 50 }, { x: 100, z: 50 }, true);
+  const frozen = snap(w.network);
+  const committed = commitFixedLink(w, [{ a: { x: 0, z: 0 }, b: { x: 0, z: 150 }, arterial: false, bridge: true, primary: false }]);
+  assert.ok(!committed.ok, `conflicting fixed deck must be refused: ${JSON.stringify(committed)}`);
+  assert.match(committed.detail ?? "", /vertical-clearance-unsupported/, "refusal must name the vertical-clearance cause");
+  assert.equal(snap(w.network), frozen, "refused fixed link mutated the network");
+}
+
+// (i5) 正向对照（前滩引道）：干地但 buildable=false（前滩）、坡度 0.2（≤6）——引道按道路可行条件放行，
+//      不套建筑 buildable 判据（「前滩地面不必满足建筑 buildable，但须按明确道路可行条件验证」）。
+{
+  const w = makeWorld({ unbuildable: [{ x: 0, z: 60, r: 30 }] });
+  addNetworkEdge(w.network, { x: -40, z: 150 }, { x: 40, z: 150 }, true);
+  const r = runConnection(request({ id: "beach-gate", allowBridge: true, maxLength: 300 }), w, { strategies: ["bridge-candidate"], bridge: { self: { x: 0, z: -14, radius: 10 }, blockers: [], siteGate: true }, crossings: false });
+  assert.ok(r.ok && r.strategy === "bridge-candidate", `gentle unbuildable beachfront approach must pass: ${JSON.stringify(r)}`);
+  assert.ok(w.network.edges.size > 1, "beachfront gate must commit its edges");
+  assert.ok([...w.network.edges.values()].every((e) => !e.bridge), "no deck is needed on dry beachfront");
+}
+
+console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), fold-back endpoints refused, slope discs detoured, mini-roundabout rings dissolving acute 3-way junctions (radius ladder, corridor-checked arcs, guard-level angles, zero side effects), unified batch-A final screen (steep dry/river-bank approaches refused, gate clipping other sites refused, conflicting fixed decks refused with vertical-clearance cause, gentle unbuildable beachfront passes), deterministic.");

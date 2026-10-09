@@ -219,13 +219,17 @@ export function buildSkeleton(opts: {
       ]);
       if (hosts.length) {
         edges.delete(hosts[0].id); // 多条宿主边同点拆分时逐条事务提交（与历史顺序一致）
-        commitFixedLink({ network, geo, inRiver, reservations: () => [] }, patchOps.slice(0, 2));
+        // splitInherit：原位拆分继承宿主有效性（拓扑精化，不按新定线标准重查）；结果必须检查——
+        // 静默失败会留下「宿主已删、两半未加」的网络破洞（批 A 评审 P1）。
+        const split0 = commitFixedLink({ network, geo, inRiver, reservations: () => [] }, patchOps.slice(0, 2), { splitInherit: true });
+        if (!split0.ok) throw new Error(`ring exit split failed: ${split0.detail ?? split0.reason}`);
         for (let h = 1; h < hosts.length; h += 1) {
           edges.delete(hosts[h].id);
-          commitFixedLink({ network, geo, inRiver, reservations: () => [] }, [
+          const splitH = commitFixedLink({ network, geo, inRiver, reservations: () => [] }, [
             { a: hosts[h].points[0], b: endpoint, arterial: true },
             { a: endpoint, b: hosts[h].points[1], arterial: true },
-          ]);
+          ], { splitInherit: true });
+          if (!splitH.ok) throw new Error(`ring exit split failed: ${splitH.detail ?? splitH.reason}`);
         }
       }
     }

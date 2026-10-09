@@ -23,7 +23,7 @@ import { buildGeography } from "./planner/geography";
 import { diagnoseNetwork } from "./planner/intent";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
-import { runConnection, endpointClear, commitFixedLink, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
+import { runConnection, endpointClear, commitFixedLink, parseFailure, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import { connectServiceLoops } from "./planner/loop";
 import { buildLandingCircles } from "./planner/landing";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
@@ -750,6 +750,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 拉一条支路接入路网——门前要有路（真机：双子塔、摩天轮、港口门前无路）。
   // 批次 5-1 桥接统一：堤道与「过水门前路」都改走连接器的显式桥候选（ground→bridge→ground
   // 三段、桥头干地与跨距校验、候选按距离前 40 个投影点），经事务补丁提交；判据逐字保留。
+  // 批 A：堤道/门路的失败都如实进 connectionLog（诊断面，不进基线哈希）。
+  const connectionLog: ConnectionAttempt[] = [];
   for (const site of [...publicSites, ...landmarks]) {
     if (!site.radius) continue;
     // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。落位期已验证
@@ -760,8 +762,14 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const l = Math.hypot(site.x - ref.x, site.z - ref.z) || 1;
       const edgePt = key({ x: site.x - ((site.x - ref.x) / l) * site.radius * 0.9, z: site.z - ((site.z - ref.z) / l) * site.radius * 0.9 });
       const shorePt = key(ref);
-      commitFixedLink(connectorWorld, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
-      bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
+      // 批 A：堤道同过统一终筛（deck 段垂直净空判）；提交失败如实进诊断，不再无据登记桥注册表
+      // （曾无条件登记——若 deck 被拒，注册表里的桥没有对应路缘，渲染与规划漂移）。
+      const causeway = commitFixedLink(connectorWorld, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
+      if (causeway.ok) {
+        bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
+      } else {
+        connectionLog.push({ id: `causeway:${site.id ?? site.kind}`, purpose: "site-access", ok: false, reason: parseFailure(causeway.detail), detail: `fixed causeway rejected: ${causeway.detail ?? causeway.reason}` });
+      }
     }
     let nearest: { p: Vec2; d: number; edge: RoadEdge } | null = null;
     for (const edge of edges.values()) {
@@ -794,6 +802,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       for (const span of bridged.ok ? bridged.bridgeSpans : []) {
         bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
       }
+      if (!bridged.ok) connectionLog.push({ id: `gate:${site.id ?? site.kind}`, purpose: "site-access", ok: false, reason: bridged.reason, detail: bridged.detail });
     }
   }
 
@@ -803,7 +812,6 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 设计明令删除的 tolerance=[1,0.7,0] 不校验直连兜底（2026-10-08 实测：150 岛 141 条兜底边里
   // 63 条穿水、16 条不可建、2 条陡坡、9 条穿既有路）：禁止用降低硬约束换连通；失败进诊断
   // （intent 需求体系记 unmet + 本处 connectionLog 记原因），必要时允许局部分量保持隔离。
-  const connectionLog: ConnectionAttempt[] = [];
   {
     const parent = new Map<string, string>();
     const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
