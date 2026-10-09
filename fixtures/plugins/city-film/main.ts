@@ -3,6 +3,7 @@
 import { CityEngine } from "../../../apps/agent-city/ui/src/engine/CityEngine";
 import { buildCityModel } from "../../../apps/agent-city/ui/src/cityModel";
 import { runFilmJob } from "../../../apps/agent-city/ui/src/export/filmJob";
+import type { Scene, Mesh } from "three";
 
 declare global { interface Window {
   runCityFilmTest: () => Promise<Record<string, unknown>>;
@@ -23,6 +24,26 @@ window.runCityFilmTest = async () => {
     totalSessions: 1, truncated: false, generatedAt: start + 3_600_000,
   });
   engine.applyModel(model);
+  let renderErrors = 0;
+  const reported = new Set<string>();
+  (engine as unknown as { scene: Scene }).scene.traverse((object) => {
+    if (!(object as Mesh).isMesh) return;
+    const mesh = object as Mesh;
+    const previous = mesh.onAfterRender;
+    mesh.onAfterRender = function (...args) {
+      previous.apply(this, args);
+      const gl = args[0].getContext();
+      const error = gl.getError();
+      if (error === gl.NO_ERROR) return;
+      renderErrors++;
+      const key = mesh.name || mesh.uuid;
+      if (!reported.has(key)) {
+        reported.add(key);
+        console.error("Film draw error", JSON.stringify({ name: key, error, count: (mesh as Mesh & { count?: number }).count,
+          attributes: Object.fromEntries(Object.entries(mesh.geometry.attributes).map(([name, attr]) => [name, attr.count])) }));
+      }
+    };
+  });
   let uiFrames = 0;
   const button = document.querySelector<HTMLButtonElement>("button")!;
   button.onclick = () => { button.textContent = "UI responsive"; engine.resetView(); engine.setLabelsVisible(false); };
@@ -58,7 +79,7 @@ window.runCityFilmTest = async () => {
         video.src = url; video.load();
       });
       if (!previews || !previewVisible) throw new Error("actual export preview missing or blank");
-      return { frames, previews, previewVisible, pulses, uiFrames, uiResponsive: button.textContent === "UI responsive", signature, bytes: blob.size, type: blob.type,
+      return { frames, previews, previewVisible, pulses, uiFrames, renderErrors, uiResponsive: button.textContent === "UI responsive", signature, bytes: blob.size, type: blob.type,
         width: video.videoWidth, height: video.videoHeight, duration: video.duration };
     } finally { video.removeAttribute("src"); video.load(); URL.revokeObjectURL(url); }
   } finally { window.clearInterval(timer); engine.dispose(); preview.remove(); }

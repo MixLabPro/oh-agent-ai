@@ -493,7 +493,8 @@ export function buildLifeguardTowers(host: SeasideHost): void {
   const glowMaterial = new THREE.MeshBasicMaterial({ color: "#ffca7a", toneMapped: false });
   host.lifeguardGlowMaterial = glowMaterial;
   const box = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
-  const structureMesh = new THREE.InstancedMesh(box, structureMaterial, count * 6);
+  // 每塔 4 根立柱 + 平台/小屋 + 檐顶/通风塔，共 8 个实例。
+  const structureMesh = new THREE.InstancedMesh(box, structureMaterial, count * 8);
   const stripeMesh = new THREE.InstancedMesh(box, stripeMaterial, count * 4);
   stripeMesh.castShadow = true;
   const glowMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.5, 6, 5), glowMaterial, count);

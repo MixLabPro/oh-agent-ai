@@ -218,7 +218,11 @@ try {
   browser = await chromium.launch({ channel: "chromium", headless: true, args: ["--use-angle=metal"] });
   if (process.argv.includes("--film-only")) {
     const filmPage = await browser.newPage();
-    filmPage.on("console", (message) => { if (message.type() === "error" || message.type() === "warning") console.error("Film fixture:", message.text()); });
+    const gpuErrors = [];
+    filmPage.on("console", (message) => {
+      if (/GL_INVALID_OPERATION|Film draw error/.test(message.text())) gpuErrors.push(message.text());
+      if (message.type() === "error" || message.type() === "warning") console.error("Film fixture:", message.text());
+    });
     await filmPage.goto(`${origin}/film-test.html`);
     const result = filmPage.evaluate(() => window.runCityFilmTest()).then((film) => ({ film }), (error) => ({ error }));
     const first = await Promise.race([result, filmPage.waitForFunction(() => window.filmProgress > 0).then(() => null)]);
@@ -228,6 +232,8 @@ try {
     const completed = await result;
     if (completed.error) throw completed.error;
     const film = completed.film;
+    assert.equal(film.renderErrors, 0, "interactive scene must draw without WebGL errors");
+    assert.deepEqual(gpuErrors, [], "foreground and export worker must draw without invalid buffer errors");
     assert.equal(film.signature, "ftyp");
     assert.equal(film.type, "video/mp4");
     assert.ok(film.bytes > 1024 && film.frames > 10 && film.pulses > 10);
