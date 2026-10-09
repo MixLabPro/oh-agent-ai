@@ -90,7 +90,9 @@ export function buildGeography(seed: number, R: number, shape: Shape): Geography
   const height = (x: number, z: number) => {
     const inland = landClearance(x, z);
     if (inland < 0) return -0.65 - Math.min(5, -inland * 0.25);
-    const hills = smoothstep(hillLine - 10, hillLine + reach * 0.3, hillProj(x, z)) * (30 + 65 * fbm(x * 0.012, z * 0.013, seed, 4));
+    const hillWeight = smoothstep(hillLine - 10, hillLine + reach * 0.3, hillProj(x, z));
+    // 平地权重严格为零时，噪声不影响高度；路网验证会反复采样这些点。
+    const hills = hillWeight === 0 ? 0 : hillWeight * (30 + 65 * fbm(x * 0.012, z * 0.013, seed, 4));
     return smoothstep(0, 10, inland) * (1.2 + hills);
   };
   // 离山脚留 12：山体高度从 hillLine−10 开始起坡，地块要落在 1.2 的平地上。
