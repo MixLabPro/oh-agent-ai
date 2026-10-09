@@ -29,6 +29,18 @@ export const UNPARADIGMED: Record<string, string> = {
 };
 
 /**
+ * 物理声明待声明清单（CITY_MODEL_PHYSICAL_INVARIANTS_SPEC §4.6「禁止静默」，批 A 起）：
+ * BUILDING_MODELS 里尚未携带 physical 的模型必须在这里登记一行理由。
+ * verify-city-physical 断言「每个模型要么已声明、要么在这里，不同时」且条数只减不增（批 A = 3）；
+ * 补声明就从这里删掉。批 B 起 station/stadium 模型声明化时同样入册。
+ */
+export const PHYSICAL_PENDING: Record<string, string> = {
+  "tv-tower": "批 A 只选三型（arch/sail-opera/ferris-wheel 覆盖并集空洞/入口/运动包络三类契约），塔型批 B 补",
+  "pagoda": "同上，批 B 补（多檐悬挑的高度段包络是其特有考点）",
+  "lighthouse": "岸型：陆侧基础与水侧防波堤分开声明（spec §3.1 贴岸模型），留批 D",
+};
+
+/**
  * 建筑模型注册表：每个地标造型一个独立文件（models/landmarks/*.ts），这里是 kind → 造型函数 + 中文名的唯一入口。
  * cityParts 只按 kind 查表调用，cityDecor 的名称表也由这里派生——新增地标 = 加一个文件 + 这里一行。
  */

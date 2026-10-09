@@ -5,7 +5,7 @@ export const manifest = JSON.parse(fs.readFileSync(new URL("./verification-manif
 const synthetic = ["verify-city-network-patch", "verify-city-connect", "verify-city-footprint-geoms", "verify-city-loop", "verify-city-landing"];
 const groups = {
   network: [...synthetic, "verify-city-intent", "verify-city-solve", "verify-react-city-layout", "verify-city-cross-engine"],
-  sites: ["verify-city-footprint-geoms", "verify-city-sitespec", "verify-city-models", "verify-react-city-layout", "verify-city-intent"],
+  sites: ["verify-city-footprint-geoms", "verify-city-sitespec", "verify-city-models", "verify-city-physical", "verify-react-city-layout", "verify-city-intent"],
   planning: ["verify-city-planning", "verify-city-constraints", "verify-city-baseline", "verify-city-survey", "verify-city-cross-engine"],
   display: ["verify-city-active", "verify-react-city-layout", "verify-city-culdesac-bulbs", "verify-city-scene-baseline", "verify-react-city-seaside", "seaside-tier10"],
   game: ["verify-city-game-session", "verify-city-game-controller", "verify-city-game-world", "verify-city-game-flight", "verify-city-game-race", "verify-city-game-profile"],
