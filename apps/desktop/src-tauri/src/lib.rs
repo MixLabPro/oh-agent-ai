@@ -2261,13 +2261,18 @@ fn warm_authority_db(app: &AppHandle) {
 /// 打开工作台主窗口：显示 + 聚焦。**不做 toggle**——工作台是常驻主窗口，× 只
 /// 隐藏不销毁（`on_window_event` 拦截 prevent_close + hide），再开保留当前
 /// tab/月/分页状态，不是重建一个空白窗口。
+/// Dock 图标会话级单向开关：首次唤起工作台时出现，此后不再隐藏。
+/// 逆向转换（隐藏图标后再显示）无论走激活策略还是 Process Transform 都有概率
+/// 卡死 AppKit 激活状态机（2026-10-09 两轮实测：关窗后再唤起间歇性失败），
+/// 唯一稳妥形态是单方向的 UIElement→Foreground 一次终身成 + 关窗只藏窗口。
+static DOCK_ICON_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn show_workbench(app: &AppHandle) {
     let Some(w) = app.get_webview_window("workbench") else { return };
-    // 工作台可见期间显示 Dock 图标（用户 2026-10-09）。用 set_dock_visibility
-    // （Process Transform，Electron 同款）而非激活策略往返——Regular↔Accessory 二次
-    // 切换会卡死 AppKit 激活状态机（activateIgnoringOtherApps 失效，2026-10-09 实测
-    // 关窗后无法再唤起）。应用永久保持 Accessory，show+focus 仍走原路径。
-    let _ = app.set_dock_visibility(true);
+    if !DOCK_ICON_SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // 每会话仅此一次 Process Transform（与 Dock 图标点击的 Reopen 路径配套）。
+        let _ = app.set_dock_visibility(true);
+    }
     let _ = w.show();
     let _ = w.set_focus();
 }
@@ -5657,9 +5662,8 @@ pub fn run() {
                 if window.label() == "workbench" {
                     api.prevent_close();
                     let _ = window.hide();
-                    // 窗口隐藏 = 撤掉 Dock 图标（与 show_workbench 的显示成对；
-                    // Process Transform 路径，不动激活策略）。
-                    let _ = window.app_handle().set_dock_visibility(false);
+                    // 关窗只藏窗口；Dock 图标保留（点它走 Reopen 重开）——逆向
+                    // Transform 会间歇性卡死再唤起，见 show_workbench 处注释。
                 }
             }
         })
@@ -5839,9 +5843,8 @@ pub fn run() {
             // setActivationPolicy(Regular) 把 plist 值盖掉（2026-09-14：删掉这行改用
             // plist 后，release 包 open 起来鸟头落进 Dock、状态栏项不出现）。
             // skipTaskbar/visible:false 只藏窗口，藏不住进程的 Dock 图标。
-            // 2026-10-09 起工作台可见期间的 Dock 图标由 show_workbench/CloseRequested
-            // 经 set_dock_visibility 动态开关（Process Transform，不动激活策略——
-            // 策略往返会卡死再唤起）；本行 Accessory 是全程恒定的基线。
+            // 2026-10-09 起：首次唤起工作台时 Dock 图标单向出现（会话内不隐藏，
+            // 点图标走 Reopen 重开）；逆向 Transform 会间歇性卡死再唤起，不做。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),
@@ -5902,8 +5905,19 @@ pub fn run() {
             warm_authority_db(app.handle());
             Ok(())
         })
-        .run(context)
-        .expect("error while running agent-vitals menubar");
+        .build(context)
+        .expect("error while building agent-vitals menubar")
+        .run(|app, event| {
+            // 点 Dock 图标重开工作台（应用常驻 Dock 后，这是与菜单栏入口并列的唤起路径）。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_workbench(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, event);
+            }
+        });
 }
 
 #[cfg(test)]
