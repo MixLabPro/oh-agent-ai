@@ -22,7 +22,7 @@ import type { RoadEdge, Vec2 } from "../cityLayout";
 import { commitNetworkPatch, keyOf, type Network, type NetworkPatch, type PatchResult } from "./network";
 import { crosses } from "./footprint";
 import type { Geography } from "./geography";
-import { corridorFailure, validateCandidate, type CorridorPolicy, type RouteCandidate, type RouteSegment } from "./validation";
+import { corridorFailure, validateCandidate, VALIDATION_CONFIG, type CorridorPolicy, type RouteCandidate, type RouteSegment } from "./validation";
 
 export { corridorFailure, VALIDATION_CONFIG } from "./validation";
 export type { CorridorPolicy, RouteCandidate, RouteSegment, CandidateValidation, CandidateViolation } from "./validation";
@@ -32,7 +32,7 @@ export type RoadClass = "arterial" | "collector" | "local";
 /** 失败原因枚举（设计 §4.3；water-span 含河与海，slope 兼指不可建地形与超限坡度）。 */
 export type ConnectionFailure =
   | "water-span" | "slope" | "site-clearance" | "junction-angle" | "search-budget"
-  | "no-target" | "stale-base" | "projection-loss" | "crossing";
+  | "no-target" | "stale-base" | "projection-loss" | "crossing" | "vertical-clearance-unsupported";
 export type ConnectionStrategy = "direct-projection" | "node-merge" | "detour" | "grid-astar" | "bridge-candidate" | "mini-roundabout";
 // 形态 backlog（2026-10-08 盘点，详见 docs/CITY_PLANNER_V2_FINDINGS §5）：
 //  - "mini-roundabout"（city-roundabout 批次已立项，见下方「策略档」一节）：三岔夹角灰带用小型
@@ -40,7 +40,7 @@ export type ConnectionStrategy = "direct-projection" | "node-merge" | "detour" |
 //    既有路口，不是「从源到目标」的连接搜索；入口在 networkRepairs.resolveAcuteJunctions（删是最后手段）。
 //  - 高架匝道/互通：不在此加档，随 RoadEdge 立体分层批次（设计 §4.2）。
 //  - 尽端回车圈（cul-de-sac bulb）：EndpointRole planned-local 的渲染层装饰，内容打磨批。
-const FAILURES: readonly string[] = ["water-span", "slope", "site-clearance", "junction-angle", "search-budget", "no-target", "stale-base", "projection-loss", "crossing"];
+const FAILURES: readonly string[] = ["water-span", "slope", "site-clearance", "junction-angle", "search-budget", "no-target", "stale-base", "projection-loss", "crossing", "vertical-clearance-unsupported"];
 
 /** 版本化连接器配置（设计 §6.3：参数取值实测后锁入版本化配置，禁散落默认数值）。
  *  v2（city-roundabout 批次）：新增 mini-roundabout 策略档参数，旧键不动。 */
@@ -103,7 +103,7 @@ export type ConnectionProposal = {
   policy: CorridorPolicy;
   /** 发起用途（批 A：门路判定以 purpose 为准——siteGate 旗标在 868 过河档被误标过）。 */
   purpose: ConnectionPurpose;
-  /** 该连接是否检查与既有路交叉（滨海互接的历史档不查——提交期草稿复核沿用同一口径）。 */
+  /** 历史调用标记；false 不再允许绕过候选终筛或提交期交叉检查。 */
   crossings: boolean;
   /** 显式桥段（原始坐标；调用方据此登记桥梁注册表 bridges）。 */
   bridgeSpans: BridgeSpan[];
@@ -133,7 +133,7 @@ export type ConnectorWorld = {
 // ── 共享校验（§5B：连接器与骨架共用 corridor validator，skeleton.ts 出口弦不再当特例）──────────────
 
 /** 请求对应的道路全宽（批 A2 胶囊口径：主干 12 / 次干 8 / 支路 5——与 roundaboutRebuildable 的重建集合同源）。 */
-const roadWidthOf = (request: ConnectionRequest): number => (request.primary ?? false) ? 12 : request.roadClass === "arterial" ? 8 : 5;
+const roadWidthOf = (request: ConnectionRequest): number => (request.primary ?? false) ? 12 : request.roadClass !== "local" ? 8 : 5;
 const directPolicy = (world: ConnectorWorld, request: ConnectionRequest): CorridorPolicy => ({ requireBuildable: true, maxSlope: 0.9, sites: world.reservations(), siteMargin: CONNECTOR_CONFIG.directSiteMargin, roadWidth: roadWidthOf(request) });
 const fallbackPolicy = (world: ConnectorWorld, request?: ConnectionRequest, margin = CONNECTOR_CONFIG.fallbackSiteMargin): CorridorPolicy => ({ requireBuildable: true, maxSlope: 0.9, sites: world.reservations(), siteMargin: margin, roadWidth: request ? roadWidthOf(request) : 0 });
 
@@ -266,7 +266,7 @@ function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, opt
     if (corridor) { note(d, corridor); continue; }
     // 角度从宽档（软成本，设计 §4.1「转弯是软成本」）：只作最后手段，acuteJunctions 度量其质量代价。
     if (!relaxed && (!endpointClear(network, p, request.source) || !endpointClear(network, request.source, p))) { note(d, "junction-angle"); continue; }
-    if (options.crossings !== false && crossAny(network, request.source, p, null)) { note(d, "crossing"); continue; }
+    if (crossAny(network, request.source, p, null)) { note(d, "crossing"); continue; }
     return { ok: true, join: { edge: null, at: p, onEnd: true }, polyline: [request.source, p], cost: d };
   }
   return { ok: false, reason: rejected.nearest?.reason ?? "no-target", detail: `no mergeable node within ${request.maxLength}${rejected.nearest ? ` (nearest rejection ${rejected.nearest.reason})` : ""}` };
@@ -452,8 +452,7 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
 
 export type BridgeSpan = { from: Vec2; to: Vec2 };
 type BridgeOptions = { self?: { x: number; z: number; radius: number }; blockers: Array<{ x: number; z: number; radius: number }>; siteGate?: boolean };
-// 批 A 后本策略对象仅作提案携带的账面值（终筛由 validateCandidate 按段结构另行构造标准）；maxSlope: Infinity 不再有消费路径，留作历史口径对照。
-const bridgePolicy = (bridge: BridgeOptions): CorridorPolicy => ({ requireBuildable: false, maxSlope: Infinity, sites: bridge.blockers, siteMargin: 2, siteGate: bridge.siteGate ?? false });
+const bridgePolicy = (bridge: BridgeOptions, request: ConnectionRequest): CorridorPolicy => ({ requireBuildable: false, maxSlope: VALIDATION_CONFIG.roadApproachMaxSlope, sites: bridge.blockers, siteMargin: 2, roadWidth: roadWidthOf(request), siteGate: bridge.siteGate ?? false });
 
 function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorld, bridge: BridgeOptions, crossings: boolean): (StrategyOutcome & { bridgeSpans: BridgeSpan[] }) | { ok: false; reason: ConnectionFailure; detail: string } {
   const { network } = world;
@@ -477,9 +476,7 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
   for (const candidate of candidates.slice(0, CONNECTOR_CONFIG.bridgeCandidates)) {
     if (candidate.d < CONNECTOR_CONFIG.minLinkDistance) continue; // 源自身悬挂边的投影（d≈0）：连到原地不是连接
     // 连线水段分析：首/末水采样界定连续水段；无水 = 纯地面引道。
-    // 采样口径（批 A 二分实证）：提议期保持历史 6 单位；终筛对 wet/gate 引道同样按 6 重推导
-    // （validation.ts approachWetSampleSpacing）——曾把任一侧改 4，验收集 disconnected 2→8、
-    // bridgehead 5→10（采样抖动拒掉历史接受的候选）；纯陆地引道两侧都是历史 4。
+    // 6 单位采样只用于提出桥跨候选；最终各段按统一路幅终筛，不以历史漏检授予豁免。
     const n = Math.max(4, Math.ceil(Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z) / CONNECTOR_CONFIG.bridgeSampleSpacing));
     const maxWetSamples = CONNECTOR_CONFIG.bridgeMaxSpanSamples;
     const at = (k: number) => ({ x: request.source.x + (candidate.p.x - request.source.x) * (k / n), z: request.source.z + (candidate.p.z - request.source.z) * (k / n) });
@@ -519,15 +516,15 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
     // 段垂直净空判。失败记因续试；候选预算 = bridgeCandidates（40 个投影点）。
     const segments: RouteSegment[] = span
       ? [
-          { a: polyline[0], b: polyline[1], kind: "ground-approach", touchesDeck: true },
-          { a: polyline[1], b: polyline[2], kind: "deck" },
-          { a: polyline[2], b: polyline[3], kind: "ground-approach", touchesDeck: true },
+          { a: polyline[0], b: polyline[1], kind: "ground-approach", width: roadWidthOf(request), touchesDeck: true },
+          { a: polyline[1], b: polyline[2], kind: "deck", width: roadWidthOf(request) },
+          { a: polyline[2], b: polyline[3], kind: "ground-approach", width: roadWidthOf(request), touchesDeck: true },
         ]
-      : [{ a: polyline[0], b: polyline[1], kind: "ground-approach" }];
-    const verdict = validateCandidate(world, world.network, { id: `${request.id}:bridge`, crossings, blockers, gate: request.purpose === "site-access", segments }, { roadPolicy: bridgePolicy(bridge) });
+      : [{ a: polyline[0], b: polyline[1], kind: "ground-approach", width: roadWidthOf(request) }];
+    const verdict = validateCandidate(world, world.network, { id: `${request.id}:bridge`, crossings, blockers, gate: request.purpose === "site-access", segments }, { roadPolicy: bridgePolicy(bridge, request) });
     if (!verdict.ok) {
       const v = verdict.violations[0];
-      nearestReject = v.kind === "water-span" || v.kind === "slope" || v.kind === "site-clearance" || v.kind === "crossing" ? v.kind : "projection-loss"; // vertical-clearance-unsupported 暂并入 projection-loss（detail 保留实因）
+      nearestReject = v.kind;
       continue;
     }
     const onEnd = roadNodeId(join) === candidate.edge.from || roadNodeId(join) === candidate.edge.to;
@@ -704,8 +701,7 @@ export type LadderOptions = {
   strategies?: ConnectionStrategy[];
   /** node-merge 的用地避让加成（滨海互接的历史档传 5 = safeRoadLink 口径）。 */
   siteMargin?: number;
-  /** 是否检查与既有路交叉（滨海互接的历史档不查，传 false）；批 A 起同时驱动 bridge-candidate
-   *  的预筛与 deck 段垂直净空判（crossings=false 时 deck 不查重叠）。 */
+  /** 兼容搜索配置；最终安全检查始终检查交叉，false 不授予豁免。 */
   crossings?: boolean;
   /** node-merge 的端点角度档：strict（缺省，净空角 ≥35°）或 relaxed（最后手段——设计 §4.1 转弯是软成本，
    *  角度从宽只换连通，质量代价由 acuteJunctions 约束度量；走廊/交叉硬检查不放松）。 */
@@ -730,9 +726,9 @@ function buildPatch(world: ConnectorWorld, request: ConnectionRequest, join: Joi
  *  批 A 起按段结构检查，废除策略级整体豁免（siteGate 全免 / 湿桥地面段不复查 / maxSlope=Infinity）：
  *   - 普通阶梯的地面段 = ground-road（proposed.policy 即历史口径，行为逐字不变）；
  *   - bridge-candidate 的地面段（湿桥引道、纯陆地、门路）= ground-approach：不过水（贴 deck 端点
- *     豁免水线）、有限坡度（实测 3.0）、前滩不套 buildable、只避让 blockers——发起用地自身不在
+ *     豁免水线）、有限坡度（历史兼容上限 6.0）、前滩不套 buildable、只避让 blockers——发起用地自身不在
  *     blockers 里，即「入口只豁免自身明确通道，不豁免坡度/其它障碍」；
- *   - 桥面段 = deck：不吃地面判据，但 crossings 开启时与既有边重叠按 vertical-clearance-unsupported
+ *   - 桥面段 = deck：不吃地面判据，但与既有边严格相交按 vertical-clearance-unsupported
  *     拒绝（RoadEdge 无高程模型，信息不足不静默放行）。 */
 export function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal, draft: Network): string | null {
   const approach = proposed.strategy === "bridge-candidate";
@@ -745,6 +741,7 @@ export function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal
     segments: adds.map((e, k) => ({
       a: e.a,
       b: e.b,
+      width: e.primary ? 12 : e.arterial ? 8 : 5,
       kind: e.bridge ? "deck" : approach ? "ground-approach" : "ground-road",
       touchesDeck: approach && !e.bridge && ((k > 0 && adds[k - 1].bridge) || (k < adds.length - 1 && adds[k + 1].bridge)),
     })),
@@ -769,7 +766,7 @@ export function proposeConnection(request: ConnectionRequest, world: ConnectorWo
       : proposeBridgeCandidate(request, world, options.bridge ?? { blockers: world.reservations() }, options.crossings !== false);
     if (outcome.ok) {
       const policy = strategy === "direct-projection" ? directPolicy(world, request)
-        : strategy === "bridge-candidate" ? bridgePolicy(options.bridge ?? { blockers: world.reservations() })
+        : strategy === "bridge-candidate" ? bridgePolicy(options.bridge ?? { blockers: world.reservations() }, request)
         : fallbackPolicy(world, request, strategy === "node-merge" ? options.siteMargin : undefined);
       const bridgeAt = strategy === "bridge-candidate" ? [2] : []; // 三段中的中段是桥（无水时 polyline 只有 2 点，不含索引 2）
       return { ok: true, patch: buildPatch(world, request, outcome.join, outcome.polyline, bridgeAt), cost: outcome.cost, strategy, policy, purpose: request.purpose, crossings: options.crossings !== false, bridgeSpans: outcome.bridgeSpans ?? [] };
@@ -796,7 +793,7 @@ export function commitFixedLink(world: ConnectorWorld, addEdges: NetworkPatch["a
     id: "fixed-link",
     crossings: true,
     blockers: [], // deck 段不查 sites；ground-road 段用 roadPolicy.sites——blockers 无消费方
-    segments: addEdges.map((e) => ({ a: e.a, b: e.b, kind: e.bridge ? "deck" : "ground-road" })),
+    segments: addEdges.map((e) => ({ a: e.a, b: e.b, width: e.primary ? 12 : e.arterial ? 8 : 5, kind: e.bridge ? "deck" : "ground-road" })),
   };
   return commitNetworkPatch(world.network, { baseVersion: world.network.version ?? 0, removeEdgeIds: [], splits: [], addEdges }, (draft) => {
     if (opts.splitInherit) return null;

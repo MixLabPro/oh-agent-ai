@@ -1,5 +1,11 @@
 [
   {
+    "id": "verify-city-road-report",
+    "file": "verify-city-road-report.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-react-city-landmarks",
     "file": "verify-react-city-landmarks.mjs",
     "env": {},

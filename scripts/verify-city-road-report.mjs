@@ -112,6 +112,7 @@ const lines = [];
 for (const { seed, tier } of CASES) {
   const plan = cachedPlan(createCityPlan, seed, tier, MIAMI_COASTAL);
   const report = runCase(`plan ${seed}/t${tier}`, {
+    layer: "plan",
     roadEdges: plan.roadEdges, nodes: plan.roadNodes, blocks: plan.blocks,
     publicSites: plan.publicSites, landmarks: plan.landmarks,
     culDeSacEnds: plan.culDeSacEnds ?? [], seaside: plan.seaside ?? null,
@@ -132,11 +133,17 @@ const displayTier = scaleTierFor(model.buildings.length);
 const layout = layoutCity(model, null, DISPLAY_SEED, MIAMI_COASTAL);
 const reference = cachedPlan(createCityPlan, DISPLAY_SEED, displayTier, MIAMI_COASTAL);
 const displayReport = runCase(`display ${DISPLAY_SEED}/t${displayTier}`, {
+  layer: "display",
   roadEdges: layout.roadEdges, nodes: layout.roadNodes, blocks: layout.blocks,
   publicSites: layout.publicSites, landmarks: layout.landmarks,
   culDeSacEnds: layout.culDeSacEnds ?? [], seaside: layout.seaside ?? null,
   referenceRoadEdges: reference.roadEdges,
 }, { assertZeroCrossings: false });
+for (const blocks of [[], layout.blocks.map((b) => ({ ...b, vacant: false }))]) {
+  const report = roadReport({ layer: "display", roadEdges: layout.roadEdges, blocks, publicSites: layout.publicSites, landmarks: layout.landmarks });
+  assert.equal(report.layer, "display", "empty/fully built display stays a display graph");
+  assert.ok(report.display, "display metrics cannot disappear with vacancy state");
+}
 dump.display = displayReport;
 {
   const g = displayReport.graph;

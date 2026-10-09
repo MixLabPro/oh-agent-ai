@@ -1,10 +1,15 @@
 # City 模型物理声明与场景不变量 SPEC
 
-> 状态：修订设计，批 A 实施中（2026-10-09）。
+> 状态：批 A 三模型声明与编译期守卫已集成；生产关系接线及整体验收未完成（2026-10-09）。
 > 上位文档：`CITY_NETWORK_FIRST_CODE_DESIGN.md`（连接、占地、入口与最终展示图）、
 > `CITY_BUILDING_MODEL_SPEC.md`（模型数据与编译器契约）、`CITY_ARCHITECTURE.md`（L0–L5 分层）。
 > 原调研基线：`99155ff3`；前轮复核 HEAD：`2bec62a9`；本轮复核 HEAD：`b0d75b35`（main）。
 > 2026-10-09 修订：变换唯一实现（§4.5）、与 planner v2 / SceneSpec 的对接（§4.6）、事故→声明追溯表（§9）、批 A 选型按实际模型修正（§6）。
+
+> 2026-10-09 集成：`worktree-city-physical-a @ 56d8f8df` 已合入 `worktree-city-opt`。批 A 的
+> arch/sail-opera/ferris-wheel 声明、编译器唯一变换及守卫已落地；道路终筛尚使用圆预留。
+> 声明入库不等于模型占地/基础/入口关系已接入生产规划，§5/后续批仍须逐项接线和验收。
+> 相关安全修复与当前未完成项见 `CITY_NETWORK_FIRST_OPTIMIZATION_PLAN.md` 接管记录。
 
 ## 1. 目标与边界
 

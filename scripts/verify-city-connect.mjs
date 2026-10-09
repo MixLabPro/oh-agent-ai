@@ -11,9 +11,10 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { runConnection, proposeConnection, commitConnection, commitFixedLink, runMiniRoundabout, corridorFailure, CONNECTOR_CONFIG, VALIDATION_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
+const { runConnection, proposeConnection, commitConnection, commitFixedLink, runMiniRoundabout, corridorFailure, validateCandidate, CONNECTOR_CONFIG, VALIDATION_CONFIG, emptyNetwork, addNetworkEdge, acuteJunctions } = await loadCity({
   "engine/planner/connect.ts": ["runConnection", "proposeConnection", "commitConnection", "commitFixedLink", "runMiniRoundabout", "corridorFailure", "CONNECTOR_CONFIG", "VALIDATION_CONFIG"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
+  "engine/planner/validation.ts": ["validateCandidate"],
   "engine/planner/constraints.ts": ["acuteJunctions"],
 });
 
@@ -260,14 +261,14 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
     assert.equal(corridorFailure(w, a, b, policy(w)), null, `arc chord ${k} must pass the ground corridor`);
   }
   assert.equal(acuteJunctions.measure(view(w)).length, 0, "the ring must clear acuteJunctions across the whole network (guard's own predicate)");
-  // 半径阶梯：以 V 为圆心的陡坡盘（半径 9）挡住 r=10 的弧段（弦心距 <9 采样入盘），r=12 全线过——走廊校验不空转。
+  // 半径阶梯：半径 9 的陡坡盘挡住小环路；全路幅检查要求更大的合法半径。
   const wSlope = makeWorld({ slopeDisc: { x: 0, z: 0, r: 9 } });
   legAt(wSlope, 90, 120, false); legAt(wSlope, 70, 120, false); legAt(wSlope, 220, 120, false);
   const rs = runMiniRoundabout(wSlope, { id: "0:0", x: 0, z: 0 }, [...wSlope.network.edges.values()]);
-  assert.ok(rs.ok && rs.radius === 12, `radius ladder must climb 10 -> 12 around the slope disc: ${JSON.stringify(rs)}`);
+  assert.ok(rs.ok && rs.radius > 10, `radius ladder must avoid the slope disc with the full road width: ${JSON.stringify(rs)}`);
   for (let k = 0; k < rs.ring.length; k += 1) {
     const a = rs.ring[k]; const b = rs.ring[(k + 1) % rs.ring.length];
-    assert.equal(corridorFailure(wSlope, a, b, policy(wSlope)), null, `arc chord ${k} at r=12 must clear the slope disc`);
+    assert.equal(corridorFailure(wSlope, a, b, { ...policy(wSlope), roadWidth: 5 }), null, `arc chord ${k} must clear the slope disc across its width`);
   }
   // 主干三岔口（普查残留的真实形态，如 seed 2004084431：local 78° / trunk 102° / trunk 282°，24.2° 对）：
   // 主干腿进环（环是路口形态不是删路），剩余段保 12 宽，弧段是 local 5 宽的环流。
@@ -364,6 +365,53 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.ok(r.ok && r.strategy === "bridge-candidate", `gentle unbuildable beachfront approach must pass: ${JSON.stringify(r)}`);
   assert.ok(w.network.edges.size > 1, "beachfront gate must commit its edges");
   assert.ok([...w.network.edges.values()].every((e) => !e.bridge), "no deck is needed on dry beachfront");
+}
+
+// 提交期复核：提案之后出现的新障碍不能靠门路用途免查；拒绝时正式图不变。
+{
+  const blockers = [];
+  const w = makeWorld({ sites: blockers });
+  addNetworkEdge(w.network, { x: -40, z: 150 }, { x: 40, z: 150 }, true);
+  const proposed = proposeConnection(request({ purpose: "site-access", allowBridge: true }), w,
+    { strategies: ["bridge-candidate"], bridge: { blockers }, crossings: false });
+  assert.ok(proposed.ok, "gate proposal starts with a clear corridor");
+  blockers.push({ x: 0, z: 75, radius: 10 });
+  const frozen = snap(w.network);
+  const committed = commitConnection(w, proposed);
+  assert.ok(!committed.ok && /site-clearance/.test(committed.detail), "gate revalidates blockers before commit");
+  assert.equal(snap(w.network), frozen);
+}
+
+// 宽度必须跟实际加边一致：collector、桥候选引道、固定主干全部拒绝侧缘压入安全余量。
+for (const mode of ["collector", "bridge", "fixed"]) {
+  const w = makeWorld({ sites: [{ x: 15, z: 75, radius: 10 }] });
+  addNetworkEdge(w.network, { x: 0, z: 150 }, { x: 100, z: 150 }, true);
+  const frozen = snap(w.network);
+  const r = mode === "fixed"
+    ? commitFixedLink(w, [{ a: { x: 0, z: 0 }, b: { x: 0, z: 150 }, arterial: true, primary: true }])
+    : runConnection(request({ roadClass: mode === "collector" ? "collector" : "arterial", target: { kind: "node", id: "0:150" }, allowBridge: mode === "bridge" }), w,
+      mode === "collector" ? { strategies: ["node-merge"], siteMargin: 2 } : { strategies: ["bridge-candidate"], bridge: { blockers: w.reservations() } });
+  assert.ok(!r.ok, `${mode} must reject full-width site overlap`);
+  assert.equal(snap(w.network), frozen);
+}
+
+// 道路侧缘地形、采样间的小预留，以及 crossings:false 均不能绕过终筛。
+{
+  const w = makeWorld();
+  const p = { requireBuildable: false, maxSlope: 0.9, sites: [], siteMargin: 0, roadWidth: 12 };
+  w.geo.height = (x) => Math.abs(x) > 3 ? -1 : 2;
+  assert.equal(corridorFailure(w, { x: 0, z: 0 }, { x: 0, z: 100 }, p), "water-span", "road side in water is rejected");
+  w.geo.height = () => 2;
+  w.geo.terrain.slope = (x) => Math.abs(x) > 3 ? 2 : 0;
+  assert.equal(corridorFailure(w, { x: 0, z: 0 }, { x: 0, z: 100 }, p), "slope", "road side on steep terrain is rejected");
+  w.geo.terrain.slope = () => 0;
+  assert.equal(corridorFailure(w, { x: 0, z: 0 }, { x: 0, z: 4 }, { ...p, roadWidth: 0, sites: [{ x: 0, z: 2, radius: 0.1 }] }), "site-clearance", "exact capsule test sees obstacles between samples");
+  addNetworkEdge(w.network, { x: -100, z: 50 }, { x: 100, z: 50 }, true);
+  for (const kind of ["deck", "ground-approach"]) {
+    const r = validateCandidate(w, w.network, { id: kind, crossings: false, blockers: [], gate: true,
+      segments: [{ a: { x: 0, z: 0 }, b: { x: 0, z: 100 }, kind, width: 5 }] }, { roadPolicy: p });
+    assert.ok(!r.ok && r.violations.some((v) => v.kind === (kind === "deck" ? "vertical-clearance-unsupported" : "crossing")), "crossing switch cannot bypass validation");
+  }
 }
 
 // (i6) 宽道路侧缘压楼（批 A2 胶囊口径）：次干（宽 8）中心线离用地盘 r+3（旧中心线口径的

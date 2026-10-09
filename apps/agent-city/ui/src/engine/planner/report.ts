@@ -33,6 +33,8 @@ import type { Landmark } from "../cityPlan";
 
 /** 跑全部指标所需的最小集合；完整规划图与显示图共用。 */
 export type RoadReportInput = {
+  /** 图层由调用方声明，不能根据空置街区猜测（全建成/空城仍是 display）。 */
+  layer: "plan" | "display";
   roadEdges: RoadEdge[];
   /** 可选；缺省时端点坐标取自各边 points（端点键即 `${x}:${z}`）。 */
   nodes?: RoadNode[];
@@ -458,7 +460,7 @@ export function roadReport(input: RoadReportInput): RoadReport {
   });
 
   // B9 显示层：活动服务率 + 空置区保留窄路的预留/无支撑划分（锚点口径见模块头）。
-  const layer: "plan" | "display" = input.blocks.some((b) => b.vacant === true) ? "display" : "plan";
+  const layer = input.layer;
   let display: RoadReport["display"];
   if (layer === "display") {
     const live = input.blocks.filter((b) => !b.vacant);
