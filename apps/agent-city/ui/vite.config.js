@@ -8,6 +8,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig(({ mode }) => ({
   root: here,
   plugins: [react()],
+  define: { __CITY_GAME_UAT__: JSON.stringify(process.env.AGENT_VITALS_CITY_GAME_UAT === "1") },
   base: "./",
   build: {
     sourcemap: mode === "debug",

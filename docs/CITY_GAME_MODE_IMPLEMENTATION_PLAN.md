@@ -264,6 +264,8 @@ type FlightProfileV1 = {
 
 原生 UAT 走 `.app` bundle，通过 Computer Use 完成练习→挑战→暂停→继续→成功/失败→重试→退出→切 Overview→重启看成绩。记录源码 commit（含未提交差异）、bundle SHA、配置、设备、帧率证据及未覆盖项。现有瞬时闪白为独立已知问题，游戏完成报告不得悄悄标记为已解决。
 
+原生验收包可用 `AGENT_VITALS_CITY_GAME_UAT=1 cargo tauri build --bundles app` 显式开启城市设置中的开发游戏入口（构建环境变量由 City Vite 编译为常量）。普通构建默认为关闭；证据必须注明该构建开关。浏览器的 `?cityGame=1` / `localStorage.cityGameDev=1` 入口继续有效。
+
 ## 13. 第二阶段：配送与成长
 
 首版通过后，基于相同 FlightWorld 增加 `DeliveryMission`：在公共地标领取虚拟包裹，携带飞往另一个公共地标，在交付范围内保持低速一段时间完成。地标不可达时重新生成；不使用真实任务文本生成 NPC 对话。

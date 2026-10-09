@@ -12,6 +12,7 @@ import { replayStartMs } from "./replayRange";
 import { useCityGame } from "./game/useCityGame";
 
 const windowOptions = [7, 30, 90, 366] as const;
+declare const __CITY_GAME_UAT__: boolean;
 type WindowDays = (typeof windowOptions)[number];
 
 function projectionStatusLabel(data: CityProjectionV1): string {
@@ -40,7 +41,7 @@ export function CityApp() {
   const experience = useCityExperience(engineRef, projection);
   // 游戏模式（G1）：开发开关下从城市设置进入；未验收不默认开放（§11 G1 交付）。
   // 必须先于引擎创建 effect 声明——卸载清理时先退出游戏（归还相机）再销毁引擎。
-  const gameDev = new URLSearchParams(location.search).has("cityGame") || (() => { try { return localStorage.getItem("cityGameDev") === "1"; } catch { return false; } })();
+  const gameDev = (typeof __CITY_GAME_UAT__ !== "undefined" && __CITY_GAME_UAT__) || new URLSearchParams(location.search).has("cityGame") || (() => { try { return localStorage.getItem("cityGameDev") === "1"; } catch { return false; } })();
   const labelsRef = useRef(labels);
   labelsRef.current = labels;
   const cinemaRef = useRef(cinema);
