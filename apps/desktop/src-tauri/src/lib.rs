@@ -2263,6 +2263,10 @@ fn warm_authority_db(app: &AppHandle) {
 /// tab/月/分页状态，不是重建一个空白窗口。
 fn show_workbench(app: &AppHandle) {
     let Some(w) = app.get_webview_window("workbench") else { return };
+    // 工作台可见期间切 Regular：程序坞/⌘Tab 出现图标与菜单栏（用户 2026-10-09：
+    // 控制面板出现时希望有 Dock 图标）；窗口隐藏时 CloseRequested 处切回 Accessory。
+    // 启动时的 Accessory 仍由 setup 设置（tao 启动重置 Regular 的兜底不变）。
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     let _ = w.show();
     let _ = w.set_focus();
 }
@@ -5652,6 +5656,9 @@ pub fn run() {
                 if window.label() == "workbench" {
                     api.prevent_close();
                     let _ = window.hide();
+                    // 窗口隐藏 = 回到纯菜单栏形态：撤掉程序坞图标（与 show_workbench
+                    // 的 Regular 切换成对；见 AGENTS.md 启动期 Accessory 纪律）。
+                    let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
                 }
             }
         })
@@ -5826,11 +5833,14 @@ pub fn run() {
             // （并列报价的「默认假设」据此挑套）。
             let _ = agent_vitals_runtime::core::fx_settings::save_locale_hint(&overview::data_home(), &system_locale());
             start_public_pricing_catalog_tick();
-            // 菜单栏工具：必须在代码里显式 `.accessory`，光靠 Info.plist 的 LSUIElement
-            // 不够——tao 的事件循环启动时会显式 setActivationPolicy(Regular) 把 plist
-            // 值盖掉（2026-09-14：删掉这行改用 plist 后，release 包 open 起来鸟头落进
-            // Dock、状态栏项不出现）。skipTaskbar/visible:false 只藏窗口，藏不住进程
-            // 的 Dock 图标。show_workbench 已负责 show+set_focus，accessory 下窗口照常成为 key。
+            // 菜单栏工具：启动必须显式 `.accessory`（基线形态：无 Dock 图标），光靠
+            // Info.plist 的 LSUIElement 不够——tao 的事件循环启动时会显式
+            // setActivationPolicy(Regular) 把 plist 值盖掉（2026-09-14：删掉这行改用
+            // plist 后，release 包 open 起来鸟头落进 Dock、状态栏项不出现）。
+            // skipTaskbar/visible:false 只藏窗口，藏不住进程的 Dock 图标。
+            // 2026-10-09 起策略动态化：show_workbench 切 Regular（工作台可见期间有
+            // Dock 图标/⌘Tab/菜单栏），CloseRequested 隐藏后切回 Accessory——本行只是
+            // 启动基线，运行时切换以那一对函数为准。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),
