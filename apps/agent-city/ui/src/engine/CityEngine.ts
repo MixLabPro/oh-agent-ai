@@ -251,6 +251,9 @@ export class CityEngine {
       this.pointerDown = null;
       this.noteActivity();
       if (!down || down.id !== event.pointerId) return;
+      // 游戏持有相机时画布手势归飞行相机（拖动环绕/双击复位）；短点击若仍当作选楼，
+      // 会 flyTo + 改写 OrbitControls 的距离/平移参数，退出游戏后污染返回视角。
+      if (this.cameraOwner === "game") return;
       const moved = Math.max(down.moved, Math.hypot(event.clientX - down.x, event.clientY - down.y));
       if (event.ctrlKey || event.metaKey || event.shiftKey) return;
       if (!isSelectionGesture(event.button, event.isPrimary, moved, performance.now() - down.at)) return;

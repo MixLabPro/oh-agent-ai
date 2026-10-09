@@ -23,6 +23,8 @@ const ENGLISH: Record<string, string> = {
   "左右转向": "Steer left / right",
   "↑ / ↓": "↑ / ↓",
   "爬升 / 下降": "Climb / descend",
+  "拖动 / 滚轮": "Drag / Wheel",
+  "环绕飞机 / 拉近拉远（双击复位）": "Orbit the plane / zoom (double-click resets)",
   "Esc": "Esc",
   "暂停 / 继续": "Pause / resume",
   "收起": "Hide",

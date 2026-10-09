@@ -9,6 +9,7 @@ import { GameModeController, type GameSnapshot } from "./GameModeController";
 import { FlightWorld } from "./FlightWorld";
 import { FlightInput } from "./FlightInput";
 import { FlightCamera } from "./FlightCamera";
+import { FlightCameraControls } from "./FlightCameraControls";
 import { FlightVisuals } from "./FlightVisuals";
 import { initialSimState, flightParamsFor, stepFlight, lerpSim, PHYSICS_VERSION, type FlightParams, type FlightSimState } from "./FlightSimulation";
 import { sweepFlight } from "./FlightCollision";
@@ -56,6 +57,7 @@ export class GameSession {
   private lastSafe: { x: number; y: number; z: number } | null = null;
   private visuals: FlightVisuals | null = null;
   private camera: FlightCamera | null = null;
+  private cameraControls: FlightCameraControls | null = null;
   private input: FlightInput | null = null;
   private returnCamera: ReturnCameraView | null = null;
   private accumulator = 0;
@@ -146,6 +148,12 @@ export class GameSession {
     if (!this.camera) {
       const reducedMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
       this.camera = new FlightCamera(this.engine.renderCamera, reducedMotion);
+    }
+    // 环绕/缩放输入：只在真实 DOM 画布上挂（Worker/OffscreenCanvas 与测试桩没有指针事件）。
+    const canvas = this.engine.domCanvas;
+    if (!this.cameraControls && typeof HTMLElement !== "undefined" && canvas instanceof HTMLElement) {
+      this.cameraControls = new FlightCameraControls({ canvas, camera: () => this.camera, isActive: () => this.controller.simulating });
+      this.cameraControls.attach();
     }
     if (!this.input) {
       this.input = new FlightInput({
@@ -270,6 +278,8 @@ export class GameSession {
       this.visuals.dispose();
       this.visuals = null;
     }
+    this.cameraControls?.detach();
+    this.cameraControls = null;
     this.camera?.dispose();
     this.camera = null;
     this.engine.setCameraOwner("orbit");
@@ -346,6 +356,8 @@ export class GameSession {
       }
       this.visuals?.update(this.renderSim, 0);
       this.visuals?.updateRings(this.renderSim.simTime, this.mission.snapshot().targetIndex);
+      // 飞机冻结但相机仍要走：倒计时里允许环绕/缩放查看，且相机阻尼继续收敛到目标位。
+      if (this.params && this.world) this.camera?.update(dt, this.renderSim, this.params, this.world);
       this.emit();
       return;
     }

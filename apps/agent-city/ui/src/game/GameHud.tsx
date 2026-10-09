@@ -59,6 +59,7 @@ export function GameHud({ snapshot, actions, locale, persist }: { snapshot: Game
           <dt>{t("W / S")}</dt><dd>{t("按住加速 / 减速；松开回到巡航")}</dd>
           <dt>{t("A / D")}</dt><dd>{t("左右转向")}</dd>
           <dt>{t("↑ / ↓")}</dt><dd>{t("爬升 / 下降")}</dd>
+          <dt>{t("拖动 / 滚轮")}</dt><dd>{t("环绕飞机 / 拉近拉远（双击复位）")}</dd>
           <dt>{t("Esc")}</dt><dd>{t("暂停 / 继续")}</dd>
         </dl>
       </details>}
@@ -79,6 +80,7 @@ export function GameHud({ snapshot, actions, locale, persist }: { snapshot: Game
         <dt>{t("W / S")}</dt><dd>{t("按住加速 / 减速；松开回到巡航")}</dd>
         <dt>{t("A / D")}</dt><dd>{t("左右转向")}</dd>
         <dt>{t("↑ / ↓")}</dt><dd>{t("爬升 / 下降")}</dd>
+        <dt>{t("拖动 / 滚轮")}</dt><dd>{t("环绕飞机 / 拉近拉远（双击复位）")}</dd>
         <dt>{t("Esc")}</dt><dd>{t("暂停 / 继续")}</dd>
       </dl>
       <div className="city-game-actions">

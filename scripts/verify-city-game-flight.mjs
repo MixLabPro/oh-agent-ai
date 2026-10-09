@@ -163,6 +163,140 @@ const flatLayout = {
   assert.equal(sweepFlight(world, { x: 90, y: 45, z: 0 }, { x: 110, y: 45, z: 0 }, 1.5), null, "楼顶上方通过不误报");
 }
 
+// ── 3b) FlightCamera 环绕/缩放（几何）+ FlightCameraControls（输入）──
+// 不操作时必须与旧追尾相机逐点一致——这是「加环绕不改变默认手感」的守卫。
+{
+  const THREE = createRequire(new URL("../apps/agent-city/ui/package.json", import.meta.url))("three");
+  const { FlightCamera, ZOOM_MIN, ZOOM_MAX } = load("game/FlightCamera.ts");
+  const open = { terrainHeight: () => 0, isPointClear: () => true };
+  const rig = () => ({ cam: new THREE.PerspectiveCamera(52, 1.5, 1.5, 8000) });
+  const settle = (c, s, w = open, frames = 400) => { for (let i = 0; i < frames; i += 1) c.update(1 / 60, s, params, w); };
+  const at = (cam, s) => cam.position.clone().sub(new THREE.Vector3(s.x, s.y, s.z));
+  const s0 = sim.initialSimState({ x: 100, y: 80, z: 50, heading: 0.4 }, params);
+
+  // 默认位：机后 back、机上 up（与改造前同一公式的解析值）。
+  {
+    const { cam } = rig(); const c = new FlightCamera(cam, true); c.reset(s0, params); settle(c, s0);
+    const speedRatio = (s0.speed - params.minSpeed) / (params.maxSpeed - params.minSpeed);
+    const back = params.planeRadius * 5.2 * (1 + 0.35 * Math.max(0, Math.min(1, speedRatio)));
+    const rel = at(cam, s0);
+    assert.ok(Math.abs(rel.x + Math.cos(s0.heading) * back) < 1e-3 && Math.abs(rel.z + Math.sin(s0.heading) * back) < 1e-3, "默认机位在机后 back 处");
+    assert.ok(Math.abs(rel.y - params.planeRadius * 2.4) < 1e-3, "默认机位在机上 up 处");
+  }
+  // 环绕：半径守恒；向右拖(+yaw)后相机绕到飞机左侧（航向 0 时 -Z）。
+  {
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    c.reset(s, params); settle(c, s); const r0 = at(cam, s).length();
+    c.orbitBy(Math.PI / 2, 0); settle(c, s);
+    const side = at(cam, s);
+    assert.ok(Math.abs(side.length() - r0) < 1e-3, "环绕半径守恒");
+    assert.ok(Math.abs(side.x) < 1e-3 && side.z < 0, "+yaw：相机在飞机正左侧(-Z)");
+  }
+  // 缩放：与倍率成正比，夹在上下限；非法输入被拒绝；侧面最近时翼尖仍在近裁剪面之外。
+  {
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    c.reset(s, params); settle(c, s); const d = at(cam, s).length();
+    c.zoomBy(0.5); settle(c, s); assert.ok(Math.abs(at(cam, s).length() / d - 0.5) < 1e-3 || Math.abs(at(cam, s).length() / d - ZOOM_MIN) < 1e-3, "zoom 0.5 → 距离减半(或夹到下限)");
+    c.zoomBy(1e-9); settle(c, s); assert.ok(Math.abs(at(cam, s).length() / d - ZOOM_MIN) < 1e-3, "下限夹取");
+    assert.ok(at(cam, s).length() - 2.1 * params.planeRadius > cam.near, "最近机位下翼尖不进近裁剪面");
+    c.zoomBy(1e9); settle(c, s); assert.ok(Math.abs(at(cam, s).length() / d - ZOOM_MAX) < 1e-3, "上限夹取");
+    // orbit.zoom 是缓动后的值，NaN 要等下一帧才传染——所以要跑帧后检查相机位置本身是否仍有限。
+    c.zoomBy(NaN); c.zoomBy(-3); c.zoomBy(0); settle(c, s, open, 10);
+    assert.ok(cam.position.toArray().every(Number.isFinite) && cam.matrixWorld.toArray().every(Number.isFinite), "非法缩放因子(NaN/负/0)不污染相机");
+    const afterBad = c.orbit.zoom; c.zoomBy(Infinity); settle(c, s, open, 10);
+    assert.ok(Number.isFinite(c.orbit.zoom) && c.orbit.zoom >= afterBad - 1e-9, "Infinity 被拒绝而不是当作无限拉远");
+  }
+  // 俯仰不翻转：拖到极限相机不越过正上方/正下方。
+  {
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 200, z: 0, heading: 0 }, params);
+    c.reset(s, params); c.orbitBy(0, 99); settle(c, s);
+    const hi = at(cam, s); const dir = new THREE.Vector3(); cam.getWorldDirection(dir);
+    assert.ok(Math.atan2(hi.y, Math.hypot(hi.x, hi.z)) < Math.PI / 2 - 0.05 && Math.abs(dir.y) < 0.9999, "俯仰上限不到正顶");
+    c.orbitBy(0, -99); settle(c, s);
+    const lo = at(cam, s); const loDeg = Math.atan2(lo.y, Math.hypot(lo.x, lo.z)) * 180 / Math.PI;
+    assert.ok(Math.abs(loDeg - (90 - 1.42 * 180 / Math.PI)) < 0.1, `俯仰下限与引擎 OrbitControls 一致(maxPolarAngle=1.42 → ${loDeg.toFixed(1)}°)`);
+  }
+  // 遮挡收缩在环绕后仍生效（相机侧后方有墙时被拉近，而不是穿墙）。
+  {
+    const wall = { terrainHeight: () => 0, isPointClear: (_x, _y, z) => !(z < -3 * params.planeRadius) };
+    const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    const a = rig().cam, b = rig().cam; const ca = new FlightCamera(a, true), cb = new FlightCamera(b, true);
+    ca.reset(s, params); cb.reset(s, params); ca.orbitBy(Math.PI / 2, 0); cb.orbitBy(Math.PI / 2, 0);
+    settle(ca, s, wall); settle(cb, s, open);
+    assert.ok(Math.abs(a.position.z) < Math.abs(b.position.z) - 1, "环绕到有墙一侧时相机被拉近");
+    // 墙在飞机正后方(-X 轴向)时，相机在默认追尾位被拉近；环绕到飞机前方(远离墙)后不该再被拉近——
+    // 遮挡采样必须沿「当前」相机方向，而不是写死在机后。
+    const behind = { terrainHeight: () => 0, isPointClear: (x) => !(x < -3 * params.planeRadius) };
+    const f1 = rig().cam, f2 = rig().cam; const cf1 = new FlightCamera(f1, true), cf2 = new FlightCamera(f2, true);
+    cf1.reset(s, params); cf2.reset(s, params); cf2.orbitBy(Math.PI, 0);
+    settle(cf1, s, behind); settle(cf2, s, behind);
+    assert.ok(at(f1, s).length() < at(f2, s).length() - 5, "墙在机后：追尾位被拉近，绕到机头前方后不再被拉近");
+  }
+  // yaw 连续绕多圈穿过 ±π 接缝：逐帧位移有界(无瞬移)，松手后 resetOrbit 回到追尾位。
+  {
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    c.reset(s, params); let maxJump = 0; const prev = cam.position.clone();
+    for (let k = 0; k < 16; k += 1) { c.orbitBy(Math.PI / 4, 0); for (let i = 0; i < 40; i += 1) { c.update(1 / 60, s, params, open); maxJump = Math.max(maxJump, cam.position.distanceTo(prev)); prev.copy(cam.position); } }
+    assert.ok(maxJump < params.planeRadius, `绕圈逐帧位移有界(${maxJump.toFixed(2)})`);
+    c.resetOrbit(); settle(c, s); assert.ok(Math.abs(c.orbit.yaw) < 1e-3 && Math.abs(c.orbit.pitch) < 1e-3 && Math.abs(c.orbit.zoom - 1) < 1e-3, "resetOrbit 回到追尾位");
+  }
+
+  // ── FlightCameraControls：指针/滚轮/双击 → FlightCamera（DOM shim）──
+  {
+    const { FlightCameraControls } = load("game/FlightCameraControls.ts");
+    const listeners = new Map(); const captured = new Set();
+    const canvas = { style: { cursor: "", touchAction: "" }, clientHeight: 600,
+      addEventListener: (t, fn) => listeners.set(t, [...(listeners.get(t) ?? []), fn]),
+      removeEventListener: (t, fn) => listeners.set(t, (listeners.get(t) ?? []).filter((f) => f !== fn)),
+      setPointerCapture: (id) => captured.add(id), releasePointerCapture: (id) => captured.delete(id) };
+    const emit = (t, e) => (listeners.get(t) ?? []).forEach((fn) => fn(e));
+    const calls = [];
+    const fake = { orbitBy: (a, b) => calls.push(["orbit", a, b]), zoomBy: (f) => calls.push(["zoom", f]), setDragging: (d) => calls.push(["drag", d]), resetOrbit: () => calls.push(["reset"]) };
+    let active = true;
+    const ctl = new FlightCameraControls({ canvas, camera: () => fake, isActive: () => active });
+    ctl.attach(); ctl.attach(); // 幂等
+    assert.equal(listeners.get("pointerdown").length, 1, "attach 幂等：只注册一份监听");
+    assert.equal(canvas.style.touchAction, "none", "触屏手势不被浏览器滚动抢走");
+    const ptr = (over = {}) => ({ button: 0, isPrimary: true, pointerId: 1, clientX: 100, clientY: 100, ...over });
+    emit("pointerdown", ptr());
+    emit("pointermove", ptr({ clientX: 160, clientY: 130 }));
+    const orbit = calls.find((c) => c[0] === "orbit");
+    const perPx = (2 * Math.PI) / 600;
+    assert.ok(orbit && Math.abs(orbit[1] - 60 * perPx) < 1e-9 && Math.abs(orbit[2] - 30 * perPx) < 1e-9, "整屏高度拖动 = 一圈，dx→yaw、dy→pitch");
+    emit("pointermove", ptr({ pointerId: 2, clientX: 400, clientY: 400 })); // 第二根手指不参与
+    assert.equal(calls.filter((c) => c[0] === "orbit").length, 1, "非拖动指针的移动被忽略");
+    emit("pointerup", ptr());
+    assert.deepEqual(calls.filter((c) => c[0] === "drag").map((c) => c[1]), [true, false], "按下/松开切换 dragging");
+    assert.equal(captured.size, 0, "松手释放指针捕获");
+    // 右键/非主指针不拖动。
+    const n = calls.length; emit("pointerdown", ptr({ button: 2 })); emit("pointerdown", ptr({ isPrimary: false })); assert.equal(calls.length, n, "右键与非主指针不触发拖动");
+    // 滚轮：与引擎 OrbitControls 同一曲线（0.95^(|Δ|/100)；向下滚 = 拉远，向上 = 拉近）。
+    // 期望值直接取 three 的 OrbitControls._getZoomScale 公式，不是从实现里抄来的。
+    const orbitScale = (deltaY, ctrl = false, mode = 0) => { let d = deltaY * (mode === 1 ? 16 : mode === 2 ? 100 : 1); if (ctrl) d *= 10; const k = Math.pow(0.95, Math.abs(d * 0.01)); return d < 0 ? k : d > 0 ? 1 / k : 1; };
+    let prevented = 0; const wheel = (over) => emit("wheel", { deltaY: 100, deltaMode: 0, ctrlKey: false, preventDefault: () => { prevented += 1; }, ...over });
+    const lastZoom = () => calls.filter((c) => c[0] === "zoom").at(-1)[1];
+    for (const [label, over] of [["鼠标一格 +100", { deltaY: 100 }], ["鼠标一格 -100", { deltaY: -100 }], ["触控板小步 +4", { deltaY: 4 }], ["line 模式 3", { deltaY: 3, deltaMode: 1 }], ["page 模式 -1", { deltaY: -1, deltaMode: 2 }], ["捏合 -5", { deltaY: -5, ctrlKey: true }], ["捏合 +30", { deltaY: 30, ctrlKey: true }]]) {
+      wheel(over);
+      assert.ok(Math.abs(lastZoom() - orbitScale(over.deltaY, over.ctrlKey ?? false, over.deltaMode ?? 0)) < 1e-9, `滚轮曲线与 OrbitControls 一致：${label}`);
+    }
+    wheel({ deltaY: 1e9 }); assert.ok(Number.isFinite(lastZoom()), "畸形巨大滚轮值不产生 Infinity");
+    assert.equal(prevented, 8, "激活时滚轮阻止默认滚动");
+    // 双击复位。
+    emit("dblclick", {}); assert.equal(calls.at(-1)[0], "reset", "双击复位");
+    // 暂停/结果面板（isActive=false）期间一切忽略，且不吞滚轮。
+    active = false; const m = calls.length; prevented = 0;
+    emit("pointerdown", ptr()); wheel({}); emit("dblclick", {});
+    assert.equal(calls.length, m, "不活跃时指针/滚轮/双击全部忽略"); assert.equal(prevented, 0, "不活跃时不吞滚轮默认行为");
+    // 拖动中途变为不活跃（按 Esc 暂停）：结束拖动并释放捕获，恢复后不会突然甩镜头。
+    active = true; emit("pointerdown", ptr()); active = false; emit("pointermove", ptr({ clientX: 300 }));
+    assert.equal(captured.size, 0, "拖动中途暂停 → 释放捕获"); assert.equal(calls.at(-1)[0], "drag", "…并结束拖动状态");
+    // detach 成对释放。
+    ctl.detach(); ctl.detach();
+    for (const t of ["pointerdown", "pointermove", "pointerup", "pointercancel", "lostpointercapture", "wheel", "dblclick"]) assert.equal(listeners.get(t)?.length ?? 0, 0, `detach 后 ${t} 监听为空`);
+    assert.equal(canvas.style.touchAction, "", "detach 还原 touch-action");
+  }
+}
+
 // ── 4) FlightInput：映射/焦点门槛/输入框忽略/失焦清空（DOM shim）──
 {
   class HTMLElement {}
