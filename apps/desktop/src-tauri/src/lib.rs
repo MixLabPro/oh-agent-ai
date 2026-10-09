@@ -2261,12 +2261,6 @@ fn warm_authority_db(app: &AppHandle) {
 /// 打开工作台主窗口：显示 + 聚焦。**不做 toggle**——工作台是常驻主窗口，× 只
 /// 隐藏不销毁（`on_window_event` 拦截 prevent_close + hide），再开保留当前
 /// tab/月/分页状态，不是重建一个空白窗口。
-/// Dock 图标会话级单向开关：首次唤起工作台时出现，此后不再隐藏。
-/// 逆向转换（隐藏图标后再显示）无论走激活策略还是 Process Transform 都有概率
-/// 卡死 AppKit 激活状态机（2026-10-09 两轮实测：关窗后再唤起间歇性失败），
-/// 唯一稳妥形态是单方向的 UIElement→Foreground 一次终身成 + 关窗只藏窗口。
-static DOCK_ICON_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// 工作台窗口句柄获取。**不能用 `get_webview_window`**：tauri 的实现要求窗口内
 /// 【所有】webview 与窗口同名（`is_webview_window`），而 plugin_host 的 `add_child`
 /// 会把插件 webview（plugin-city-N）挂进工作台窗口——插件一开，该 API 对
@@ -2283,10 +2277,12 @@ fn show_workbench(app: &AppHandle) {
         agent_vitals_runtime::logging::log_warn("workbench", "show: window lookup FAILED (registry lost)");
         return;
     };
-    if !DOCK_ICON_SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        // 每会话仅此一次 Process Transform（与 Dock 图标点击的 Reopen 路径配套）。
-        let _ = app.set_dock_visibility(true);
-    }
+    // 工作台可见期间显示 Dock 图标（用户理想形态：关窗图标消失、菜单栏唤起）。
+    // 双向 Process Transform 此前被判「间歇性卡死再唤起」而降级为单向——后来
+    // 证实那些失败的真根因是 get_webview_window 多 webview 门槛 + tao show 在
+    // wedge 态静默无效（均已修复），与图标切换无关，故恢复双向。tao 自带 1s
+    // 防抖防快速开关产生幽灵图标。
+    let _ = app.set_dock_visibility(true);
     // 诊断 2026-10-09「开 City 后关窗，二次唤起失败」：窗口在 CGWindowList 里存在
     // 但 onScreen=false——记录 NSApp 层 hidden 与 show/focus 的真实返回值定位卡点。
     #[cfg(target_os = "macos")]
@@ -3331,6 +3327,65 @@ fn fail_pricing_catalog_update(
     );
     write_pricing_catalog_status(data_home, status)?;
     Err(reason)
+}
+
+/// 「测试」板嵌入的 Claude IP 风险自检：webview 受 ATS 限制拿不到 ip-api 的
+/// http 明文接口（免费版才带 proxy/hosting 标记），由本进程代取一次公开 geo
+/// 情报。仅对公共目录发 GET、查询对象就是待检 IP 本身，不携带任何本地数据；
+/// 无缓存、无持久化、失败即向调用方报错（页面自行降级到 HTTPS 数据源）。
+fn ip_check_intel_arg_is_ip(ip: &str) -> bool {
+    let ip = ip.trim();
+    if ip.is_empty() || ip.len() > 45 {
+        return false;
+    }
+    let v4: Vec<&str> = ip.split('.').collect();
+    if v4.len() == 4 {
+        return v4.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 3
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && part.parse::<u8>().is_ok()
+        });
+    }
+    // IPv6：十六进制冒号，允许 IPv4 尾段（ip-api 接受该写法）
+    ip.contains(':') && ip.bytes().all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+}
+
+#[tauri::command]
+async fn ip_check_intel(ip: String) -> Result<Value, String> {
+    if !ip_check_intel_arg_is_ip(&ip) {
+        return Err("invalid ip".into());
+    }
+    let url = format!(
+        "http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,isp,org,as,asname,mobile,proxy,hosting,query"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("agent-vitals-ip-check/1")
+        .build()
+        .map_err(|e| format!("create ip intel client failed: {e}"))?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("ip intel request failed: {e}"))?;
+    let code = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("ip intel decode failed: {e}"))?;
+    if !code.is_success() {
+        return Err(format!("ip intel http {code}"));
+    }
+    if body.get("status").and_then(Value::as_str) != Some("success") {
+        return Err(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("ip intel rejected")
+                .to_string(),
+        );
+    }
+    Ok(body)
 }
 
 #[tauri::command(async)]
@@ -5720,8 +5775,9 @@ pub fn run() {
                     api.prevent_close();
                     agent_vitals_runtime::logging::log_info("workbench", "close-requested -> hide");
                     let _ = window.hide();
-                    // 关窗只藏窗口；Dock 图标保留（点它走 Reopen 重开）——逆向
-                    // Transform 会间歇性卡死再唤起，见 show_workbench 处注释。
+                    // 关窗 = 撤 Dock 图标（用户理想形态：无窗口时回到纯菜单栏，
+                    // 经菜单栏唤起）。真根因（webview 门槛/wedge）已修，双向安全。
+                    let _ = window.app_handle().set_dock_visibility(false);
                 }
             }
         })
@@ -5778,6 +5834,7 @@ pub fn run() {
             restore_authority_backup,
             export_diagnostic_package,
             about_diagnostics,
+            ip_check_intel,
             check_for_updates,
             open_trusted_releases_page,
             budget_config,
