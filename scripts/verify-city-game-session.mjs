@@ -219,4 +219,45 @@ function fakeEngine() {
   session.exit();
 }
 
+// Real input/physics/mission success path; never assign progress or teleport the plane.
+{
+  const engine = fakeEngine();
+  engine.currentLayout = layout; engine.currentModel = model;
+  const records = [];
+  const session = new GameSession(engine, { onState: () => {}, onExited: () => {},
+    onRecord: (...record) => records.push(record) });
+  assert.ok(session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok);
+  documentShim.activeElement = engine.domCanvas;
+  const held = new Set();
+  const setKeys = (next) => {
+    for (const code of held) if (!next.has(code)) { releaseKey(code); held.delete(code); }
+    for (const code of next) if (!held.has(code)) { pressKey(code); held.add(code); }
+  };
+  for (let frame = 0; frame < 18000 && session.controller.snapshot.phase !== "result"; frame += 1) {
+    const keys = new Set();
+    const state = session.sim;
+    const target = session.course.rings[session.mission.snapshot().targetIndex];
+    if (session.controller.snapshot.phase === "racing") {
+      const error = Math.atan2(Math.sin(Math.atan2(target.z - state.z, target.x - state.x) - state.heading),
+        Math.cos(Math.atan2(target.z - state.z, target.x - state.x) - state.heading));
+      const correction = error - state.turnRate * 0.13;
+      if (correction > 0.015) keys.add("KeyA");
+      else if (correction < -0.015) keys.add("KeyD");
+      const heightError = target.y - state.y - state.verticalSpeed * 0.18;
+      if (heightError > 0.15) keys.add("ArrowUp");
+      else if (heightError < -0.15) keys.add("ArrowDown");
+      if (Math.abs(error) > 0.4) keys.add("KeyS");
+    }
+    setKeys(keys);
+    engine.frame(1 / 60);
+  }
+  setKeys(new Set());
+  const result = session.snapshot();
+  assert.equal(result.mission.progress, 12, JSON.stringify(result.mission));
+  assert.equal(result.mission.result?.finished, true, "keyboard/physics flight finishes all rings");
+  assert.equal(records.length, 1, "successful mission emits exactly one persistent record");
+  assert.equal(records[0][0], result.courseId);
+  session.exit();
+}
+
 console.log("verify-city-game-session: ok");
