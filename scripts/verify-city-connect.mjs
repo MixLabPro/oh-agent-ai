@@ -366,4 +366,16 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.ok([...w.network.edges.values()].every((e) => !e.bridge), "no deck is needed on dry beachfront");
 }
 
-console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), fold-back endpoints refused, slope discs detoured, mini-roundabout rings dissolving acute 3-way junctions (radius ladder, corridor-checked arcs, guard-level angles, zero side effects), unified batch-A final screen (steep dry/river-bank approaches refused, gate clipping other sites refused, conflicting fixed decks refused with vertical-clearance cause, gentle unbuildable beachfront passes), deterministic.");
+// (i6) 宽道路侧缘压楼（批 A2 胶囊口径）：次干（宽 8）中心线离用地盘 r+3（旧中心线口径的
+//      fallback margin 恰好放行），但侧缘再进 4 个单位压进盘内——胶囊口径拒 site-clearance，零副作用。
+{
+  const w = makeWorld({ sites: [{ x: 0, z: 100, radius: 20 }] });
+  addNetworkEdge(w.network, { x: 0, z: 0 }, { x: 0, z: -60 }, false);
+  addNetworkEdge(w.network, { x: -100, z: 123 }, { x: 100, z: 123 }, true);
+  const frozen = snap(w.network);
+  const r = runConnection(request({ id: "wide-crush", roadClass: "arterial", maxLength: 300 }), w, { strategies: ["direct-projection"] });
+  assert.ok(!r.ok && r.reason === "site-clearance", `wide arterial edge crushing the site must be refused: ${JSON.stringify(r)}`);
+  assert.equal(snap(w.network), frozen, "refused wide road mutated the network");
+}
+
+console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), fold-back endpoints refused, slope discs detoured, mini-roundabout rings dissolving acute 3-way junctions (radius ladder, corridor-checked arcs, guard-level angles, zero side effects), unified batch-A final screen (steep dry/river-bank approaches refused, gate clipping other sites refused, conflicting fixed decks refused with vertical-clearance cause, gentle unbuildable beachfront passes, wide-road envelope clearance), deterministic.");

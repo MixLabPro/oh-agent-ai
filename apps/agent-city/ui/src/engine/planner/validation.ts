@@ -72,7 +72,7 @@ export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy:
     if (!opts.skipWater && (world.geo.height(p.x, p.z) <= 0.5 || world.inRiver(p.x, p.z))) return "water-span";
     if (policy.requireBuildable && !world.geo.buildable(p.x, p.z)) return "slope";
     if (world.geo.terrain.slope(p.x, p.z) > policy.maxSlope) return "slope";
-    if (policy.sites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + policy.siteMargin)) return "site-clearance";
+    if (policy.sites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + policy.siteMargin + (policy.roadWidth ?? 0) / 2)) return "site-clearance";
   }
   return null;
 }
@@ -82,6 +82,10 @@ export type CorridorPolicy = {
   maxSlope: number;
   sites: Array<{ x: number; z: number; radius: number }>;
   siteMargin: number;
+  /** 道路全宽（批 A2 胶囊口径）：避让判据从中心线点升级为「中心线 ± width/2 侧向展开」——
+   *  宽路的侧缘不得压进用地盘（评审门禁「宽道路侧缘压楼」）。缺省 0 = 历史中心线口径
+   *  （占位调用方）；模型多边形占地（非圆）随批 D SiteSpec 接线。 */
+  roadWidth?: number;
   /** 批 A 起验证不再因该旗标授予任何豁免（保留仅为调用位标注用途）；豁免语义见 RouteCandidate.blockers。 */
   siteGate?: boolean;
 };

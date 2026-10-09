@@ -132,8 +132,10 @@ export type ConnectorWorld = {
 
 // ── 共享校验（§5B：连接器与骨架共用 corridor validator，skeleton.ts 出口弦不再当特例）──────────────
 
-const directPolicy = (world: ConnectorWorld): CorridorPolicy => ({ requireBuildable: true, maxSlope: 0.9, sites: world.reservations(), siteMargin: CONNECTOR_CONFIG.directSiteMargin });
-const fallbackPolicy = (world: ConnectorWorld, margin = CONNECTOR_CONFIG.fallbackSiteMargin): CorridorPolicy => ({ requireBuildable: true, maxSlope: 0.9, sites: world.reservations(), siteMargin: margin });
+/** 请求对应的道路全宽（批 A2 胶囊口径：主干 12 / 次干 8 / 支路 5——与 roundaboutRebuildable 的重建集合同源）。 */
+const roadWidthOf = (request: ConnectionRequest): number => (request.primary ?? false) ? 12 : request.roadClass === "arterial" ? 8 : 5;
+const directPolicy = (world: ConnectorWorld, request: ConnectionRequest): CorridorPolicy => ({ requireBuildable: true, maxSlope: 0.9, sites: world.reservations(), siteMargin: CONNECTOR_CONFIG.directSiteMargin, roadWidth: roadWidthOf(request) });
+const fallbackPolicy = (world: ConnectorWorld, request?: ConnectionRequest, margin = CONNECTOR_CONFIG.fallbackSiteMargin): CorridorPolicy => ({ requireBuildable: true, maxSlope: 0.9, sites: world.reservations(), siteMargin: margin, roadWidth: request ? roadWidthOf(request) : 0 });
 
 /** 骨架内部连线（高架出口接驳弦等）的可走性：逐 4 单位全 buildable（skeleton.ts 批次 5-2 起共用）。 */
 export function walkableCorridor(geo: Geography, a: Vec2, b: Vec2): boolean {
@@ -219,7 +221,7 @@ function targetNodesOf(request: ConnectionRequest, world: ConnectorWorld): Array
 function proposeDirectProjection(request: ConnectionRequest, world: ConnectorWorld): StrategyOutcome {
   const { network } = world;
   const minAngle = ((request.minAngleDeg ?? CONNECTOR_CONFIG.minJunctionAngleDeg) * Math.PI) / 180;
-  const policy = directPolicy(world);
+  const policy = directPolicy(world, request);
   let best: { edge: RoadEdge; p: Vec2; d: number; onEnd: boolean } | null = null;
   const rejected: { nearest: { d: number; reason: ConnectionFailure } | null } = { nearest: null };
   let targets = 0;
@@ -251,7 +253,7 @@ function proposeDirectProjection(request: ConnectionRequest, world: ConnectorWor
 
 function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, options: LadderOptions): StrategyOutcome {
   const { network } = world;
-  const policy = fallbackPolicy(world, options.siteMargin);
+  const policy = fallbackPolicy(world, request, options.siteMargin);
   const relaxed = options.anglePolicy === "relaxed";
   const sourceId = roadNodeId(keyOf(request.source));
   const rejected: { nearest: { d: number; reason: ConnectionFailure } | null } = { nearest: null };
@@ -274,7 +276,7 @@ function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, opt
 
 function proposeDetour(request: ConnectionRequest, world: ConnectorWorld): StrategyOutcome {
   const { network } = world;
-  const policy = fallbackPolicy(world);
+  const policy = fallbackPolicy(world, request);
   const minAngle = ((request.minAngleDeg ?? CONNECTOR_CONFIG.minJunctionAngleDeg) * Math.PI) / 180;
   const joins: Array<{ edge: RoadEdge; p: Vec2; onEnd: boolean; d: number }> = [];
   for (const edge of network.edges.values()) {
@@ -346,7 +348,7 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
   const { network } = world;
   const step = CONNECTOR_CONFIG.gridStep;
   const budget = request.searchBudget ?? CONNECTOR_CONFIG.aStarBudget;
-  const policy = fallbackPolicy(world);
+  const policy = fallbackPolicy(world, request);
   const sourceId = roadNodeId(keyOf(request.source));
   const goals = targetNodesOf(request, world)
     .filter((g) => g.id !== sourceId && !network.edges.has([sourceId, g.id].sort().join("/"))) // 已直连的节点（源悬挂边对端）不是目标
@@ -584,7 +586,8 @@ function proposeMiniRoundabout(
   if (minGap >= (CONNECTOR_CONFIG.roundaboutMaxPairAngleDeg * Math.PI) / 180) {
     return { reason: "junction-angle", detail: `junction min gap ${Math.round((minGap * 180) / Math.PI)}deg outside the roundabout band (<${CONNECTOR_CONFIG.roundaboutMaxPairAngleDeg}deg)` };
   }
-  const policy = fallbackPolicy(world);
+  // 环弧按 local 5 宽的胶囊口径避让（环是慢行环流，等级在进口腿保留）——无 request，显式传宽。
+  const policy = fallbackPolicy(world, { roadClass: "local", primary: false } as Parameters<typeof fallbackPolicy>[1]);
   const legIds = new Set(legs.map((e) => e.id));
   let last: { reason: ConnectionFailure; detail: string } = { reason: "no-target", detail: "no radius candidate" };
   for (const radius of CONNECTOR_CONFIG.roundaboutRadii) {
@@ -765,9 +768,9 @@ export function proposeConnection(request: ConnectionRequest, world: ConnectorWo
       : strategy === "grid-astar" ? proposeGridAStar(request, world)
       : proposeBridgeCandidate(request, world, options.bridge ?? { blockers: world.reservations() }, options.crossings !== false);
     if (outcome.ok) {
-      const policy = strategy === "direct-projection" ? directPolicy(world)
+      const policy = strategy === "direct-projection" ? directPolicy(world, request)
         : strategy === "bridge-candidate" ? bridgePolicy(options.bridge ?? { blockers: world.reservations() })
-        : fallbackPolicy(world, strategy === "node-merge" ? options.siteMargin : undefined);
+        : fallbackPolicy(world, request, strategy === "node-merge" ? options.siteMargin : undefined);
       const bridgeAt = strategy === "bridge-candidate" ? [2] : []; // 三段中的中段是桥（无水时 polyline 只有 2 点，不含索引 2）
       return { ok: true, patch: buildPatch(world, request, outcome.join, outcome.polyline, bridgeAt), cost: outcome.cost, strategy, policy, purpose: request.purpose, crossings: options.crossings !== false, bridgeSpans: outcome.bridgeSpans ?? [] };
     }
