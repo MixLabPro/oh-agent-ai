@@ -2268,13 +2268,31 @@ fn warm_authority_db(app: &AppHandle) {
 static DOCK_ICON_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn show_workbench(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("workbench") else { return };
+    let Some(w) = app.get_webview_window("workbench") else {
+        agent_vitals_runtime::logging::log_warn("workbench", "show: window lookup FAILED (registry lost)");
+        return;
+    };
     if !DOCK_ICON_SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
         // 每会话仅此一次 Process Transform（与 Dock 图标点击的 Reopen 路径配套）。
         let _ = app.set_dock_visibility(true);
     }
-    let _ = w.show();
-    let _ = w.set_focus();
+    // 诊断 2026-10-09「开 City 后关窗，二次唤起失败」：窗口在 CGWindowList 里存在
+    // 但 onScreen=false——记录 NSApp 层 hidden 与 show/focus 的真实返回值定位卡点。
+    #[cfg(target_os = "macos")]
+    {
+        // objc 0.2 的宏内部会生成 cfg(cargo-clippy)（与 plugin_host 的用法一致），
+        // clippy -D warnings 会把它当 unexpected_cfgs——就地豁免。
+        #[allow(unexpected_cfgs, clippy::undocumented_unsafe_blocks)]
+        let app_hidden: bool = unsafe {
+            use objc::{msg_send, sel, sel_impl};
+            let ns_app: *mut objc::runtime::Object = msg_send![objc::class!(NSApplication), sharedApplication];
+            msg_send![ns_app, isHidden]
+        };
+        agent_vitals_runtime::logging::log_info("workbench", &format!("show: nsapp_hidden={app_hidden}"));
+    }
+    let shown = w.show();
+    let focused = w.set_focus();
+    agent_vitals_runtime::logging::log_info("workbench", &format!("show: show={shown:?} focus={focused:?}"));
 }
 
 /// 信息行菜单 id → 工作台 tab 名。纯函数，单测钉住映射——切错 tab 的回归靠它挡。
@@ -5655,12 +5673,16 @@ pub fn run() {
         // Skill 体检 tab 的扫描缓存 + 取消把手（store.rs SkillsScanState 注释）。
         .manage(store::SkillsScanState::new())
         .on_window_event(|window, event| {
+            if let WindowEvent::Destroyed = event {
+                agent_vitals_runtime::logging::log_warn("workbench", &format!("window destroyed: {}", window.label()));
+            }
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
             // 当前 tab/月/分页游标都在，再开就是上次的样子。
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "workbench" {
                     api.prevent_close();
+                    agent_vitals_runtime::logging::log_info("workbench", "close-requested -> hide");
                     let _ = window.hide();
                     // 关窗只藏窗口；Dock 图标保留（点它走 Reopen 重开）——逆向
                     // Transform 会间歇性卡死再唤起，见 show_workbench 处注释。
@@ -5911,6 +5933,7 @@ pub fn run() {
             // 点 Dock 图标重开工作台（应用常驻 Dock 后，这是与菜单栏入口并列的唤起路径）。
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
+                agent_vitals_runtime::logging::log_info("workbench", "dock reopen event");
                 show_workbench(app);
             }
             #[cfg(not(target_os = "macos"))]
