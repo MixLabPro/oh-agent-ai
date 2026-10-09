@@ -332,7 +332,10 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
     }
     if bounds_only { return Err("plugin_instance_unavailable".into()); }
     let old = state.0.lock().unwrap().current.take();
-    if let Some(old) = old { if let Some(view) = app.get_webview(&old.id) { let _ = view.close(); } }
+    if let Some(old) = old { if let Some(view) = app.get_webview(&old.id) {
+        agent_vitals_runtime::logging::log_warn("plugin_host", &format!("view.close() [replace] id={}", old.id));
+        let _ = view.close();
+    } }
     let id = {
         let mut host = state.0.lock().unwrap();
         host.generation += 1;
@@ -444,6 +447,7 @@ pub fn plugin_set_bounds(
 pub async fn plugin_close(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, instance_id: String, suspend: Option<bool>) -> Result<(), String> {
     host_only(&webview)?;
     let _operation = state.1.lock().unwrap();
+    agent_vitals_runtime::logging::log_info("plugin_host", &format!("plugin_close entry id={instance_id} suspend={suspend:?}"));
     if suspend == Some(true) {
         let valid = {
             let mut host = state.0.lock().unwrap();
@@ -463,7 +467,10 @@ pub async fn plugin_close(app: tauri::AppHandle, webview: Webview, state: tauri:
         let mut host = state.0.lock().unwrap();
         if host.current.as_ref().is_some_and(|i| i.id == instance_id) { host.current.take() } else { None }
     };
-    if let Some(old) = old { if let Some(view) = app.get_webview(&old.id) { view.close().map_err(|_| "plugin_close_failed")?; } }
+    if let Some(old) = old { if let Some(view) = app.get_webview(&old.id) {
+        agent_vitals_runtime::logging::log_warn("plugin_host", &format!("view.close() [plugin_close] id={}", old.id));
+        view.close().map_err(|_| "plugin_close_failed")?;
+    } }
     Ok(())
 }
 

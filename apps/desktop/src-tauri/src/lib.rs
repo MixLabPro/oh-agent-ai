@@ -2267,8 +2267,19 @@ fn warm_authority_db(app: &AppHandle) {
 /// 唯一稳妥形态是单方向的 UIElement→Foreground 一次终身成 + 关窗只藏窗口。
 static DOCK_ICON_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 工作台窗口句柄获取。**不能用 `get_webview_window`**：tauri 的实现要求窗口内
+/// 【所有】webview 与窗口同名（`is_webview_window`），而 plugin_host 的 `add_child`
+/// 会把插件 webview（plugin-city-N）挂进工作台窗口——插件一开，该 API 对
+/// "workbench" 恒返回 None（窗口与 webview 实际都在，日志已证），表现为
+/// 「开 City 后关窗，Dock/菜单都唤不回工作台」。窗口优先 + 按名取主 webview。
+fn workbench_parts(app: &AppHandle) -> Option<(tauri::Window, Option<tauri::Webview>)> {
+    let window = app.get_window("workbench")?;
+    let main = window.webviews().into_iter().find(|view| view.label() == "workbench");
+    Some((window, main))
+}
+
 fn show_workbench(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("workbench") else {
+    let Some((window, main)) = workbench_parts(app) else {
         agent_vitals_runtime::logging::log_warn("workbench", "show: window lookup FAILED (registry lost)");
         return;
     };
@@ -2290,9 +2301,11 @@ fn show_workbench(app: &AppHandle) {
         };
         agent_vitals_runtime::logging::log_info("workbench", &format!("show: nsapp_hidden={app_hidden}"));
     }
-    let shown = w.show();
-    let focused = w.set_focus();
-    agent_vitals_runtime::logging::log_info("workbench", &format!("show: show={shown:?} focus={focused:?}"));
+    let shown = window.show();
+    let webview_shown = main.as_ref().map(|view| view.show());
+    let focused = window.set_focus();
+    if let Some(view) = &main { let _ = view.set_focus(); }
+    agent_vitals_runtime::logging::log_info("workbench", &format!("show: show={shown:?} webview={webview_shown:?} focus={focused:?}"));
 }
 
 /// 信息行菜单 id → 工作台 tab 名。纯函数，单测钉住映射——切错 tab 的回归靠它挡。
@@ -5611,8 +5624,7 @@ fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use objc::{msg_send, sel, sel_impl};
-        let window = app
-            .get_webview_window("workbench")
+        let (window, _) = crate::workbench_parts(&app)
             .ok_or_else(|| "工作台窗口未打开".to_string())?;
         let ns_window = window.ns_window().map_err(|e| e.to_string())? as *mut objc::runtime::Object;
         if ns_window.is_null() {
