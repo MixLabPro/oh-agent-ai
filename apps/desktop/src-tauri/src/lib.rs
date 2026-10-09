@@ -2263,10 +2263,11 @@ fn warm_authority_db(app: &AppHandle) {
 /// tab/月/分页状态，不是重建一个空白窗口。
 fn show_workbench(app: &AppHandle) {
     let Some(w) = app.get_webview_window("workbench") else { return };
-    // 工作台可见期间切 Regular：程序坞/⌘Tab 出现图标与菜单栏（用户 2026-10-09：
-    // 控制面板出现时希望有 Dock 图标）；窗口隐藏时 CloseRequested 处切回 Accessory。
-    // 启动时的 Accessory 仍由 setup 设置（tao 启动重置 Regular 的兜底不变）。
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    // 工作台可见期间显示 Dock 图标（用户 2026-10-09）。用 set_dock_visibility
+    // （Process Transform，Electron 同款）而非激活策略往返——Regular↔Accessory 二次
+    // 切换会卡死 AppKit 激活状态机（activateIgnoringOtherApps 失效，2026-10-09 实测
+    // 关窗后无法再唤起）。应用永久保持 Accessory，show+focus 仍走原路径。
+    let _ = app.set_dock_visibility(true);
     let _ = w.show();
     let _ = w.set_focus();
 }
@@ -5656,9 +5657,9 @@ pub fn run() {
                 if window.label() == "workbench" {
                     api.prevent_close();
                     let _ = window.hide();
-                    // 窗口隐藏 = 回到纯菜单栏形态：撤掉程序坞图标（与 show_workbench
-                    // 的 Regular 切换成对；见 AGENTS.md 启动期 Accessory 纪律）。
-                    let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    // 窗口隐藏 = 撤掉 Dock 图标（与 show_workbench 的显示成对；
+                    // Process Transform 路径，不动激活策略）。
+                    let _ = window.app_handle().set_dock_visibility(false);
                 }
             }
         })
@@ -5838,9 +5839,9 @@ pub fn run() {
             // setActivationPolicy(Regular) 把 plist 值盖掉（2026-09-14：删掉这行改用
             // plist 后，release 包 open 起来鸟头落进 Dock、状态栏项不出现）。
             // skipTaskbar/visible:false 只藏窗口，藏不住进程的 Dock 图标。
-            // 2026-10-09 起策略动态化：show_workbench 切 Regular（工作台可见期间有
-            // Dock 图标/⌘Tab/菜单栏），CloseRequested 隐藏后切回 Accessory——本行只是
-            // 启动基线，运行时切换以那一对函数为准。
+            // 2026-10-09 起工作台可见期间的 Dock 图标由 show_workbench/CloseRequested
+            // 经 set_dock_visibility 动态开关（Process Transform，不动激活策略——
+            // 策略往返会卡死再唤起）；本行 Accessory 是全程恒定的基线。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),
