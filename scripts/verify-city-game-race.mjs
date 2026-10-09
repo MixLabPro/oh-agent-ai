@@ -7,24 +7,13 @@
 // 3) 计时：倒计时不偷跑、终态只结算一次、罚时 3s 与 1s 保护窗、
 //    最后一环临界时刻（截止及之前算成功）、超时判定按 耗时+罚时。
 import assert from "node:assert/strict";
-import vm from "node:vm";
-import { createRequire } from "node:module";
-
-const require = createRequire(new URL("../apps/desktop/ui-dev/package.json", import.meta.url));
-const { buildSync } = require("esbuild");
-const load = (file) => {
-  const code = buildSync({ entryPoints: [new URL(`../apps/agent-city/ui/src/${file}`, import.meta.url).pathname],
-    bundle: true, write: false, format: "cjs", platform: "node" }).outputFiles[0].text;
-  const mod = { exports: {} };
-  vm.runInNewContext(code, { module: mod, exports: mod.exports, console, Date, Math, Map, Set, Number, String, Array, Object, JSON });
-  return mod.exports;
-};
-const { buildCityModel } = load("cityModel.ts");
-const { layoutCity } = load("engine/cityLayout.ts");
-const { FlightWorld } = load("game/FlightWorld.ts");
-const { flightParamsFor } = load("game/FlightSimulation.ts");
-const { generateRaceCourse, COURSE_VERSION } = load("game/RaceCourse.ts");
-const { RaceMission, ringCrossing, COUNTDOWN_MS, COLLISION_PENALTY_MS } = load("game/RaceMission.ts");
+import { loadCity } from "./city-kit/index.mjs";
+const { buildCityModel, layoutCity, FlightWorld, flightParamsFor, generateRaceCourse, COURSE_VERSION,
+  RaceMission, ringCrossing, COUNTDOWN_MS, COLLISION_PENALTY_MS } = await loadCity({
+  "cityModel.ts": ["buildCityModel"], "engine/cityLayout.ts": ["layoutCity"], "game/FlightWorld.ts": ["FlightWorld"],
+  "game/FlightSimulation.ts": ["flightParamsFor"], "game/RaceCourse.ts": ["generateRaceCourse", "COURSE_VERSION"],
+  "game/RaceMission.ts": ["RaceMission", "ringCrossing", "COUNTDOWN_MS", "COLLISION_PENALTY_MS"],
+});
 
 const DAY = 86_400_000;
 const now = Date.UTC(2026, 9, 1);

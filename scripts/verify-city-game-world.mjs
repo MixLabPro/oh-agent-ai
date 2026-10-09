@@ -3,21 +3,10 @@
 // 0/1/90/500 会话 × 多种子布局：碰撞盒有限且在地面之上、包络含全部建筑、
 // 出生点对飞机与机后相机锚点均净空、软/硬边界覆盖全城；0 会话的空岛也有安全点。
 import assert from "node:assert/strict";
-import vm from "node:vm";
-import { createRequire } from "node:module";
-
-const require = createRequire(new URL("../apps/desktop/ui-dev/package.json", import.meta.url));
-const { buildSync } = require("esbuild");
-const load = (file) => {
-  const code = buildSync({ entryPoints: [new URL(`../apps/agent-city/ui/src/${file}`, import.meta.url).pathname],
-    bundle: true, write: false, format: "cjs", platform: "node" }).outputFiles[0].text;
-  const mod = { exports: {} };
-  vm.runInNewContext(code, { module: mod, exports: mod.exports, console, Date, Map, Set, Number, String, Array, Object, JSON });
-  return mod.exports;
-};
-const { buildCityModel } = load("cityModel.ts");
-const { layoutCity } = load("engine/cityLayout.ts");
-const { FlightWorld } = load("game/FlightWorld.ts");
+import { loadCity } from "./city-kit/index.mjs";
+const { buildCityModel, layoutCity, FlightWorld } = await loadCity({
+  "cityModel.ts": ["buildCityModel"], "engine/cityLayout.ts": ["layoutCity"], "game/FlightWorld.ts": ["FlightWorld"],
+});
 
 const DAY = 86_400_000;
 const now = Date.UTC(2026, 9, 1);
