@@ -172,7 +172,10 @@ export function CityApp() {
     { id: "photo", commandId: "city.photo", label: experience.photoBusy ? "正在拍照" : "拍照", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy && !experience.film },
     { id: "film", commandId: "city.film", label: experience.film ? `取消导出 · ${Math.round(experience.film.frame / experience.film.total * 100)}%` : "导出视频", kind: "button", enabled: !!experience.film || (sceneReady && !cinema && !game.active && !experience.busy && supportsBackgroundFilm()) },
     { id: "settings", commandId: "city.settings", label: "城市设置", kind: "button", enabled: !cinema && !game.active },
-  ].map((tool) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
+    // 游戏模式（开发开关门控）：平时「驾驶飞机」直接进自由练习（挑战仍在城市设置）；
+    // 游戏中变「退出游戏」——即计划 §3 要求的宿主级通用退出入口。上限 8→9 见 host 校验器。
+    ...(gameDev ? [{ id: "game", commandId: "city.game", label: game.active ? "退出游戏" : "驾驶飞机", kind: "button" as const, enabled: sceneReady && !cinema && !experience.busy && !experience.film }] : []),
+  ].map((tool) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "game" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
   const execute = (commandId: string, value?: string) => {
     const engine = engineRef.current;
     switch (commandId) {
@@ -194,10 +197,14 @@ export function CityApp() {
       case "city.film": void experience.exportFilm(); break;
       case "city.settings": experience.setOptions(!experience.options); break;
       case "city.catalog": experience.setCatalog(!experience.catalog); break;
+      case "city.game":
+        if (game.active) game.exit();
+        else game.enterPractice();
+        break;
       default: throw new Error("command_unavailable");
     }
   };
-  useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, experience.busy, experience.cut, experience.options, experience.catalog, experience.film]);
+  useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, game.active, gameDev, experience.busy, experience.cut, experience.options, experience.catalog, experience.film]);
   // Publishing the first toolbar is the host's ready handshake. An empty scene
   // or loaded DTO alone must not arm the runtime watchdog during shader boot.
   useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, experience.busy, experience.film?.frame, experience.film?.total]);

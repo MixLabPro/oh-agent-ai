@@ -22,7 +22,7 @@
     if (message.type === "toolbar.update") {
       if (!Number.isSafeInteger(message.revision) || message.revision <= current.revision) throw new Error("stale_revision");
       const text = (value, limit, nonempty = false) => typeof value === "string" && value.length <= limit && (!nonempty || value.length > 0);
-      if (!Array.isArray(message.items) || message.items.length > 8 || message.items.some((item) =>
+      if (!Array.isArray(message.items) || message.items.length > 9 || message.items.some((item) =>
         !item || !text(item.id, 64, true) || !text(item.label, 100, true) || typeof item.enabled !== "boolean"
         || !text(item.commandId, 64, true) || !item.commandId.startsWith(`${current.commandNamespace}.`) || !["button", "select"].includes(item.kind)
         || (item.kind === "select" && (!Array.isArray(item.options) || item.options.length < 1 || item.options.length > 8
