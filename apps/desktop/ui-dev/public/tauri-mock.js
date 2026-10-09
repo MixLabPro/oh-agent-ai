@@ -1219,7 +1219,8 @@
   // 复用上面的 citySessions（700 条确定性模拟会话），按真实宿主的 city:v2 形状返回；种子存 localStorage。
   const cityHarnessId = (harness) => (harness === "plugin:zcode" ? "harness:zcode" : harness);
   const cityHarnessNames = { codex: "Codex", "claude-code": "Claude Code", "harness:zcode": "ZCode", dsh: "DeepSeek Harness" };
-  window.__AV_BROWSER_PROVIDERS__ = Object.assign(window.__AV_BROWSER_PROVIDERS__ || {}, {
+  // 显式注入的测试/预览 provider 优先，默认演示数据不能覆盖调用方。
+  window.__AV_BROWSER_PROVIDERS__ = Object.assign({
     city: async (request) => {
       const payload = request.payload || {};
       if (request.method !== "data.read") throw new Error("unsupported_method");
@@ -1254,5 +1255,5 @@
         findings: [{ harness: "codex", severity: "warning", count: 3 }, { harness: "claude-code", severity: "info", count: 2 }],
       };
     },
-  });
+  }, window.__AV_BROWSER_PROVIDERS__ || {});
 })();

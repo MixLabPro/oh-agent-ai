@@ -188,6 +188,7 @@ export async function loadProfilePort(native: NativeStateIo = defaultNativeIo): 
   const local = localRead();
   const parsed = local?.value ? parseProfile(local.value) : null;
   if (parsed) {
+    if (parsed.readOnly) return { tier: "local", profile: parsed.profile, readOnly: true };
     try {
       localWrite(parsed.profile);
       return { tier: "local", profile: parsed.profile, readOnly: parsed.readOnly };
@@ -199,23 +200,26 @@ export async function loadProfilePort(native: NativeStateIo = defaultNativeIo): 
 }
 
 /** 保存档案（设置变更与比赛结算时调用，不逐帧）。失败返回 false（HUD 显示「本次成绩尚未保存」）。 */
-export async function saveProfile(port: ProfilePort, profile: FlightProfileV1): Promise<ProfilePort> {
+export async function saveProfile(port: ProfilePort, profile: FlightProfileV1, native: NativeStateIo = defaultNativeIo): Promise<ProfilePort> {
   if (port.readOnly) return port; // 只读降级不写回（未知版本不覆盖）
   if (port.tier === "native" && "revision" in port) {
     const revision = (port as ProfilePort & { revision: number }).revision;
     try {
-      const next = await nativeWrite(revision, profile);
+      const next = await native.write(revision, profile);
       return { ...port, profile, revision: next } as ProfilePort & { revision: number };
     } catch (error) {
       if (error instanceof Error && error.message === "revision_conflict") {
         // 冲突：重读 → 合并（已知成绩不被旧状态静默覆盖）→ 重写一次。
         try {
-          const read = await nativeRead();
+          const read = await native.read();
           const parsed = read && read.value !== null ? parseProfile(read.value) : null;
+          if (read && read.value !== null && (!parsed || parsed.readOnly)) {
+            return { ...port, profile, readOnly: true };
+          }
           const merged = parsed ? parsed.profile : { ...EMPTY_PROFILE };
           let combined = merged;
           for (const record of profile.records) combined = mergeRecord(combined, record);
-          const next = await nativeWrite(read?.revision ?? 0, combined);
+          const next = await native.write(read?.revision ?? 0, combined);
           return { tier: "native", profile: combined, readOnly: false, revision: next } as ProfilePort & { revision: number };
         } catch {
           return { ...port, profile, readOnly: true };

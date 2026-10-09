@@ -241,7 +241,8 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   const replayButton = useRef<HTMLButtonElement>(null);
   const timelineRef = useRef<HTMLElement>(null);
   const compact = (n: number) => new Intl.NumberFormat(language === "en" ? "en-US" : "zh-CN", { notation: "compact", maximumFractionDigits: 2 }).format(n);
-  const totalTokens = ui.projection?.sessions.reduce((sum, session) => sum + session.tokens.total, 0);
+  const availableProjection = ui.projection?.status === "unavailable" ? null : ui.projection;
+  const totalTokens = availableProjection?.sessions.reduce((sum, session) => sum + session.tokens.total, 0);
   useEffect(() => { if (ui.selected || ui.catalog) setSummaryOpen(false); }, [ui.selected, ui.catalog]);
   useEffect(() => {
     const element = timelineRef.current;
@@ -285,7 +286,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   return cityView(<>
     <div className="city-tooltip" ref={ui.tooltipRef} aria-hidden="true" />
     {!cinema && !gameActive && <button ref={summaryButton} className="city-summary-trigger" aria-label="城市摘要" aria-expanded={summaryOpen} aria-controls="city-summary-panel" onClick={() => { ui.clearSelection(); ui.setCatalog(false); setSummaryOpen(!summaryOpen); }}>
-      <span>{ui.projection ? compact(ui.projection.coverage.returned) : "—"} 会话 · {totalTokens === undefined ? "—" : compact(totalTokens)} tokens</span>
+      <span>{availableProjection ? compact(availableProjection.coverage.returned) : "—"} 会话 · {totalTokens === undefined ? "—" : compact(totalTokens)} tokens</span>
       {ui.projection?.coverage.truncated && <span className="city-coverage-badge">已截断</span>}
       {ui.projection?.source === "fixture" && <span className="city-coverage-badge">演示</span>}
       <span aria-hidden="true">{summaryOpen ? "−" : "›"}</span>

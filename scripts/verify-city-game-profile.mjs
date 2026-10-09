@@ -7,11 +7,11 @@ import { createRequire } from "node:module";
 
 const require = createRequire(new URL("../apps/desktop/ui-dev/package.json", import.meta.url));
 const { buildSync } = require("esbuild");
-const load = (windowStub) => {
+const load = (windowStub, localStorage) => {
   const code = buildSync({ entryPoints: [new URL("../apps/agent-city/ui/src/data/profile.ts", import.meta.url).pathname],
     bundle: true, write: false, format: "cjs", platform: "node" }).outputFiles[0].text;
   const mod = { exports: {} };
-  vm.runInNewContext(code, { module: mod, exports: mod.exports, console, JSON, Number, Error, URL, location: { href: "http://localhost/" }, window: windowStub });
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, console, JSON, Number, Error, URL, localStorage, location: { href: "http://localhost/" }, window: windowStub });
   return mod.exports;
 };
 const standalone = {}; standalone.parent = standalone; // host.ts 顶层探测：parent === window → 非嵌入
@@ -130,6 +130,46 @@ const { parseProfile, mergeRecord, EMPTY_PROFILE } = load(standalone);
   const afterSave = await embedded.saveProfile(structPort, { ...embedded.EMPTY_PROFILE, records: [{ courseId: "x", bestTimeMs: 1, collisions: 0 }] });
   assert.equal(structWrites.length, 0, "只读端口不得发起写回（原件完整保留在原生存储）");
   assert.ok(afterSave.readOnly, "保存后仍只读");
+}
+
+// 冲突重读同样遵循只读保护：损坏内容/未来版本不得被旧客户端覆盖。
+for (const value of [{ broken: true }, { schemaVersion: 2, futureData: "retain" }]) {
+  const writes = [];
+  const io = {
+    read: async () => ({ value, revision: 9 }),
+    write: async (revision, profile) => { writes.push({ revision, profile }); throw new Error("revision_conflict"); },
+  };
+  const mod = load(standalone);
+  const result = await mod.saveProfile({ tier: "native", profile: mod.EMPTY_PROFILE, readOnly: false, revision: 8 },
+    { ...mod.EMPTY_PROFILE, records: [{ courseId: "new", bestTimeMs: 100, collisions: 0 }] }, io);
+  assert.equal(writes.length, 1, "冲突重读不合法/只读档案后不得重试写回");
+  assert.equal(result.readOnly, true);
+  assert.equal(result.profile.records[0].courseId, "new", "本次成绩保留在内存");
+}
+
+{
+  const writes = [];
+  const mod = load(standalone, {
+    getItem: () => JSON.stringify({ schemaVersion: 2, futureData: "retain" }),
+    setItem: (...args) => writes.push(args),
+  });
+  const port = await mod.loadProfilePort();
+  assert.equal(port.tier, "local");
+  assert.equal(port.readOnly, true);
+  assert.equal(writes.length, 0, "浏览器未来版本档案在读取时也不得被覆盖");
+}
+{
+  const writes = [];
+  const mod = load(standalone);
+  const result = await mod.saveProfile({ tier: "native", profile: mod.EMPTY_PROFILE, readOnly: false, revision: 3 },
+    { ...mod.EMPTY_PROFILE, records: [{ courseId: "new", bestTimeMs: 100, collisions: 0 }] }, {
+      read: async () => ({ value: { ...mod.EMPTY_PROFILE, records: [{ courseId: "existing", bestTimeMs: 90, collisions: 0 }] }, revision: 4 }),
+      write: async (revision, profile) => { writes.push({ revision, profile }); if (writes.length === 1) throw new Error("revision_conflict"); return 5; },
+    });
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].revision, 4);
+  assert.deepEqual(Array.from(result.profile.records, (record) => record.courseId), ["existing", "new"]);
+  assert.equal(result.readOnly, false);
 }
 
 console.log("verify-city-game-profile: ok");
