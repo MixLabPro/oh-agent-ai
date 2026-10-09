@@ -241,8 +241,8 @@ function fakeEngine() {
       const error = Math.atan2(Math.sin(Math.atan2(target.z - state.z, target.x - state.x) - state.heading),
         Math.cos(Math.atan2(target.z - state.z, target.x - state.x) - state.heading));
       const correction = error - state.turnRate * 0.13;
-      if (correction > 0.015) keys.add("KeyA");
-      else if (correction < -0.015) keys.add("KeyD");
+      if (correction > 0.015) keys.add("KeyD"); // 与 uatPilot.ts 同向：航向增大 = 屏幕右 = D
+      else if (correction < -0.015) keys.add("KeyA");
       const heightError = target.y - state.y - state.verticalSpeed * 0.18;
       if (heightError > 0.15) keys.add("ArrowUp");
       else if (heightError < -0.15) keys.add("ArrowDown");

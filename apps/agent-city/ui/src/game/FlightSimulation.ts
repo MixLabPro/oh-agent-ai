@@ -86,7 +86,9 @@ export function stepFlight(state: FlightSimState, input: FlightInputState, dt: n
   const speed = approach(state.speed, targetSpeed, rate, dt);
 
   // 转向：A 左 / D 右，指数平滑；机翼倾斜随当前转向比例（纯视觉）。
-  const turnInput = (input.turnLeft ? 1 : 0) - (input.turnRight ? 1 : 0);
+  // 符号：前向 = (cos h, 0, sin h)，追尾相机看向 +X 时屏幕右 = +Z，所以 heading 增大 = 向右转。
+  // 曾写成 left - right，A 键反而把飞机带向屏幕右侧（试飞时才发现，数值回放只断言 |turnRate| 抓不到）。
+  const turnInput = (input.turnRight ? 1 : 0) - (input.turnLeft ? 1 : 0);
   const turnTarget = turnInput * params.turnRate;
   const turnRate = smooth(state.turnRate, turnTarget, params.turnSmoothing, dt);
   const heading = state.heading + turnRate * dt;

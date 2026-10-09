@@ -30,8 +30,9 @@ export function startUatPilot(session: GameSession, engine: CityEngine): () => v
     const errorAngle = Math.atan2(Math.sin(angle), Math.cos(angle));
     const correction = errorAngle - state.turnRate * 0.13;
     const next = new Set<string>();
-    if (correction > 0.015) next.add("KeyA");
-    else if (correction < -0.015) next.add("KeyD");
+    // correction > 0 = 目标在航向增大一侧 = 屏幕右侧 → D。
+    if (correction > 0.015) next.add("KeyD");
+    else if (correction < -0.015) next.add("KeyA");
     const heightError = target.y - state.y - state.verticalSpeed * 0.18;
     if (heightError > 0.15) next.add("ArrowUp");
     else if (heightError < -0.15) next.add("ArrowDown");

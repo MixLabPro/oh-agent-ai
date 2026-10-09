@@ -79,6 +79,16 @@ function replay(name, inputOf, seconds) {
   assert.ok(state.speed >= params.minSpeed - 1e-9 && state.speed <= params.maxSpeed + 1e-9, `${name}: 速度边界`);
   return { name, curve, end: state };
 }
+// 转向符号（回归）：前向 = (cos h, 0, sin h)，追尾相机看向 +X 时屏幕右 = +Z。
+// 曾经 A 键把飞机带向屏幕右侧，而上面所有场景只断言 |turnRate|，对符号不敏感。
+{
+  const D = { ...EMPTY, turnRight: true };
+  const fly = (input) => { let s = sim.initialSimState({ x: 0, y: 400, z: 0, heading: 0 }, params); for (let i = 0; i < 60; i += 1) s = sim.stepFlight(s, input, FIXED, params); return s; };
+  const left = fly(A), right = fly(D);
+  assert.ok(left.z < 0 && left.heading < 0, "A 左转：飞机偏向 -Z（屏幕左），heading 减小");
+  assert.ok(right.z > 0 && right.heading > 0, "D 右转：飞机偏向 +Z（屏幕右），heading 增大");
+  assert.ok(left.bank < 0 && right.bank > 0, "bank 与转向同号（FlightVisuals 依赖：bank>0 = 右翼下沉 = 向右转的内侧）");
+}
 // 场景 1：稳定巡航 + 满舵 3 秒（R1 转弯减速候选的主对照；当前物理速度应保持巡航）。
 const fullRudder = replay("cruise-full-rudder-3s", () => A, 3.0);
 assert.ok(Math.abs(fullRudder.end.speed - params.cruiseSpeed) < 0.01, "场景1 基线：现物理转向不损失速度（候选档位将改变此断言）");
