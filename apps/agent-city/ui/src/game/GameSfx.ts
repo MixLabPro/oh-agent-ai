@@ -61,26 +61,29 @@ export class GameSfx {
     return this.soundMuted;
   }
 
-  /** 当前主增益目标：静音为 0，否则基准 × 主音量。 */
+  /** 当前主增益目标：挂起/静音为 0，否则基准 × 主音量。 */
   private gainTarget(): number {
-    return this.soundMuted ? 0 : MASTER_GAIN * this.vol;
+    return this.suspended || this.soundMuted ? 0 : MASTER_GAIN * this.vol;
+  }
+
+  private applyMasterGain(tau: number): void {
+    if (this.ctx && this.nodes) {
+      this.nodes.master.gain.setTargetAtTime(this.gainTarget(), this.ctx.currentTime, tau);
+    }
   }
 
   setMuted(value: boolean): void {
     this.soundMuted = value;
-    if (this.ctx && this.nodes) {
-      this.nodes.master.gain.setTargetAtTime(this.gainTarget(), this.ctx.currentTime, 0.02);
-    }
+    this.applyMasterGain(0.02);
   }
 
   setVolume(volume: number): void {
     this.vol = clamp01(volume);
-    if (this.ctx && this.nodes) {
-      this.nodes.master.gain.setTargetAtTime(this.gainTarget(), this.ctx.currentTime, 0.02);
-    }
+    this.applyMasterGain(0.02);
   }
 
-  /** 开始/继续（幂等）：run 挂载与重开路径共用。 */
+  /** 开始/继续（幂等）：run 挂载与重开路径共用。挂起期间主增益已淡到 0，
+   *  这里负责恢复上下文并把增益淡回目标。 */
   start(): void {
     this.suspended = false;
     if (typeof AudioContext === "undefined") return;
@@ -90,19 +93,32 @@ export class GameSfx {
     }
     if (!this.ctx) return;
     if (!this.nodes) this.nodes = this.build(this.ctx);
-    if (this.ctx.state === "suspended") void this.ctx.resume().catch(() => undefined);
+    const fade = () => this.applyMasterGain(0.05);
+    if (this.ctx.state === "suspended") void this.ctx.resume().then(fade).catch(() => undefined);
+    else fade();
   }
 
-  /** 挂起（暂停/焦点丢失/宿主隐藏/结算画面）：时钟冻结，循环静止。 */
+  /** 挂起（暂停/焦点丢失/宿主隐藏/结算画面）。先短淡出再挂起：噪声/锯齿声部
+   *  在非零振幅被瞬间冻结会在输出端产生阶跃——扬声器上就是那声「啪」。 */
   suspend(): void {
+    if (this.suspended) return;
     this.suspended = true;
-    if (this.ctx && this.ctx.state === "running") void this.ctx.suspend().catch(() => undefined);
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    this.applyMasterGain(0.015);  // ~40ms 内收敛到 0
+    setTimeout(() => {
+      if (this.suspended && ctx.state === "running") void ctx.suspend().catch(() => undefined);
+    }, 60);
   }
 
   resume(): void {
     if (!this.suspended) return;
     this.suspended = false;
-    if (this.ctx && this.ctx.state === "suspended") void this.ctx.resume().catch(() => undefined);
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const fade = () => this.applyMasterGain(0.05);
+    if (ctx.state === "suspended") void ctx.resume().then(fade).catch(() => undefined);
+    else fade();
   }
 
   /** 停止（退出游戏）：挂起即可（循环参数在下次 start 前由 update 重设）。 */
