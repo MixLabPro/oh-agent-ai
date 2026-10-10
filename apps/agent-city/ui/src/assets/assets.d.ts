@@ -8,3 +8,8 @@ declare module "*.glb?url" {
   const url: string;
   export default url;
 }
+// 游戏背景音乐 .m4a 走 ?url 导入（本地资产随应用离线分发，运行时不联网）。
+declare module "*.m4a?url" {
+  const url: string;
+  export default url;
+}

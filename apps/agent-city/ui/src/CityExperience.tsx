@@ -451,7 +451,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     </section>}
     {ui.error && !ui.options && <div className="city-feature-error" role="alert">{ui.error}<button aria-label="关闭提示" onClick={() => ui.setError(null)}>×</button></div>}
     {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} persist={{ tier: game.persistTier, saveFailed: game.saveFailed }} actions={{
-      onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse,
+      onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse, onSoundVolume: game.setSoundVolume, onToggleSfx: game.toggleSfx, onToggleMusic: game.toggleMusic,
     }} />}
     {debug && ui.stats && <p className="city-perf">{ui.stats.fps} FPS · {ui.stats.drawCalls} draw calls · {ui.stats.buildings} buildings · geo {ui.stats.geometries} · tex {ui.stats.textures} · quality {ui.stats.quality}</p>}
   </>, language);

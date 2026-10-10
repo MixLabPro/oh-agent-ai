@@ -15,6 +15,9 @@ import { initialSimState, flightParamsFor, stepFlight, lerpSim, PHYSICS_VERSION,
 import { sweepFlight } from "./FlightCollision";
 import { generateRaceCourse, COURSE_VERSION, type RaceCourse } from "./RaceCourse";
 import { RaceMission, type RaceMissionSnapshot, type RaceResult } from "./RaceMission";
+import { GameAudio } from "./GameAudio";
+import { GameSfx, type SfxTelemetry } from "./GameSfx";
+import { weatherAt } from "../engine/cityWeather";
 import type { EnterHostState, GamePauseReason, GameSelection, ReturnCameraView } from "./types";
 
 const FIXED_DT = 1 / 60;
@@ -45,6 +48,10 @@ export type GameSessionSnapshot = {
   courseId: string | null;
   /** 当前路线变体（测试与调试用）。 */
   variant: number;
+  /** 声音面板状态（HUD 三控件）。 */
+  soundVolume: number;
+  sfxEnabled: boolean;
+  musicEnabled: boolean;
 };
 
 export class GameSession {
@@ -74,6 +81,19 @@ export class GameSession {
   private bestByCourse = new Map<string, RaceResult>();
   /** 路线工厂（测试注入点：真实布局几乎不会生成失败，无法覆盖 no-course 分支）。 */
   private readonly courseFactory: typeof generateRaceCourse;
+  /** 背景音乐（乐谱驱动合成，懒拉起；不可用时静默无音乐）。 */
+  private audio = new GameAudio();
+  /** 飞行音效（Web Audio 程序化合成：螺旋桨/风/雨 + 一次性事件音）。 */
+  private sfx = new GameSfx();
+  /** 声音面板状态：主音量 + 音效/BGM 独立开关（HUD 三控件的数据源）。 */
+  private soundVolume = 1;
+  private sfxEnabled = true;
+  private musicEnabled = true;
+  /** 天气雨强缓存（500ms 取一次 weatherAt，避免每帧哈希）。 */
+  private rainIntensity = 0;
+  private rainCheckedAt = 0;
+  /** 倒计时秒数追踪（整数秒变化时发蜂鸣）。 */
+  private lastCountdownSec: number | null = null;
 
   constructor(
     private readonly engine: CityEngine,
@@ -164,6 +184,10 @@ export class GameSession {
       this.input.attach();
     }
     this.engine.setGameFrameHook(this.frame);
+    this.applySoundSettings();
+    this.audio.start();
+    this.sfx.start();
+    this.lastCountdownSec = null;
     this.resetToSpawn();
     this.controller.prepareDone();
     this.emit(true);
@@ -186,6 +210,8 @@ export class GameSession {
 
   pause(reason: GamePauseReason): void {
     this.input?.clear();
+    this.audio.suspend();
+    this.sfx.suspend();
     this.controller.pause(reason);
     this.emit(true);
   }
@@ -195,6 +221,8 @@ export class GameSession {
     // §5：恢复需重新确认焦点 + 清空旧键值——把焦点还给画布（点击「继续」时焦点在按钮上），
     // 之后飞行输入立即生效；焦点获取失败则等待用户点击画布。
     this.input?.clear();
+    this.audio.resume();
+    this.sfx.resume();
     const canvas = this.engine.domCanvas;
     if (canvas instanceof HTMLElement) canvas.focus({ preventScroll: true });
     this.controller.resume();
@@ -272,6 +300,8 @@ export class GameSession {
     this.controller.exit();
     this.input?.detach();
     this.input = null;
+    this.audio.stop();
+    this.sfx.stop();
     this.engine.setGameFrameHook(null);
     if (this.visuals) {
       this.engine.detachGameObjects(this.visuals.group);
@@ -297,6 +327,8 @@ export class GameSession {
     if (this.disposed) return;
     this.disposed = true;
     this.exit();
+    this.audio.dispose();
+    this.sfx.dispose();
   }
 
   snapshot(): GameSessionSnapshot {
@@ -309,7 +341,39 @@ export class GameSession {
       best: this.course ? this.bestByCourse.get(this.course.courseId) ?? null : null,
       courseId: this.course?.courseId ?? null,
       variant: this.variant,
+      soundVolume: this.soundVolume,
+      sfxEnabled: this.sfxEnabled,
+      musicEnabled: this.musicEnabled,
     };
+  }
+
+  /** 把面板设置下发到两个引擎（进入 run 与每次面板操作时调用，幂等）。 */
+  private applySoundSettings(): void {
+    this.audio.setMuted(!this.musicEnabled);
+    this.audio.setVolume(this.soundVolume);
+    this.sfx.setMuted(!this.sfxEnabled);
+    this.sfx.setVolume(this.soundVolume);
+  }
+
+  /** 声音面板：主音量（0-1，音乐与音效共用）。 */
+  setSoundVolume(volume: number): void {
+    this.soundVolume = Math.max(0, Math.min(1, volume));
+    this.applySoundSettings();
+    this.emit(true);
+  }
+
+  /** 声音面板：音效开关。 */
+  toggleSfx(): void {
+    this.sfxEnabled = !this.sfxEnabled;
+    this.applySoundSettings();
+    this.emit(true);
+  }
+
+  /** 声音面板：BGM 开关。 */
+  toggleMusic(): void {
+    this.musicEnabled = !this.musicEnabled;
+    this.applySoundSettings();
+    this.emit(true);
   }
 
   get physicsVersion(): number {
@@ -344,10 +408,17 @@ export class GameSession {
         steps += 1;
         if (events.some((event) => event.type === "countdown-done")) {
           this.controller.countdownDone();
+          this.sfx.countdownBeep(true);
           this.accumulator = 0;
           this.emit(true);
           return;
         }
+      }
+      // 整数秒变化时蜂鸣（3-2-1）；飞机冻结但发动机怠速嗡鸣。
+      const sec = Math.ceil(this.mission.snapshot().countdownRemainingMs / 1000);
+      if (sec !== this.lastCountdownSec) {
+        this.lastCountdownSec = sec;
+        if (sec > 0) this.sfx.countdownBeep(false);
       }
       if (this.accumulator > LAG_PAUSE_SECONDS) {
         this.accumulator = 0;
@@ -358,6 +429,7 @@ export class GameSession {
       this.visuals?.updateRings(this.renderSim.simTime, this.mission.snapshot().targetIndex);
       // 飞机冻结但相机仍要走：倒计时里允许环绕/缩放查看，且相机阻尼继续收敛到目标位。
       if (this.params && this.world) this.camera?.update(dt, this.renderSim, this.params, this.world);
+      this.updateSfx(false, false);
       this.emit();
       return;
     }
@@ -387,9 +459,29 @@ export class GameSession {
       this.visuals?.update(this.renderSim, dt);
       if (this.mission) this.visuals?.updateRings(this.renderSim.simTime, this.mission.snapshot().targetIndex);
       this.camera?.update(dt, this.renderSim, this.params, this.world);
+      const inputState = this.input?.snapshot();
+      this.updateSfx(!!inputState?.throttleUp, !!inputState?.throttleDown);
       this.emit();
     }
   };
+
+  /** 喂音效：每帧遥测 + 500ms 一次的天气雨强（跟随回放时钟，clear 恒 0）。 */
+  private updateSfx(throttleUp: boolean, throttleDown: boolean): void {
+    if (!this.renderSim || !this.params) return;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (now - this.rainCheckedAt > 500) {
+      this.rainCheckedAt = now;
+      this.rainIntensity = weatherAt(this.engine.replayCursor ?? Date.now()).intensity;
+    }
+    this.sfx.update({
+      speed: this.renderSim.speed,
+      minSpeed: this.params.minSpeed,
+      maxSpeed: this.params.maxSpeed,
+      throttleUp,
+      throttleDown,
+      rainIntensity: this.rainIntensity,
+    });
+  }
 
   private stepPhysics(): void {
     const sim = this.sim;
@@ -406,6 +498,7 @@ export class GameSession {
       // 温和重置（§6.3）：回到最近安全点、减速、短反馈；任务侧记罚时。
       this.collisions += 1;
       this.visuals?.pulseFeedback();
+      this.sfx.collision();
       for (const event of this.mission?.onCollision() ?? []) {
         if (event.type === "failed") this.finishRace(event.result);
       }
@@ -428,7 +521,10 @@ export class GameSession {
       for (const event of this.mission.step(sim, this.sim, FIXED_DT * 1000, teleported)) {
         if (event.type === "finished") this.finishRace(event.result);
         else if (event.type === "failed") this.finishRace(event.result);
-        else this.emit(true);
+        else {
+          if (event.type === "ring-passed") this.sfx.ringPass();
+          this.emit(true);
+        }
       }
     }
   }
@@ -436,6 +532,7 @@ export class GameSession {
   private finishRace(result: RaceResult): void {
     // 结算恰好一次由 RaceMission 保证；控制器再收敛到 result 相位。
     this.controller.raceFinished();
+    this.sfx.suspend();  // 结算画面静止：发动机/环境声随暂停语义一起挂起
     if (result.finished && this.course) {
       const best = this.bestByCourse.get(this.course.courseId);
       if (!best || result.finalMs < best.finalMs || (result.finalMs === best.finalMs && result.collisions < best.collisions)) {
@@ -470,6 +567,8 @@ export class GameSession {
   private interrupt(reason: Extract<GamePauseReason, "focus-lost" | "host-hidden" | "lag">): void {
     this.accumulator = 0;
     this.input?.clear();
+    this.audio.suspend();
+    this.sfx.suspend();
     this.controller.pause(reason);
     this.emit(true);
   }

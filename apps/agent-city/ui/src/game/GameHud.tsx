@@ -14,6 +14,9 @@ export type GameHudActions = {
   onExit: () => void;
   onRetryPrepare: () => void;
   onNewCourse: () => void;
+  onSoundVolume: (volume: number) => void;
+  onToggleSfx: () => void;
+  onToggleMusic: () => void;
 };
 
 /** 毫秒 → m:ss.s 展示。 */
@@ -23,7 +26,7 @@ const clock = (ms: number) => {
 };
 
 export function GameHud({ snapshot, actions, locale, persist }: { snapshot: GameSessionSnapshot; actions: GameHudActions; locale: GameLocale; persist?: { tier: "native" | "local" | "memory" | null; saveFailed: boolean } }) {
-  const [helpOpen, setHelpOpen] = useState(true);
+  const [helpOpen, setHelpOpen] = useState(false);
   const t = (text: string) => gameText(text, locale);
   const { controller, telemetry, softOutside, mission, best } = snapshot;
   const phase = controller.phase;
@@ -50,11 +53,26 @@ export function GameHud({ snapshot, actions, locale, persist }: { snapshot: Game
       <div className="city-game-topright">
         {racing && mission
           ? <div className="city-game-chip city-game-telemetry"><span>{t("剩时")}</span>{clock(mission.remainingMs)}{mission.penaltyMs > 0 && <> · +{(mission.penaltyMs / 1000).toFixed(0)}s</>}</div>
-          : <div className="city-game-chip">{t("自由练习")}</div>}
+          : null}
         {telemetryView}
+        {/* 声音面板：主音量 + 音效/BGM 独立开关（details 展开式，与按键提示同交互）。 */}
+        <details className="city-game-chip city-game-sound">
+          <summary aria-label={t("游戏声音")}>♪ {t("声音")}</summary>
+          <div className="city-game-sound-panel">
+            <label>{t("音量")}
+              <input type="range" min="0" max="100" step="1" defaultValue={Math.round(snapshot.soundVolume * 100)}
+                onInput={(event) => actions.onSoundVolume(Number((event.target as HTMLInputElement).value) / 100)}
+                aria-label={t("游戏声音大小")} />
+            </label>
+            <div className="city-game-sound-toggles">
+              <button type="button" aria-pressed={snapshot.sfxEnabled} onClick={actions.onToggleSfx}>{t("音效")} · {t(snapshot.sfxEnabled ? "开" : "关")}</button>
+              <button type="button" aria-pressed={snapshot.musicEnabled} onClick={actions.onToggleMusic}>BGM · {t(snapshot.musicEnabled ? "开" : "关")}</button>
+            </div>
+          </div>
+        </details>
       </div>
       {!paused && !error && phase !== "result" && <details className="city-game-chip city-game-keys" open={helpOpen} onToggle={(event) => setHelpOpen((event.target as HTMLDetailsElement).open)}>
-        <summary aria-label={t("按键提示")}>{t("按键提示")} · {t("收起")}</summary>
+        <summary aria-label={t("按键提示")}>{t("按键提示")} · {t(helpOpen ? "收起" : "展开")}</summary>
         <dl>
           <dt>{t("W / S")}</dt><dd>{t("按住加速 / 减速；松开回到巡航")}</dd>
           <dt>{t("A / D")}</dt><dd>{t("左右转向")}</dd>

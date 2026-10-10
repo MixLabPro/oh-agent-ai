@@ -132,7 +132,7 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     return () => canvas.removeEventListener("webglcontextlost", onLost);
   }, [active, engine]);
 
-  const call = useCallback((method: "pause" | "resume" | "restart" | "retryPrepare" | "exit" | "newCourse", reason?: Parameters<GameSession["pause"]>[0]) => {
+  const call = useCallback((method: "pause" | "resume" | "restart" | "retryPrepare" | "exit" | "newCourse" | "toggleSfx" | "toggleMusic", reason?: Parameters<GameSession["pause"]>[0]) => {
     const session = getSession();
     if (!session) return;
     if (method === "pause" && reason) session.pause(reason);
@@ -164,6 +164,12 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     restart: () => call("restart"),
     retryPrepare: () => call("retryPrepare"),
     newCourse: () => call("newCourse"),
+    setSoundVolume: (volume: number) => {
+      const session = getSession();
+      session?.setSoundVolume(volume);
+    },
+    toggleSfx: () => call("toggleSfx"),
+    toggleMusic: () => call("toggleMusic"),
     exit: () => call("exit"),
   };
 }
