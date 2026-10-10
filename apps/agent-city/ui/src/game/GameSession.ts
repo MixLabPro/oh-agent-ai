@@ -178,7 +178,6 @@ export class GameSession {
     if (!this.input) {
       this.input = new FlightInput({
         isGameFocused: () => this.canvasFocused(),
-        shouldConsumeArrows: () => this.controller.simulating && this.canvasFocused(),
         onInterrupt: (reason) => this.interrupt(reason),
       });
       this.input.attach();
@@ -189,6 +188,10 @@ export class GameSession {
     this.sfx.start();
     this.lastCountdownSec = null;
     this.resetToSpawn();
+    // 进场即把焦点交给画布（与 resume 同规则）：不可编辑目标上输入法无组合通路，
+    // WASD 直接进飞行状态，不再打到入口按钮/设置控件上。
+    const entryCanvas = this.engine.domCanvas;
+    if (entryCanvas instanceof HTMLElement) entryCanvas.focus({ preventScroll: true });
     this.controller.prepareDone();
     this.emit(true);
   }
