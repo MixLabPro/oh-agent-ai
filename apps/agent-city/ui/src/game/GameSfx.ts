@@ -10,6 +10,21 @@ const MASTER_GAIN = 0.5;
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
+/** 进程级共享 AudioContext（一个页面一个 ctx 是 Web Audio 最佳实践）。
+ *  WKWebView 首次 new AudioContext() 可能同步阻塞主线程数秒（音频会话协商），
+ *  因此提供预热：城市就绪后的空闲时机提前创建（新建即 suspended、不发声），
+ *  进游戏时只做轻量 resume，进场不再冻结。 */
+let sharedAudioContext: AudioContext | null = null;
+
+export function prewarmAudioContext(): void {
+  if (sharedAudioContext || typeof AudioContext === "undefined") return;
+  try {
+    sharedAudioContext = new AudioContext();
+  } catch {
+    sharedAudioContext = null;
+  }
+}
+
 /** 每帧由会话层喂给的飞行状态（参数平滑由 setTargetAtTime 完成）。 */
 export type SfxTelemetry = {
   /** 空速（世界单位/秒）。 */
@@ -69,7 +84,11 @@ export class GameSfx {
   start(): void {
     this.suspended = false;
     if (typeof AudioContext === "undefined") return;
-    if (!this.ctx) this.ctx = new AudioContext();
+    if (!this.ctx) {
+      if (!sharedAudioContext) prewarmAudioContext();
+      this.ctx = sharedAudioContext;  // 预热失败为 null → 音效静默降级
+    }
+    if (!this.ctx) return;
     if (!this.nodes) this.nodes = this.build(this.ctx);
     if (this.ctx.state === "suspended") void this.ctx.resume().catch(() => undefined);
   }
@@ -93,11 +112,9 @@ export class GameSfx {
 
   dispose(): void {
     this.suspended = true;
-    if (this.ctx) {
-      void this.ctx.close().catch(() => undefined);
-      this.ctx = null;
-      this.nodes = null;
-    }
+    // 共享 ctx 不关闭（关闭后整页无法再建音频图）；只丢弃自己的节点图。
+    this.nodes = null;
+    this.ctx = null;
   }
 
   /** 每帧驱动连续声部（螺旋桨/风/雨 + 雷声调度）。暂停/结算时不会被调用。 */

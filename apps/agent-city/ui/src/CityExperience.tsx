@@ -16,6 +16,7 @@ import { scaleTierFor } from "./engine/cityPlan";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { GameHud } from "./game/GameHud";
 import { gameText } from "./game/gameCopy";
+import { prewarmAudioContext } from "./game/GameSfx";
 import type { useCityGame } from "./game/useCityGame";
 
 declare const __CITY_GAME_UAT__: boolean;
@@ -237,6 +238,18 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     if (!gameActive) return;
     ui.setOptions(false); ui.setDetails(false); ui.setCatalog(false);
   }, [gameActive]);
+  // 音频上下文预热：WKWebView 首次 new AudioContext() 可能同步阻塞主线程数秒，
+  // 放在进场关键路径会把进入游戏冻结住。城市就绪后的空闲时机先建好（不发声）。
+  useEffect(() => {
+    if (disabled || !ui.model) return;
+    const warm = () => prewarmAudioContext();
+    if (typeof requestIdleCallback === "function") {
+      const id = requestIdleCallback(warm, { timeout: 4000 });
+      return () => cancelIdleCallback(id);
+    }
+    const timer = setTimeout(warm, 1500);
+    return () => clearTimeout(timer);
+  }, [disabled, ui.model]);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const summaryButton = useRef<HTMLButtonElement>(null);
