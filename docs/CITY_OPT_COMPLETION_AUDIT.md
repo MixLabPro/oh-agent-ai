@@ -49,7 +49,27 @@ endpointRelineCandidates现覆盖与更宽宿主共享stem的degree2弯点：仅
 四旋转合成成功/拒绝、网络补丁、connect、repair-safety及typecheck通过。
 2000000000/t1 session78908：未接关系1→0，联合定线与锐角修复有归因，R390不变；
 体育场仍未满足，Outcome.failed保持，不称全岛完成。较早13941仅开启coalescing仍exit1。
-新版完整planning session20252已启动，待终态；当前修改尚待提交，不记为30岛通过。
+本批已提交为6a86232b。新版完整planning session20252终态exit1：通过全部10个t1样本，
+随后在1703350391/t2因villa-complex的foundation-gap、foundation-water、foundation-relief
+失败；不是30岛通过，尚未完成t2/t5主批。保持原基础准入断言，不以已修命名样本替代主批。
+
+### 冻结源码游戏回归终态及新增基础阻断
+
+6a86232b源码的game模块session95642终态exit0：8/8阶段通过（含typecheck与harness），
+总时383951ms；race生成80、fallback0、unavailable0，world覆盖12布局2013障碍盒。
+这是游戏模块证据，不证明完整planning、无缓存full、物理模型全覆盖或跨引擎验收通过。
+
+新增1703350391/t2诊断session17220 exit0：R551.5432893255071，原400位置预筛拒绝
+299占地、39道路、62邻接。实际XY暂清的5个位置均仍与observation-tower及working-harbor
+名义预留重叠；其中仅3个主网距离满足原54上限。其岸线满足原104.205853界限，
+高架实际外廓清净，但邻居尚无实际实体声明，不能直接忽略其plot保护。
+同位置局部岸线yaw反事实未改善预筛分布；未改生产yaw、候选数、岸线或邻居保护。
+6a86232b重新诊断session62642 exit0确认同一画像：26项required unmet0，但solve前后
+庄园位置不变，实际海面下250个基础样点、maxGap4.9334435514642685，Outcome.failed。
+初始岸线264候选有63个基础可行位置被旧圆道路筛拒绝，另6个被owner-spacing拒绝；
+这只证明阶段合同不一致的排查方向，不证明63个位置满足完整实际路幅或其它约束。
+后续修复须统一初始选址/后置迁移/最终约束的已声明实体净距合同，并完成未知邻居的
+真实声明或联合预留修复；不能将这些暂清候选标作合法落位或把基础失败改为容忍。
 
 ## 2026-10-12 全折线消费者与实体外廓检查（最新，整体未完成）
 
