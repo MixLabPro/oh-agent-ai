@@ -56,6 +56,8 @@ const output = await build({ stdin: { contents: [
   `export {relocatedSitePositionFailure} from ${JSON.stringify(path.join(citySrc, "engine/planner/snapJunctions.ts"))};`,
   `export {inspectModelGround, registeredModelGroundFailure} from ${JSON.stringify(path.join(citySrc, "engine/planner/modelGround.ts"))};`,
   `export {inspectEnvelopeRoad, inspectEnvelopePair} from ${JSON.stringify(path.join(citySrc, "engine/planner/modelEnvelope.ts"))};`,
+  `export {closestPolylineSegment} from ${JSON.stringify(path.join(citySrc, "engine/planner/footprint.ts"))};`,
+  `export {DetMath} from ${JSON.stringify(path.join(citySrc, "engine/detMath.ts"))};`,
   `export {polylineDistance, nearBridgeEnd, wetCount} from ${JSON.stringify(path.join(citySrc, "engine/planner/footprint.ts"))};`,
   `export {componentOf, primaryComponentId} from ${JSON.stringify(path.join(citySrc, "engine/planner/intent.ts"))};`,
 ].join("\n"), resolveDir: citySrc }, bundle: true, write: false, format: "esm", platform: "node", logLevel: "silent",
@@ -100,9 +102,25 @@ for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.isla
     river: ctx.geo.river, seaside: ctx.seaside, primaryAnchorNodeId: ctx.primaryAnchorNodeId, siteObligations: ctx.siteObligations, demandCatalogue: ctx.demandCatalogue };
   const components = module.componentOf(view), primary = module.primaryComponentId(view, components);
   const primaryRoads = view.roadEdges.filter(edge => !edge.bridge && components.get(edge.from) === primary).map(edge => edge.points);
-  const counts = {}, examples = {}, groundAdmissibleRejectedBy = {}, groundAdmissibleExamples = {}, entityFactCounts = {}, entityFactExamples = {}, remainingPolicyCandidates = []; let attempts = 0;
+  const counts = {}, examples = {}, groundAdmissibleRejectedBy = {}, groundAdmissibleExamples = {}, entityFactCounts = {}, entityFactExamples = {}, remainingPolicyCandidates = [], coastAlignedCandidateCounts = {}, coastAlignedCandidateExamples = {}; let attempts = 0;
   for (const at of module.localResiteCandidates(owner)) {
     attempts += 1;
+    // Read-only counterfactual: one local coast-facing yaw per existing position,
+    // not additional positions or route attempts. The copied diagnostic owner
+    // is restored before evaluating the original production candidate.
+    const localCoast = module.closestPolylineSegment([...ctx.coast, ctx.coast[0]], at);
+    if (localCoast) {
+      const yaw = module.DetMath.atan2(localCoast.q.x - at.x, localCoast.q.z - at.z), priorYaw = owner.yaw;
+      try {
+        owner.yaw = yaw;
+        let poseReason = module.relocatedSitePositionFailure(ctx, owner, at, true);
+        if (!poseReason && module.polylineDistance(primaryRoads, at) > owner.radius + 20) poseReason = "primary-service-bound";
+        if (!poseReason && ctx.blocks.some(block => block.parcels.some(parcel => Math.hypot(parcel.x - at.x, parcel.z - at.z)
+          < owner.radius + 9 + Math.hypot(parcel.width, parcel.depth) / 2))) poseReason = "reserved-parcel-envelope";
+        poseReason ??= module.registeredModelGroundFailure({ ...owner, ...at }, { height: ctx.height, inRiver: ctx.inRiver });
+        tally(coastAlignedCandidateExamples, coastAlignedCandidateCounts, poseReason ?? "candidate-pre-screen-admitted-not-transaction-accepted", { ...at, yaw });
+      } finally { owner.yaw = priorYaw; }
+    }
     let reason = module.relocatedSitePositionFailure(ctx, owner, at, true);
     if (!reason && module.polylineDistance(primaryRoads, at) > owner.radius + 20) reason = "primary-service-bound";
     if (!reason && ctx.blocks.some(block => block.parcels.some(parcel => Math.hypot(parcel.x - at.x, parcel.z - at.z)
@@ -150,7 +168,7 @@ for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.isla
     }
   }
   console.log(JSON.stringify({ stage: "pre-solve-wet-local-tier", radius, owner, attempts, firstRejectionCounts: counts, examples,
-    groundAdmissibleRejectedBy, groundAdmissibleExamples, entityFactCounts, entityFactExamples, remainingPolicyCandidates,
+    groundAdmissibleRejectedBy, groundAdmissibleExamples, entityFactCounts, entityFactExamples, remainingPolicyCandidates, coastAlignedCandidateCounts, coastAlignedCandidateExamples,
     entityFactScope: "read-only conservative XY projection; neighbor extra setback=0; highway/plot/entrance policy remains pending; no candidate published" }));
 }
 delete globalThis.__groundDiagnostic;
