@@ -141,7 +141,10 @@ function aggregateOverflow(districtId: string, anchor: Vec2, overflow: CityModel
 }
 
 /** The seed controls geography, never harness count, token ranking or time window. */
-export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null, backdrop: BackdropMode = "auto"): CityLayout {
+/** 规划修复补丁的移楼钉子（planPatch.ts::layoutPinsFor）：buildingId → parcelId，只在档位一致时生效。 */
+export type LayoutPins = { scaleTier: number; parcels: ReadonlyMap<string, string> };
+
+export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null, backdrop: BackdropMode = "auto", pins: LayoutPins | null = null): CityLayout {
   // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
   const tier = scaleTierFor(model.buildings.length);
   // plans 缓存键携带海滨配置身份（profile+version）：同 seed 不同配置不得复用旧规划。
@@ -187,6 +190,18 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
   const assigned = new Map<string, Parcel>();
   const used = new Set<string>();
+  // 规划修复的移楼钉子（CITY_PLAN_MANUAL_REPAIR_SPEC §5/§12.4）：先于「刷新不搬家」落位。
+  // 只在 layoutCity 之后做后处理时，生长剪枝不知道楼搬走了——新家的空置街区支路被剪掉（楼落在没有路的地方），
+  // 老家街区却保住了路；刷新后目标地块还可能先被分给新会话，补丁随即失效、用户的修改悄悄消失。
+  // 钉子只认存在且未占的地块；档位不符（岛已放大重排）整份不认，由 applyPlanPatch 报 tier-changed。
+  // 无钉子时本段不执行，布局与旧版逐字节相同（golden/scene-baseline 不变）。
+  if (pins && pins.scaleTier === tier) {
+    const present = new Set(model.buildings.map((building) => building.id));
+    for (const [buildingId, parcelId] of pins.parcels) {
+      const parcel = parcelIndex.get(parcelId);
+      if (present.has(buildingId) && parcel && !used.has(parcelId) && !assigned.has(buildingId)) { assigned.set(buildingId, parcel); used.add(parcelId); }
+    }
+  }
   // 跨档（会话数越过 400 的整数倍）：岛按原形状放大，地块编号对应的位置变了，旧地址不能原样复用——
   // 按放大比例把每栋楼映射到「放大后的原位置」最近的空地块（SPEC §4.2），城市看起来是整体长大而不是整体洗牌。
   // 先落位的是更早开工的楼（占最好的位置）；映射不到（半径 > 120 内没有空地块）的留给后面的常规落位。
@@ -196,7 +211,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const CELL = 40;
     const grid = new Map<string, Parcel[]>();
     for (const parcel of parcels) { const key = `${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`; const list = grid.get(key); if (list) list.push(parcel); else grid.set(key, [parcel]); }
-    const ordered = [...model.buildings].filter((building) => old.has(building.id)).sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    const ordered = [...model.buildings].filter((building) => old.has(building.id) && !assigned.has(building.id)).sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
     for (const building of ordered) {
       const from = old.get(building.id)!;
       const tx = from.x * ratio; const tz = from.z * ratio;
@@ -219,7 +234,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const old = new Map(previous.districts.flatMap((district) => [...district.slots]));
     for (const building of model.buildings) {
       const parcel = old.get(building.id);
-      if (parcel && parcelIndex.has(parcel.id) && !used.has(parcel.id)) {
+      if (parcel && parcelIndex.has(parcel.id) && !used.has(parcel.id) && !assigned.has(building.id)) {
         assigned.set(building.id, parcelIndex.get(parcel.id)!); used.add(parcel.id);
       }
     }
