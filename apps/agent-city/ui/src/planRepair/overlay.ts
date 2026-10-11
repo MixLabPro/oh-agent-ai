@@ -7,10 +7,14 @@
 import * as THREE from "three";
 
 export type OverlayParcel = { x: number; y: number; z: number; yaw: number; width: number; depth: number };
-export type OverlayRibbon = { points: ReadonlyArray<{ x: number; z: number }>; width: number; tone: "erase" | "erase-blocked" | "draw" | "draw-warn" | "draw-blocked" };
+export type OverlayRibbon = { points: ReadonlyArray<{ x: number; z: number }>; width: number; tone: "erase" | "erase-blocked" | "draw" | "draw-warn" | "draw-blocked" | "link" };
 export type OverlayMarker = { x: number; z: number; tone: "start" | "snap" | "snap-blocked" };
-/** 设施占地标记：悬停（黄）/ 选中（青），贴地方块比占地略大一圈。 */
-export type OverlaySiteMark = { x: number; y: number; z: number; yaw: number; width: number; depth: number; tone: "hover" | "selected" };
+/**
+ * 占地标记，贴地方块（round = 圆形占地按外接圆画）比占地略大一圈：
+ * 悬停（黄）/ 选中（青）/ 落位试算能放（绿）不能放（红）/ 将被推平（红）/ 将被安置的会话楼原址与新家（琥珀）/ 无处安置（深红）。
+ */
+export type OverlaySiteMark = { x: number; y: number; z: number; yaw: number; width: number; depth: number; round?: boolean;
+  tone: "hover" | "selected" | "ghost-ok" | "ghost-bad" | "doomed" | "relocate-from" | "relocate-to" | "homeless" };
 
 const COLORS = {
   parcel: 0x35d07f,
@@ -24,7 +28,15 @@ const COLORS = {
   "snap-blocked": 0xff8a3d,
   hover: 0xffd84d,
   selected: 0x4dd2ff,
+  "ghost-ok": 0x35d07f,
+  "ghost-bad": 0xff4d3d,
+  doomed: 0xff4d3d,
+  "relocate-from": 0xffc23d,
+  "relocate-to": 0xffc23d,
+  homeless: 0xb3122e,
+  link: 0xffc23d,             // 安置连线：原址 → 新家
 } as const;
+const MARK_OPACITY: Record<OverlaySiteMark["tone"], number> = { hover: 0.32, selected: 0.45, "ghost-ok": 0.42, "ghost-bad": 0.42, doomed: 0.5, "relocate-from": 0.45, "relocate-to": 0.3, homeless: 0.55 };
 
 const noRaycast = () => {};
 
@@ -35,6 +47,7 @@ export class ParcelOverlay {
   private readonly siteMarks = new THREE.Group();
   private readonly plane = new THREE.PlaneGeometry(1, 1);
   private readonly ring = new THREE.RingGeometry(0.55, 1, 28);
+  private readonly disc = new THREE.CircleGeometry(0.5, 40);
   private readonly materials = new Map<number, THREE.MeshBasicMaterial>();
 
   constructor() {
@@ -75,8 +88,10 @@ export class ParcelOverlay {
     this.siteMarks.clear();
     // 设施标记铺在建筑占地里，会被建筑自己挡住：关深度测试，让轮廓透出来（高楼/大商场也看得见选中了谁）。
     for (const mark of marks) {
-      const material = this.material(COLORS[mark.tone], mark.tone === "selected" ? 0.45 : 0.32, false);
-      const rect = this.flat(this.plane, material, mark.x, mark.y + 0.6, mark.z, mark.yaw, mark.width + 3, mark.depth + 3);
+      const material = this.material(COLORS[mark.tone], MARK_OPACITY[mark.tone], false);
+      const rect = mark.round
+        ? this.flat(this.disc, material, mark.x, mark.y + 0.6, mark.z, 0, mark.width + 3, mark.width + 3)
+        : this.flat(this.plane, material, mark.x, mark.y + 0.6, mark.z, mark.yaw, mark.width + 3, mark.depth + 3);
       rect.renderOrder = 30;
       this.siteMarks.add(rect);
     }
@@ -104,7 +119,7 @@ export class ParcelOverlay {
 
   dispose(): void {
     this.parcels.clear(); this.preview.clear(); this.siteMarks.clear(); this.group.clear();
-    this.plane.dispose(); this.ring.dispose();
+    this.plane.dispose(); this.ring.dispose(); this.disc.dispose();
     for (const material of this.materials.values()) material.dispose();
     this.materials.clear();
   }

@@ -8,17 +8,18 @@
  *   选择（build）：点会话楼 → 候选空地块高亮 → 点地块搬过去；
  *   画路（draw）：点一下落起点，鼠标移动有预览（绿可行 / 红不行 + 原因），再点一下落笔，连续接着画；
  *   橡皮擦（erase）：悬停高亮将被擦掉的路段（红；不能擦的变灰并说明原因），点击擦除。
- *   设施（site）：悬停高亮非会话建筑（公共设施/花园/城区地标/背景楼），点选后点目标空街区/空地块搬家，或拆除。
- *               市长管设施，会话楼由开发商盖——点会话楼只给提示，不能在这里动它。
+ *   设施（site）：悬停高亮非会话建筑（公共设施/花园/地标/市政用地/背景楼），点选后点目标空地搬家，或拆除。
+ *   路口（node）：点一个路口拿起来，鼠标移动预览关联路段跟着走（含推平/安置后果），再点一下放下。
+ * 选中建筑后悬停有落位试算（绿 = 能放，红 = 不能放并写原因）；画路/拖路口的推平与安置是推土机试算的确切结果（SPEC §16）。
  * 画路/橡皮擦只用地面点（引擎射线与地形的交点），不看射线先打到的建筑——与悬停预览用的是同一个点，所见即所点。
  */
 import type { SnapPoint, RoadVerdict } from "../engine/planRoadRules";
 import type { Vec2 } from "../engine/cityLayout";
 import type { RepairRay } from "../engine/CityEngine";
 import type { SiteInfo, SiteTarget } from "../engine/planSites";
-import type { EditResult, RepairCandidate, SiteEditResult } from "./session";
+import type { EditResult, ImpactPreview, NodeHandle, PlacementGhost, PlanRect, RepairCandidate, RoadPreview, SiteEditResult } from "./session";
 
-export type RepairTool = "build" | "draw" | "erase" | "site";
+export type RepairTool = "build" | "draw" | "erase" | "site" | "node";
 export type RoadWidth = 5 | 8;
 
 export type RepairMessage = { kind: "hint" | "ok" | "warn" | "error"; text: string };
@@ -26,9 +27,15 @@ export type RepairMessage = { kind: "hint" | "ok" | "warn" | "error"; text: stri
 /** 悬停预览（叠加层据此画色带/标记）。reason 非空时面板在消息下方显示。 */
 export type RepairPreview =
   | { kind: "erase"; points: Vec2[]; width: number; ok: boolean; reason: string | null; warning: string | null }
-  | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; warning: string | null; snap: SnapPoint }
+  | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; warning: string | null; snap: SnapPoint; impact: ImpactPreview | null }
   | { kind: "snap"; at: Vec2; ok: boolean; snap: SnapPoint }
   | { kind: "site"; rect: { x: number; z: number; yaw: number; width: number; depth: number }; label: string }
+  /** 选中建筑后悬停的落位试算。 */
+  | { kind: "ghost"; rect: PlanRect; ok: boolean; reason: string | null; warning: string | null }
+  /** 路口工具：悬停指向的路口（还没拿起）。 */
+  | { kind: "node-hover"; at: Vec2; ok: boolean; reason: string | null }
+  /** 路口工具：拿起路口后，关联路段跟到鼠标位置的样子。 */
+  | { kind: "node"; at: Vec2; edges: Array<{ points: Vec2[]; width: number }>; ok: boolean; reason: string | null; warning: string | null; impact: ImpactPreview | null }
   | null;
 
 export type RepairState = {
@@ -40,6 +47,10 @@ export type RepairState = {
   site: SiteInfo | null;
   siteTargets: SiteTarget[];
   drawStart: SnapPoint | null;
+  /** 路口工具：拿在手上的路口。 */
+  dragNode: NodeHandle | null;
+  /** 刚搬走的地标/市政用地在原址留下的断头接入路（面板给一键擦掉）。 */
+  stranded: string[];
   roadWidth: RoadWidth;
   preview: RepairPreview;
   message: RepairMessage | null;
@@ -56,10 +67,18 @@ export type RepairDeps = {
   // 道路
   snap(x: number, z: number): SnapPoint | null;
   edgeAt(x: number, z: number): { id: string; points: Vec2[]; width: number; locked: boolean } | null;
-  validateAdd(from: Vec2, to: Vec2, width: number): RoadVerdict;
+  validateAdd(from: Vec2, to: Vec2, width: number): RoadPreview;
   addRoad(from: Vec2, to: Vec2, width: number): EditResult;
   validateDrop(edgeId: string): RoadVerdict;
   dropEdge(edgeId: string): EditResult;
+  dropEdges(edgeIds: readonly string[]): EditResult;
+  // 路口
+  nodeAt(x: number, z: number): NodeHandle | null;
+  validateMove(nodeId: string, x: number, z: number): RoadPreview;
+  moveNode(nodeId: string, x: number, z: number): EditResult;
+  // 落位试算（悬停）
+  buildingGhost(buildingId: string, x: number, z: number): PlacementGhost | null;
+  siteGhost(site: SiteInfo, x: number, z: number): PlacementGhost | null;
   // 设施
   pickSite(ray: RepairRay): SiteInfo | null;
   siteById(id: string): SiteInfo | null;
@@ -81,13 +100,13 @@ const BLOCKER_TEXT: Record<string, string> = {
   "unknown-building": "这栋楼不在当前城市里",
   // 道路
   "locked-edge": "桥面由桥梁模型绑定，不能单独编辑",
-  "hits-locked-site": "会压到锁定的设施（悬索桥、海上地标或港口）",
+  "hits-locked-site": "会压到悬索桥（它是路网里的一段桥面）",
   "site-locked": "这座设施已锁定",
   "arterial-skeleton": "主干道是城市骨架，不能擦",
   "strands-buildings": "擦掉后有楼离最近的路超过 40",
   "disconnects-buildings": "擦掉后有楼会和路网断开",
   "edge-too-short": "太短了（至少 6）",
-  "edge-too-long": "太长了（最多 250）",
+  "edge-too-long": "太长了（最多 800）",
   "isolated-road": "新路必须接到现有道路上",
   "road-in-water": "不能修到水面或岩岸上",
   "road-over-building": "会穿过建筑、配套或花园",
@@ -103,6 +122,8 @@ const BLOCKER_TEXT: Record<string, string> = {
   // 设施
   "target-occupied": "目标已被占用（会话楼、配套、花园或背景楼）",
   "site-over-road": "会压到道路上",
+  "missing-target": "这里没有可落位的街区或地块",
+  "tier-changed": "城市已随数据增长扩大了一档，旧修改已失效——请先在面板上点「清除失效修改」",
 };
 const WARNING_TEXT: Record<string, string> = {
   "cross-district": "已搬出它所属的小区",
@@ -116,6 +137,7 @@ const WARNING_TEXT: Record<string, string> = {
   "disconnects-buildings": "有楼会和主路网断开",
   "isolated-road": "这段路两端都没接上路网",
   "acute-junction": "会形成夹角小于 30° 的路口",
+  "no-access-road": "新位置附近没有能顺手接上的路（会压到建筑或入水），需要你用画路工具接一条",
 };
 /** 带数量的提示码（`code:N`）。 */
 const COUNTED_TEXT: Record<string, (n: number) => string> = {
@@ -125,9 +147,14 @@ const COUNTED_TEXT: Record<string, (n: number) => string> = {
   bulldozed: (n) => `推平了 ${n} 座设施`,
   relocated: (n) => `开发商安置了 ${n} 栋会话楼`,
   homeless: (n) => `${n} 栋会话楼附近没有空地块，仍压在路上`,
+  "homeless-risk": (n) => `${n} 栋会话楼附近没有空地块，会留在路上`,
+  "access-road": (n) => `在新位置补了一条 ${n} 长的接入路`,
 };
 
-export const blockerText = (code: string): string => BLOCKER_TEXT[code] ?? code;
+export const blockerText = (code: string): string => (code.startsWith("patch-tier-") ? BLOCKER_TEXT["tier-changed"] : BLOCKER_TEXT[code] ?? code);
+/** 编辑失败的说明：优先逐条翻译阻断码，其次翻译 reason（跨档的补丁会以 reason 形式回来）。 */
+const failText = (verb: string, result: { reason: string; blockers?: string[] }) =>
+  `${verb}：${result.blockers?.length ? result.blockers.map(blockerText).join("；") : blockerText(result.reason)}`;
 export const warningText = (code: string): string => {
   const [key, count] = code.split(":");
   return count !== undefined && COUNTED_TEXT[key] ? COUNTED_TEXT[key](Number(count)) : WARNING_TEXT[code] ?? code;
@@ -141,6 +168,7 @@ const HINT: Record<RepairTool, RepairMessage> = {
   draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，Esc 结束" },
   erase: { kind: "hint", text: "把橡皮擦移到道路上，红色高亮的路段点击即擦掉" },
   site: { kind: "hint", text: "点选任意非会话建筑（公共设施、花园、地标、市政用地、背景楼）；再点空地搬家，或点「拆除」" },
+  node: { kind: "hint", text: "点一个路口拿起来，移动鼠标预览，再点一下放下；Esc 放回原处" },
 };
 
 // 名称表暂在这里（注册表 SPEC CITY_SITE_REGISTRY_SPEC.md B1 会把它们收进 siteClasses 单一来源）。
@@ -160,10 +188,19 @@ const footprintContains = (site: SiteInfo, p: Vec2) => {
   return Math.abs(lx) <= site.width / 2 && Math.abs(lz) <= site.depth / 2;
 };
 
+const ghostPreview = (ghost: PlacementGhost | null): RepairPreview =>
+  ghost ? { kind: "ghost", rect: ghost.rect, ok: ghost.blockers.length === 0, reason: ghost.blockers[0] === "unchanged" ? "它已经在这里了" : reasonOf(ghost.blockers), warning: noteOf(ghost.warnings) } : null;
+/** 把路段朝向路口的一端换成 to（拖路口预览）。 */
+const movedEdges = (node: NodeHandle, to: Vec2) => node.edges.map((edge) => {
+  const points = [...edge.points];
+  if (edge.atStart) points[0] = to; else points[points.length - 1] = to;
+  return { points, width: edge.width };
+});
+
 const HOVER_EPS = 0.75; // 地面点移动不到这么多就不重算预览（鼠标抖动）
 
 export class RepairController {
-  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, roadWidth: 5, preview: null, message: null };
+  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadWidth: 5, preview: null, message: null };
   private readonly listeners = new Set<(state: RepairState) => void>();
   private lastGround: Vec2 | null = null;
   private lastRay: RepairRay | null = null;
@@ -187,21 +224,21 @@ export class RepairController {
   enter(): void {
     if (this.state.active) return;
     this.lastGround = null;
-    this.set({ active: true, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, preview: null, message: HINT.build });
+    this.set({ active: true, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], preview: null, message: HINT.build });
   }
 
   exit(): void {
     if (!this.state.active) return;
     this.deps.setSelected(null);
     this.lastGround = null;
-    this.set({ active: false, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, preview: null, message: null });
+    this.set({ active: false, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], preview: null, message: null });
   }
 
   setTool(tool: RepairTool): void {
     if (!this.state.active || this.state.tool === tool) return;
     this.deps.setSelected(null);
     this.lastGround = null;
-    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, preview: null, message: HINT[tool] });
+    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], preview: null, message: HINT[tool] });
   }
 
   setRoadWidth(roadWidth: RoadWidth): void {
@@ -215,6 +252,7 @@ export class RepairController {
     const { active, tool, buildingId, drawStart } = this.state;
     if (!active) return;
     if (tool === "draw" && drawStart) { this.set({ drawStart: null, preview: null, message: HINT.draw }); this.recomputePreview(); return; }
+    if (tool === "node" && this.state.dragNode) { this.set({ dragNode: null, preview: null, message: HINT.node }); this.recomputePreview(); return; }
     if (tool === "site" && this.state.site) { this.clearSite(HINT.site); return; }
     if (tool !== "build") { this.setTool("build"); return; }
     if (buildingId) { this.deselect(HINT.build); return; }
@@ -223,7 +261,7 @@ export class RepairController {
 
   private deselect(message: RepairMessage | null): void {
     this.deps.setSelected(null);
-    this.set({ buildingId: null, candidates: [], message });
+    this.set({ buildingId: null, candidates: [], preview: null, message });
   }
 
   private select(buildingId: string, message?: RepairMessage): void {
@@ -234,15 +272,14 @@ export class RepairController {
       message: message ?? (candidates.length
         ? { kind: "hint", text: `已选中，附近有 ${candidates.length} 个可搬去的空地块（绿色）；点任一地块搬过去` }
         : { kind: "warn", text: "已选中，但附近没有可搬去的空地块" }),
-    });
+    });    this.recomputePreview();
   }
 
   // ── 悬停预览（画路/橡皮擦）──────────────────────────────────────────────
 
   /** 引擎的指针移动：ground = 射线与地形的交点，鼠标离开/朝天为 null。 */
   hover(ground: Vec2 | null, ray: RepairRay | null = null): void {
-    const { active, tool } = this.state;
-    if (!active || tool === "build") return;
+    if (!this.state.active) return;
     if (!ground) { this.lastGround = null; this.lastRay = null; if (this.state.preview) this.set({ preview: null }); return; }
     if (this.lastGround && Math.hypot(ground.x - this.lastGround.x, ground.z - this.lastGround.z) < HOVER_EPS) return;
     this.lastGround = ground; this.lastRay = ray;
@@ -253,11 +290,31 @@ export class RepairController {
   private recomputePreview(): void {
     const ground = this.lastGround;
     const { tool, drawStart, roadWidth } = this.state;
-    if (!ground || tool === "build") { if (this.state.preview) this.set({ preview: null }); return; }
+    if (!ground) { if (this.state.preview) this.set({ preview: null }); return; }
+    if (tool === "build") {
+      const { buildingId } = this.state;
+      const preview = buildingId ? ghostPreview(this.deps.buildingGhost(buildingId, ground.x, ground.z)) : null;
+      if (preview || this.state.preview) this.set({ preview });
+      return;
+    }
     if (tool === "site") {
       // 设施拾取按射线与占地盒求交（实例级）：高楼会把射线与地形的交点推到楼后面，只用地面点会点歪。
       const hit = this.lastRay ? this.deps.pickSite(this.lastRay) : null;
+      const site = this.state.site;
+      // 已选中一座：指着别的设施（地面点在它占地内）就高亮它（点击会改选），否则是在找落脚处——给落位试算。
+      if (site && !(hit && hit.id !== site.id && footprintContains(hit, ground))) { this.set({ preview: ghostPreview(this.deps.siteGhost(site, ground.x, ground.z)) }); return; }
       this.set({ preview: hit ? { kind: "site", rect: siteRect(hit), label: siteLabel(hit) } : null });
+      return;
+    }
+    if (tool === "node") {
+      const node = this.state.dragNode;
+      if (!node) {
+        const near = this.deps.nodeAt(ground.x, ground.z);
+        this.set({ preview: near ? { kind: "node-hover", at: { x: near.x, z: near.z }, ok: !near.locked, reason: near.locked ? blockerText("locked-edge") : null } : null });
+        return;
+      }
+      const verdict = this.deps.validateMove(node.id, ground.x, ground.z);
+      this.set({ preview: { kind: "node", at: ground, edges: movedEdges(node, ground), ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers.filter((code) => code !== "unchanged")), warning: noteOf(verdict.warnings), impact: verdict.impact ?? null } });
       return;
     }
     if (tool === "erase") {
@@ -274,7 +331,7 @@ export class RepairController {
       return;
     }
     const verdict = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, roadWidth);
-    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: roadWidth, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), snap } });
+    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: roadWidth, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), snap, impact: ("impact" in verdict ? verdict.impact : null) ?? null } });
   }
 
   // ── 点击 ────────────────────────────────────────────────────────────────
@@ -282,6 +339,8 @@ export class RepairController {
   /** 引擎的选取手势：pickedId = 射线最近命中物（会话楼 id 或 decor:…），ground = 射线与地形的交点。 */
   click(click: { pickedId: string | null; ground: Vec2 | null; ray?: RepairRay | null }): void {
     if (!this.state.active) return;
+    if (this.state.stranded.length) this.set({ stranded: [] }); // 原址接入路的一键擦除只在搬完那一刻提供
+    if (this.state.tool === "node") { this.clickNode(click.ground); return; }
     if (this.state.tool === "site") { this.clickSite(click); return; }
     if (this.state.tool === "draw") { this.clickDraw(click.ground); return; }
     if (this.state.tool === "erase") { this.clickErase(click.ground); return; }
@@ -311,8 +370,7 @@ export class RepairController {
     if (parcel.id === this.deps.parcelOf(buildingId)) { this.set({ message: { kind: "hint", text: "它已经在这个地块上了" } }); return; }
     const result = this.deps.moveBuilding(buildingId, parcel.id);
     if (!result.ok) {
-      const text = result.blockers?.length ? `不能搬到这里：${result.blockers.map(blockerText).join("；")}` : `不能搬到这里：${result.reason}`;
-      this.set({ message: { kind: "error", text } });
+      this.set({ message: { kind: "error", text: failText("不能搬到这里", result) } });
       return;
     }
     // 搬成功：引擎已重建城市，重新选中恢复选中环，并按新位置刷新候选。
@@ -336,8 +394,7 @@ export class RepairController {
     }
     const result = this.deps.addRoad(start, snap, this.state.roadWidth);
     if (!result.ok) {
-      const text = result.blockers?.length ? `不能这样画：${result.blockers.map(blockerText).join("；")}` : `不能这样画：${result.reason}`;
-      this.set({ message: { kind: "error", text } });
+      this.set({ message: { kind: "error", text: failText("不能这样画", result) } });
       return;
     }
     // 画成功：城市已重建（端点落在路段中间时那段路已被拆开）。以终点为新起点接着画；
@@ -374,7 +431,7 @@ export class RepairController {
         : siteTargets.length
         ? { kind: "hint", text: `已选中${siteLabel(site)}，附近有 ${siteTargets.length} 个可搬去的${site.level === "block" ? "空街区" : "空地块"}（绿色）；点任一处搬过去，或点「拆除」` }
         : { kind: "warn", text: `已选中${siteLabel(site)}，但附近没有可搬去的${site.level === "block" ? "空街区" : "空地块"}；可以拆除` }),
-    });
+    });    this.recomputePreview();
   }
 
   private clickSite({ pickedId, ground, ray }: { pickedId: string | null; ground: Vec2 | null; ray?: RepairRay | null }): void {
@@ -403,12 +460,15 @@ export class RepairController {
     if (!targetId) { this.set({ message: { kind: "warn", text: `这里没有可落位的${site.level === "block" ? "街区" : "地块"}` } }); return; }
     const result = this.deps.moveSite(site, targetId);
     if (!result.ok) {
-      const text = result.blockers?.length ? `不能搬到这里：${result.blockers.map(blockerText).join("；")}` : `不能搬到这里：${result.reason}`;
-      this.set({ message: result.blockers?.[0] === "unchanged" ? { kind: "hint", text: "它已经在这里了" } : { kind: "error", text } });
+      this.set({ message: result.blockers?.[0] === "unchanged" ? { kind: "hint", text: "它已经在这里了" } : { kind: "error", text: failText("不能搬到这里", result) } });
       return;
     }
     const moved = (result.siteId ? this.deps.siteById(result.siteId) : null) ?? site;
-    this.selectSite(moved, { kind: "ok", text: `已把${siteLabel(site)}搬过去` });
+    const notes = result.warnings.map(warningText);
+    const stranded = result.strandedEdges ?? [];
+    if (stranded.length) notes.push(`原址留下 ${stranded.length} 段断头接入路，可在面板上一键擦掉`);
+    this.selectSite(moved, { kind: result.warnings.includes("no-access-road") ? "warn" : "ok", text: notes.length ? `已把${siteLabel(site)}搬过去（${notes.join("；")}）` : `已把${siteLabel(site)}搬过去` });
+    this.set({ stranded });
   }
 
   /** 拆除选中的设施（面板按钮 / Delete 键）。 */
@@ -416,7 +476,7 @@ export class RepairController {
     const { active, tool, site } = this.state;
     if (!active || tool !== "site" || !site) return;
     const result = this.deps.removeSite(site);
-    if (!result.ok) { this.set({ message: { kind: "error", text: `不能拆除：${result.reason}` } }); return; }
+    if (!result.ok) { this.set({ message: { kind: "error", text: failText("不能拆除", result) } }); return; }
     this.lastGround = null;
     this.set({ site: null, siteTargets: [], preview: null, message: { kind: "ok", text: `已拆除${siteLabel(site)}（撤销可恢复）` } });
   }
@@ -428,12 +488,45 @@ export class RepairController {
     if (!edge) { this.set({ message: { kind: "warn", text: "这里没有道路可擦" } }); return; }
     const result = this.deps.dropEdge(edge.id);
     if (!result.ok) {
-      const text = result.blockers?.length ? `不能擦：${result.blockers.map(blockerText).join("；")}` : `不能擦：${result.reason}`;
-      this.set({ message: { kind: "error", text } });
+      this.set({ message: { kind: "error", text: failText("不能擦", result) } });
       return;
     }
     const warnings = result.warnings.map(warningText);
     this.set({ message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已擦掉一段路（${warnings.join("；")}）` : "已擦掉一段路" } });
+    this.recomputePreview();
+  }
+
+  /** 擦掉刚搬走的地标在原址留下的断头接入路（面板按钮）。 */
+  eraseStranded(): void {
+    const { active, stranded } = this.state;
+    if (!active || !stranded.length) return;
+    const result = this.deps.dropEdges(stranded);
+    this.set({ stranded: [], message: result.ok ? { kind: "ok", text: `已擦掉原址的 ${stranded.length} 段接入路（撤销可恢复）` } : { kind: "error", text: failText("不能擦", result) } });
+    this.recomputePreview();
+  }
+
+  // ── 路口 ────────────────────────────────────────────────────────────────
+
+  private clickNode(ground: Vec2 | null): void {
+    if (!ground) return;
+    this.lastGround = ground;
+    const node = this.state.dragNode;
+    if (!node) {
+      const near = this.deps.nodeAt(ground.x, ground.z);
+      if (!near) { this.set({ message: { kind: "warn", text: "这里没有路口——把鼠标移到路口上（蓝色圆环）再点" } }); return; }
+      if (near.locked) { this.set({ message: { kind: "error", text: `这个路口不能拖：${blockerText("locked-edge")}` } }); return; }
+      this.set({ dragNode: near, message: { kind: "hint", text: `已拿起路口（连着 ${near.edges.length} 段路）：移动鼠标预览，再点一下放下；Esc 放回原处` } });
+      this.recomputePreview();
+      return;
+    }
+    const result = this.deps.moveNode(node.id, ground.x, ground.z);
+    if (!result.ok) {
+      if (result.blockers?.[0] === "unchanged") { this.set({ dragNode: null, message: HINT.node }); this.recomputePreview(); return; }
+      this.set({ message: { kind: "error", text: failText("不能放在这里", result) } });
+      return;
+    }
+    const warnings = result.warnings.map(warningText);
+    this.set({ dragNode: null, message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已移动路口（${warnings.join("；")}）` : "已移动路口" } });
     this.recomputePreview();
   }
 
@@ -454,7 +547,9 @@ export class RepairController {
       this.select(buildingId, message);
       return;
     }
-    // 路网变了：起点可能已不在路上（被撤销/擦掉）——保留坐标，预览按新路网重算；
+    // 路网变了：拿在手上的路口可能已不存在（id 随坐标变）——放下；画路起点保留坐标，预览按新路网重算。
+    if (tool === "node" && this.state.dragNode) this.set({ dragNode: null });
+    if (this.state.stranded.length) this.set({ stranded: [] });
     if (message) this.set({ message });
     this.recomputePreview();
   }

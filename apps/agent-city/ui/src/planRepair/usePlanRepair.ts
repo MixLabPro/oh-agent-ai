@@ -10,18 +10,20 @@ import type { CityEngine } from "../engine/CityEngine";
 import type { PlanIssue } from "../engine/planAudit";
 import { RepairController, type RepairState, type RepairTool, type RoadWidth } from "./controller";
 import { ParcelOverlay, type OverlayMarker, type OverlayRibbon, type OverlaySiteMark } from "./overlay";
-import { installPlanRepairDebug, planDevEnabled, type PlanRepairSession } from "./session";
+import { installPlanRepairDebug, planDevEnabled, type PlanRect, type PlanRepairSession } from "./session";
 
 export type RepairInfo = {
   counts: { buildingMoves: number; roadOps: number; roadAdds: number; roadDrops: number; siteOps: number; suppressedContext: number } | null;
   staleCount: number;
+  /** 补丁写于更小的档位（城市随数据增长扩大过）：整份失效。 */
+  tierChanged: boolean;
   canUndo: boolean;
   canRedo: boolean;
   saveFailed: boolean;
 };
 
-const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, roadWidth: 5, preview: null, message: null };
-const NO_INFO: RepairInfo = { counts: null, staleCount: 0, canUndo: false, canRedo: false, saveFailed: false };
+const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadWidth: 5, preview: null, message: null };
+const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, canUndo: false, canRedo: false, saveFailed: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
   const enabled = planDevEnabled();
@@ -38,7 +40,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     const session = installed.current?.session;
     if (!session) return;
     const status = session.status();
-    setInfo({ counts: status.counts, staleCount: status.stale.length, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed });
+    setInfo({ counts: status.counts, staleCount: status.stale.length, tierChanged: status.tierChanged, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed });
     if (auditOpen.current) setIssues(session.audit());
   }, []);
 
@@ -62,6 +64,12 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         addRoad: (from, to, width) => session.addRoad(from, to, width),
         validateDrop: (id) => session.validateDrop(id),
         dropEdge: (id) => session.dropEdge(id),
+        dropEdges: (ids) => session.dropEdges(ids),
+        nodeAt: (x, z) => session.nodeAt(x, z),
+        validateMove: (id, x, z) => session.validateMove(id, x, z),
+        moveNode: (id, x, z) => session.moveNode(id, x, z),
+        buildingGhost: (id, x, z) => session.buildingGhost(id, x, z),
+        siteGhost: (site, x, z) => session.siteGhost(site, x, z),
         pickSite: (ray) => session.pickSite(ray),
         siteById: (id) => session.siteById(id),
         siteTargets: (site) => session.siteTargets(site),
@@ -112,7 +120,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if ((event.key === "Delete" || event.key === "Backspace") && controller.snapshot.tool === "site" && controller.snapshot.site) { event.preventDefault(); controller.removeSelected(); syncInfo(); return; }
-      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase", s: "site" };
+      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase", s: "site", n: "node" };
       if (tool[event.key.toLowerCase()]) { event.preventDefault(); controller.setTool(tool[event.key.toLowerCase()]); }
     };
     window.addEventListener("keydown", onKey);
@@ -127,7 +135,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     };
   }, [state.active]);
 
-  // 工具 → 光标：画路/橡皮擦用十字，选择用默认。
+  // 工具 → 光标：画路/橡皮擦/路口用十字，选择用默认。
   useEffect(() => { if (state.active) engine.current?.setCursor(state.tool === "build" ? "" : "crosshair"); }, [state.active, state.tool]);
 
   // 候选 / 预览 / 起点变化 → 刷新叠加层（贴在地形高度上）。
@@ -143,16 +151,29 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     })));
     const marks: OverlaySiteMark[] = [];
     if (state.preview?.kind === "site") marks.push({ ...state.preview.rect, y: Math.max(0, heightAt(state.preview.rect.x, state.preview.rect.z)), tone: "hover" });
-    if (state.site) marks.push({ x: state.site.x, z: state.site.z, yaw: state.site.yaw, width: state.site.width, depth: state.site.depth, y: Math.max(0, heightAt(state.site.x, state.site.z)), tone: "selected" });
-    overlay.setSiteMarks(marks);
-    const ribbons: OverlayRibbon[] = []; const markers: OverlayMarker[] = [];
+    if (state.site) marks.push({ x: state.site.x, z: state.site.z, yaw: state.site.yaw, width: state.site.width, depth: state.site.depth, round: state.site.level === "free", y: Math.max(0, heightAt(state.site.x, state.site.z)), tone: "selected" });
+    const mark = (rect: PlanRect, tone: OverlaySiteMark["tone"]): OverlaySiteMark => ({ ...rect, y: Math.max(0, heightAt(rect.x, rect.z)), tone });
     const { preview, drawStart } = state;
+    if (preview?.kind === "ghost") marks.push(mark(preview.rect, preview.ok ? "ghost-ok" : "ghost-bad"));
+    const ribbons: OverlayRibbon[] = []; const markers: OverlayMarker[] = [];
+    // 道路编辑的后果（推土机试算）：推平红、安置琥珀（原址 → 新家连线）、无处安置深红。
+    const impact = preview?.kind === "draw" || preview?.kind === "node" ? preview.impact : null;
+    if (impact && preview && "ok" in preview && preview.ok) {
+      for (const rect of impact.bulldozed) marks.push(mark(rect, "doomed"));
+      for (const { from, to } of impact.relocated) { marks.push(mark(from, "relocate-from"), mark(to, "relocate-to")); ribbons.push({ points: [from, to], width: 0.8, tone: "link" }); }
+      for (const rect of impact.homeless) marks.push(mark(rect, "homeless"));
+    }
+    overlay.setSiteMarks(marks);
+    const hasImpact = !!impact && (impact.bulldozed.length > 0 || impact.relocated.length > 0 || impact.homeless.length > 0);
     if (preview?.kind === "erase") ribbons.push({ points: preview.points, width: preview.width, tone: preview.ok ? "erase" : "erase-blocked" });
-    if (preview?.kind === "draw") { ribbons.push({ points: [preview.from, preview.to], width: preview.width, tone: !preview.ok ? "draw-blocked" : preview.warning && /推平|安置/.test(preview.warning) ? "draw-warn" : "draw" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
+    if (preview?.kind === "draw") { ribbons.push({ points: [preview.from, preview.to], width: preview.width, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
+    if (preview?.kind === "node") { for (const edge of preview.edges) ribbons.push({ points: edge.points, width: edge.width, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" }); markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" }); }
+    if (preview?.kind === "node-hover") markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" });
+    if (state.dragNode) markers.push({ x: state.dragNode.x, z: state.dragNode.z, tone: "start" });
     if (preview?.kind === "snap") markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" });
     if (drawStart) markers.push({ x: drawStart.x, z: drawStart.z, tone: "start" });
     overlay.setPreview(ribbons, markers, heightAt);
-  }, [state.candidates, state.siteTargets, state.site, state.preview, state.drawStart, state.active, state.tool]);
+  }, [state.candidates, state.siteTargets, state.site, state.preview, state.drawStart, state.dragNode, state.active, state.tool]);
 
   useEffect(() => () => {
     controllerRef.current?.exit();
@@ -171,6 +192,8 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     exit: () => { auditOpen.current = false; setIssues(null); controllerRef.current?.exit(); },
     setTool: (tool: RepairTool) => withSession((_s, controller) => controller.setTool(tool)),
     removeSelected: () => withSession((_s, controller) => controller.removeSelected()),
+    eraseStranded: () => withSession((_s, controller) => controller.eraseStranded()),
+    pruneStale: () => withSession((session, controller) => { if (session.pruneStale()) controller.refresh({ kind: "ok", text: "已清除失效的修改（撤销可恢复）" }); }),
     setRoadWidth: (width: RoadWidth) => withSession((_s, controller) => controller.setRoadWidth(width)),
     undo: () => withSession((session, controller) => { if (session.undo()) controller.refresh({ kind: "ok", text: "已撤销" }); }),
     redo: () => withSession((session, controller) => { if (session.redo()) controller.refresh({ kind: "ok", text: "已重做" }); }),

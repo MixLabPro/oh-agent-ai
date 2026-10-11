@@ -8,12 +8,13 @@
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, type PlanIssue } from "../engine/planAudit";
-import { appendRoadOp, appendSiteOp, emptyPlanPatch, validateBuildingMove, type PlanPatchV1 } from "../engine/planPatch";
-import { listSites, pickSite, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
+import { appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, hashPlanPatch, pruneStalePatch, validateBuildingMove, type PlanPatchV1, type RoadOp } from "../engine/planPatch";
+import { listSites, parseFreeTarget, pickSite, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
+import { accessRoadFor, strandedAccessEdges } from "../engine/planAccess";
 import type { RepairRay } from "../engine/CityEngine";
 import { bulldozeForRoads } from "../engine/planBulldozer";
 import { nearestEdgeAt, snapPoint, validateEdgeDrop, validateNodeMove, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
-import type { Vec2 } from "../engine/cityLayout";
+import type { CityLayout, Parcel, Vec2 } from "../engine/cityLayout";
 import { cityPlanPatchStore, emptyPlanPatchStore, type PlanPatchStoreV1 } from "../data/planPatch";
 
 export function planDevEnabled(): boolean {
@@ -26,7 +27,17 @@ export type RepairCandidate = { parcelId: string; x: number; z: number; yaw: num
 
 export type EditResult = { ok: true; patch: PlanPatchV1; warnings: string[] } | { ok: false; reason: string; blockers?: string[] };
 /** 设施搬家后 id 可能变（背景楼的 id 由地块决定），成功时带回新 id 供编辑器重新选中。 */
-export type SiteEditResult = EditResult & { siteId?: string };
+export type SiteEditResult = EditResult & { siteId?: string; strandedEdges?: string[] };
+
+/** 平面矩形（叠加层画标记用）。round：圆形占地（自由级设施），按外接圆画。 */
+export type PlanRect = { x: number; z: number; yaw: number; width: number; depth: number; round?: boolean };
+/** 道路编辑的确切后果（推土机试算，和确认后实际发生的一致）。 */
+export type ImpactPreview = { bulldozed: PlanRect[]; relocated: Array<{ from: PlanRect; to: PlanRect }>; homeless: PlanRect[] };
+export type RoadPreview = RoadVerdict & { impact?: ImpactPreview };
+/** 选中建筑后悬停的落位试算：目标占地 + 能不能放。 */
+export type PlacementGhost = { targetId: string; rect: PlanRect; blockers: string[]; warnings: string[] };
+/** 路口工具点选的路口：位置与关联路段（预览时把朝向它的一端换成鼠标位置）。 */
+export type NodeHandle = { id: string; x: number; z: number; locked: boolean; edges: Array<{ points: Vec2[]; width: number; atStart: boolean }> };
 
 const UNDO_LIMIT = 100;
 const SAVE_DEBOUNCE_MS = 400;
@@ -39,6 +50,7 @@ export class PlanRepairSession {
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private saveFailed = false;
   private loadTicket = 0;
+  private dryRunMemo: { key: string; preview: RoadPreview } | null = null;
 
   constructor(private readonly engine: CityEngine) {}
 
@@ -173,9 +185,31 @@ export class PlanRepairSession {
     if (!base.ok) return base;
     const problem = siteMoveProblem(this.engine.currentLayout!, site, targetId, base.patch.suppressedContext);
     if (problem) return { ok: false, reason: "blocked", blockers: [problem] };
-    const patch = appendSiteOp(base.patch, { t: "move", id: site.id, at: { x: site.x, z: site.z }, to: targetId });
+    let patch = appendSiteOp(base.patch, { t: "move", id: site.id, at: { x: site.x, z: site.z }, to: targetId });
+    if (site.level !== "free") {
+      this.commit(patch);
+      return { ok: true, patch, warnings: [], siteId: site.kind === "context" ? `context:${targetId}` : site.id };
+    }
+    // 自由级（地标/市政用地）：新位置补一条接入路（同一步撤销），并列出原址留下的断头接入路供一键擦掉（SPEC §16.3）。
+    const generated = this.engine.generatedLayout; const model = this.engine.currentModel!;
+    const before = this.engine.currentLayout!;
+    const warnings: string[] = [];
+    let stranded: string[] = [];
+    if (generated) {
+      const at = parseFreeTarget(targetId)!;
+      const moved = applyPlanPatch(generated, patch).layout;
+      const road = accessRoadFor(moved, model, at, site.width / 2);
+      if (road) { patch = appendRoadOp(patch, { t: "add", from: road.from, to: road.to, width: 5 }); warnings.push(`access-road:${road.length}`); }
+      else if (!touchesRoad(moved, at, site.width / 2)) warnings.push("no-access-road");
+      const after = road ? applyPlanPatch(generated, patch).layout : moved;
+      const accessNode = (before.landmarks ?? []).find((landmark) => landmark.id === site.id)?.access?.nodeId
+        ?? (before.publicSites ?? []).find((public_) => `public:${public_.id}` === site.id)?.access?.nodeId;
+      // 只列编辑前就存在的路段：新补的接入路（以及它拆开的路段）不算原址遗留。
+      const existing = new Set(moved.roadEdges.map((edge) => edge.id));
+      stranded = strandedAccessEdges(after, { x: site.x, z: site.z }, site.width / 2, accessNode, existing);
+    }
     this.commit(patch);
-    return { ok: true, patch, warnings: [], siteId: site.kind === "context" ? `context:${targetId}` : site.id };
+    return { ok: true, patch, warnings, siteId: site.id, strandedEdges: stranded };
   }
 
   removeSite(site: SiteInfo): EditResult {
@@ -218,9 +252,113 @@ export class PlanRepairSession {
     return layout && model ? validateEdgeDrop(layout, model, edgeId) : { blockers: ["city-not-ready"], warnings: [] };
   }
 
-  validateAdd(from: Vec2, to: Vec2, width: number): RoadVerdict {
+  validateAdd(from: Vec2, to: Vec2, width: number): RoadPreview {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
-    return layout && model ? validateRoadAdd(layout, model, from, to, width) : { blockers: ["city-not-ready"], warnings: [] };
+    if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
+    return this.dryRun({ t: "add", from, to, width }, validateRoadAdd(layout, model, from, to, width));
+  }
+
+  /** 推土机试算：把这一笔道路操作连同推平/安置算一遍但不提交。悬停每动一下都会调用，按（补丁, 操作）记住上一次结果。 */
+  private dryRun(op: RoadOp, verdict: RoadVerdict): RoadPreview {
+    if (verdict.blockers.length || !verdict.warnings.some((code) => code.startsWith("bulldoze:") || code.startsWith("relocate:"))) return verdict;
+    const generated = this.engine.generatedLayout; const before = this.engine.currentLayout; const model = this.engine.currentModel;
+    const base = this.working();
+    if (!generated || !before || !model || !base.ok) return verdict;
+    const key = `${hashPlanPatch(base.patch)}|${JSON.stringify(op)}`;
+    if (this.dryRunMemo?.key === key) return this.dryRunMemo.preview;
+    const result = bulldozeForRoads(generated, model, before, appendRoadOp(base.patch, op));
+    const sites = new Map(listSites(before).map((site) => [site.id, site]));
+    const slots = new Map(before.districts.flatMap((district) => [...district.slots]));
+    const buildings = new Map(model.buildings.map((building) => [building.id, building]));
+    const rectOfSite = (id: string): PlanRect | null => { const site = sites.get(id); return site ? { x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth, round: site.level === "free" } : null; };
+    const rectOfBuilding = (id: string): PlanRect | null => { const slot = slots.get(id); const building = buildings.get(id); return slot && building ? buildingRect(building, slot) : null; };
+    const parcels = new Map(before.blocks.flatMap((block) => block.parcels).map((parcel) => [parcel.id, parcel]));
+    const impact: ImpactPreview = {
+      bulldozed: result.bulldozed.map(rectOfSite).filter((rect): rect is PlanRect => !!rect),
+      relocated: result.relocated.flatMap(({ id, to }) => { const from = rectOfBuilding(id); const parcel = parcels.get(to); return from && parcel ? [{ from, to: { x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: parcel.width, depth: parcel.depth } }] : []; }),
+      homeless: result.homeless.map(rectOfBuilding).filter((rect): rect is PlanRect => !!rect),
+    };
+    // 预估计数（roadImpact 按悬停时的布局数，含生成器残余、不知道安置链会腾出地方）换成试算的确切数字。
+    const warnings = [
+      ...verdict.warnings.filter((code) => !code.startsWith("bulldoze:") && !code.startsWith("relocate:")),
+      ...(result.bulldozed.length ? [`bulldoze:${result.bulldozed.length}`] : []),
+      ...(result.relocated.length ? [`relocate:${result.relocated.length}`] : []),
+      ...(result.homeless.length ? [`homeless-risk:${result.homeless.length}`] : []),
+    ];
+    const preview = { blockers: verdict.blockers, warnings, impact };
+    this.dryRunMemo = { key, preview };
+    return preview;
+  }
+
+  /** 拖路口的悬停校验（含推土机试算）。 */
+  validateMove(nodeId: string, x: number, z: number): RoadPreview {
+    const layout = this.engine.currentLayout; const model = this.engine.currentModel;
+    if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
+    return this.dryRun({ t: "move", node: nodeId, to: { x, z } }, validateNodeMove(layout, model, nodeId, { x, z }));
+  }
+
+  /** 地面点附近（radius 内）最近的路口。 */
+  nodeAt(x: number, z: number, radius = 10): NodeHandle | null {
+    const layout = this.engine.currentLayout;
+    if (!layout) return null;
+    let best: { id: string; x: number; z: number; d: number } | null = null;
+    for (const node of layout.roadNodes) {
+      const d = Math.hypot(node.x - x, node.z - z);
+      if (d <= radius && (!best || d < best.d)) best = { id: node.id, x: node.x, z: node.z, d };
+    }
+    if (!best) return null;
+    const id = best.id;
+    const incident = layout.roadEdges.filter((edge) => edge.from === id || edge.to === id);
+    if (!incident.length) return null;
+    return { id, x: best.x, z: best.z, locked: incident.some(edgeLocked), edges: incident.map((edge) => ({ points: edge.points, width: edge.width, atStart: edge.from === id })) };
+  }
+
+  /** 选中会话楼后悬停：最近地块的落位试算。 */
+  buildingGhost(buildingId: string, x: number, z: number): PlacementGhost | null {
+    const layout = this.engine.currentLayout; const model = this.engine.currentModel;
+    const parcel = layout ? this.nearestParcelInfo(x, z) : null;
+    if (!layout || !model || !parcel) return null;
+    const building = model.buildings.find((candidate) => candidate.id === buildingId);
+    const rect = building ? buildingRect(building, parcel) : { x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: parcel.width, depth: parcel.depth };
+    if (parcel.id === this.parcelOf(buildingId)) return { targetId: parcel.id, rect, blockers: ["unchanged"], warnings: [] };
+    const verdict = validateBuildingMove(layout, model, this.engine.planPatch ?? emptyPlanPatch(layout.seed, layout.scaleTier), buildingId, parcel.id);
+    return { targetId: parcel.id, rect, blockers: verdict.blockers, warnings: verdict.warnings };
+  }
+
+  /** 选中设施后悬停：目标街区/地块/空地的落位试算。 */
+  siteGhost(site: SiteInfo, x: number, z: number): PlacementGhost | null {
+    const layout = this.engine.currentLayout;
+    if (!layout) return null;
+    const targetId = this.siteTargetAt(site, x, z);
+    if (!targetId) return null;
+    let rect: PlanRect | null = null;
+    if (site.level === "free") { const at = parseFreeTarget(targetId)!; rect = { x: at.x, z: at.z, yaw: site.yaw, width: site.width, depth: site.depth, round: true }; }
+    else if (site.level === "block") { const block = layout.blocks.find((candidate) => candidate.id === targetId); if (block) rect = { x: block.x, z: block.z, yaw: block.parcels[0]?.yaw ?? 0, width: block.width, depth: block.depth }; }
+    else { const parcel = layout.blocks.flatMap((block) => block.parcels).find((candidate) => candidate.id === targetId); if (parcel) rect = { x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: site.width, depth: site.depth }; }
+    if (!rect) return null;
+    const problem = siteMoveProblem(layout, site, targetId, this.engine.planPatch?.suppressedContext ?? []);
+    return { targetId, rect, blockers: problem ? [problem] : [], warnings: [] };
+  }
+
+  /** 一次擦掉几段路（搬走地标后原址的断头接入路）——同一步撤销。 */
+  dropEdges(edgeIds: readonly string[]): EditResult {
+    const base = this.working();
+    if (!base.ok) return base;
+    const layout = this.engine.currentLayout!;
+    const ids = edgeIds.filter((id) => { const edge = layout.roadEdges.find((candidate) => candidate.id === id); return !!edge && !edgeLocked(edge); });
+    if (!ids.length) return { ok: false, reason: "blocked", blockers: ["missing-edge"] };
+    let patch = base.patch;
+    for (const id of ids) patch = appendRoadOp(patch, { t: "drop", edge: id });
+    this.commit(patch);
+    return { ok: true, patch, warnings: [] };
+  }
+
+  /** 清除失效修改（含跨档整份失效）。可撤销。 */
+  pruneStale(): boolean {
+    const patch = this.engine.planPatch; const stale = this.engine.planPatched?.stale ?? [];
+    if (!patch || !stale.length) return false;
+    this.commit(pruneStalePatch(patch, stale));
+    return true;
   }
 
   undo(): boolean {
@@ -282,6 +420,17 @@ export class PlanRepairSession {
     return best;
   }
 
+  /** 同 nearestParcel，但带回地块的朝向与尺寸（落位试算画占地用）。 */
+  private nearestParcelInfo(x: number, z: number, radius = 14): Parcel | null {
+    const layout = this.engine.currentLayout;
+    if (!layout) return null;
+    let best: Parcel | null = null; let bestD = radius;
+    const consider = (parcel: Parcel) => { const d = Math.hypot(parcel.x - x, parcel.z - z); if (d < bestD) { bestD = d; best = parcel; } };
+    for (const block of layout.blocks) for (const parcel of block.parcels) consider(parcel);
+    for (const district of layout.districts) for (const parcel of district.slots.values()) consider(parcel);
+    return best;
+  }
+
   /** 全城布局级体检（含补丁失效条目）。 */
   audit(): PlanIssue[] {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
@@ -295,6 +444,7 @@ export class PlanRepairSession {
     return {
       ready: !!layout, seed: layout?.seed ?? null, cityTier: layout?.scaleTier ?? null, patchTier: patch?.scaleTier ?? null,
       patch, stale: this.engine.planPatched?.stale ?? [], saveFailed: this.saveFailed,
+      tierChanged: !!patch && !!layout && patch.scaleTier !== layout.scaleTier,
       canUndo: this.undoStack.length > 0, canRedo: this.redoStack.length > 0,
       counts: patch ? { buildingMoves: Object.keys(patch.buildingMoves).length, roadOps: patch.roadOps.length, roadAdds: patch.roadOps.filter((op) => op.t === "add").length, roadDrops: patch.roadOps.filter((op) => op.t === "drop").length, siteOps: patch.siteOps.length, suppressedContext: patch.suppressedContext.length } : null,
     };
@@ -303,6 +453,16 @@ export class PlanRepairSession {
   dispose(): void {
     clearTimeout(this.saveTimer);
   }
+}
+
+/** 圆形占地（中心 at、半径 r）是否已经挨着地面路（间隙 ≤ 6）。 */
+function touchesRoad(layout: CityLayout, at: Vec2, r: number): boolean {
+  return layout.roadEdges.some((edge) => !edge.bridge && edge.points.some((p, i) => {
+    if (!i) return false;
+    const a = edge.points[i - 1]; const dx = p.x - a.x; const dz = p.z - a.z; const l2 = dx * dx + dz * dz || 1;
+    const t = Math.max(0, Math.min(1, ((at.x - a.x) * dx + (at.z - a.z) * dz) / l2));
+    return Math.hypot(at.x - a.x - dx * t, at.z - a.z - dz * t) - r <= 6 + edge.width / 2;
+  }));
 }
 
 declare global {

@@ -6,7 +6,10 @@
 //   (c) 致敬地标与市政用地：可拆除、可搬到任意空地（free 级，目标 "@x,z"）；圆内地形/道路/建筑检查；
 //       唯一锁定的是悬索桥（不是建筑，是桥面）；海上地标与港口也可以动（用户拍板「所有建筑都可以移动」）；
 //   (d) 搬走的地标会让它圆内的地块算占用，会话楼不能被搬进去；
-//   (e) 真实城市：画一条横穿城区的路，推平与安置后补丁干净重放、没有会话楼仍压在新路上（除非 homeless）。
+//   (e) 真实城市：画一条横穿城区的路，推平与安置后补丁干净重放、没有会话楼仍压在新路上（除非 homeless）；
+//       搬一座地标并补接入路，干净重放（SPEC §16.3）；
+//   (f) 接入路：新位置离路远就补一条最短的、不推平不安置的接入路；挨着路不补；原址断头接入路沿单行链列出，到岔路口为止；
+//   (g) 清除失效修改：只删失效条目，其余重放结果不变；跨档整份失效 → 空补丁。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
@@ -14,9 +17,11 @@ globalThis.window ??= globalThis;
 const {
   bulldozeForRoads, freshRoadGeometry, applyPlanPatch, emptyPlanPatch, appendRoadOp, appendSiteOp, listSites, siteMoveProblem, reservedParcelIds,
   validateRoadAdd, rectClearOfEdges, buildingRect, buildCityModel, layoutCity, MIAMI_COASTAL,
+  accessRoadFor, strandedAccessEdges, pruneStalePatch,
 } = await loadCity({
+  "engine/planAccess.ts": ["accessRoadFor", "strandedAccessEdges"],
   "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry"],
-  "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect"],
+  "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch"],
   "engine/planSites.ts": ["listSites", "siteMoveProblem"],
   "engine/planRoadRules.ts": ["validateRoadAdd"],
   "cityModel.ts": ["buildCityModel"],
@@ -147,6 +152,63 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   }
 }
 
+// (f) 接入路与原址断头路。主路拆成 0:0–60:0–300:0，摩天轮 (60,-80) 的接入点是断头路口 60:-60（经 60:-60/60:0 接主路）。
+{
+  const base = makeLayout();
+  base.roadNodes = [{ id: "0:0", x: 0, z: 0 }, { id: "60:0", x: 60, z: 0 }, { id: "300:0", x: 300, z: 0 }, { id: "60:-60", x: 60, z: -60 }];
+  base.roadEdges = [edge("0:0", "60:0"), edge("60:0", "300:0"), edge("60:-60", "60:0")];
+  base.landmarks[0] = { ...base.landmarks[0], access: { role: "plot-gate", nodeId: "60:-60", ownerX: 60, ownerZ: -80, ownerYaw: 0 } };
+  const wheel = listSites(base).find((s) => s.id === "landmark:ferris-wheel");
+  // 搬到 (200,-60)：离主路 60 → 补接入路；原址那截断头路留下。
+  const target = "@200,-60";
+  assert.equal(siteMoveProblem(base, wheel, target), null);
+  const movedPatch = appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: target }, 1);
+  const moved = applyPlanPatch(base, movedPatch).layout;
+  const road = accessRoadFor(moved, model, { x: 200, z: -60 }, wheel.width / 2);
+  assert.ok(road, "a site moved away from roads gets an access road");
+  assert.equal(road.to.z, 0, "…ending on the main road");
+  assert.ok(Math.abs(road.to.x - 200) < 1, "…at the nearest point");
+  assert.ok(Math.hypot(road.from.x - 200, road.from.z + 60) >= wheel.width / 2 * Math.SQRT2, "…starting outside the site's own square footprint (else it would 'bulldoze' itself)");
+  const withRoad = appendRoadOp(movedPatch, { t: "add", from: road.from, to: road.to, width: 5 }, 2);
+  const after = applyPlanPatch(base, withRoad);
+  assert.equal(after.stale.length, 0, "move + access road replay cleanly");
+  assert.equal(bulldozeForRoads(base, model, moved, withRoad).bulldozed.length, 0, "the access road bulldozes nothing (else it would not have been offered)");
+  const stranded = strandedAccessEdges(after.layout, { x: 60, z: -80 }, wheel.width / 2, "60:-60", new Set(moved.roadEdges.map((e) => e.id)));
+  assert.deepEqual(stranded, ["60:-60/60:0"], "the old dead-end access road is listed, and the walk stops at the junction with the main road");
+  // 挨着路：不补。
+  const close = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@200,-22" }, 1)).layout;
+  assert.equal(accessRoadFor(close, model, { x: 200, z: -22 }, wheel.width / 2), null, "a site already beside a road gets no extra road");
+  // 搬到旧接入路旁：接入路接到断头路口上，它不再是断头路——不列为遗留。
+  const reuse = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@60,-110" }, 1)).layout;
+  const reuseRoad = accessRoadFor(reuse, model, { x: 60, z: -110 }, wheel.width / 2);
+  assert.ok(reuseRoad && Math.hypot(reuseRoad.to.x - 60, reuseRoad.to.z + 60) < 1, "moving next to the old access road reuses its dead end");
+  const reused = applyPlanPatch(base, appendRoadOp(appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@60,-110" }, 1), { t: "add", from: reuseRoad.from, to: reuseRoad.to, width: 5 }, 2)).layout;
+  assert.deepEqual(strandedAccessEdges(reused, { x: 60, z: -80 }, wheel.width / 2, "60:-60", new Set(reuse.roadEdges.map((e) => e.id))), [], "…and it is no longer a leftover (the new road's own end does not start a walk into it)");
+  // 远到 160 以外没有路：不补，交给用户画。
+  const far = { ...base, roadNodes: [{ id: "0:0", x: 0, z: 0 }, { id: "60:0", x: 60, z: 0 }], roadEdges: [edge("0:0", "60:0")] };
+  assert.equal(accessRoadFor(far, model, { x: 300, z: -120 }, 18), null, "no road within reach → none is invented");
+}
+
+// (g) 清除失效修改。
+{
+  const base = makeLayout();
+  let patch = appendSiteOp(fresh(), { t: "move", id: "landmark:ferris-wheel", at: { x: 60, z: -80 }, to: "@60,-100" }, 1);
+  patch = appendSiteOp(patch, { t: "remove", id: "civic:9", at: { x: 0, z: 0 } }, 2);
+  patch = appendRoadOp(patch, { t: "drop", edge: "nope/nope" }, 3);
+  patch = appendRoadOp(patch, { t: "add", from: { x: 110, z: -40 }, to: { x: 110, z: -10 }, width: 5 }, 4);
+  patch = { ...patch, buildingMoves: { b1: "a7", ghost: "a8" } };
+  const before = applyPlanPatch(base, patch);
+  assert.equal(before.stale.length, 3, `three stale entries — ${before.stale.map((s) => s.id)}`);
+  const pruned = pruneStalePatch(patch, before.stale, 9);
+  assert.equal(pruned.siteOps.length, 1); assert.equal(pruned.roadOps.length, 1); assert.deepEqual(Object.keys(pruned.buildingMoves), ["b1"]);
+  const after = applyPlanPatch(base, pruned);
+  assert.equal(after.stale.length, 0, "nothing stale remains");
+  const shape = (l) => JSON.stringify({ e: l.roadEdges.map((e) => e.id).sort(), lm: l.landmarks.map((x) => [x.id, x.x, x.z]), s: [...l.districts[0].slots].map(([k, v]) => [k, v.id]) });
+  assert.equal(shape(after.layout), shape(before.layout), "pruning stale entries does not change what the rest of the patch does");
+  assert.equal(pruneStalePatch({ ...patch, scaleTier: 2 }, [{ kind: "road-add", id: "1:add", reason: "tier-changed", detail: "" }]), null, "a tier-changed patch prunes to nothing");
+  assert.equal(pruneStalePatch(patch, []), patch, "no stale entries → unchanged");
+}
+
 // (e) 真实城市：一条横穿城区的路。
 {
   const HARNESSES = ["codex", "claude-code", "dsh", "harness:zcode"];
@@ -189,6 +251,32 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   assert.deepEqual(stillOnRoad.map(([id]) => id), [], "no re-homed session building is left under the new road");
   assert.equal(applied.layout.districts.reduce((n, d) => n + d.slots.size, 0), layout.districts.reduce((n, d) => n + d.slots.size, 0), "no session building disappears");
   console.log(`  真实城市 380 楼：横穿城区的新路 ${chosen.verdict.warnings.join("、")} → 推平 ${result.bulldozed.length}、安置 ${result.relocated.length}、无处安置 ${result.homeless.length}；推土机耗时 ${ms}ms`);
+
+  // 搬一座地标到 60~200 外的空地并补接入路：补丁干净重放、接入路不推平任何东西。
+  const landmarks = listSites(layout).filter((site) => site.level === "free" && !site.locked);
+  let movedOne = null;
+  for (const site of landmarks) {
+    for (let k = 0; k < 24 && !movedOne; k += 1) {
+      const ang = (k * Math.PI) / 12; const dist = 60 + (k % 3) * 60;
+      const target = `@${Math.round((site.x + Math.cos(ang) * dist) * 100) / 100},${Math.round((site.z + Math.sin(ang) * dist) * 100) / 100}`;
+      if (siteMoveProblem(layout, site, target)) continue;
+      const patch = appendSiteOp(emptyPlanPatch(layout.seed, layout.scaleTier), { t: "move", id: site.id, at: { x: site.x, z: site.z }, to: target }, 1);
+      const movedLayout = applyPlanPatch(layout, patch).layout;
+      const at = { x: Number(target.slice(1).split(",")[0]), z: Number(target.split(",")[1]) };
+      const t1 = performance.now();
+      const road = accessRoadFor(movedLayout, real, at, site.width / 2);
+      const accessMs = Math.round(performance.now() - t1);
+      if (!road) continue;
+      const full = appendRoadOp(patch, { t: "add", from: road.from, to: road.to, width: 5 }, 2);
+      const replay = applyPlanPatch(layout, full);
+      assert.equal(replay.stale.length, 0, `real-city landmark move + access road replay cleanly — ${JSON.stringify(replay.stale)}`);
+      assert.equal(bulldozeForRoads(layout, real, movedLayout, full).bulldozed.length, 0, "the access road bulldozes nothing");
+      movedOne = { site: site.id, target, length: road.length, accessMs };
+    }
+    if (movedOne) break;
+  }
+  assert.ok(movedOne, "some landmark can be moved and given an access road in the real city");
+  console.log(`  真实城市：${movedOne.site} → ${movedOne.target}，补接入路 ${movedOne.length}（求路耗时 ${movedOne.accessMs}ms）`);
 }
 
-console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; real-city cross-town road replays cleanly.");
+console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; moved sites get a non-destructive access road and their old dead-end access road is listed; pruning stale entries leaves the rest unchanged; real-city cross-town road and landmark move replay cleanly.");

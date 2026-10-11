@@ -184,6 +184,29 @@ export function appendSiteOp(patch: PlanPatchV1, op: SiteOp, now = Date.now()): 
   return { ...patch, updatedAt: now, siteOps: [...patch.siteOps, op] };
 }
 
+/**
+ * 删掉已失效的条目（用户在面板上点「清除失效修改」）。失效条目重放时本来就没生效（道路/设施操作先在试算副本上跑，
+ * 失败即丢弃），删掉它们不改变其余条目的重放结果——后面的操作引用的是 id，不是序号。
+ * 跨档失效（tier-changed）是整份作废，清掉后等于空补丁，返回 null。
+ */
+export function pruneStalePatch(patch: PlanPatchV1, stale: readonly PatchStaleEntry[], now = Date.now()): PlanPatchV1 | null {
+  if (!stale.length) return patch;
+  if (stale.some((entry) => entry.reason === "tier-changed")) return null;
+  const roadLabels = new Set(stale.filter((entry) => entry.kind.startsWith("road-")).map((entry) => entry.id));
+  const siteLabels = new Set(stale.filter((entry) => entry.kind.startsWith("site-")).map((entry) => entry.id));
+  const buildings = new Set(stale.filter((entry) => entry.kind === "building-move").map((entry) => entry.id));
+  const contexts = new Set(stale.filter((entry) => entry.kind === "context-suppress").map((entry) => entry.id));
+  const next: PlanPatchV1 = {
+    ...patch, updatedAt: now,
+    roadOps: patch.roadOps.filter((op, index) => !roadLabels.has(`${index + 1}:${op.t}`)),
+    siteOps: patch.siteOps.filter((op, index) => !siteLabels.has(`${index + 1}:${op.t}`)),
+    buildingMoves: Object.fromEntries(Object.entries(patch.buildingMoves).filter(([id]) => !buildings.has(id))),
+    suppressedContext: patch.suppressedContext.filter((id) => !contexts.has(id)),
+  };
+  const empty = !next.roadOps.length && !next.siteOps.length && !Object.keys(next.buildingMoves).length && !next.suppressedContext.length;
+  return empty ? null : next;
+}
+
 /** 端点离已有路口这么近就接到路口上。 */
 export const SNAP_NODE_RADIUS = 1;
 /** 端点落在路段中间（离折线 ≤ 此值）就把该路段拆成两半。 */

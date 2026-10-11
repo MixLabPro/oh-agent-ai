@@ -12,6 +12,7 @@ const TOOLS: Array<{ id: RepairTool; label: string; key: string; hint: string }>
   { id: "build", label: "移动", key: "V", hint: "点选任意建筑，再点空地搬过去：会话楼搬到你选的地块，设施、地标、市政用地搬到任意空地" },
   { id: "draw", label: "画路", key: "R", hint: "点两下画一段路，可连续画" },
   { id: "erase", label: "橡皮擦", key: "E", hint: "点击红色高亮的路段擦掉" },
+  { id: "node", label: "路口", key: "N", hint: "点一个路口拿起来，再点一下放下：连着的路跟着走" },
   { id: "site", label: "设施", key: "S", hint: "编辑非会话建筑：公共设施、花园、地标、市政用地、背景楼——搬家或拆除" },
 ];
 const WIDTHS: Array<{ id: RoadWidth; label: string }> = [{ id: 5, label: "小路" }, { id: 8, label: "次干道" }];
@@ -29,7 +30,7 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
 
   if (!repair.enabled) return null;
   if (!state.active) {
-    return <button className="city-repair-entry" disabled={entryDisabled} onClick={repair.enter} title="修复规划：移楼、画路、橡皮擦（开发预览）">✎ 修复规划</button>;
+    return <button className="city-repair-entry" disabled={entryDisabled} onClick={repair.enter} title="修复规划：移动建筑、画路、橡皮擦、拖路口（开发预览）">✎ 修复规划</button>;
   }
 
   const counts = info.counts;
@@ -57,6 +58,13 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
     {state.tool === "draw" && <div className="city-repair-widths" role="radiogroup" aria-label="路宽">
       {WIDTHS.map((width) => <button key={width.id} role="radio" aria-checked={state.roadWidth === width.id} className={state.roadWidth === width.id ? "is-active" : ""} onClick={() => repair.setRoadWidth(width.id)}>{width.label}</button>)}
     </div>}
+    {info.tierChanged ? <div className="city-repair-banner" role="alert">
+      <p>城市已随会话数增长扩大了一档，地块和路口都重新排过——之前的 {info.staleCount} 处修改已全部失效，没有显示在地图上。</p>
+      <button onClick={repair.pruneStale}>清除失效修改</button>
+    </div> : info.staleCount > 0 && <div className="city-repair-banner city-repair-banner-soft">
+      <p>{info.staleCount} 处修改已失效（城市重算后对象不在了或位置变了），它们不起作用；点「体检」可逐条查看。</p>
+      <button onClick={repair.pruneStale}>清除失效修改</button>
+    </div>}
     {state.message && <p className={`city-repair-msg city-repair-${state.message.kind}`} role={state.message.kind === "error" ? "alert" : "status"}>{state.message.text}</p>}
     {previewReason && <p className="city-repair-reason">不可行：{previewReason}</p>}
     {previewNote && <p className="city-repair-note">注意：{previewNote}</p>}
@@ -66,6 +74,10 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
       <button onClick={repair.removeSelected} title="拆除选中的设施（Delete）">拆除</button>
     </div>}
     {state.tool === "site" && !state.site && state.preview?.kind === "site" && <p className="city-repair-sel">指向：{state.preview.label}（点击选中）</p>}
+    {state.stranded.length > 0 && <div className="city-repair-site">
+      <span>原址留下 {state.stranded.length} 段断头接入路</span>
+      <button onClick={repair.eraseStranded} title="一次擦掉，撤销可恢复">擦掉</button>
+    </div>}
     <p className="city-repair-status">
       {total === 0 ? "尚无修改" : `${total} 处修改`}
       {counts && total > 0 && `（${[counts.buildingMoves ? `移楼 ${counts.buildingMoves}` : "", counts.roadAdds ? `画路 ${counts.roadAdds}` : "", counts.roadDrops ? `擦路 ${counts.roadDrops}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `改路口 ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `改设施 ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}）`}
@@ -87,6 +99,6 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
         </li>)}</ul>
       </>}
     </div>}
-    <p className="city-repair-help">V 移动 · R 画路 · E 橡皮擦 · S 设施 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
+    <p className="city-repair-help">V 移动 · R 画路 · E 橡皮擦 · N 路口 · S 设施 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
   </section>;
 }

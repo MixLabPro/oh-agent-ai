@@ -186,3 +186,8 @@
 .city-repair-site { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .city-app .city-repair-site button { border-color: #ff8a7a; color: #ffd2cb; }
 .city-repair-note { color: #ffd98a; }
+.city-repair-tools { flex-wrap: wrap; }
+.city-repair-tools button { min-width: 0; }
+.city-repair-banner { display: grid; gap: 6px; padding: 8px; border-radius: 6px; border: 1px solid #ff8a7a88; background: #ff4d3d1f; color: #ffd2cb; }
+.city-repair-banner-soft { border-color: #ffd98a55; background: #ffd98a14; color: #ffd98a; }
+.city-repair-banner button { justify-self: start; }

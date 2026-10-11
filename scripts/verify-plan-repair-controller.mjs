@@ -21,7 +21,7 @@ import { loadCity } from "./city-kit/index.mjs";
 const { RepairController, blockerText } = await loadCity({ "planRepair/controller.ts": ["RepairController", "blockerText"] });
 
 function harness(overrides = {}) {
-  const log = { moves: [], selected: [], candidateCalls: [], adds: [], drops: [], siteMoves: [], siteRemoves: [] };
+  const log = { moves: [], selected: [], candidateCalls: [], adds: [], drops: [], siteMoves: [], siteRemoves: [], nodeMoves: [] };
   const buildings = new Set(["b1", "b2"]);
   const parcelOf = { b1: "p1", b2: "p2" };
   const cand = (parcelId, x) => ({ parcelId, x, z: 0, yaw: 0, width: 8, depth: 8, distance: 5, warnings: [] });
@@ -39,6 +39,17 @@ function harness(overrides = {}) {
     addRoad: (from, to, width) => { log.adds.push([from, to, width]); return deps.addResult ?? { ok: true, patch: {}, warnings: [] }; },
     validateDrop: (id) => (id === "bridge" ? { blockers: ["locked-edge"], warnings: [] } : (deps.dropVerdict ?? { blockers: [], warnings: [] })),
     dropEdge: (id) => { log.drops.push(id); return deps.dropResult ?? { ok: true, patch: {}, warnings: [] }; },
+    dropEdges: (ids) => { log.drops.push(...ids); return { ok: true, patch: {}, warnings: [] }; },
+    // 路口：(0,0)、(100,0) 两个路口；(-100,0) 的路口连着桥（锁定）。
+    nodeAt: (x, z) => {
+      const nodes = [{ id: "n0", x: 0, z: 0 }, { id: "n1", x: 100, z: 0 }, { id: "nb", x: -100, z: 0, locked: true }];
+      const hit = nodes.find((node) => Math.hypot(node.x - x, node.z - z) <= 10);
+      return hit ? { id: hit.id, x: hit.x, z: hit.z, locked: !!hit.locked, edges: [{ points: [{ x: hit.x, z: hit.z }, { x: hit.x + 50, z: 0 }], width: 5, atStart: true }] } : null;
+    },
+    validateMove: (id, x, z) => (deps.moveVerdict ?? { blockers: [], warnings: [] }),
+    moveNode: (id, x, z) => { log.nodeMoves.push([id, x, z]); return deps.moveNodeResult ?? { ok: true, patch: {}, warnings: [] }; },
+    buildingGhost: (id, x, z) => ({ targetId: "pG", rect: { x, z, yaw: 0, width: 8, depth: 8 }, blockers: x < 0 ? ["parcel-occupied"] : [], warnings: [] }),
+    siteGhost: (site, x, z) => ({ targetId: "@" + x + "," + z, rect: { x, z, yaw: 0, width: site.width, depth: site.depth, round: site.level === "free" }, blockers: x < 0 ? ["not-buildable"] : [], warnings: [] }),
     // 设施：ray.hit 为设施 id（或 null）；目标/搬家/拆除记日志。
     pickSite: (ray) => (ray && ray.hit ? deps.sites[ray.hit] ?? null : null),
     siteById: (id) => deps.sites[id] ?? null,
@@ -118,7 +129,12 @@ function harness(overrides = {}) {
   assert.equal(controller.snapshot.buildingId, "b1", "a rejected move keeps the selection");
   deps.moveResult = { ok: false, reason: "patch-tier-1-vs-city-tier-2: reset() first" };
   controller.click({ pickedId: null, ground: { x: 10, z: 0 } });
-  assert.match(controller.snapshot.message.text, /reset\(\)/, "non-blocker failures still show their reason");
+  // 跨档失效的补丁以 reason 形式回来：翻成人话并指向面板上的清除按钮，不把 reset() 这种开发口吻漏给用户。
+  assert.match(controller.snapshot.message.text, /扩大了一档.*清除失效修改/, "a tier-changed failure is explained and points at the fix");
+  assert.ok(!/reset\(\)|patch-tier/.test(controller.snapshot.message.text), "…without leaking the raw reason");
+  deps.moveResult = { ok: false, reason: "something-else" };
+  controller.click({ pickedId: null, ground: { x: 10, z: 0 } });
+  assert.match(controller.snapshot.message.text, /something-else/, "unknown non-blocker failures still show their reason");
 }
 
 // (e) 自己的地块 / 无地块 / 天空。
@@ -469,4 +485,104 @@ function harness(overrides = {}) {
   assert.equal(controller.snapshot.site.id, "context:pC", "a real mesh hit selects even when the ground point falls outside the footprint");
 }
 
-console.log("City plan repair controller: every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (r) 路口工具（SPEC §16.1）：点路口拿起 → 悬停预览关联路段跟着走 → 再点放下；锁定路口说明理由；Esc 放回。
+{
+  const { controller, log, deps } = harness();
+  controller.enter(); controller.setTool("node");
+  controller.hover({ x: 3, z: 2 });
+  assert.equal(controller.snapshot.preview.kind, "node-hover", "hovering near a junction highlights it");
+  assert.deepEqual(controller.snapshot.preview.at, { x: 0, z: 0 });
+  controller.click({ pickedId: null, ground: { x: 40, z: 40 } });
+  assert.match(controller.snapshot.message.text, /这里没有路口/, "a click away from junctions explains where to click");
+  controller.click({ pickedId: null, ground: { x: -98, z: 0 } });
+  assert.match(controller.snapshot.message.text, /桥面/, "a junction on a bridge cannot be picked up, with the reason");
+  assert.equal(controller.snapshot.dragNode, null);
+  controller.click({ pickedId: null, ground: { x: 2, z: 1 } });
+  assert.equal(controller.snapshot.dragNode.id, "n0", "clicking a junction picks it up");
+  controller.hover({ x: 10, z: 30 });
+  const preview = controller.snapshot.preview;
+  assert.equal(preview.kind, "node"); assert.equal(preview.ok, true);
+  assert.deepEqual(preview.edges[0].points[0], { x: 10, z: 30 }, "the incident edge follows the cursor at the junction's end");
+  assert.deepEqual(preview.edges[0].points[1], { x: 50, z: 0 }, "…while its far end stays put");
+  deps.moveVerdict = { blockers: ["road-in-water"], warnings: [] };
+  controller.hover({ x: 20, z: 40 });
+  assert.equal(controller.snapshot.preview.ok, false); assert.match(controller.snapshot.preview.reason, /水面/);
+  deps.moveVerdict = undefined;
+  controller.cancel();
+  assert.equal(controller.snapshot.dragNode, null, "Esc puts the junction back");
+  assert.equal(controller.snapshot.tool, "node", "…without leaving the tool");
+  controller.click({ pickedId: null, ground: { x: 99, z: 0 } });
+  deps.moveNodeResult = { ok: true, patch: {}, warnings: ["relocated:1"] };
+  controller.click({ pickedId: null, ground: { x: 110, z: 25 } });
+  assert.deepEqual(log.nodeMoves.at(-1), ["n1", 110, 25], "the second click drops it where the cursor is");
+  assert.equal(controller.snapshot.dragNode, null);
+  assert.match(controller.snapshot.message.text, /已移动路口（开发商安置了 1 栋会话楼）/);
+  deps.moveNodeResult = { ok: false, reason: "blocked", blockers: ["node-collision"] };
+  controller.click({ pickedId: null, ground: { x: 1, z: 0 } });
+  controller.click({ pickedId: null, ground: { x: 100, z: 0 } });
+  assert.match(controller.snapshot.message.text, /不能放在这里：目标处已有路口/);
+  assert.equal(controller.snapshot.dragNode.id, "n0", "a rejected drop keeps the junction in hand");
+}
+
+// (s) 落位试算（SPEC §16.4）：选中后悬停给绿/红占地；会话楼与设施都有，free 级是圆形。
+{
+  const { controller, deps } = harness();
+  controller.enter();
+  controller.hover({ x: 20, z: 0 });
+  assert.equal(controller.snapshot.preview, null, "nothing selected → no ghost");
+  controller.click({ pickedId: "b1", ground: null });
+  controller.hover({ x: 20, z: 0 });
+  assert.equal(controller.snapshot.preview.kind, "ghost"); assert.equal(controller.snapshot.preview.ok, true);
+  controller.hover({ x: -20, z: 0 });
+  assert.equal(controller.snapshot.preview.ok, false); assert.match(controller.snapshot.preview.reason, /已被其他会话楼/);
+  deps.sites["landmark:ferris-wheel"] = { id: "landmark:ferris-wheel", kind: "landmark", landmarkKind: "ferris-wheel", x: 60, z: -80, yaw: 0, width: 36, depth: 36, height: 45, y: 0, level: "free", slotId: "" };
+  controller.setTool("site");
+  controller.click({ pickedId: null, ground: { x: 60, z: -80 }, ray: { hit: "landmark:ferris-wheel" } });
+  controller.hover({ x: 200, z: 0 }, { hit: null });
+  assert.equal(controller.snapshot.preview.kind, "ghost"); assert.equal(controller.snapshot.preview.rect.round, true, "free-level sites ghost as a circle");
+  controller.hover({ x: -200, z: 0 }, { hit: null });
+  assert.match(controller.snapshot.preview.reason, /不可建设/);
+  // 指着另一座设施（地面在它占地内）：高亮它（点击会改选），不画试算。
+  controller.hover({ x: 100, z: 100 }, { hit: "civic:0" });
+  assert.equal(controller.snapshot.preview.kind, "site"); assert.equal(controller.snapshot.preview.label, "学校");
+}
+
+// (t) 地标搬家后的接入路与原址断头路（SPEC §16.3）：消息说明，面板一键擦掉，擦完/下一次点击后不再提供。
+{
+  const { controller, log, deps } = harness();
+  controller.enter();
+  deps.sites["landmark:tv-tower"] = { id: "landmark:tv-tower", kind: "landmark", landmarkKind: "tv-tower", x: 0, z: 300, yaw: 0, width: 20, depth: 20, height: 120, y: 0, level: "free", slotId: "" };
+  controller.setTool("site");
+  controller.click({ pickedId: null, ground: { x: 0, z: 300 }, ray: { hit: "landmark:tv-tower" } });
+  deps.siteMoveResult = { ok: true, patch: {}, warnings: ["access-road:42"], siteId: "landmark:tv-tower", strandedEdges: ["e7", "e8"] };
+  controller.click({ pickedId: null, ground: { x: 0, z: 200 }, ray: { hit: null } });
+  assert.match(controller.snapshot.message.text, /补了一条 42 长的接入路/);
+  assert.match(controller.snapshot.message.text, /原址留下 2 段断头接入路/);
+  assert.deepEqual(controller.snapshot.stranded, ["e7", "e8"]);
+  controller.eraseStranded();
+  assert.deepEqual(log.drops.slice(-2), ["e7", "e8"], "one click erases the whole leftover chain");
+  assert.deepEqual(controller.snapshot.stranded, []);
+  deps.siteMoveResult = { ok: true, patch: {}, warnings: ["no-access-road"], siteId: "landmark:tv-tower", strandedEdges: ["e9"] };
+  controller.click({ pickedId: null, ground: { x: 0, z: 150 }, ray: { hit: null } });
+  assert.equal(controller.snapshot.message.kind, "warn", "no access road is a warning");
+  assert.match(controller.snapshot.message.text, /用画路工具接一条/);
+  controller.click({ pickedId: null, ground: { x: 0, z: 120 }, ray: { hit: null } });
+  assert.deepEqual(controller.snapshot.stranded, ["e9"], "a further move offers the latest leftover (fresh result)");
+  controller.setTool("draw");
+  assert.deepEqual(controller.snapshot.stranded, [], "switching tools withdraws the offer");
+}
+
+// (u) 推土机试算结果原样进预览（叠加层据此画推平/安置标记），数字是确切的。
+{
+  const { controller, deps } = harness();
+  controller.enter(); controller.setTool("draw");
+  const impact = { bulldozed: [{ x: 1, z: 1, yaw: 0, width: 4, depth: 4 }], relocated: [], homeless: [{ x: 5, z: 5, yaw: 0, width: 4, depth: 4 }] };
+  deps.addVerdict = { blockers: [], warnings: ["bulldoze:1", "homeless-risk:1"], impact };
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  controller.hover({ x: 60, z: 20 });
+  assert.equal(controller.snapshot.preview.impact, impact);
+  assert.match(controller.snapshot.preview.warning, /将推平 1 座设施/);
+  assert.match(controller.snapshot.preview.warning, /1 栋会话楼附近没有空地块，会留在路上/);
+}
+
+console.log("City plan repair controller: junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
