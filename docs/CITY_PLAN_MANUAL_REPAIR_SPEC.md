@@ -306,3 +306,23 @@ ui 包无单测框架（仅 `tsc --noEmit`），沿用 verify 脚本模式：
 - 开关：`?cityPlan` 或 localStorage `cityPlanDev=1`，开启后 `window.__cityPlan` 可用。**未开启时不读存档、不挂 window、引擎里 planPatch 恒 null**。
 - 真实引擎实测（浏览器，夹具数据）：移楼生效且飞行世界读同一份 `currentLayout`；非法移动被拒（missing-parcel / parcel-occupied+building-overlap）；
   刷新后补丁自动恢复无 stale；reset 回到原地块、undo 恢复；节点拖到相邻节点 → node-collision；再拖已拖过的节点只留一条原始 id。
+
+### 13.2 最小编辑 UI（2026-10-11，开发开关下）
+
+入口：城市设置 →「修复规划（开发预览）」→「进入修复模式」（`?cityPlan` / `cityPlanDev=1`）。**不放工具栏**：工具栏已满 8 项（宿主校验上限）。
+
+- **交互**：点选会话楼 → 附近最多 40 个可搬去的空地块在地面上以绿色方块高亮 → 点任一地块（不必是高亮的）搬过去；
+  点非会话物体（背景楼/配套/地标/装饰）提示「只有会话楼可以移动」且不改选中；点自己所在地块不产生补丁；点天空取消选中。
+  硬阻止逐条翻译成人话（`blockerText`），不泄漏原始码，选中不丢。成功后重新选中（恢复选中环）并按新位置刷新候选。
+- **面板**（`planRepair/PlanRepairPanel.tsx`）：步骤提示/反馈消息、「N 处修改 · 已保存/本次修改仅临时生效」、撤销/重做、体检（定位）、
+  恢复生成（两段确认，4 秒内再点一次，同 reseed 模式）。键盘：Esc 先取消选中再退出模式；⌘Z / ⇧⌘Z。
+- **引擎窄接口**（`CityEngine`）：`setRepairHook`（把选取手势翻成 `{pickedId, ground}` 交给钩子，引擎自己不再选楼/飞镜头）、
+  `addOverlay`/`removeOverlay`（叠加层挂场景根，不随 CityParts 重建销毁）、`focusPoint`、`groundPointAtPointer`（射线与地形迭代求交）。
+- **分层**：`controller.ts` 是纯状态机（依赖全注入，`verify-plan-repair-controller.mjs` 在 node 里直接测，不依赖 WebGL）；
+  `overlay.ts`（three）/`usePlanRepair.ts`（React 胶水）/`session.ts`（补丁与存档）各管一层。
+- **互斥**（§8）：游戏/航拍/导出/忙碌时进入被拒、已在模式中则自动退出；换种子退出（候选与选中属于旧城）。
+- **性能**：`candidates` 按距离从近到远逐个校验，凑够 limit 即停（曾先校验全城再截断）。
+- **真实引擎实测**（浏览器真实鼠标点击，夹具数据）：选楼→绿色候选→点地块搬过去→选中环跟随；点地标被拒；点远离地块的路面提示「没有可落位的地块」；
+  体检通过；⌘Z/⇧⌘Z；Esc 两级；刷新后补丁恢复；恢复生成两段确认且存档清除；航拍互斥；无开关时无入口/无 window 钩子/无存档读写。
+- **未做**：悬停 ghost 与逐地块红绿即时反馈、节点拖动与删路 UI（M2，依赖 `validateNodeMove`/`validateEdgeDrop`）、英文文案（开发预览仅中文）、
+  plan 级体检。注意：叠加层目前只标出「可搬」的地块；不可搬的地块点下去才给原因。

@@ -13,7 +13,8 @@ import { cinematicCopy } from "./engine/cinematicCopy";
 import { describeDecor, isDecorId } from "./engine/cityDecor";
 import { CATALOG_GROUPS, CATALOG_KIND_LABEL, CITY_CATALOG } from "./cityCatalog";
 import { scaleTierFor } from "./engine/cityPlan";
-import { installPlanRepairDebug, planDevEnabled } from "./planRepair/session";
+import { PlanRepairPanel } from "./planRepair/PlanRepairPanel";
+import type { PlanRepairUi } from "./planRepair/usePlanRepair";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { GameHud } from "./game/GameHud";
 import { gameText } from "./game/gameCopy";
@@ -58,18 +59,6 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     try { localStorage.setItem("city.backdrop", mode); } catch { /* 存储不可用：本次会话内仍生效 */ }
   };
   useEffect(() => { engine.current?.setBackdrop(backdrop); }, [backdrop]);
-  // 规划修复（开发开关 ?cityPlan / localStorage cityPlanDev=1 才启用，见 planRepair/session.ts）：
-  // 种子或引擎就绪变化时读该种子的补丁交给引擎；未开启时不读存档、不挂 window、引擎行为不变。
-  const planSession = useRef<ReturnType<typeof installPlanRepairDebug> | null>(null);
-  const planLoadedSeed = useRef<number | null>(null);
-  useEffect(() => {
-    if (!planDevEnabled()) return;
-    const current = engine.current; if (!current) return;
-    if (!planSession.current) planSession.current = installPlanRepairDebug(current);
-    if (planLoadedSeed.current !== seed) { planLoadedSeed.current = seed; void planSession.current.session.load(seed); }
-  }, [seed, model]);
-  // 清理必须连「已加载种子」一起重置：StrictMode 的 挂载→卸载→再挂载 会销毁会话，标记还留着就会跳过重新加载。
-  useEffect(() => () => { planSession.current?.dispose(); planSession.current = null; planLoadedSeed.current = null; }, []);
   const [film, setFilm] = useState<{ frame: number; total: number; width?: number; height?: number; software?: boolean } | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -242,7 +231,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     lockSelection: (id: string) => engine.current?.lockSelection(id) };
 }
 
-export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, gameDev }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; gameDev: boolean }) {
+export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, gameDev, planRepair }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; gameDev: boolean; planRepair: PlanRepairUi }) {
   const language = useCityLanguage();
   const gameActive = game.active;
   // 游戏接管时收起模态与侧栏（native dialog 在 top layer，会盖住游戏 HUD）。
@@ -448,6 +437,13 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {game.entryError && <p role="alert">{game.entryError}</p>}
         <p>{gameText("进入后用 W/S/A/D 与方向键飞行，Esc 暂停。", language === "en" ? "en" : "zh-Hans")}</p>
       </div>}
+      {planRepair.enabled && <div className="city-game-entry">
+        <label style={{ fontSize: 12, color: "var(--city-muted)" }}>修复规划（开发预览）</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button disabled={cinema || ui.busy || gameActive || !ui.model || planRepair.state.active} onClick={() => { ui.setOptions(false); planRepair.enter(); }}>进入修复模式</button>
+        </div>
+        <p>点选会话楼，再点要搬去的空地块；非法位置会说明原因。修改按种子保存在本机。</p>
+      </div>}
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
       {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}
       <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.lockSelection(e.target.value); else ui.clearSelection(); ui.setOptions(false); }}>
@@ -463,6 +459,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <small>实际生成帧 · 预览最多 2 FPS，成片 30 FPS</small>
     </section>}
     {ui.error && !ui.options && <div className="city-feature-error" role="alert">{ui.error}<button aria-label="关闭提示" onClick={() => ui.setError(null)}>×</button></div>}
+    {!cinema && !gameActive && <PlanRepairPanel repair={planRepair} />}
     {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} persist={{ tier: game.persistTier, saveFailed: game.saveFailed }} actions={{
       onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse,
     }} />}

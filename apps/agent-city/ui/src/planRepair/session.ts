@@ -17,6 +17,8 @@ export function planDevEnabled(): boolean {
   } catch { return false; }
 }
 
+export type RepairCandidate = { parcelId: string; x: number; z: number; yaw: number; width: number; depth: number; distance: number; warnings: string[] };
+
 export type EditResult = { ok: true; patch: PlanPatchV1; warnings: string[] } | { ok: false; reason: string; blockers?: string[] };
 
 const UNDO_LIMIT = 100;
@@ -136,21 +138,44 @@ export class PlanRepairSession {
     if (this.engine.planPatch) this.commit(null);
   }
 
-  /** 离某栋楼最近的、可以搬过去的空地块（试搬用）。 */
-  candidates(buildingId: string, limit = 8): Array<{ parcelId: string; x: number; z: number; distance: number; warnings: string[] }> {
+  /** 离某栋楼最近的、可以搬过去的空地块（试搬用）。按距离从近到远逐个校验，凑够 limit 个就停——
+   *  曾先校验全城再截断，真实城市 4000 地块 × 上千路段的校验每次选楼都要卡一下。 */
+  candidates(buildingId: string, limit = 8, maxDistance = 160): RepairCandidate[] {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
     const home = layout?.districts.flatMap((district) => [...district.slots]).find(([id]) => id === buildingId)?.[1];
     if (!layout || !model || !home) return [];
     const patch = this.engine.planPatch ?? emptyPlanPatch(layout.seed, layout.scaleTier);
-    return layout.blocks.flatMap((block) => block.parcels)
+    const sorted = layout.blocks.flatMap((block) => block.parcels)
       .map((parcel) => ({ parcel, distance: Math.hypot(parcel.x - home.x, parcel.z - home.z) }))
-      .sort((a, b) => a.distance - b.distance || (a.parcel.id < b.parcel.id ? -1 : 1))
-      .flatMap(({ parcel, distance }) => {
-        if (parcel.id === home.id) return [];
-        const verdict = validateBuildingMove(layout, model, patch, buildingId, parcel.id);
-        return verdict.blockers.length ? [] : [{ parcelId: parcel.id, x: parcel.x, z: parcel.z, distance: Math.round(distance), warnings: verdict.warnings }];
-      })
-      .slice(0, limit);
+      .filter(({ parcel, distance }) => parcel.id !== home.id && distance <= maxDistance)
+      .sort((a, b) => a.distance - b.distance || (a.parcel.id < b.parcel.id ? -1 : 1));
+    const out: RepairCandidate[] = [];
+    for (const { parcel, distance } of sorted) {
+      const verdict = validateBuildingMove(layout, model, patch, buildingId, parcel.id);
+      if (verdict.blockers.length) continue;
+      out.push({ parcelId: parcel.id, x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: parcel.width, depth: parcel.depth, distance: Math.round(distance), warnings: verdict.warnings });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  /** 某栋会话楼当前所在地块（生效布局）。 */
+  parcelOf(buildingId: string): string | null {
+    return this.engine.currentLayout?.districts.flatMap((district) => [...district.slots]).find(([id]) => id === buildingId)?.[1].id ?? null;
+  }
+
+  /** 点到地面一处时最近的地块（半径内）；含酒店地块。 */
+  nearestParcel(x: number, z: number, radius = 14): { id: string; x: number; z: number } | null {
+    const layout = this.engine.currentLayout;
+    if (!layout) return null;
+    let best: { id: string; x: number; z: number } | null = null; let bestD = radius;
+    const consider = (parcel: { id: string; x: number; z: number }) => {
+      const d = Math.hypot(parcel.x - x, parcel.z - z);
+      if (d < bestD) { bestD = d; best = parcel; }
+    };
+    for (const block of layout.blocks) for (const parcel of block.parcels) consider(parcel);
+    for (const district of layout.districts) for (const parcel of district.slots.values()) consider(parcel);
+    return best;
   }
 
   /** 全城布局级体检（含补丁失效条目）。 */

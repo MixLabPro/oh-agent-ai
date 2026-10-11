@@ -6,6 +6,7 @@ import "./city.css";
 import { embedded, connect, observeHealth, publishToolbar, type Tool } from "./host";
 import type { EngineQualityMode } from "./engine/CityEngine";
 import { CityExperience, useCityExperience } from "./CityExperience";
+import { usePlanRepair } from "./planRepair/usePlanRepair";
 import { supportsBackgroundFilm } from "./export/filmJob";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { replayStartMs } from "./replayRange";
@@ -58,6 +59,8 @@ export function CityApp() {
     requestRefresh: () => setRefresh((value) => value + 1),
     locale: () => (language === "en" ? "en" : "zh-Hans"),
   });
+  // 规划修复（开发开关 ?cityPlan / cityPlanDev=1；未开启时 hook 什么都不做）。与游戏/航拍/导出/忙碌互斥。
+  const planRepair = usePlanRepair(engineRef, { seed: experience.seed, model: experience.model, blocked: cinema || game.active || experience.busy || !!experience.film });
   const appliedWindow = useRef<number | null>(null);
   const fingerprint = useRef("");
   useEffect(() => observeHealth(() => engineRef.current?.diagnosticState() ?? { engineMissing: true }), []);
@@ -219,7 +222,7 @@ export function CityApp() {
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
           : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>
       </header>}
-      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} gameDev={gameDev}
+      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} gameDev={gameDev} planRepair={planRepair}
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} />
     </section>
   ), language);

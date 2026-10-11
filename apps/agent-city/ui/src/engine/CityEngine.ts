@@ -51,6 +51,10 @@ export type PhotoView = { position: number[]; target: number[]; fov: number; ela
 /** 相机所有权（游戏模式 §4）：同一帧只允许一个所有者推进相机。 */
 export type CameraOwner = "orbit" | "cinematic" | "game";
 
+/** 规划修复模式的点击钩子：引擎把一次选取手势翻成「点中的会话楼/非楼物体 id + 点到的地面坐标」交给它，自己不再选楼/飞镜头。 */
+export type RepairClick = { pickedId: string | null; ground: { x: number; z: number } | null };
+export type RepairHook = { onClick(click: RepairClick): void };
+
 export type CityEngineOptions = {
   canvas: RenderCanvas;
   /** Worker-only renderer: no DOM events, OrbitControls or realtime loop. */
@@ -84,6 +88,7 @@ export class CityEngine {
   private layout: CityLayout | null = null;
   /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
   private baseLayout: CityLayout | null = null;
+  private repairHook: RepairHook | null = null;
   private planPatchValue: PlanPatchV1 | null = null;
   private planResult: PatchedLayout | null = null;
   private model: CityModel | null = null;
@@ -1063,8 +1068,54 @@ export class CityEngine {
     return this.playing;
   }
 
+  /** 规划修复模式（planRepair/）：挂上钩子后画布选取手势交给钩子；null 恢复原行为。 */
+  setRepairHook(hook: RepairHook | null): void {
+    this.repairHook = hook;
+    this.noteActivity();
+  }
+
+  /** 叠加层（候选地块高亮等）：直接挂在场景根上，不随 CityParts 重建而销毁。 */
+  addOverlay(object: THREE.Object3D): void {
+    this.scene.add(object);
+    this.noteActivity();
+  }
+
+  removeOverlay(object: THREE.Object3D): void {
+    this.scene.remove(object);
+    this.noteActivity();
+  }
+
+  /** 指针射线与地形的交点（迭代逼近地形高度，3 轮足够；射线朝天或在城市包围盒外返回 null）。 */
+  private groundPointAtPointer(): { x: number; z: number } | null {
+    if (!this.layout) return null;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const { origin, direction } = this.raycaster.ray;
+    if (direction.y >= -1e-4) return null;
+    let y = 0;
+    let x = 0; let z = 0;
+    for (let i = 0; i < 4; i += 1) {
+      const t = (y - origin.y) / direction.y;
+      x = origin.x + direction.x * t; z = origin.z + direction.z * t;
+      y = Math.max(0, this.layout.terrain.height(x, z));
+    }
+    return Number.isFinite(x) && Number.isFinite(z) ? { x, z } : null;
+  }
+
+  /** 把相机飞到地面一点（体检「定位」用）。 */
+  focusPoint(x: number, z: number): void {
+    this.releaseOrbitLock();
+    const y = Math.max(0, this.layout?.terrain.height(x, z) ?? 0);
+    const d = 70;
+    this.flyTo({ x: x + d * 0.8, y: y + d * 0.55, z: z + d * 0.8 }, { x, y, z }, 900);
+  }
+
   private handleClick(): void {
     if (!this.parts) return;
+    if (this.repairHook) {
+      const picked = this.pick();
+      this.repairHook.onClick({ pickedId: picked, ground: this.groundPointAtPointer() });
+      return;
+    }
     const id = this.pick();
     if (id && id.startsWith("decor:")) {
       // Decorations share orbit locking, but not session-only selection rings.
