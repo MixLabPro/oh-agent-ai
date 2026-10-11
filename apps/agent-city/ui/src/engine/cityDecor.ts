@@ -64,6 +64,6 @@ export function decorDistrictId(id: string | null | undefined): string | null {
 /** 网格名 → 装饰类别（拾取时沿父级链匹配；静态城缓存复用时名字随网格一起保留）。 */
 export function decorKindForName(name: string): string | null {
   // Unknown geometry stays unpickable instead of silently inheriting a prefix.
-  const routes = [...new Set(siteClassesForMesh(name).map(item => item.decorKind))];
+  const routes = [...new Set(siteClassesForMesh(name).map(item => item.meshRoutes?.[name] ?? item.decorKind))];
   return routes.length === 1 ? routes[0] : null;
 }

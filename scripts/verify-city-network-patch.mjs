@@ -8,11 +8,65 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { emptyNetwork, addNetworkEdge, commitNetworkPatch, previewNetworkPatch, remapRoadPath, applyNetworkReferences } = await loadCity({
-  "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge", "commitNetworkPatch", "previewNetworkPatch"],
+const { emptyNetwork, addNetworkEdge, commitNetworkPatch, previewNetworkPatch, remapRoadPath, applyNetworkReferences, NETWORK_RELINE_CONFIG } = await loadCity({
+  "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge", "commitNetworkPatch", "previewNetworkPatch", "NETWORK_RELINE_CONFIG"],
   "engine/planner/references.ts": ["remapRoadPath", "applyNetworkReferences"],
 });
 const snap = (n) => JSON.stringify({ v: n.version ?? 0, nodes: [...n.nodes], edges: [...n.edges] });
+// A corridor can retain its graph endpoints/id while replacing its actual
+// interior shape. Ordered full-span references must change in both directions.
+for (const width of [9, 12]) for (let quarter = 0; quarter < 4; quarter++) {
+  const rotate = point => {
+    for (let turn = 0; turn < quarter; turn++) point = { x: -point.z, z: point.x };
+    return point;
+  };
+  const a = rotate({ x: 0, z: 0 }), oldBend = rotate({ x: 20, z: 3 }), b = rotate({ x: 40, z: 0 });
+  const shape = [a, rotate({ x: 10, z: 8 }), rotate({ x: 30, z: 8 }), b];
+  const network = emptyNetwork(); addNetworkEdge(network, a, b, true, false, true); network.patchRemaps = [];
+  const original = [...network.edges.values()][0]; original.width = width; original.purpose = "waterfront"; original.points = [a, oldBend, b];
+  const before = snap(network), patch = { baseVersion: 0, addEdges: [], removeEdgeIds: [], splits: [], relineEdges: [{ edgeId: original.id, points: shape }] };
+  const preview = previewNetworkPatch(network, patch); assert.ok(preview.ok); assert.equal(snap(network), before);
+  assert.equal(commitNetworkPatch(network, patch, () => "corridor unsafe").ok, false); assert.equal(snap(network), before); assert.equal(network.patchRemaps.length, 0);
+  const result = commitNetworkPatch(network, patch); assert.ok(result.ok); assert.equal(result.version, 1);
+  const current = network.edges.get(original.id);
+  assert.equal(network.edges.size, 1); assert.equal(network.nodes.size, 2);
+  for (const key of ["id", "from", "to", "width", "kind", "structure", "purpose", "bridge"]) assert.equal(current[key], original[key]);
+  assert.deepEqual(current.points, shape); assert.deepEqual(result.remap.edges, {});
+  assert.equal(result.remap.paths.length, 1); assert.equal(network.patchRemaps.length, 1);
+  assert.deepEqual(remapRoadPath([a, oldBend, b], result.remap, network), shape);
+  assert.deepEqual(remapRoadPath([b, oldBend, a], result.remap, network), [...shape].reverse());
+  assert.equal(remapRoadPath([oldBend, b], result.remap, network), null, "undeclared partial curved reference must not guess a new point");
+  const prior = rotate({ x: -10, z: 0 }), next = rotate({ x: 50, z: 0 });
+  assert.deepEqual(remapRoadPath([prior, a, oldBend, b, next], result.remap, network), [prior, ...shape, next]);
+  const ctx = { network, publicSites: [], landmarks: [], primaryAnchorNodeId: original.from,
+    carPaths: [[a, oldBend, b]], coastRoadRuns: [[b, oldBend, a]], riverRoadRuns: [], coastRoadRunEnds: [b],
+    blocks: [{ id: "face", polygon: [a, oldBend, b, next, prior] }], bridges: [] };
+  assert.equal(applyNetworkReferences(ctx, [result.remap]), null);
+  assert.deepEqual(ctx.carPaths, [shape]); assert.deepEqual(ctx.coastRoadRuns, [[...shape].reverse()]);
+  assert.deepEqual(ctx.blocks[0].polygon, [...shape, next, prior]);
+  const committed = snap(network); assert.equal(commitNetworkPatch(network, patch).reason, "stale-base"); assert.equal(snap(network), committed);
+  const conflicting = { ...result.remap, paths: [...result.remap.paths, { before: [a, oldBend, b], after: [a, oldBend, b] }] };
+  assert.equal(remapRoadPath([a, oldBend, b], conflicting, network), null, "ambiguous ordered lineage fails closed");
+  assert.equal(remapRoadPath([a, oldBend, b], { ...conflicting, paths: [...conflicting.paths].reverse() }, network), null);
+}
+for (const bad of ["bridge", "approach", "endpoint", "reverse", "nan", "zero", "crossing", "backtrack", "duplicate", "split", "width", "point-budget", "edge-budget"]) {
+  const network = emptyNetwork(), a = { x: 0, z: 0 }, b = { x: 40, z: 0 };
+  addNetworkEdge(network, a, b, true, false, true); network.patchRemaps = [];
+  const edge = [...network.edges.values()][0];
+  if (bad === "bridge") { edge.bridge = true; edge.structure = "deck"; }
+  if (bad === "approach") edge.structure = "ground-approach";
+  if (bad === "width") edge.width = 0;
+  const shapes = { endpoint: [a, { x: 20, z: 8 }, { x: 41, z: 0 }], reverse: [b, { x: 20, z: 8 }, a],
+    nan: [a, { x: NaN, z: 8 }, b], zero: [a, { x: 10, z: 8 }, { x: 10.001, z: 8 }, b],
+    crossing: [a, { x: 30, z: 10 }, { x: 10, z: 10 }, b], backtrack: [a, { x: 20, z: 0 }, { x: 10, z: 0 }, b] };
+  const replacement = { edgeId: edge.id, points: bad === "point-budget" ? Array.from({ length: NETWORK_RELINE_CONFIG.maxPointsPerEdge + 1 }, (_, index) => ({ x: index * 40 / NETWORK_RELINE_CONFIG.maxPointsPerEdge, z: 0 }))
+    : shapes[bad] ?? [a, { x: 20, z: 8 }, b] };
+  const patch = { baseVersion: 0, addEdges: [], removeEdgeIds: [], splits: bad === "split" ? [{ edgeId: edge.id, at: { x: 20, z: 0 } }] : [],
+    relineEdges: bad === "edge-budget" ? Array(NETWORK_RELINE_CONFIG.maxEdgesPerPatch + 1).fill(replacement)
+      : bad === "duplicate" ? [replacement, replacement] : [replacement] };
+  const before = snap(network); assert.equal(commitNetworkPatch(network, patch).ok, false, bad);
+  assert.equal(snap(network), before, bad); assert.equal(network.patchRemaps.length, 0, bad);
+}
 // Explicit straight-ground coalescence carries both ordered lineages into the
 // widest compatible corridor. Default, curved, approach and deck collisions
 // remain failures, and rejection must not mutate either original geometry.

@@ -29,7 +29,27 @@ export function remapRoadPath(path: readonly Vec2[], remap: NetworkRemap, networ
   const first = path.length ? point(path[0]) : null;
   if (path.length && !first) return null;
   const out: Vec2[] = first ? [first] : [];
+  // A replaced curved edge may lose its old interior bends. Match only an
+  // explicit, complete ordered lineage span (forward or reverse), never infer
+  // a partial route from proximity to the new geometry.
+  const spans = remap.paths.filter(change => change.before.length > 2).flatMap(change => [change,
+    { before: [...change.before].reverse(), after: change.after ? [...change.after].reverse() : null }])
+    .sort((a, b) => b.before.length - a.before.length);
   for (let i = 1; i < path.length; i += 1) {
+    if (spans.length) {
+      const matches = spans.filter(change => i - 1 + change.before.length <= path.length
+        && change.before.every((point, offset) => idOf(point) === idOf(path[i - 1 + offset])));
+      const span = matches[0];
+      if (span) {
+        if (matches.some(change => change.before.length === span.before.length &&
+          (change.after === null || span.after === null ? change.after !== span.after : change.after.length !== span.after.length
+            || change.after.some((point, index) => point.x !== span.after![index].x || point.z !== span.after![index].z)))) return null;
+        if (!span.after) return null;
+        for (const point of span.after) if (!out.length || idOf(out[out.length - 1]) !== idOf(point)) out.push({ ...point });
+        i += span.before.length - 2;
+        continue;
+      }
+    }
     const key = `${idOf(path[i - 1])}/${idOf(path[i])}`;
     const replacement = routes.has(key) ? routes.get(key) : [point(path[i - 1]), point(path[i])];
     if (!replacement || replacement.some((p) => !p)) return null;

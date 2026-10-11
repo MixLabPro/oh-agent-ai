@@ -58,6 +58,56 @@ exit0（254modules、3.69s），仍有大chunk警告，不作为性能预算通�
 删除、未知模型外廓和稳定id迁移仍待，因此B0–B4未整体完成。UIUX检索未匹配本问题，
 采用通用一致性检查保留市政/城区功能面板、关闭和聚焦操作；不增加无关视觉/交互变化。
 
+### B2真实场景拾取回归与子造型别名
+
+新增独立scene守卫：380/1600合成会话、full背景、昼夜，实际CityParts遍历与旧52faeefe
+分类器独立对照，不更新golden。首跑session81114 exit1捕获真实子网格
+city-landmark-twisting-deco-tower未注册，被父级twist-tower接管的回归。
+现由原twist-tower类登记exact meshRoutes别名，保留旧子造型route/标题，不新增假layout
+对象或重复目录归属；siteClassOf把唯一展示别名回读到原类，合并族仍不猜具体类。
+修复后session78985 exit0：380档136实例（civic8/garden4/district4/context107/landmark7/public6）、
+422可拾取mesh、853civic部件；1600档332实例（30/4/4/280/8/6）、459mesh、3392部件。
+两档昼夜均有32个城区地标mesh。六数组每实例恰归一类，当前layout身份全局唯一；
+与旧逻辑实际可拾取集合逐对象相同，非城区地标route不变，配套部件读取真实实例id。
+守卫进入manifest67项及planning/sites（不塞fast）；harness session33682、typecheck、
+models、i18n及metadata专项通过。此证据不是独立前后完整场景图哈希或GPU/浏览器验收，
+也不证明模型instance外廓/高度、所有市政设施精确身份、稳定id迁移或B3已接入。
+
+### 基础失败的初始道路快照与联合定线证据
+
+diagnose-city-ground-stages在初始shore前私有深拷贝network实际边/宽度，不使用trunk名义
+中心线假定路幅；全部边（含桥）按实际width/2+3保守XY检查，高架10.5全宽+1保持。
+仍只检查原264位置；不发布候选，不改生产朝向、路网、owner、预算或阈值。
+1703350391/t2 session10657 exit0：55初始边，69基础合格位置中65实际全宽冲突、
+4原owner-spacing拒绝，零直接可准入；2003037141/t1 session85985 exit0：72边、
+32基础合格位置中2原湿/中心拒绝、28实际路幅冲突、2owner-spacing拒绝，仍零直接可准入。
+这否定“只取消初始圆筛即可修复”的假设，不能把ground-only合格位置当实际空地。
+联合定线线索：前者16位置只剩道路阻挡，报告前5均为同一12宽主干两相邻段
+24.97:307.5/29.82:343.17与29.82:343.17/34.67:378.84；后者3位置只被12宽
+119.35:-406.59/137.53:-437.66阻挡。示例均在原搬迁岸线界限内、无桥头近接、
+原名义邻居预留及高架清净。必须联合修改这些道路与owner并通过事务/最终网络/入口检查，
+不能删除道路或把上述counterfactual记录为已修复。操作尚未实施，完整规划验收仍失败。
+
+### 联合改线原语及曲线lineage（选址操作仍待接入）
+
+NetworkPatch新增relineEdges：仅ground-road，保留同一edge id、原两端及所有宽度/等级/
+purpose属性；非法/退化/自交/折返/重复操作或与拆边混用拒绝。预览/校验失败零副作用。
+同id但points已变现在进入paths journal，不再把保留身份误当成保留几何。
+remapRoadPath按完整旧曲线的显式有序span替换（含反向/外接前后段），丢失旧折点的局部
+引用不能靠空间猜测；冲突lineage拒绝。车流、岸路与街区边界消费同一journal。
+新增4旋转×9/12路幅、preview/stale/validator、双向曲线、含前后段、街区引用、局部缺失
+与lineage置换拒绝守卫，network-patch/connect/repair-safety及typecheck通过。
+新自交检查有16edge/patch、256point/edge输入上限，明确预算拒绝；不宣称U5全局账本完成。
+
+求解守卫揭示旧测试输入缺polygon/parcel尺寸/主网，并沿用旧“任意修改都加网络版本”断言。
+ea8750c8源码确认初始化同样直接读取block.polygon.length；现在初始化/源校验失败在候选
+枚举前返回planning-world-initialization-refused，生产不合成几何或主网。旧不完整输入保留
+为拒绝负例；正常测试明确提供测试面/尺寸/主网，容量/异常零副作用断言保持，新增site-only
+只加site域、不虚增network域验证。初始两次solve测试因旧输入终态exit1，修复后session17777
+终态exit0：28策略/10目标约束、6岛after<=before与双次确定性通过；不是完整30岛或基础
+全覆盖验收。随后新操作输入边/点上限、原路幅合法性与无曲线span时的空集合分配快路
+经network-patch专项复验。道路/owner联合搜索与两个命名样本恢复仍待。
+
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 
 - 本批已提交为8881f482（基于bb76bc87）。完整渲染XY外廓与局部ground-only声明现在分别登记；

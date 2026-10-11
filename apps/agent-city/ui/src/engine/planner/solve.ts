@@ -611,6 +611,16 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
       (ctx.network as typeof ctx.network & { version?: number }).version = pending.state.world.versions.network;
     }
   }
+  let baseWorld: RepairWorldState;
+  try {
+    baseWorld = repairWorldStates.get(ctx) ?? initialRepairWorld(ctx);
+    const baseFailure = worldBaseFailure(ctx, baseWorld);
+    if (baseFailure) return { changes: 0, reason: baseFailure };
+  } catch (error) {
+    // Reject invalid observed inputs before running candidate/strategy code.
+    // Do not invent missing polygons, dimensions or a verified authority.
+    return { changes: 0, reason: `planning-world-initialization-refused: ${error instanceof Error ? error.message : "invalid source projection"}` };
+  }
   if (strategy.candidates) {
     let changes = 0; const reasons: string[] = [];
     const candidates = strategy.candidates(ctx);
@@ -625,9 +635,6 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
     }
     return { changes, ...(reasons.length ? { reason: reasons.join("; ") } : {}) };
   }
-  const baseWorld = repairWorldStates.get(ctx) ?? initialRepairWorld(ctx);
-  const baseFailure = worldBaseFailure(ctx, baseWorld);
-  if (baseFailure) return { changes: 0, reason: baseFailure };
   const draft = copyData(ctx);
   installRepairWorld(draft, makeWorldState(draft, baseWorld.world));
   installDemandCatalogue(draft, diagnoseNetwork(planView(ctx))?.demands.map((entry) => entry.demand) ?? ctx.demandCatalogue ?? []);

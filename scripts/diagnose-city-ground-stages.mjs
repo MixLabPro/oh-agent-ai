@@ -26,7 +26,7 @@ globalThis.__groundDiagnostic = {
       publicSites: structuredClone(ctx.publicSites), landmarks: structuredClone(ctx.landmarks), blocks: structuredClone(ctx.blocks) } });
   },
   shoreInput(ctx, radius) { shoreInputs.push({ radius, ctx: { ...ctx,
-    publicSites: structuredClone(ctx.publicSites), landmarks: structuredClone(ctx.landmarks) } }); },
+    publicSites: structuredClone(ctx.publicSites), landmarks: structuredClone(ctx.landmarks), diagnosticRoads: structuredClone(ctx.diagnosticRoads) } }); },
 };
 const cityPlanFile = path.join(citySrc, "engine/cityPlan.ts");
 const instrument = raw => {
@@ -43,7 +43,7 @@ const instrument = raw => {
   ];
   for (const [marker, label] of markers) {
     if (!text.includes(marker)) throw new Error(`source tracing marker missing: ${label}`);
-    text = text.replace(marker, `${trace(label + "-before")}\n${label === "shore-settle" ? "globalThis.__groundDiagnostic.shoreInput(shoreCtx, R);" : ""}\n${marker}\n${trace(label + "-after")}`);
+    text = text.replace(marker, `${trace(label + "-before")}\n${label === "shore-settle" ? "globalThis.__groundDiagnostic.shoreInput({ ...shoreCtx, diagnosticRoads: [...network.edges.values()] }, R);" : ""}\n${marker}\n${trace(label + "-after")}`);
   }
   const solveMarker = "const solveReport = skipSolve ? null : solvePlan(repairCtx);";
   if (!text.includes(solveMarker)) throw new Error("source tracing marker missing: solve");
@@ -78,6 +78,7 @@ const tally = (rows, counter, reason, at) => { counter[reason] = (counter[reason
 for (const { radius, ctx } of shoreInputs.filter(row => row.radius === plan.islandRadius)) {
   const owner = ctx.landmarks.find(site => site.kind === "villa-complex"); if (!owner) continue;
     const others = [...ctx.publicSites, ...ctx.landmarks].filter(site => site.id !== owner.id && site.radius), counts = {}, examples = {}, groundAdmissibleRejectedBy = {}, groundAdmissibleExamples = {};
+  const initialEntityCounts = {}, initialEntityExamples = {}, initialEntityCandidates = [], initialRoadOnlyCandidates = [];
   let attempts = 0;
   for (let rr = 6; rr <= 70; rr += 6) for (let k = 0; k < 24; k += 1) {
     attempts += 1; const angle = k * Math.PI * 2 / 24, at = { x: owner.x + Math.cos(angle) * rr, z: owner.z + Math.sin(angle) * rr };
@@ -89,11 +90,46 @@ for (const { radius, ctx } of shoreInputs.filter(row => row.radius === plan.isla
     else if (others.some(other => Math.hypot(other.x - at.x, other.z - at.z) < owner.radius + other.radius)) reason = "owner-spacing";
     else reason = module.registeredModelGroundFailure({ ...owner, ...at }, { height: ctx.height, inRiver: ctx.inRiver }) ?? "candidate-admitted";
     tally(examples, counts, reason, at);
-    if (module.inspectModelGround({ ...owner, ...at }, { height: ctx.height, inRiver: ctx.inRiver }).status === "partial")
+    if (module.inspectModelGround({ ...owner, ...at }, { height: ctx.height, inRiver: ctx.inRiver }).status === "partial") {
       tally(groundAdmissibleExamples, groundAdmissibleRejectedBy, reason, at);
+      const candidate = { ...owner, ...at }, roads = ctx.diagnosticRoads;
+      const roadFacts = roads.map(road => module.inspectEnvelopeRoad(candidate, road, { setback: 3 }));
+      const highwayFacts = ctx.ringRuns.map((points, index) => module.inspectEnvelopeRoad(candidate,
+        { id: `diagnostic-highway:${index}`, points, width: 10.5 }, { setback: 1 }));
+      const overlappingOwners = others.filter(other => Math.hypot(other.x - at.x, other.z - at.z) < owner.radius + other.radius).map(other => other.id);
+      const wetCircle = module.wetCount({ height: ctx.height, inRiver: ctx.inRiver, riverBank: ctx.riverBank }, at, owner.radius, { river: true, riverBank: 14 });
+      const entityReason = wetCircle > 2 || ctx.height(at.x, at.z) <= 0.5 ? "original-wet-or-centre-policy"
+        : roadFacts.some(fact => fact.status !== "partial" || fact.entity.relation === "unsupported") ? "initial-road-envelope-unsupported"
+        : roadFacts.some(fact => fact.entity.relation !== "clear") ? "initial-actual-full-road-width-conflict"
+        : highwayFacts.some(fact => fact.status !== "partial" || fact.entity.relation !== "clear") ? "initial-actual-highway-conflict-or-unsupported"
+        : overlappingOwners.length ? "original-nominal-owner-spacing"
+        : "partial-initial-geometry-clear-not-published";
+      tally(initialEntityExamples, initialEntityCounts, entityReason, at);
+      // Joint reline diagnosis keeps every original site/highway condition and
+      // records actual blocking roads, rather than pretending they disappeared.
+      const roadConflicts = roadFacts.flatMap((fact, index) => fact.status === "partial" && fact.entity.relation === "conflict"
+        ? [{ id: roads[index].id, width: roads[index].width, kind: roads[index].kind, bridge: !!roads[index].bridge,
+            structure: roads[index].structure, margin: fact.entity.margin, points: roads[index].points }] : []);
+      if (wetCircle <= 2 && ctx.height(at.x, at.z) > 0.5 && overlappingOwners.length === 0 && roadConflicts.length
+        && roadFacts.every(fact => fact.status === "partial" && fact.entity.relation !== "unsupported")
+        && highwayFacts.every(fact => fact.status === "partial" && fact.entity.relation === "clear")) {
+        const coastDistance = ctx.coastDistance(at.x, at.z), maximumRelocationCoastDistance = Math.max(owner.radius * 2, ctx.coastDistance(owner.x, owner.z));
+        initialRoadOnlyCandidates.push({ at, wetCircle, coastDistance, maximumRelocationCoastDistance,
+          withinExistingRelocationCoastBound: coastDistance <= maximumRelocationCoastDistance,
+          nearBridgeEnd: module.nearBridgeEnd(ctx.bridges, at.x, at.z, owner.radius), blockingRoads: roadConflicts,
+          admission: "not-admitted; joint road/site proposal unattempted, final network/entrance/transaction unverified" });
+      }
+      if (entityReason === "partial-initial-geometry-clear-not-published") initialEntityCandidates.push({ at, originalReason: reason, wetCircle,
+        legacyTrunkDistance: module.polylineDistance(ctx.trunkRuns, at), coastDistance: ctx.coastDistance(at.x, at.z),
+        nearBridgeEnd: module.nearBridgeEnd(ctx.bridges, at.x, at.z, owner.radius),
+        minimumActualRoadMargin: roadFacts.length ? Math.min(...roadFacts.map(fact => fact.entity.margin)) : null,
+        admission: "not-admitted; stage counterfactual only, final roads/entrance/transaction policy unverified" });
+    }
   }
   console.log(JSON.stringify({ stage: "initial-shore-local-tier", radius, owner, attempts, firstRejectionCounts: counts, examples,
-    groundAdmissibleRejectedBy, groundAdmissibleExamples }));
+    groundAdmissibleRejectedBy, groundAdmissibleExamples, initialRoadCount: ctx.diagnosticRoads.length,
+    initialEntityCounts, initialEntityExamples, initialEntityCandidates, initialRoadOnlyCandidateCount: initialRoadOnlyCandidates.length,
+    initialRoadOnlyCandidates: initialRoadOnlyCandidates.sort((a, b) => a.blockingRoads.length - b.blockingRoads.length || a.at.x - b.at.x || a.at.z - b.at.z).slice(0, 5) }));
 }
 for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.islandRadius)) {
   const owner = ctx.landmarks.find(site => site.kind === "villa-complex"); if (!owner) continue;
