@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { citySrc, loadCity } from "./city-kit/index.mjs";
 const { SITE_CLASSES, siteClassOf, siteClassesForInstance, classifyLayoutSites, civicMinimumSize,
-  GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE } = await loadCity({
+  GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE, describeDecor, CIVIC_LABELS } = await loadCity({
+  "engine/cityDecor.ts": ["describeDecor"],
+  "engine/models/registry.ts": ["CIVIC_LABELS"],
   "engine/models/siteClasses.ts": ["SITE_CLASSES", "siteClassOf", "siteClassesForInstance", "classifyLayoutSites"],
   "engine/models/layoutPlacementGeometry.ts": ["civicMinimumSize", "GARDEN_MINIMUM_SIZE", "DISTRICT_LANDMARK_ENVELOPE"],
 });
@@ -34,6 +36,18 @@ for (const kind of ["school", "mall", "hospital"]) assert.deepEqual(siteClassOf(
 assert.deepEqual(siteClassOf("garden").placement.minimumSize(), GARDEN_MINIMUM_SIZE);
 assert.deepEqual(siteClassOf("district-landmark").placement.minimumSize(), DISTRICT_LANDMARK_ENVELOPE);
 assert.equal(siteClassOf("district-landmark").placement.mode, "face-reserve");
+for (const kind of ["school", "mall", "hospital"]) {
+  const declaration = siteClassOf(`civic:${kind}`);
+  assert.equal(CIVIC_LABELS[kind], declaration.title);
+  assert.equal(describeDecor(`decor:civic:${kind}`).title, declaration.title);
+}
+for (const kind of ["station", "stadium", "park", "tower", "harbor"]) assert.equal(describeDecor(`decor:site:${kind}`).title, siteClassOf(`public:${kind}`).title);
+for (const [legacy, classId] of [["backdrop", "context"], ["garden", "garden"], ["massing", "scenery:massing"], ["seaside", "scenery:seaside"], ["volcano", "scenery:volcano"]])
+  assert.equal(describeDecor(`decor:${legacy}`).title, siteClassOf(classId).title);
+assert.equal(describeDecor("decor:site:civic").title, "市政设施", "legacy municipal overview is not a named instance");
+assert.equal(describeDecor("decor:site:unknown").title, "市政设施");
+assert.equal(describeDecor("decor:civic:unknown").title, "城市配套");
+assert.equal(describeDecor("decor:unknown"), null);
 const source = fs.readFileSync(`${citySrc}/engine/models/siteClasses.ts`, "utf8");
 assert(!/from\s+["'][^"']*(?:planRepair|planSites|planSitePolicy|three)[^"']*["']/.test(source), "pure generator declarations only");
 assert(!/(?:width|depth):\s*\d/.test(source), "placement dimensions must derive from renderer declarations");

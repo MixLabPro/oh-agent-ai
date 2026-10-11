@@ -28,7 +28,18 @@ face-lot/face-reserve/parcel模式及minimumSize引用既有renderer声明，未
 守卫验证目录/标题、唯一类id、合成六数组分类、未知类、原minimumSize及生成器依赖方向，
 登记manifest66项、fast/planning/sites。typecheck与专项通过；真实380/1600全实例唯一id、
 renderer外廓/拾取高度、场景逐字节前后对照、全场景网格归属及编辑器跨层守卫尚未执行/实现。
-当前没有生产消费者导入siteClasses，未改生产规划/渲染逻辑；仍不记作B0完整验收通过。
+该准备层检查点a67dbfe6没有生产消费者导入siteClasses，未改生产规划/渲染逻辑；
+仍不记作B0完整验收通过。
+
+### B1生成器名称消费者接入（编辑器部分仍待）
+
+registry.CIVIC_LABELS改从SITE_CLASSES派生；cityDecor的市政设施、背景楼、花园、海滨、
+聚合与火山标题读取注册类，正文/通用fallback与市政厅原总览语义保持。
+相对a67dbfe6的33个完整describeDecor输出（含未知/通用id）JSON逐字节一致，
+未改生产选址、场景几何、decorKindForName或uiOverlays返回id。
+typecheck、site-registry、models（1110parts）及i18n-catalog（302entries）通过。
+site-registry新增运行时名称派生/fallback断言；编辑器controller.SITE_LABEL仍未迁移，
+真实场景前后逐字节对照仍待，因此不是B1全项或B0–B2整批验收通过。
 
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 

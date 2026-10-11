@@ -8,11 +8,17 @@
  */
 
 import { CIVIC_LABELS, LANDMARK_LABELS } from "./models/registry";
+import { siteClassOf } from "./models/siteClasses";
 
 export type DecorInfo = { title: string; category: string; body: string };
 
 const LANDMARK_NAMES = LANDMARK_LABELS; // 名称表在 models/registry.ts（单一来源）
 const CIVIC_NAMES = CIVIC_LABELS;
+const classTitle = (classId: string): string => {
+  const declaration = siteClassOf(classId);
+  if (!declaration) throw new Error(`missing decor class declaration: ${classId}`);
+  return declaration.title;
+};
 
 export function isDecorId(id: string | null | undefined): boolean {
   return typeof id === "string" && id.startsWith("decor:");
@@ -26,18 +32,18 @@ export function describeDecor(id: string): DecorInfo | null {
     case "civic":
       return { title: CIVIC_NAMES[detail] ?? "城市配套", category: "城市配套 · 随规模增长", body: "会话越多，城市配套越多（约每 45 个会话一座）。它反映城市规模，不代表单个会话。" };
     case "site":
-      if (detail && detail !== "civic") { const names: Record<string, string> = { station: "车站", stadium: "体育场", tower: "观景塔", park: "城市公园", harbor: "港口与码头" }; return { title: names[detail] ?? "市政设施", category: "公共用地 · 装饰", body: "随岛屿规划生成的公共设施，不代表任何会话。" }; }
+      if (detail && detail !== "civic") { return { title: siteClassOf(`public:${detail}`)?.title ?? "市政设施", category: "公共用地 · 装饰", body: "随岛屿规划生成的公共设施，不代表任何会话。" }; }
       return { title: "市政设施", category: "公共用地 · 装饰", body: "市政广场、车站、体育场、观景塔或港口。随岛屿规划生成，不代表任何会话。" };
     case "backdrop":
-      return { title: "背景楼", category: "城市氛围 · 不计入会话", body: "填充城市天际线的灰调背景楼，数量随会话数缩放。不可钻取，可在「城市设置」里关闭。" };
+      return { title: classTitle("context"), category: "城市氛围 · 不计入会话", body: "填充城市天际线的灰调背景楼，数量随会话数缩放。不可钻取，可在「城市设置」里关闭。" };
     case "massing":
-      return { title: "聚合楼群", category: "超出容量的会话", body: "会话数超过城市容量（4000 栋）时，多出来的会话合并成低细节楼群显示。" };
+      return { title: classTitle("scenery:massing"), category: "超出容量的会话", body: "会话数超过城市容量（4000 栋）时，多出来的会话合并成低细节楼群显示。" };
     case "seaside":
-      return { title: "海滨设施", category: "城市风貌 · 装饰", body: "沙滩、遮阳伞、躺椅、沙排场、游客、救生塔、码头与游艇等海滨装饰。不代表任何会话。" };
+      return { title: classTitle("scenery:seaside"), category: "城市风貌 · 装饰", body: "沙滩、遮阳伞、躺椅、沙排场、游客、救生塔、码头与游艇等海滨装饰。不代表任何会话。" };
     case "garden":
-      return { title: "城区花园与景观湖", category: "城区中心 · 随规模出现", body: "每个执行环境城区中心的花园与景观湖，城区地标立在它旁边；城区的会话楼从这里向外生长。" };
+      return { title: classTitle("garden"), category: "城区中心 · 随规模出现", body: "每个执行环境城区中心的花园与景观湖，城区地标立在它旁边；城区的会话楼从这里向外生长。" };
     case "volcano":
-      return { title: "火山", category: "远景 · 装饰", body: "海平线上的远景火山。不代表任何会话。" };
+      return { title: classTitle("scenery:volcano"), category: "远景 · 装饰", body: "海平线上的远景火山。不代表任何会话。" };
     default:
       return null;
   }
