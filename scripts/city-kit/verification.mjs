@@ -13,6 +13,11 @@ const groups = {
 const newGeometryStages = ["verify-city-layout-envelopes", "verify-city-parcel-frontage", "verify-city-block-placement", "verify-city-block-lot-candidates", "verify-city-villa-physical", "verify-city-model-ground"];
 synthetic.push(...newGeometryStages);
 synthetic.push("verify-city-layout-capacity");
+synthetic.push("verify-city-model-envelope");
+groups.planning.push("verify-city-model-envelope");
+groups.sites.push("verify-city-model-envelope");
+groups.planning.push("verify-city-villa-placement");
+groups.sites.push("verify-city-villa-placement");
 groups.planning.push("verify-city-layout-capacity");
 groups.display.push("verify-city-layout-capacity");
 groups.planning.push(...newGeometryStages, "verify-city-road-derived-plan");

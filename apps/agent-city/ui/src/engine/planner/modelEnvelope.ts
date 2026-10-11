@@ -3,8 +3,8 @@
  */
 import { hashSeed } from "../../cityModel";
 import { DetMath as Math } from "../detMath";
-import { resolveGroundModel } from "../models/groundRegistry";
-import { pointInRegion, type LocalFootprint, type LocalRegion, type Vec2 } from "../models/physical";
+import { resolveGroundModel, type GroundModelResolution } from "../models/groundRegistry";
+import { pointInRegion, MAX_FOOTPRINT_PARTS, MAX_CONVEX_VERTICES, type LocalFootprint, type LocalRegion, type Vec2 } from "../models/physical";
 import type { GroundOwner } from "./modelGround";
 
 export const MODEL_ENVELOPE_CONFIG = { version: 1, numericEpsilon: 1e-9, defaultRoadSetback: 3 } as const;
@@ -13,11 +13,12 @@ export type PlotReservationProxy = { readonly semantic: "nominal-plot-reservatio
 export type ModelEnvelope =
   | { readonly status: "partial"; readonly ownerId: string; readonly modelId: string; readonly modelRevision: string;
       readonly groundFootprint: LocalFootprint; readonly conservativeProjection: LocalFootprint; readonly plotReservation: PlotReservationProxy;
+      readonly relocationCorridorEnvelope?: Extract<GroundModelResolution, { status: "partial" }>["relocationCorridorEnvelope"];
       readonly wholeModelReady: false; readonly missing: readonly string[] }
   | { readonly status: "unsupported"; readonly ownerId: string; readonly reason: string;
       readonly plotReservation?: PlotReservationProxy; readonly wholeModelReady: false };
 export type EnvelopeRoad = { readonly id?: string; readonly width: number; readonly points: readonly Vec2[] };
-export type SpatialRelation = { readonly relation: "clear" | "conflict"; readonly distance: number; readonly required: number; readonly margin: number };
+export type SpatialRelation = { readonly relation: "clear" | "conflict" | "unsupported"; readonly distance: number; readonly required: number; readonly margin: number };
 export type EnvelopeRoadInspection =
   | { readonly status: "partial"; readonly ownerId: string; readonly roadId?: string; readonly entity: SpatialRelation;
       readonly plotReservation: SpatialRelation; readonly semantic: "conservative-entity-projection"; readonly wholeModelReady: false; readonly missing: readonly string[] }
@@ -31,6 +32,27 @@ export type EnvelopePairInspection =
       readonly plotReservations?: SpatialRelation; readonly wholeModelReady: false };
 
 const finitePoint = (point: Vec2) => !!point && Number.isFinite(point.x) && Number.isFinite(point.z);
+function validFootprint(footprint: LocalFootprint): boolean {
+  if (!footprint || !Array.isArray(footprint.parts) || !footprint.parts.length || footprint.parts.length > MAX_FOOTPRINT_PARTS * 2) return false;
+  return footprint.parts.every((region: LocalRegion) => {
+    if (!region) return false;
+    if (region.shape === "circle") return finitePoint(region.center) && Number.isFinite(region.radius) && region.radius >= 0;
+    if (region.shape === "rect") return finitePoint(region.center) && Number.isFinite(region.width) && region.width > 0 && Number.isFinite(region.depth) && region.depth > 0;
+    if (region.shape !== "convex" || !Array.isArray(region.vertices) || region.vertices.length < 3 || region.vertices.length > MAX_CONVEX_VERTICES || region.vertices.some((point: Vec2) => !finitePoint(point))) return false;
+    let direction = 0;
+    for (let i = 0; i < region.vertices.length; i++) {
+      const a = region.vertices[i], b = region.vertices[(i + 1) % region.vertices.length];
+      for (const point of region.vertices) {
+        const value = (b.x - a.x) * (point.z - a.z) - (b.z - a.z) * (point.x - a.x);
+        if (value === 0) continue;
+        const sign = value > 0 ? 1 : -1;
+        if (direction && sign !== direction) return false;
+        direction = sign;
+      }
+    }
+    return direction !== 0;
+  });
+}
 const eps = MODEL_ENVELOPE_CONFIG.numericEpsilon;
 const worldPoint = (point: Vec2, owner: GroundOwner): Vec2 => ({
   x: owner.x + point.x * Math.cos(owner.yaw) + point.z * Math.sin(owner.yaw),
@@ -61,9 +83,10 @@ export function resolveModelEnvelope(owner: GroundOwner): ModelEnvelope {
     // Upper solids are conservatively projected into the same XY obstacle set.
     // This does not authorize passing beneath them without a height contract.
     const conservativeProjection = { parts: [...groundFootprint.parts, ...(declaration.overhang?.parts ?? []).map(region => projectRegion(region, owner))] };
-    if (!plotReservation || !conservativeProjection.parts.length) return unsupported("model declaration has no usable projection", plotReservation);
+    if (!plotReservation || !validFootprint(groundFootprint) || !validFootprint(conservativeProjection)) return unsupported("model declaration has no usable projection", plotReservation);
     return { status: "partial", ownerId: owner.id, modelId: declaration.modelId, modelRevision: declaration.modelRevision,
       groundFootprint, conservativeProjection, plotReservation, wholeModelReady: false,
+      ...(resolution.relocationCorridorEnvelope ? { relocationCorridorEnvelope: { ...resolution.relocationCorridorEnvelope } } : {}),
       missing: [...resolution.missing, "height-qualified collision", "full model physical readiness"] };
   } catch (error) { return unsupported(error instanceof Error ? error.message : "invalid model projection", plotReservation); }
 }
@@ -114,18 +137,21 @@ function regionDistance(a: LocalRegion, b: LocalRegion): number {
   return distance;
 }
 export function footprintUnionDistance(a: LocalFootprint, b: LocalFootprint): number {
-  if (!a.parts.length || !b.parts.length) return Infinity;
+  if (!validFootprint(a) || !validFootprint(b)) return NaN;
   return Math.min(...a.parts.flatMap(part => b.parts.map(other => regionDistance(part, other))));
 }
 export function footprintPolylineDistance(footprint: LocalFootprint, points: readonly Vec2[]): number {
-  if (!footprint.parts.length || !points.length || points.some(point => !finitePoint(point))) return Infinity;
+  if (!validFootprint(footprint) || !Array.isArray(points) || !points.length || points.some(point => !finitePoint(point))) return NaN;
   if (points.length === 1) return Math.min(...footprint.parts.map(part => pointRegionDistance(points[0], part)));
   let distance = Infinity;
   for (let i = 1; i < points.length; i += 1) for (const part of footprint.parts)
     distance = Math.min(distance, segmentRegionDistance(points[i - 1], points[i], part));
   return distance;
 }
-const relation = (distance: number, required: number): SpatialRelation => ({ relation: distance < required ? "conflict" : "clear", distance, required, margin: distance - required });
+// Unsigned distance is zero for overlap and contact. Neither can certify clear
+// space even when the caller's additional setback is zero.
+const relation = (distance: number, required: number): SpatialRelation => ({ relation: !Number.isFinite(distance) ? "unsupported"
+  : distance === 0 || distance < required ? "conflict" : "clear", distance, required, margin: distance - required });
 export function inspectEnvelopeRoad(owner: GroundOwner, road: EnvelopeRoad,
   options: { readonly setback?: number } = {}): EnvelopeRoadInspection {
   const setback = options.setback ?? MODEL_ENVELOPE_CONFIG.defaultRoadSetback;
