@@ -156,7 +156,7 @@
 @media (max-width: 420px) { .city-replay-controls { grid-template-columns: auto minmax(60px, 1fr); } .city-replay-controls select { width: 100%; } }
 
 /* 规划修复面板（开发预览，docs/CITY_PLAN_MANUAL_REPAIR_SPEC.md §13） */
-.city-repair { position: absolute; right: 24px; top: 134px; width: 290px; max-height: calc(100% - 260px); overflow-y: auto; padding: 12px; background: var(--city-surface); border: 1px solid var(--city-border); border-radius: 12px; font-size: 12px; z-index: 5; display: grid; gap: 8px; }
+.city-repair { position: absolute; right: 24px; top: 100px; bottom: 24px; width: 290px; max-height: calc(100% - 124px); height: max-content; overflow-y: auto; padding: 12px; background: var(--city-surface); border: 1px solid var(--city-border); border-radius: 12px; font-size: 12px; z-index: 5; display: grid; gap: 8px; }
 .city-repair header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .city-repair h2 { margin: 0; font-size: 13px; }
 .city-repair h2 small { color: var(--city-muted); font-weight: 400; margin-left: 4px; }
@@ -175,3 +175,11 @@
 .city-repair-audit li.city-repair-error b { color: #ffb4a8; }
 .city-repair-audit li.city-repair-warning b { color: #ffd98a; }
 .city-repair-help { color: var(--city-muted); font-size: 11px; }
+.city-repair-entry { position: absolute; right: 24px; top: 64px; z-index: 5; }
+.city-repair-tools { display: flex; gap: 6px; }
+.city-repair-tools button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.city-repair-tools kbd { font-size: 10px; opacity: 0.7; border: 1px solid var(--city-border); border-radius: 3px; padding: 0 3px; line-height: 14px; }
+.city-repair-widths { display: flex; gap: 6px; }
+.city-repair-widths button { flex: 1; }
+.city-app .city-repair button.is-active { background: #2f6fd8; border-color: #8ab4ff; }
+.city-repair-reason { color: #ffb4a8; }

@@ -1,14 +1,16 @@
 /**
  * 规划修复会话（docs/CITY_PLAN_MANUAL_REPAIR_SPEC.md §13）：把补丁层接到 CityEngine 与存档。
  *
- * 本批只有**开发开关下的控制台入口**（`window.__cityPlan`），没有编辑 UI——先让补丁能在真实城市里
- * 走通「写补丁 → 重建 → 渲染/飞行世界读到 → 刷新不丢」，UI（拾取/拖拽/面板）属下一批。
+ * 编辑 UI（planRepair/PlanRepairPanel + controller）与开发控制台入口（`window.__cityPlan`）共用这个会话：
+ * 校验 → 写补丁 → 引擎重建 → 存档。道路编辑一律先过 planRoadRules 的硬规则，再追加一条道路日志。
  * 开关：`?cityPlan` 或 localStorage `cityPlanDev=1`（同 cityGame 的开发开关口径）。未开启时本模块
  * 不读存档、不挂 window、不改引擎行为（引擎里 planPatch 恒为 null → 与旧版逐字节一致）。
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, type PlanIssue } from "../engine/planAudit";
-import { applyPlanPatch, emptyPlanPatch, recordEdgeDrop, recordNodeMove, validateBuildingMove, type PlanPatchV1 } from "../engine/planPatch";
+import { appendRoadOp, emptyPlanPatch, validateBuildingMove, type PlanPatchV1 } from "../engine/planPatch";
+import { nearestEdgeAt, snapPoint, validateEdgeDrop, validateNodeMove, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
+import type { Vec2 } from "../engine/cityLayout";
 import { cityPlanPatchStore, emptyPlanPatchStore, type PlanPatchStoreV1 } from "../data/planPatch";
 
 export function planDevEnabled(): boolean {
@@ -70,7 +72,7 @@ export class PlanRepairSession {
   }
 
   private apply(next: PlanPatchV1 | null): void {
-    const empty = !next || (!Object.keys(next.buildingMoves).length && !Object.keys(next.nodeMoves).length && !next.edgeDrops.length && !next.suppressedContext.length);
+    const empty = !next || (!Object.keys(next.buildingMoves).length && !next.roadOps.length && !next.suppressedContext.length);
     const patch = empty ? null : next;
     this.engine.setPlanPatch(patch);
     const seed = this.seed;
@@ -99,24 +101,59 @@ export class PlanRepairSession {
     return { ok: true, patch, warnings: verdict.warnings };
   }
 
-  /** 拖一个路网节点（传 effective id，即屏幕上当前看到的）。M1 只有套用层的锁定/撞车保护，
-   *  没有几何校验（锐角/并行间距/断网是 M2）——所以这是调试口，结果看 status().stale。 */
-  moveNode(effectiveNodeId: string, x: number, z: number): EditResult {
+  /** 拖一个路口（传当前 id，即屏幕上看到的）。先过硬规则：锁定/撞车/过短/入水/穿楼/锐角。 */
+  moveNode(nodeId: string, x: number, z: number): EditResult {
     const base = this.working();
     if (!base.ok) return base;
-    const generated = this.engine.generatedLayout!;
-    const patch = recordNodeMove(base.patch, applyPlanPatch(generated, base.patch), effectiveNodeId, { x, z });
+    const verdict = validateNodeMove(this.engine.currentLayout!, this.engine.currentModel!, nodeId, { x, z });
+    if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
+    const patch = appendRoadOp(base.patch, { t: "move", node: nodeId, to: { x, z } });
     this.commit(patch);
-    return { ok: true, patch, warnings: [] };
+    return { ok: true, patch, warnings: verdict.warnings };
   }
 
-  dropEdge(effectiveEdgeId: string): EditResult {
+  /** 橡皮擦：删一段路（传当前 id）。 */
+  dropEdge(edgeId: string): EditResult {
     const base = this.working();
     if (!base.ok) return base;
-    const generated = this.engine.generatedLayout!;
-    const patch = recordEdgeDrop(base.patch, applyPlanPatch(generated, base.patch), effectiveEdgeId);
+    const verdict = validateEdgeDrop(this.engine.currentLayout!, this.engine.currentModel!, edgeId);
+    if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
+    const patch = appendRoadOp(base.patch, { t: "drop", edge: edgeId });
     this.commit(patch);
-    return { ok: true, patch, warnings: [] };
+    return { ok: true, patch, warnings: verdict.warnings };
+  }
+
+  /** 画路：from/to 是已吸附的坐标（snap() 的结果）。端点落在路段中间会把该路段拆成两半。 */
+  addRoad(from: Vec2, to: Vec2, width: number): EditResult {
+    const base = this.working();
+    if (!base.ok) return base;
+    const verdict = validateRoadAdd(this.engine.currentLayout!, this.engine.currentModel!, from, to, width);
+    if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
+    const patch = appendRoadOp(base.patch, { t: "add", from, to, width });
+    this.commit(patch);
+    return { ok: true, patch, warnings: verdict.warnings };
+  }
+
+  // ── 悬停预览用的只读包装（不写补丁）──
+  snap(x: number, z: number): SnapPoint | null {
+    const layout = this.engine.currentLayout;
+    return layout ? snapPoint(layout, x, z) : null;
+  }
+
+  edgeAt(x: number, z: number): { id: string; points: Vec2[]; width: number; locked: boolean } | null {
+    const layout = this.engine.currentLayout;
+    const edge = layout ? nearestEdgeAt(layout, x, z) : null;
+    return edge ? { id: edge.id, points: edge.points, width: edge.width, locked: edge.bridge === true || edge.structure === "deck" || edge.structure === "ground-approach" || edge.purpose === "waterfront" } : null;
+  }
+
+  validateDrop(edgeId: string): RoadVerdict {
+    const layout = this.engine.currentLayout; const model = this.engine.currentModel;
+    return layout && model ? validateEdgeDrop(layout, model, edgeId) : { blockers: ["city-not-ready"], warnings: [] };
+  }
+
+  validateAdd(from: Vec2, to: Vec2, width: number): RoadVerdict {
+    const layout = this.engine.currentLayout; const model = this.engine.currentModel;
+    return layout && model ? validateRoadAdd(layout, model, from, to, width) : { blockers: ["city-not-ready"], warnings: [] };
   }
 
   undo(): boolean {
@@ -192,7 +229,7 @@ export class PlanRepairSession {
       ready: !!layout, seed: layout?.seed ?? null, cityTier: layout?.scaleTier ?? null, patchTier: patch?.scaleTier ?? null,
       patch, stale: this.engine.planPatched?.stale ?? [], saveFailed: this.saveFailed,
       canUndo: this.undoStack.length > 0, canRedo: this.redoStack.length > 0,
-      counts: patch ? { buildingMoves: Object.keys(patch.buildingMoves).length, nodeMoves: Object.keys(patch.nodeMoves).length, edgeDrops: patch.edgeDrops.length, suppressedContext: patch.suppressedContext.length } : null,
+      counts: patch ? { buildingMoves: Object.keys(patch.buildingMoves).length, roadOps: patch.roadOps.length, roadAdds: patch.roadOps.filter((op) => op.t === "add").length, roadDrops: patch.roadOps.filter((op) => op.t === "drop").length, suppressedContext: patch.suppressedContext.length } : null,
     };
   }
 

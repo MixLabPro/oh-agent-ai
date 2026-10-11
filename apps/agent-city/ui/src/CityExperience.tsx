@@ -437,13 +437,6 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {game.entryError && <p role="alert">{game.entryError}</p>}
         <p>{gameText("进入后用 W/S/A/D 与方向键飞行，Esc 暂停。", language === "en" ? "en" : "zh-Hans")}</p>
       </div>}
-      {planRepair.enabled && <div className="city-game-entry">
-        <label style={{ fontSize: 12, color: "var(--city-muted)" }}>修复规划（开发预览）</label>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button disabled={cinema || ui.busy || gameActive || !ui.model || planRepair.state.active} onClick={() => { ui.setOptions(false); planRepair.enter(); }}>进入修复模式</button>
-        </div>
-        <p>点选会话楼，再点要搬去的空地块；非法位置会说明原因。修改按种子保存在本机。</p>
-      </div>}
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
       {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}
       <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.lockSelection(e.target.value); else ui.clearSelection(); ui.setOptions(false); }}>
@@ -459,7 +452,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <small>实际生成帧 · 预览最多 2 FPS，成片 30 FPS</small>
     </section>}
     {ui.error && !ui.options && <div className="city-feature-error" role="alert">{ui.error}<button aria-label="关闭提示" onClick={() => ui.setError(null)}>×</button></div>}
-    {!cinema && !gameActive && <PlanRepairPanel repair={planRepair} />}
+    {!cinema && !gameActive && <PlanRepairPanel repair={planRepair} entryDisabled={ui.busy || !ui.model || !!ui.film} />}
     {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} persist={{ tier: game.persistTier, saveFailed: game.saveFailed }} actions={{
       onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse,
     }} />}

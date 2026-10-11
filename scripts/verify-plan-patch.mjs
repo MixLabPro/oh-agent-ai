@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 规划修复补丁守卫（docs/CITY_PLAN_MANUAL_REPAIR_SPEC.md §10，M1 首批）：
-//   (a) 确定性：同输入两次套用逐字段相等；补丁条目倒序构造结果不变（排序后处理）；
+//   (a) 确定性：同输入两次套用逐字段相等；buildingMoves 条目倒序结果不变，roadOps 按日志顺序；
 //   (b) 移楼叠套是 no-op（节点/删路不承诺叠套——补丁只套在底层布局上，见 planPatch.ts 契约）；
 //   (c) 建筑移动：换 slot 重算地面高度；目标缺失/被占/被预留 → stale 如实上报，布局不动；
 //   (d) 锁定口径：桥（bridge/deck/ground-approach）与滨海段（waterfront）的节点不可移、边不可删；
@@ -13,7 +13,7 @@
 //   (j) 背景楼压制：部分生效时，其余不存在的 id 仍逐条上报；
 //   (k) 套用与校验同一占用口径：目标地块有背景楼 → parcel-occupied（曾只看会话楼）；
 //   (l) 存档宽容读取：null/错型字段不抛、单条坏条目丢弃、缺必填 → 整条丢弃；
-//   (m) 编辑器写补丁走原始 id：再拖已拖过的节点、删已重挂的路段 → 记回原始 id；
+//   (m) 道路日志按顺序重放：引用当前 id（移后再移、移后再删）、拆路段后再删其中一半、画路端点吸附（路口/路段中间/新建）、失败操作不留半截改动；
 //   (n) 跨档位：整份补丁 tier-changed，布局不动；
 //   (o) 真实城市：空补丁不改布局；占地重叠不误报（曾 1600 楼 1111 条）；layoutCity pins 让移楼在落位阶段生效、
 //       空置街区随之长出路、刷新后不被新会话挤掉；pins=null / 跨档 pins 时落位与无 pins 一致。
@@ -22,10 +22,10 @@ import { loadCity } from "./city-kit/index.mjs";
 
 globalThis.window ??= globalThis;
 const {
-  applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, recordNodeMove, recordEdgeDrop, layoutPinsFor,
+  applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
   auditLayout, buildCityModel, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
-  "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "recordNodeMove", "recordEdgeDrop", "layoutPinsFor"],
+  "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor"],
   "engine/planAudit.ts": ["auditLayout"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
@@ -115,18 +115,18 @@ const snap = (layout) => JSON.stringify({
   })),
 });
 
-// (a) 确定性：同输入两次 → 相同；条目倒序构造 → 相同。
+// (a) 确定性：同输入两次 → 相同；buildingMoves 条目倒序 → 相同；roadOps 顺序是语义（日志）。
 {
   const patch = fresh();
   patch.buildingMoves = { b1: "p3", b2: "p9" };
-  patch.edgeDrops = ["100:0/100:100"];
-  patch.nodeMoves = { "100:100": { x: 120, z: 120 } };
-  const reversed = { ...patch, buildingMoves: { b2: "p9", b1: "p3" }, edgeDrops: [...patch.edgeDrops].reverse() };
+  patch.roadOps = [{ t: "drop", edge: "100:0/100:100" }, { t: "add", from: { x: 100, z: 0 }, to: { x: 150, z: 50 }, width: 5 }];
+  const reversed = { ...patch, buildingMoves: { b2: "p9", b1: "p3" } };
   const one = applyPlanPatch(makeLayout(), patch);
   const two = applyPlanPatch(makeLayout(), patch);
   assert.equal(snap(one.layout), snap(two.layout), "same input must yield identical layouts");
   assert.equal(JSON.stringify(one.stale), JSON.stringify(two.stale));
-  assert.equal(snap(applyPlanPatch(makeLayout(), reversed).layout), snap(one.layout), "entry insertion order must not matter");
+  assert.equal(snap(applyPlanPatch(makeLayout(), reversed).layout), snap(one.layout), "buildingMoves insertion order must not matter");
+  assert.notEqual(hashPlanPatch(patch), hashPlanPatch({ ...patch, roadOps: [...patch.roadOps].reverse() }), "road op order is part of the fingerprint");
 }
 
 // (b) 移楼叠套 → 不动。
@@ -151,25 +151,30 @@ const snap = (layout) => JSON.stringify({
   assert.deepEqual(stale.map((s) => `${s.kind}:${s.reason}`).sort(), ["building-move:missing-parcel", "building-move:unknown-building"], "stale reasons must be exact");
 }
 
-// (d) 锁定口径：桥端点、滨海端点不可移；桥/滨海边不可删。
+// (d) 锁定口径：桥端点、滨海端点不可移；桥/滨海边不可删；不能从桥/滨海路段中间接路。
 {
   assert.ok(edgeLocked(E2) && edgeLocked(E3), "bridge and waterfront edges are locked by construction");
   const patch = fresh();
-  patch.nodeMoves = { "100:0": { x: 120, z: 0 }, "0:0": { x: 10, z: 10 } }; // 100:0 连桥、0:0 连滨海
-  patch.edgeDrops = ["100:0/200:0", "0:0/0:100"];
+  patch.roadOps = [
+    { t: "move", node: "100:0", to: { x: 120, z: 0 } },   // 100:0 连桥
+    { t: "move", node: "0:0", to: { x: 10, z: 10 } },     // 0:0 连滨海
+    { t: "drop", edge: "100:0/200:0" },
+    { t: "drop", edge: "0:0/0:100" },
+    { t: "add", from: { x: 150, z: 0 }, to: { x: 150, z: 40 }, width: 5 }, // 起点落在桥面中间
+  ];
   const { layout, stale } = applyPlanPatch(makeLayout(), patch);
-  assert.equal(stale.length, 4, "every locked node move and edge drop must be reported");
+  assert.equal(stale.length, 5, "every locked operation must be reported");
   assert.ok(stale.every((s) => s.reason === "locked-edge"));
   const base = makeLayout();
-  assert.deepEqual(layout.roadNodes, base.roadNodes, "locked node moves must not mutate nodes");
-  assert.deepEqual(layout.roadEdges, base.roadEdges, "locked edge drops must not mutate edges");
+  assert.deepEqual(layout.roadNodes, base.roadNodes, "locked operations must not mutate nodes");
+  assert.deepEqual(layout.roadEdges, base.roadEdges, "locked operations must not mutate edges");
 }
 
-// (e) 节点移动：尽端节点 (100,100) → (120,120)，id/边引用/边 id/回车点全部跟随；id 映射回原始。
+// (e) 节点移动：尽端节点 (100,100) → (120,120)，id/边引用/边 id/回车点全部跟随。
 {
   const patch = fresh();
-  patch.nodeMoves = { "100:100": { x: 120, z: 120 } };
-  const { layout, stale, ids } = applyPlanPatch(makeLayout(), patch);
+  patch.roadOps = [{ t: "move", node: "100:100", to: { x: 120, z: 120 } }];
+  const { layout, stale } = applyPlanPatch(makeLayout(), patch);
   assert.equal(stale.length, 0);
   const node = layout.roadNodes.find((n) => n.id === "120:120");
   assert.ok(node && node.x === 120 && node.z === 120, "node must be re-keyed to its new coordinates");
@@ -178,14 +183,12 @@ const snap = (layout) => JSON.stringify({
   assert.equal(e4.id, "100:0/120:120", "edge id must be re-derived from the new node ids");
   assert.deepEqual(e4.points, [{ x: 100, z: 0 }, { x: 120, z: 120 }], "edge endpoints must follow the moved node");
   assert.deepEqual(layout.culDeSacEnds, [{ x: 120, z: 120 }], "the moved dead-end must remain a cul-de-sac at its new position");
-  assert.equal(ids.nodes.get("120:120"), "100:100", "effective node id maps back to the original");
-  assert.equal(ids.edges.get("100:0/120:120"), "100:0/100:100", "effective edge id maps back to the original");
 }
 
 // (f) 删路段：车流过滤、孤立节点清除、缺失边 stale、锁定边 stale。
 {
   const patch = fresh();
-  patch.edgeDrops = ["100:0/100:100", "100:0/200:0", "nope"];
+  patch.roadOps = [{ t: "drop", edge: "100:0/100:100" }, { t: "drop", edge: "100:0/200:0" }, { t: "drop", edge: "nope" }];
   const { layout, stale } = applyPlanPatch(makeLayout(), patch);
   assert.ok(!layout.roadEdges.some((e) => e.id === "100:0/100:100"), "the dropped local edge must be gone");
   assert.ok(!layout.roadNodes.some((n) => n.id === "100:100"), "the orphaned dead-end node must be pruned");
@@ -253,7 +256,7 @@ const snap = (layout) => JSON.stringify({
     assert.ok(layout.roadEdges.every((e) => e.from !== e.to), "no zero-length edge");
   };
   for (const to of [{ x: 0, z: 100 }, { x: 100, z: 0 }]) { // 拖到不动的 0:100 上 / 拖到相邻节点 → 零长边
-    const patch = fresh(); patch.nodeMoves = { "100:100": to };
+    const patch = fresh(); patch.roadOps = [{ t: "move", node: "100:100", to }];
     const { layout, stale } = applyPlanPatch(makeLayout(), patch);
     assert.deepEqual(stale.map((s) => s.reason), ["node-collision"], "a move onto an existing node must be rejected");
     assert.ok(layout.roadNodes.some((n) => n.id === "100:100"), "the rejected node stays put");
@@ -265,20 +268,21 @@ const snap = (layout) => JSON.stringify({
     layout.roadEdges.push(edge("300:0/300:50", "300:0", "300:50", 5, [{ x: 300, z: 0 }, { x: 300, z: 50 }]), edge("100:100/300:0", "100:100", "300:0", 5, [{ x: 100, z: 100 }, { x: 300, z: 0 }]));
     return layout;
   };
-  // 两个自由节点去同一点：两条都拒（谁也不比谁优先，确定性）。
-  const both = fresh(); both.nodeMoves = { "300:0": { x: 200, z: 200 }, "300:50": { x: 200, z: 200 } };
+  // 日志按顺序重放：先到先得——第二个去同一点的被拒，第一个生效。
+  const both = fresh(); both.roadOps = [{ t: "move", node: "300:0", to: { x: 200, z: 200 } }, { t: "move", node: "300:50", to: { x: 200, z: 200 } }];
   const collided = applyPlanPatch(free(), both);
-  assert.deepEqual(collided.stale.map((s) => `${s.id}:${s.reason}`), ["300:0:node-collision", "300:50:node-collision"]);
+  assert.deepEqual(collided.stale.map((s) => `${s.id}:${s.reason}`), ["2:move:node-collision"], "the later move into an occupied spot is rejected");
+  assert.ok(collided.layout.roadNodes.some((n) => n.id === "200:200") && collided.layout.roadNodes.some((n) => n.id === "300:50"));
   uniqueAndNonDegenerate(collided.layout);
-  // 让位（A 去 B 的旧位、B 去别处）是单射，合法。
-  const swap = fresh(); swap.nodeMoves = { "300:50": { x: 320, z: 80 }, "300:0": { x: 300, z: 50 } };
+  // 让位：先把占位的挪开，后面的就能进。
+  const swap = fresh(); swap.roadOps = [{ t: "move", node: "300:50", to: { x: 320, z: 80 } }, { t: "move", node: "300:0", to: { x: 300, z: 50 } }];
   const swapped = applyPlanPatch(free(), swap);
-  assert.equal(swapped.stale.length, 0, "moving into a spot another move vacates is legal");
+  assert.equal(swapped.stale.length, 0, "moving into a spot an earlier op vacated is legal");
   assert.ok(swapped.layout.roadEdges.some((e) => e.id === "300:50/320:80"));
   uniqueAndNonDegenerate(swapped.layout);
-  // 连锁：B 被拒留在原地 → 要去 B 旧位的 A 也得拒（迭代到稳定）。
-  const chain = fresh(); chain.nodeMoves = { "300:0": { x: 300, z: 50 }, "300:50": { x: 100, z: 100 } };
-  assert.deepEqual(applyPlanPatch(free(), chain).stale.map((s) => s.id).sort(), ["300:0", "300:50"], "a rejection that pins a node must cascade");
+  // 反过来次序（先去被占的）→ 被拒，说明次序是语义。
+  const wrongOrder = fresh(); wrongOrder.roadOps = [swap.roadOps[1], swap.roadOps[0]];
+  assert.deepEqual(applyPlanPatch(free(), wrongOrder).stale.map((s) => s.reason), ["node-collision"], "op order is semantic");
 }
 
 // (j) 背景楼压制：曾以「总数没变」判失效，一条生效就吞掉其余不存在的 id。
@@ -299,40 +303,78 @@ const snap = (layout) => JSON.stringify({
   assert.equal(applyPlanPatch(makeLayout(), lifted).layout.districts[0].slots.get("b1").id, "p6", "suppression frees the parcel");
 }
 
-// (l) 存档宽容读取：曾 `{...c, 默认, ...c}`，`edgeDrops: null` 直接让套用抛异常。
+// (l) 存档宽容读取：曾 `{...c, 默认, ...c}`，`edgeDrops: null` 直接让套用抛异常；旧开发版两张表转日志。
 {
   const coerced = coercePlanPatch({ version: 1, seed: 74031, scaleTier: 1, nodeMoves: { a: { x: 1, z: 2 }, bad: { x: "1" } }, edgeDrops: null, buildingMoves: { b1: "p3", b2: 9 }, suppressedContext: ["context:x", 3] });
-  assert.deepEqual(coerced, { version: 1, seed: 74031, scaleTier: 1, updatedAt: 0, nodeMoves: { a: { x: 1, z: 2 } }, edgeDrops: [], buildingMoves: { b1: "p3" }, suppressedContext: ["context:x"] });
+  assert.deepEqual(coerced, { version: 1, seed: 74031, scaleTier: 1, updatedAt: 0, roadOps: [{ t: "move", node: "a", to: { x: 1, z: 2 } }], buildingMoves: { b1: "p3" }, suppressedContext: ["context:x"] });
   assert.doesNotThrow(() => applyPlanPatch(makeLayout(), coerced));
+  const legacy = coercePlanPatch({ version: 1, seed: 1, scaleTier: 1, edgeDrops: ["0:0/100:0"], nodeMoves: { "100:100": { x: 110, z: 110 } } });
+  assert.deepEqual(legacy.roadOps, [{ t: "drop", edge: "0:0/100:0" }, { t: "move", node: "100:100", to: { x: 110, z: 110 } }], "legacy tables become a log: drops first, then moves");
+  const messy = coercePlanPatch({ version: 1, seed: 1, scaleTier: 1, roadOps: [{ t: "add", from: { x: 1, z: 2 }, to: { x: 3, z: 4 }, width: 5 }, { t: "add", from: { x: 1 } }, { t: "zap" }, null, { t: "drop", edge: 7 }] });
+  assert.equal(messy.roadOps.length, 1, "malformed log entries are dropped one by one");
   assert.equal(coercePlanPatch({ version: 1, seed: 7 }), null, "missing scaleTier drops the whole patch");
   assert.equal(coercePlanPatch(null), null);
   assert.equal(coercePlanPatch({ version: 2, seed: 7, scaleTier: 1 }), null);
 }
 
-// (m) 编辑器写补丁走原始 id：effective 布局里拾取的是重挂后的 id。
+// (m) 道路日志重放：引用当前 id；拆路段、画路端点吸附、失败不留半截改动。
 {
   const base = makeLayout();
-  let patch = fresh(); patch.nodeMoves = { "100:100": { x: 120, z: 120 } };
+  // 移后再移（用移后的当前 id）：两步等价于一步到终点。
+  let patch = fresh();
+  patch = appendRoadOp(patch, { t: "move", node: "100:100", to: { x: 120, z: 120 } }, 1);
+  patch = appendRoadOp(patch, { t: "move", node: "120:120", to: { x: 130, z: 140 } }, 2);
   let patched = applyPlanPatch(base, patch);
-  patch = recordNodeMove(patch, patched, "120:120", { x: 130, z: 140 }, 1); // 再拖同一节点（effective id）
-  assert.deepEqual(Object.keys(patch.nodeMoves), ["100:100"], "re-dragging a moved node overwrites its original entry");
+  assert.equal(patched.stale.length, 0);
+  assert.ok(patched.layout.roadNodes.some((n) => n.id === "130:140") && !patched.layout.roadNodes.some((n) => n.id === "120:120"));
+  assert.deepEqual(patched.layout.culDeSacEnds, [{ x: 130, z: 140 }], "the cul-de-sac follows two successive moves");
+  // 移后再删（用移后的边 id）。
+  patch = appendRoadOp(patch, { t: "drop", edge: "100:0/130:140" }, 3);
   patched = applyPlanPatch(base, patch);
   assert.equal(patched.stale.length, 0);
-  assert.ok(patched.layout.roadNodes.some((n) => n.id === "130:140"));
-  patch = recordEdgeDrop(patch, patched, "100:0/130:140", 2); // 删一条已重挂的路段
-  assert.deepEqual(patch.edgeDrops, ["100:0/100:100"], "dropping a re-keyed edge records its original id");
-  const final = applyPlanPatch(base, patch);
-  assert.ok(!final.layout.roadEdges.some((e) => e.id === "100:0/100:100" || e.id === "100:0/130:140"), "the edge is gone");
-  assert.deepEqual(final.stale.map((s) => s.reason), ["missing-node"], "the dragged node lost its only edge — its move goes stale, honestly");
+  assert.ok(!patched.layout.roadEdges.some((e) => e.id === "100:0/130:140"), "dropping by the current id works");
+  assert.ok(!patched.layout.roadNodes.some((n) => n.id === "130:140"), "the orphaned node goes with it");
+  assert.deepEqual(patched.layout.culDeSacEnds, [], "…and so does its cul-de-sac");
+
+  // 画路：端点落在路口 / 路段中间 / 空地。
+  const add = (from, to, width = 5) => ({ t: "add", from, to, width });
+  const draw = (op) => { const p = fresh(); p.roadOps = [op]; return applyPlanPatch(makeLayout(), p); };
+  const toNode = draw(add({ x: 100, z: 100 }, { x: 200, z: 0 }));
+  assert.equal(toNode.stale.length, 0);
+  assert.ok(toNode.layout.roadEdges.some((e) => e.id === "100:100/200:0" && e.points.length === 2 && e.structure === "ground-road"), "a road between two existing nodes is one new edge");
+  assert.equal(toNode.layout.roadNodes.length, makeLayout().roadNodes.length, "no node is invented when both ends snap to nodes");
+  const split = draw(add({ x: 100, z: 100 }, { x: 50, z: 0 })); // 终点落在 0:0—100:0 路段中间
+  assert.equal(split.stale.length, 0);
+  assert.ok(!split.layout.roadEdges.some((e) => e.id === "0:0/100:0"), "the host edge is replaced by two halves");
+  assert.ok(split.layout.roadEdges.some((e) => e.id === "0:0/50:0") && split.layout.roadEdges.some((e) => e.id === "100:0/50:0"), "both halves are keyed by their endpoints");
+  assert.ok(split.layout.roadEdges.some((e) => e.id === "100:100/50:0"), "the new road lands on the split node");
+  assert.equal(split.layout.roadEdges.find((e) => e.id === "0:0/50:0").width, E1.width, "halves inherit the host's attributes");
+  const dead = draw(add({ x: 200, z: 60 }, { x: 260, z: 60 }, 8)); // 起点在路口 200:60（路网尽头），终点是空地
+  assert.equal(dead.stale.length, 0);
+  assert.ok(dead.layout.roadNodes.some((n) => n.id === "260:60"), "a free end creates a node");
+  assert.equal(dead.layout.roadEdges.find((e) => e.id === "200:60/260:60").kind, "arterial", "width ≥ 8 draws an arterial");
+  // 拆开后再删其中一半（用拆出来的 id）——这是原始 id 方案做不到的。
+  let chained = fresh(); chained.roadOps = [add({ x: 100, z: 100 }, { x: 50, z: 0 }), { t: "drop", edge: "0:0/50:0" }];
+  const afterHalf = applyPlanPatch(makeLayout(), chained);
+  assert.equal(afterHalf.stale.length, 0, "a half created by a split can be dropped by the log");
+  assert.ok(!afterHalf.layout.roadEdges.some((e) => e.id === "0:0/50:0") && afterHalf.layout.roadEdges.some((e) => e.id === "100:0/50:0"));
+  // 失败的操作不留半截改动：终点已存在的重复路段不应顺带把宿主拆了。
+  const dup = fresh(); dup.roadOps = [add({ x: 0, z: 0 }, { x: 100, z: 0 })];
+  const dupResult = applyPlanPatch(makeLayout(), dup);
+  assert.deepEqual(dupResult.stale.map((s) => s.reason), ["edge-exists"]);
+  const partial = fresh(); partial.roadOps = [add({ x: 50, z: 0 }, { x: 50.2, z: 0.1 })]; // 两端解析到同一个新路口 → 退化
+  const partialResult = applyPlanPatch(makeLayout(), partial);
+  assert.deepEqual(partialResult.stale.map((s) => s.reason), ["degenerate"]);
+  assert.equal(snap(partialResult.layout).replace(/\|patch:\d+/, ""), snap(makeLayout()).replace(/\|patch:\d+/, ""), "a failed add must not leave a half-done split behind");
 }
 
 // (n) 跨档位：整份补丁失效，布局原样返回。
 {
-  const patch = emptyPlanPatch(74031, 2); patch.buildingMoves = { b1: "p3" }; patch.edgeDrops = ["100:0/100:100"];
+  const patch = emptyPlanPatch(74031, 2); patch.buildingMoves = { b1: "p3" }; patch.roadOps = [{ t: "drop", edge: "100:0/100:100" }];
   const base = makeLayout();
   const { layout, stale } = applyPlanPatch(base, patch);
   assert.equal(layout, base, "a cross-tier patch must not touch the layout");
-  assert.deepEqual(stale.map((s) => `${s.kind}:${s.reason}`), ["building-move:tier-changed", "edge-drop:tier-changed"]);
+  assert.deepEqual(stale.map((s) => `${s.kind}:${s.reason}`), ["building-move:tier-changed", "road-drop:tier-changed"]);
 }
 
 // (o) 真实城市（同 verify-city-culdesac-bulbs 的固定伪随机数据）。
@@ -415,4 +457,4 @@ const snap = (layout) => JSON.stringify({
   assert.equal(slotsOf(otherTier), slotsOf(base), "pins written for another tier are ignored by layoutCity");
 }
 
-console.log("City plan patch: deterministic and order-independent, building-move replay is a no-op, stale entries degrade honestly (missing/locked/occupied/collision/tier/context), node moves re-key ids/edges/cul-de-sacs and map back to originals, edge drops prune nodes and filter car paths, building-move blockers (occupied/missing/road/slope/buildable/highway/overlap) hold, storage coercion never throws, layout audit is severity-sorted and quiet on generated cities, layout pins place moved buildings before road pruning and survive refresh.");
+console.log("City plan patch: deterministic (building moves order-independent, road ops replayed in log order), building-move replay is a no-op, stale entries degrade honestly (missing/locked/occupied/collision/tier/context/duplicate/degenerate), node moves re-key ids/edges/cul-de-sacs, drawn roads snap to nodes/split host edges/create free ends and halves of a split can be dropped later, failed adds leave no half-done split, edge drops prune nodes and filter car paths, building-move blockers (occupied/missing/road/slope/buildable/highway/overlap) hold, storage coercion never throws, layout audit is severity-sorted and quiet on generated cities, layout pins place moved buildings before road pruning and survive refresh.");

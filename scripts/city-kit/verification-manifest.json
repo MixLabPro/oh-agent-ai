@@ -232,5 +232,6 @@
   { "id": "verify-city-game-profile", "file": "verify-city-game-profile.mjs", "env": {}, "shared": false
   },
   { "id": "verify-plan-patch", "file": "verify-plan-patch.mjs", "env": {}, "shared": false },
-  { "id": "verify-plan-repair-controller", "file": "verify-plan-repair-controller.mjs", "env": {}, "shared": false }
+  { "id": "verify-plan-repair-controller", "file": "verify-plan-repair-controller.mjs", "env": {}, "shared": false },
+  { "id": "verify-plan-road-rules", "file": "verify-plan-road-rules.mjs", "env": {}, "shared": false }
 ]

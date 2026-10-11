@@ -53,7 +53,8 @@ export type CameraOwner = "orbit" | "cinematic" | "game";
 
 /** 规划修复模式的点击钩子：引擎把一次选取手势翻成「点中的会话楼/非楼物体 id + 点到的地面坐标」交给它，自己不再选楼/飞镜头。 */
 export type RepairClick = { pickedId: string | null; ground: { x: number; z: number } | null };
-export type RepairHook = { onClick(click: RepairClick): void };
+/** onMove：指针移动时的地面点（离开画布/朝天为 null）——画路/橡皮擦的悬停预览用。 */
+export type RepairHook = { onClick(click: RepairClick): void; onMove?(ground: { x: number; z: number } | null): void };
 
 export type CityEngineOptions = {
   canvas: RenderCanvas;
@@ -241,6 +242,7 @@ export class CityEngine {
       const rect = interactiveCanvas.getBoundingClientRect();
       this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
       this.pointerMoved = true;
+      this.repairHook?.onMove?.(this.groundPointAtPointer());
       this.noteActivity();
     };
     const onPointerDown = (event: PointerEvent) => {
@@ -273,6 +275,7 @@ export class CityEngine {
     };
     const onPointerCancel = () => { this.pointerDown = null; };
     const onPointerLeave = () => {
+      this.repairHook?.onMove?.(null);
       this.pointerClient = null;
       this.hoveredId = null;
       this.parts?.setHovered(null);
@@ -1072,6 +1075,11 @@ export class CityEngine {
   setRepairHook(hook: RepairHook | null): void {
     this.repairHook = hook;
     this.noteActivity();
+  }
+
+  /** 画布光标样式（修复模式的画路/橡皮擦用十字）；空串恢复默认。 */
+  setCursor(cursor: string): void {
+    if (!this.options.headless) (this.options.canvas as HTMLCanvasElement).style.cursor = cursor;
   }
 
   /** 叠加层（候选地块高亮等）：直接挂在场景根上，不随 CityParts 重建而销毁。 */

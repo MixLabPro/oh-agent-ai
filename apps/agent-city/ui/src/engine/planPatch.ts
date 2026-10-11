@@ -6,7 +6,7 @@
  * 引用对象（session_ref / parcelId / roadNode 坐标 id），套用确定性、顺序无关。
  *
  * 契约（verify-plan-patch.mjs 守卫）：
- *   - 同一底层布局 + 同一补丁 → 逐字段相等；补丁条目序倒排结果不变（排序后处理）；
+ *   - 同一底层布局 + 同一补丁 → 逐字段相等；buildingMoves/suppressedContext 条目序无关，roadOps 按日志顺序；
  *   - 补丁只套在**未打补丁的底层布局**上（CityEngine 每次 layoutCity 重建后重新套）。不承诺叠套：
  *     节点移动/删路改写了 id，第二次套用时原 id 已不存在——曾在注释里声称「幂等」，
  *     实测叠套会报 missing-node/missing-edge，契约收窄为如实的样子。buildingMoves 叠套仍是 no-op
@@ -14,19 +14,28 @@
  *   - 失效条目（对象不存在 / 边锁定 / 地块被占 / 节点撞车 / 跨档位）不套用、进 stale 清单如实上报，不静默吞；
  *   - 桥（bridge/deck/ground-approach）与滨海段（purpose=waterfront）锁定不可编辑（SPEC §7.2）。
  *
- * **补丁永远存原始 id**：节点移动后按新坐标重挂 id，编辑器从 effective 布局拾取到的是新 id。
- * 直接写进补丁会对不上底层布局（拖过的节点再拖一次、删一条拖过的路 → 全部 stale）。
- * 编辑器必须经 `recordNodeMove` / `recordEdgeDrop` 写补丁，它们按 `PatchedLayout.ids` 翻译回原始 id。
+ * **道路编辑是操作日志（roadOps），按顺序重放**：每个操作引用「执行当时的当前 id」。节点/路段 id 全由坐标推出
+ * （`x:z` / `from/to`），所以同一底层布局 + 同一日志的重放是确定的，不需要把 id 翻回原始 id。
+ * 曾经 nodeMoves/edgeDrops 两张表按原始 id 存——画路要把原路段从中间拆成两半，拆出来的新 id 在底层布局里不存在，
+ * 「翻回原始 id」无从谈起；日志形式也让撤销自然（弹出最后一个操作）。代价：道路操作**有顺序**，
+ * 不再满足「条目顺序倒排结果不变」（buildingMoves/suppressedContext 仍是集合，顺序无关）。
  *
- * M1 范围：buildingMoves 全量 + nodeMoves/edgeDrops 的套用与锁定规则（编辑器 UI 属后续批）；
+ * 范围：buildingMoves 全量 + 道路日志（删/移/加）的套用与锁定规则；
  * suppressedContext（M3）仅透传过滤。plan 级约束复用（体检的另一半）等 city-opt 的
  * constraints.ts 导出稳定后再接（SPEC §0 重估条款）。
  */
 import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { clearsHighways, roadNodeId } from "./cityPlan";
-import type { CityLayout, Parcel, RoadEdge, Vec2 } from "./cityLayout";
+import type { CityLayout, Parcel, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 
 export const PLAN_PATCH_VERSION = 1;
+
+/** 道路操作日志的一项。node/edge 是**执行当时**的当前 id。 */
+export type RoadOp =
+  | { t: "drop"; edge: string }
+  | { t: "move"; node: string; to: Vec2 }
+  /** 新增一段直路。端点吸附规则见 resolveEndpoint：靠近路口 → 接到路口；落在路段中间 → 把该路段拆成两半；否则新建路口。 */
+  | { t: "add"; from: Vec2; to: Vec2; width: number };
 
 export type PlanPatchV1 = {
   version: 1;
@@ -34,10 +43,8 @@ export type PlanPatchV1 = {
   /** 补丁写下时的规模档位。跨档（岛放大、地块与节点重排）后全部条目失效——不做坐标重定位（SPEC §4）。 */
   scaleTier: number;
   updatedAt: number;
-  /** 道路节点**原始** id（底层布局里的坐标串 "x:z"）→ 新位置；移动后节点按新坐标重挂 id 与边引用。 */
-  nodeMoves: Record<string, Vec2>;
-  /** 删除的路段**原始** id（"from/to" 字典序）。 */
-  edgeDrops: string[];
+  /** 道路操作日志，按顺序重放。 */
+  roadOps: RoadOp[];
   /** 会话楼 id（session_ref）→ 新地块 id（Parcel.id）。 */
   buildingMoves: Record<string, string>;
   /** 压制的背景楼 id（"context:<parcelId>"，M3）。 */
@@ -46,19 +53,16 @@ export type PlanPatchV1 = {
 
 /** 条目无法套用的原因——诚实降级：丢弃 + 上报，绝不猜测替代目标。 */
 export type PatchStaleEntry = {
-  kind: "building-move" | "node-move" | "edge-drop" | "context-suppress";
+  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "context-suppress";
   id: string;
-  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed";
+  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate";
   detail: string;
 };
 
-/** effective id → 原始 id（只记被重挂的；不在表里的 id 本身就是原始 id）。 */
-export type PatchIdMap = { nodes: ReadonlyMap<string, string>; edges: ReadonlyMap<string, string> };
-
-export type PatchedLayout = { layout: CityLayout; stale: PatchStaleEntry[]; patchHash: string; ids: PatchIdMap };
+export type PatchedLayout = { layout: CityLayout; stale: PatchStaleEntry[]; patchHash: string };
 
 export function emptyPlanPatch(seed: number, scaleTier: number): PlanPatchV1 {
-  return { version: PLAN_PATCH_VERSION, seed, scaleTier, updatedAt: 0, nodeMoves: {}, edgeDrops: [], buildingMoves: {}, suppressedContext: [] };
+  return { version: PLAN_PATCH_VERSION, seed, scaleTier, updatedAt: 0, roadOps: [], buildingMoves: {}, suppressedContext: [] };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -71,9 +75,18 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === "nu
  */
 export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
   if (!isRecord(raw) || raw.version !== PLAN_PATCH_VERSION || !isFiniteNumber(raw.seed) || !isFiniteNumber(raw.scaleTier)) return null;
-  const nodeMoves: Record<string, Vec2> = {};
-  if (isRecord(raw.nodeMoves)) for (const [id, to] of Object.entries(raw.nodeMoves)) {
-    if (isRecord(to) && isFiniteNumber(to.x) && isFiniteNumber(to.z)) nodeMoves[id] = { x: to.x, z: to.z };
+  const point = (value: unknown): Vec2 | null => (isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.z) ? { x: value.x, z: value.z } : null);
+  const roadOps: RoadOp[] = [];
+  // 早期开发版把道路编辑存成 edgeDrops/nodeMoves 两张表（原始 id）：先删后移，等价转成日志。
+  if (Array.isArray(raw.edgeDrops)) for (const edge of raw.edgeDrops) if (typeof edge === "string") roadOps.push({ t: "drop", edge });
+  if (isRecord(raw.nodeMoves)) for (const [node, to] of Object.entries(raw.nodeMoves).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const target = point(to); if (target) roadOps.push({ t: "move", node, to: target });
+  }
+  if (Array.isArray(raw.roadOps)) for (const op of raw.roadOps) {
+    if (!isRecord(op)) continue;
+    if (op.t === "drop" && typeof op.edge === "string") roadOps.push({ t: "drop", edge: op.edge });
+    else if (op.t === "move" && typeof op.node === "string") { const to = point(op.to); if (to) roadOps.push({ t: "move", node: op.node, to }); }
+    else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); if (from && to) roadOps.push({ t: "add", from, to, width: op.width }); }
   }
   const buildingMoves: Record<string, string> = {};
   if (isRecord(raw.buildingMoves)) for (const [id, parcelId] of Object.entries(raw.buildingMoves)) {
@@ -83,17 +96,16 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
   return {
     version: PLAN_PATCH_VERSION, seed: raw.seed, scaleTier: raw.scaleTier,
     updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : 0,
-    nodeMoves, edgeDrops: strings(raw.edgeDrops), buildingMoves, suppressedContext: strings(raw.suppressedContext),
+    roadOps, buildingMoves, suppressedContext: strings(raw.suppressedContext),
   };
 }
 
-/** 补丁指纹：键排序后的规范序列化 → FNV；进 activityKey 触发静态城缓存重画。 */
+/** 补丁指纹：道路日志按顺序、其余键排序后规范序列化 → FNV；进 activityKey 触发静态城缓存重画。 */
 export function hashPlanPatch(patch: PlanPatchV1): string {
   const canonical = JSON.stringify({
     version: patch.version,
     scaleTier: patch.scaleTier,
-    nodeMoves: Object.keys(patch.nodeMoves).sort().map((id) => [id, patch.nodeMoves[id]]),
-    edgeDrops: [...patch.edgeDrops].sort(),
+    roadOps: patch.roadOps,
     buildingMoves: Object.keys(patch.buildingMoves).sort().map((id) => [id, patch.buildingMoves[id]]),
     suppressedContext: [...patch.suppressedContext].sort(),
   });
@@ -236,23 +248,125 @@ export function layoutPinsFor(patch: PlanPatchV1 | null | undefined): { scaleTie
   return { scaleTier: patch.scaleTier, parcels: new Map(Object.keys(patch.buildingMoves).sort().map((id) => [id, patch.buildingMoves[id]])) };
 }
 
-/** 编辑器写补丁：拖动 effective 布局里的节点 → 以原始 id 记录（重复拖同一节点覆盖原条目）。 */
-export function recordNodeMove(patch: PlanPatchV1, patched: PatchedLayout, effectiveNodeId: string, to: Vec2, now = Date.now()): PlanPatchV1 {
-  const original = patched.ids.nodes.get(effectiveNodeId) ?? effectiveNodeId;
-  return { ...patch, updatedAt: now, nodeMoves: { ...patch.nodeMoves, [original]: quantize(to) } };
+/** 编辑器写补丁：追加一个道路操作（引用生效布局里的当前 id）。 */
+export function appendRoadOp(patch: PlanPatchV1, op: RoadOp, now = Date.now()): PlanPatchV1 {
+  return { ...patch, updatedAt: now, roadOps: [...patch.roadOps, op] };
 }
 
-/** 编辑器写补丁：删除 effective 布局里的路段 → 以原始 id 记录。 */
-export function recordEdgeDrop(patch: PlanPatchV1, patched: PatchedLayout, effectiveEdgeId: string, now = Date.now()): PlanPatchV1 {
-  const original = patched.ids.edges.get(effectiveEdgeId) ?? effectiveEdgeId;
-  if (patch.edgeDrops.includes(original)) return patch;
-  return { ...patch, updatedAt: now, edgeDrops: [...patch.edgeDrops, original].sort() };
+/** 端点离已有路口这么近就接到路口上。 */
+export const SNAP_NODE_RADIUS = 1;
+/** 端点落在路段中间（离折线 ≤ 此值）就把该路段拆成两半。 */
+export const SNAP_EDGE_RADIUS = 0.6;
+
+type RoadState = { nodes: RoadNode[]; edges: RoadEdge[] };
+
+const edgeIdOf = (from: string, to: string) => [from, to].sort().join("/");
+
+export function nearestOnPolyline(p: Vec2, points: readonly Vec2[]): { distance: number; segment: number; point: Vec2 } {
+  let best = { distance: Infinity, segment: 1, point: points[0] };
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1]; const b = points[i];
+    const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
+    const q = { x: a.x + dx * t, z: a.z + dz * t };
+    const distance = Math.hypot(p.x - q.x, p.z - q.z);
+    if (distance < best.distance) best = { distance, segment: i, point: q };
+  }
+  return best;
 }
 
-const NO_IDS: PatchIdMap = { nodes: new Map(), edges: new Map() };
+/** 把路段在 p 处拆成两半（属性完整继承；折线按最近一段切开）。p 取整到 0.01。 */
+function splitEdge(state: RoadState, edge: RoadEdge, p: Vec2, segment: number): string {
+  const at = quantize(p);
+  const id = roadNodeId(at);
+  const first = edge.points.slice(0, segment); first.push(at);
+  const second = [at, ...edge.points.slice(segment)];
+  if (!state.nodes.some((node) => node.id === id)) state.nodes.push({ id, x: at.x, z: at.z });
+  state.edges = state.edges.filter((candidate) => candidate !== edge);
+  state.edges.push({ ...edge, id: edgeIdOf(edge.from, id), from: edge.from, to: id, points: first });
+  state.edges.push({ ...edge, id: edgeIdOf(id, edge.to), from: id, to: edge.to, points: second });
+  return id;
+}
 
-/** 套用补丁（SPEC §5；顺序 edgeDrops → nodeMoves → buildingMoves → 派生重算 → suppressedContext。
- *  删除先于移动：补丁里的边/节点 id 都是底层布局的原始 id，节点移动会重挂 id，先删才不会失配）。
+/** 端点解析：路口 → 路段中间（拆开）→ 新建路口。碰到锁定路段（桥/引道/滨海）返回 "locked-edge"。 */
+function resolveEndpoint(state: RoadState, p: Vec2): { id: string } | { error: "locked-edge" } {
+  const at = quantize(p);
+  const near = state.nodes.find((node) => Math.hypot(node.x - at.x, node.z - at.z) < SNAP_NODE_RADIUS);
+  if (near) return { id: near.id };
+  let host: { edge: RoadEdge; hit: ReturnType<typeof nearestOnPolyline> } | null = null;
+  for (const edge of state.edges) {
+    const hit = nearestOnPolyline(at, edge.points);
+    if (hit.distance <= SNAP_EDGE_RADIUS && (!host || hit.distance < host.hit.distance)) host = { edge, hit };
+  }
+  if (host) {
+    if (edgeLocked(host.edge)) return { error: "locked-edge" };
+    return { id: splitEdge(state, host.edge, host.hit.point, host.hit.segment) };
+  }
+  const id = roadNodeId(at);
+  state.nodes.push({ id, x: at.x, z: at.z });
+  return { id };
+}
+
+/**
+ * 重放道路操作日志。每个操作在**试算副本**上执行，成功才提交——否则「端点已把路拆了、整条边却因重复而失败」
+ * 会留下半截改动。失败的操作进 stale、不影响后续操作（后续操作若引用了它产生的 id，会各自报 missing）。
+ */
+function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchStaleEntry[]): { nodes: RoadNode[]; edges: RoadEdge[]; endMap: Map<string, string> } {
+  let state: RoadState = { nodes: layout.roadNodes.map((node) => ({ ...node })), edges: [...layout.roadEdges] };
+  // 回车点跟随：底层回车点节点 id → 当前 id（移动会改 id）。
+  const endMap = new Map((layout.culDeSacEnds ?? []).map((end) => { const id = roadNodeId(quantize(end)); return [id, id] as [string, string]; }));
+  ops.forEach((op, index) => {
+    const label = `${index + 1}:${op.t}`;
+    const trial: RoadState = { nodes: state.nodes.map((node) => ({ ...node })), edges: [...state.edges] };
+    if (op.t === "drop") {
+      const edge = trial.edges.find((candidate) => candidate.id === op.edge);
+      if (!edge) { stale.push({ kind: "road-drop", id: label, reason: "missing-edge", detail: `路段 ${op.edge} 不存在（规划已重算或前序操作已改动）` }); return; }
+      if (edgeLocked(edge)) { stale.push({ kind: "road-drop", id: label, reason: "locked-edge", detail: "骨架/桥/滨海段不可删" }); return; }
+      trial.edges = trial.edges.filter((candidate) => candidate !== edge);
+      const kept = new Set(trial.edges.flatMap((candidate) => [candidate.from, candidate.to]));
+      trial.nodes = trial.nodes.filter((node) => kept.has(node.id) || (node.id !== edge.from && node.id !== edge.to));
+    } else if (op.t === "move") {
+      const node = trial.nodes.find((candidate) => candidate.id === op.node);
+      if (!node) { stale.push({ kind: "road-move", id: label, reason: "missing-node", detail: `路口 ${op.node} 不存在` }); return; }
+      if (trial.edges.some((edge) => (edge.from === node.id || edge.to === node.id) && edgeLocked(edge))) {
+        stale.push({ kind: "road-move", id: label, reason: "locked-edge", detail: "路口连着桥/引道/滨海段，不可编辑" }); return;
+      }
+      const target = quantize(op.to);
+      const fresh = roadNodeId(target);
+      if (fresh === node.id) return; // 原地不动：无操作，不算失效
+      // 目标落在别的路口上 → 重复节点/重复路段/零长边（曾一路流进渲染），整条拒绝。
+      if (trial.nodes.some((other) => other.id === fresh)) { stale.push({ kind: "road-move", id: label, reason: "node-collision", detail: `目标 ${fresh} 已有路口` }); return; }
+      const old = node.id;
+      node.id = fresh; node.x = target.x; node.z = target.z;
+      trial.edges = trial.edges.map((edge) => {
+        if (edge.from !== old && edge.to !== old) return edge;
+        const from = edge.from === old ? fresh : edge.from; const to = edge.to === old ? fresh : edge.to;
+        const points = [...edge.points];
+        if (edge.from === old) points[0] = { x: target.x, z: target.z };
+        if (edge.to === old) points[points.length - 1] = { x: target.x, z: target.z };
+        return { ...edge, id: edgeIdOf(from, to), from, to, points };
+      });
+      for (const [key, value] of endMap) if (value === old) endMap.set(key, fresh);
+    } else {
+      const a = resolveEndpoint(trial, op.from);
+      if ("error" in a) { stale.push({ kind: "road-add", id: label, reason: a.error, detail: "起点落在桥/引道/滨海段上，不能从这里接路" }); return; }
+      const b = resolveEndpoint(trial, op.to);
+      if ("error" in b) { stale.push({ kind: "road-add", id: label, reason: b.error, detail: "终点落在桥/引道/滨海段上，不能从这里接路" }); return; }
+      if (a.id === b.id) { stale.push({ kind: "road-add", id: label, reason: "degenerate", detail: "起点和终点是同一个路口" }); return; }
+      const id = edgeIdOf(a.id, b.id);
+      if (trial.edges.some((edge) => edge.id === id)) { stale.push({ kind: "road-add", id: label, reason: "edge-exists", detail: `路段 ${id} 已存在` }); return; }
+      const na = trial.nodes.find((node) => node.id === a.id)!; const nb = trial.nodes.find((node) => node.id === b.id)!;
+      trial.edges.push({
+        id, from: a.id, to: b.id, width: op.width, kind: op.width >= 8 ? "arterial" : "local",
+        points: [{ x: na.x, z: na.z }, { x: nb.x, z: nb.z }], structure: "ground-road",
+      });
+    }
+    state = trial;
+  });
+  return { nodes: state.nodes, edges: state.edges, endMap };
+}
+
+/** 套用补丁（SPEC §5；顺序 道路日志 → buildingMoves → 派生重算 → suppressedContext）。
  *  不改入参；失效条目进 stale。 */
 export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedLayout {
   const stale: PatchStaleEntry[] = [];
@@ -262,87 +376,15 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   if (patch.scaleTier !== layout.scaleTier) {
     const detail = `补丁写于第 ${patch.scaleTier} 档，城市已扩容到第 ${layout.scaleTier} 档`;
     for (const id of Object.keys(patch.buildingMoves).sort()) stale.push({ kind: "building-move", id, reason: "tier-changed", detail });
-    for (const id of Object.keys(patch.nodeMoves).sort()) stale.push({ kind: "node-move", id, reason: "tier-changed", detail });
-    for (const id of [...patch.edgeDrops].sort()) stale.push({ kind: "edge-drop", id, reason: "tier-changed", detail });
+    patch.roadOps.forEach((op, index) => stale.push({ kind: op.t === "drop" ? "road-drop" : op.t === "move" ? "road-move" : "road-add", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
     for (const id of [...patch.suppressedContext].sort()) stale.push({ kind: "context-suppress", id, reason: "tier-changed", detail });
-    return { layout, stale, patchHash, ids: NO_IDS };
+    return { layout, stale, patchHash };
   }
 
-  let { roadNodes, roadEdges } = layout;
-  const nodeId = (x: number, z: number) => roadNodeId(quantize({ x, z }));
-
-  // ── 1. edgeDrops：锁定/缺失跳过；删后清孤立节点 ──
-  const drops = new Set([...patch.edgeDrops].sort());
-  if (drops.size) {
-    for (const id of drops) if (!layout.roadEdges.some((edge) => edge.id === id)) stale.push({ kind: "edge-drop", id, reason: "missing-edge", detail: "路段不存在（规划已重算）" });
-    roadEdges = roadEdges.filter((edge) => {
-      if (!drops.has(edge.id)) return true;
-      if (edgeLocked(edge)) { stale.push({ kind: "edge-drop", id: edge.id, reason: "locked-edge", detail: "骨架/桥/滨海段不可删（M1）" }); return true; }
-      return false;
-    });
-    const kept = new Set(roadEdges.flatMap((edge) => [edge.from, edge.to]));
-    roadNodes = roadNodes.filter((node) => kept.has(node.id));
-  }
-
-  // ── 2. nodeMoves：锁定边触碰即整条跳过；节点映射必须是单射，否则撞车条目整体失效 ──
-  const movedIds = new Map<string, string>(); // 原始节点 id → 新节点 id
-  const nodeMoves = Object.keys(patch.nodeMoves).sort();
-  if (nodeMoves.length) {
-    const byId = new Map(roadNodes.map((node) => [node.id, node]));
-    const candidates = new Map<string, Vec2>(); // 原始 id → 量化后的目标
-    for (const id of nodeMoves) {
-      if (!byId.has(id)) { stale.push({ kind: "node-move", id, reason: "missing-node", detail: "规划里没有这个节点（城市已重排或种子已换）" }); continue; }
-      if (roadEdges.some((edge) => (edge.from === id || edge.to === id) && edgeLocked(edge))) {
-        stale.push({ kind: "node-move", id, reason: "locked-edge", detail: "节点连着桥/引道/滨海段，M1 锁定不可编辑" });
-        continue;
-      }
-      const target = quantize(patch.nodeMoves[id]);
-      if (nodeId(target.x, target.z) !== id) candidates.set(id, target);
-    }
-    // 撞车：目标落在一个不动的节点上（含相邻节点 → 零长边），或两条移动去同一点。
-    // 曾不查：重复节点 id、重复路段 id、`0:0/0:0` 零长边一路流进渲染。被拒的节点留在原位，
-    // 又可能挡住别人的目标——迭代到稳定（每轮至少拒一条，必然收敛）。
-    for (;;) {
-      const counts = new Map<string, number>();
-      for (const target of candidates.values()) { const fresh = nodeId(target.x, target.z); counts.set(fresh, (counts.get(fresh) ?? 0) + 1); }
-      const rejected = [...candidates].filter(([, target]) => {
-        const fresh = nodeId(target.x, target.z);
-        return (counts.get(fresh) ?? 0) > 1 || (byId.has(fresh) && !candidates.has(fresh));
-      }).map(([id]) => id);
-      if (!rejected.length) break;
-      for (const id of rejected) {
-        const target = candidates.get(id)!;
-        stale.push({ kind: "node-move", id, reason: "node-collision", detail: `目标 ${nodeId(target.x, target.z)} 已有节点或与另一条移动重合` });
-        candidates.delete(id);
-      }
-    }
-    if (candidates.size) {
-      roadNodes = roadNodes.map((node) => {
-        const target = candidates.get(node.id);
-        if (!target) return node;
-        const fresh = nodeId(target.x, target.z);
-        movedIds.set(node.id, fresh);
-        return { ...node, id: fresh, x: target.x, z: target.z };
-      });
-      const at = new Map(roadNodes.map((node) => [node.id, node]));
-      roadEdges = roadEdges.map((edge) => {
-        const from = movedIds.get(edge.from) ?? edge.from;
-        const to = movedIds.get(edge.to) ?? edge.to;
-        if (from === edge.from && to === edge.to) return edge;
-        const points = [...edge.points];
-        if (from !== edge.from) points[0] = { x: at.get(from)!.x, z: at.get(from)!.z };
-        if (to !== edge.to) points[points.length - 1] = { x: at.get(to)!.x, z: at.get(to)!.z };
-        return { ...edge, id: [from, to].sort().join("/"), from, to, points };
-      });
-    }
-  }
-  const nodeIds = new Map([...movedIds].map(([original, fresh]) => [fresh, original]));
-  const edgeIds = new Map<string, string>();
-  for (const edge of layout.roadEdges) {
-    const from = movedIds.get(edge.from) ?? edge.from; const to = movedIds.get(edge.to) ?? edge.to;
-    const fresh = [from, to].sort().join("/");
-    if (fresh !== edge.id) edgeIds.set(fresh, edge.id);
-  }
+  // ── 1. 道路操作日志（删/移/加，按顺序重放）──
+  const replayed = patch.roadOps.length ? replayRoadOps(layout, patch.roadOps, stale) : null;
+  const roadNodes = replayed ? replayed.nodes : layout.roadNodes;
+  const roadEdges = replayed ? replayed.edges : layout.roadEdges;
 
   // ── 3. buildingMoves：目标缺失/被占（按套用顺序先到先得）→ stale；否则换 slot 重算地面高度 ──
   const districts = layout.districts.map((district) => ({ ...district, slots: new Map(district.slots), grounds: new Map(district.grounds), carPaths: district.carPaths }));
@@ -369,7 +411,8 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   for (const edge of roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) degree.set(id, (degree.get(id) ?? 0) + 1);
   const nodeById = new Map(roadNodes.map((node) => [node.id, node]));
   const culDeSacEnds = (layout.culDeSacEnds ?? []).flatMap((end) => {
-    const id = movedIds.get(nodeId(end.x, end.z)) ?? nodeId(end.x, end.z);
+    const original = roadNodeId(quantize(end));
+    const id = replayed ? replayed.endMap.get(original) ?? original : original;
     const node = nodeById.get(id);
     return node && degree.get(id) === 1 ? [{ x: node.x, z: node.z }] : [];
   });
@@ -399,5 +442,5 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     ? layout.activityKey // 叠套时不重复追加指纹
     : `${layout.activityKey ?? ""}${suffix}`;
 
-  return { layout: { ...layout, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey }, stale, patchHash, ids: { nodes: nodeIds, edges: edgeIds } };
+  return { layout: { ...layout, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey }, stale, patchHash };
 }
