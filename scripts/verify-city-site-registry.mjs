@@ -56,9 +56,15 @@ for (const item of SITE_CLASSES) for (const pattern of item.meshNames) {
   const matches = siteClassesForMesh(name);
   assert(matches.length > 0, name);
   assert.equal(new Set(matches.map(item => item.family)).size, 1, "merged mesh names may only share one family");
-  assert.equal(new Set(matches.map(item => item.decorKind)).size, 1, "merged mesh route must be unambiguous");
-  assert.equal(decorKindForName(name), item.decorKind);
+  assert.equal(new Set(matches.map(item => item.meshRoutes?.[name] ?? item.decorKind)).size, 1, "merged mesh route must be unambiguous");
+  assert.equal(decorKindForName(name), item.meshRoutes?.[name] ?? item.decorKind);
 }
+assert.equal(decorKindForName("city-landmark-twisting-deco-tower"), "landmark:twisting-deco-tower");
+assert.equal(siteClassesForMesh("city-landmark-twisting-deco-tower")[0].id, "landmark:twist-tower");
+assert.equal(siteClassOf("decor:landmark:twisting-deco-tower").id, "landmark:twist-tower");
+assert.equal(siteClassOf("decor:backdrop").id, "context");
+assert.equal(siteClassOf("decor:civic"), null, "a merged family is not an exact class");
+assert.equal(describeDecor("decor:landmark:twisting-deco-tower").title, "扭转装饰艺术塔");
 assert.equal(decorKindForName("city-landmark-district:harness:zcode"), "district-landmark");
 assert.equal(decorKindForName("city-landmark-unknown"), null);
 assert.equal(decorKindForName("city-session-hotel"), null);

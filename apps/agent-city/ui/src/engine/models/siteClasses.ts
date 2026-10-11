@@ -17,6 +17,9 @@ export type SiteClass = {
   readonly additionalCatalogIds?: readonly string[];
   readonly meshNames: readonly string[];
   readonly decorKind: string | null;
+  /** Named renderer sub-variants may retain their historical presentation route
+   * without inventing a second layout object or catalog owner. Exact names only. */
+  readonly meshRoutes?: Readonly<Record<string, string>>;
   readonly source: { readonly array: "civics" | "gardens" | "districtLandmarks" | "contextBuildings" | "landmarks" | "publicSites";
     readonly match?: (raw: unknown) => boolean } | null;
   readonly placement?: { readonly mode: "face-lot" | "face-reserve" | "parcel";
@@ -30,8 +33,9 @@ const civic = (kind: string, title: string): SiteClass => ({ id: `civic:${kind}`
   placement: { mode: "face-lot", minimumSize: () => {
     const minimum = civicMinimumSize(kind); if (!minimum) throw new Error(`undeclared civic geometry: ${kind}`); return minimum;
   } }, pendingCapabilities: pending });
-const landmark = (kind: string, title: string): SiteClass => ({ id: `landmark:${kind}`, family: "landmark", title,
-  catalogId: kind === "villa-complex" ? "villa" : kind, meshNames: [`city-landmark-${kind}`], decorKind: `landmark:${kind}`,
+const landmark = (kind: string, title: string, meshRoutes?: Readonly<Record<string, string>>): SiteClass => ({ id: `landmark:${kind}`, family: "landmark", title,
+  catalogId: kind === "villa-complex" ? "villa" : kind, meshNames: [`city-landmark-${kind}`, ...Object.keys(meshRoutes ?? {})], decorKind: `landmark:${kind}`,
+  ...(meshRoutes ? { meshRoutes } : {}),
   source: { array: "landmarks", match: hasKind(kind) }, pendingCapabilities: pending });
 const publicSite = (kind: string, title: string, catalogId: string): SiteClass => ({ id: `public:${kind}`, family: "public-site", title,
   catalogId, meshNames: ["city-public-sites-*"], decorKind: "site", source: { array: "publicSites", match: hasKind(kind) }, pendingCapabilities: pending });
@@ -53,7 +57,8 @@ export const SITE_CLASSES: readonly SiteClass[] = [
     meshNames: ["city-vice-context-facades", "city-vice-context-rooftops"], decorKind: "backdrop", source: { array: "contextBuildings" },
     placement: { mode: "parcel" }, pendingCapabilities: pending },
   ...[tvTowerModel, pagodaModel, archModel, sailOperaModel, lighthouseModel, ferrisWheelModel].map(model => landmark(model.id, model.title)),
-  landmark("twin-towers", "双子塔"), landmark("twist-tower", "扭转塔"), landmark("villa-complex", "地中海庄园"), landmark("suspension-bridge", "悬索桥"),
+  landmark("twin-towers", "双子塔"), landmark("twist-tower", "扭转塔", { "city-landmark-twisting-deco-tower": "landmark:twisting-deco-tower" }),
+  landmark("villa-complex", "地中海庄园"), landmark("suspension-bridge", "悬索桥"),
   publicSite("civic", "市政厅", "civic-hall"), publicSite("station", "车站", "station"), publicSite("stadium", "体育场", "stadium"),
   publicSite("park", "城市公园", "park"), publicSite("tower", "观景塔", "observation-tower"), publicSite("harbor", "港口与码头", "harbor"),
   scenery("seaside", "海滨设施", "beach", ["city-lifeguard-towers", "city-yachts", "city-beach-furniture", "city-beach-people", "city-volleyball-courts", "city-promenade-props", "city-marina"]),
@@ -74,7 +79,10 @@ export function siteClassOf(id: string): SiteClass | null {
   classId = classId.split("#")[0];
   if (classId.startsWith("landmark:district:") && classId.length > "landmark:district:".length) classId = "district-landmark";
   if (classId.startsWith("site:")) classId = `public:${classId.slice("site:".length)}`;
-  return SITE_CLASSES.find(item => item.id === classId) ?? null;
+  const exact = SITE_CLASSES.find(item => item.id === classId);
+  if (exact) return exact;
+  const aliases = SITE_CLASSES.filter(item => item.decorKind === classId || Object.values(item.meshRoutes ?? {}).includes(classId));
+  return aliases.length === 1 ? aliases[0] : null;
 }
 export function siteClassesForInstance(array: NonNullable<SiteClass["source"]>["array"], raw: unknown): readonly SiteClass[] {
   return SITE_CLASSES.filter(item => item.source?.array === array && (!item.source.match || item.source.match(raw)));

@@ -58,6 +58,21 @@ exit0（254modules、3.69s），仍有大chunk警告，不作为性能预算通�
 删除、未知模型外廓和稳定id迁移仍待，因此B0–B4未整体完成。UIUX检索未匹配本问题，
 采用通用一致性检查保留市政/城区功能面板、关闭和聚焦操作；不增加无关视觉/交互变化。
 
+### B2真实场景拾取回归与子造型别名
+
+新增独立scene守卫：380/1600合成会话、full背景、昼夜，实际CityParts遍历与旧52faeefe
+分类器独立对照，不更新golden。首跑session81114 exit1捕获真实子网格
+city-landmark-twisting-deco-tower未注册，被父级twist-tower接管的回归。
+现由原twist-tower类登记exact meshRoutes别名，保留旧子造型route/标题，不新增假layout
+对象或重复目录归属；siteClassOf把唯一展示别名回读到原类，合并族仍不猜具体类。
+修复后session78985 exit0：380档136实例（civic8/garden4/district4/context107/landmark7/public6）、
+422可拾取mesh、853civic部件；1600档332实例（30/4/4/280/8/6）、459mesh、3392部件。
+两档昼夜均有32个城区地标mesh。六数组每实例恰归一类，当前layout身份全局唯一；
+与旧逻辑实际可拾取集合逐对象相同，非城区地标route不变，配套部件读取真实实例id。
+守卫进入manifest67项及planning/sites（不塞fast）；harness session33682、typecheck、
+models、i18n及metadata专项通过。此证据不是独立前后完整场景图哈希或GPU/浏览器验收，
+也不证明模型instance外廓/高度、所有市政设施精确身份、稳定id迁移或B3已接入。
+
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 
 - 本批已提交为8881f482（基于bb76bc87）。完整渲染XY外廓与局部ground-only声明现在分别登记；
