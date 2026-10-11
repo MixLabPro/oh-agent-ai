@@ -2,7 +2,7 @@ import { DetMath as Math } from "../detMath";
 import { clearsHighways, type Landmark } from "../cityPlan";
 import type { PublicSite, Vec2 } from "../cityLayout";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount } from "./footprint";
-import { coastalSitingKinds } from "./sitespec";
+import { coastalSitingKinds, canRelocateGroundSite } from "./sitespec";
 import type { RepairContext } from "./context";
 
 // 选址后置（CITY_ARCHITECTURE §6 步）：候选表 + 路网后落位。
@@ -15,20 +15,31 @@ import type { RepairContext } from "./context";
 //   选择                          —— 第一个满足全部条件的候选（即离原位置最近的合法位置）。
 // 只对仍然违例的用地启用（入水、重叠），所以对本来就合法的岛零影响。判据与 constraints.ts 的 measure 同口径。
 
-type S = { x: number; z: number; radius: number; kind: string; shore?: Vec2 };
+type S = { x: number; z: number; radius: number; kind: string; shore?: Vec2; access?: unknown };
 
-export function resiteViolatingSites(ctx: RepairContext): number {
+export function* localResiteCandidates(site: Vec2): Iterable<Vec2> {
+  for (let radius = 6; radius <= 120; radius += 6) for (let k = 0; k < 20; k += 1) {
+    const a = (k / 20) * Math.PI * 2 + radius * 0.37;
+    yield { x: site.x + Math.cos(a) * radius, z: site.z + Math.sin(a) * radius };
+  }
+}
+
+export function resiteViolatingSites(ctx: RepairContext, opts: { skipWetShore?: boolean } = {}): number {
   const all = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius) as S[];
   const solid = [...ctx.network.edges.values()].filter((e) => !e.bridge);
   const geo = { height: ctx.height, inRiver: ctx.inRiver };
   const nearestRoad = (x: number, z: number) => polylineDistance(solid.map((e) => e.points), { x, z });
   const limit = (s: S) => (ctx.SHORE_SITE_KINDS.has(s.kind) ? 3 : 0);
   const violates = (s: S): boolean => {
-    if (s.kind === "harbor" || s.kind === "civic" || s.kind === "arch" || s.shore) return false;
+    if (!canRelocateGroundSite(s)) return false;
     // 与 constraints.ts siteInWater / sitesOverlap 同口径（此处只看地形高度，不含 inRiver，免得把没违例的岛也动了）
-    if (wetCount(geo, s, s.radius) > (ctx.SHORE_SITE_KINDS.has(s.kind) ? 4 : 0)) return true;
+    const wet = wetCount(geo, s, s.radius);
+    // The joint wet-shore path already spent this owner's original local tier;
+    // do not repeat it through an overlap fallback with weaker admission.
+    if (opts.skipWetShore && ctx.SHORE_SITE_KINDS.has(s.kind) && wet > 4) return false;
+    if (wet > (ctx.SHORE_SITE_KINDS.has(s.kind) ? 4 : 0)) return true;
     // 重叠：与 sitesOverlap 同判据（kind 字典序较小的一方被标记）；对方是不能挪的（港口、广场、凯旋门、岛上地标）时，不论字典序都由这一方让开。
-    const fixed = (o: S) => o.kind === "harbor" || o.kind === "civic" || o.kind === "arch" || !!o.shore;
+    const fixed = (o: S) => !canRelocateGroundSite(o);
     return all.some((o) => o !== s && (o.kind > s.kind || fixed(o)) && Math.hypot(o.x - s.x, o.z - s.z) < o.radius + s.radius);
   };
   const acceptable = (s: S, x: number, z: number): boolean => {
@@ -41,15 +52,9 @@ export function resiteViolatingSites(ctx: RepairContext): number {
   };
   let moved = 0;
   for (const s of all) {
-    if (violates(s)) {
+    if (violates(s) && !s.access) {
       let chosen: Vec2 | null = null;
-      for (let radius = 6; radius <= 120 && !chosen; radius += 6) {
-        for (let k = 0; k < 20 && !chosen; k += 1) {
-          const a = (k / 20) * Math.PI * 2 + radius * 0.37; // 每圈错开起始角，免得候选排成同一条射线
-          const p = { x: s.x + Math.cos(a) * radius, z: s.z + Math.sin(a) * radius };
-          if (acceptable(s, p.x, p.z)) chosen = p;
-        }
-      }
+      for (const p of localResiteCandidates(s)) if (acceptable(s, p.x, p.z)) { chosen = p; break; }
       if (chosen) { s.x = chosen.x; s.z = chosen.z; moved += 1; }
     }
     // 无论是否挪过，都用地标实际底座半径 + 9 清空周边地块——曾只对「挪过的」
@@ -69,6 +74,12 @@ export function resiteViolatingSites(ctx: RepairContext): number {
 export type ShoreMoveContext = {
   publicSites: PublicSite[];
   landmarks: Landmark[];
+  /** Optional relocation transaction scope; omitted means the existing full pass. */
+  relocateSiteIds?: ReadonlySet<string>;
+  /** Transaction-owned extra separation from reserved neighbours, by owner ID. */
+  neighbourMargins?: ReadonlyMap<string, number>;
+  /** Accepted candidate-world road envelopes for explicitly forced relocation. */
+  roadEnvelopes?: ReadonlyArray<{ points: Vec2[]; width: number }>;
   core: Vec2;
   coast: Vec2[];
   coastDistance: (x: number, z: number) => number;
@@ -91,6 +102,7 @@ export function retreatShoreSitesToDryLand(ctx: ShoreMoveContext): void {
   const footprintGeo = { height: ctx.height, inRiver: ctx.inRiver, riverBank: ctx.riverBank };
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
   for (const site of landmarks) {
+    if (ctx.relocateSiteIds && !ctx.relocateSiteIds.has(site.id)) continue;
     if (!site.radius || !SHORE_KINDS.has(site.kind)) continue;
     const wetCountAt = (c: Vec2) => wetCount(footprintGeo, c, site.radius); // 内移判据：只看地形水位（不含河道），与原实现同口径
     const dx = core.x - site.x; const dz = core.z - site.z; const len = Math.hypot(dx, dz) || 1;
@@ -132,6 +144,7 @@ export function settleShoreSitesOnCoast(ctx: ShoreMoveContext): void {
   const footprintGeo = { height: ctx.height, inRiver: ctx.inRiver, riverBank: ctx.riverBank };
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
   for (const site of landmarks) {
+    if (ctx.relocateSiteIds && !ctx.relocateSiteIds.has(site.id)) continue;
     if (!site.radius || !SHORE_KINDS.has(site.kind)) continue;
     const wet = (x: number, z: number) => wetCount(footprintGeo, { x, z }, site.radius, { river: true, riverBank: 14 }); // 河道及两岸 14 内也算水：歌剧院曾立在河口上（用户截图）
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
@@ -150,14 +163,22 @@ export function settleShoreSitesOnCoast(ctx: ShoreMoveContext): void {
       if (d < best.d) best = { x, z, d };
     }
     if (wet(best.x, best.z) <= 3 && (distanceToTrunks(best) >= site.radius * 0.7 || distanceToTrunks(site) < site.radius * 0.7)) { site.x = best.x; site.z = best.z; } // 落点压到主干道上就留在原位
-    // 仍有 >3 点在水上（原位本就半悬空，核心方向也可能隔着水）：在 70 内按距离由近到远搜一个占地干燥、不压主干道/其它用地的落点。
-    if (wet(site.x, site.z) > 3) {
+    // A dry, already coastal nominal position can still block a joint owner.
+    // Explicitly scoped relocation reuses the existing local search tier;
+    // otherwise this remains the historical wet-site fallback.
+    const separation = (other: typeof others[number]) => other.radius + site.radius + (ctx.neighbourMargins?.get(other.id) ?? 0);
+    const forced = ctx.relocateSiteIds?.has(site.id) && canRelocateGroundSite(site)
+      && others.some((other) => Math.hypot(other.x - site.x, other.z - site.z) < separation(other));
+    if (wet(site.x, site.z) > 3 || forced) {
       let found: Vec2 | null = null;
       for (let rr = 6; rr <= 70 && !found; rr += 6) {
         for (let k = 0; k < 24 && !found; k += 1) {
           const a = (k / 24) * Math.PI * 2; const nx = site.x + Math.cos(a) * rr; const nz = site.z + Math.sin(a) * rr;
           if (wet(nx, nz) > 2 || height(nx, nz) <= 0.5 || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4) continue;
-          if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
+          if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < separation(o))) continue;
+          if (forced && coastDistance(nx, nz) > Math.max(site.radius * 2, coastDistance(site.x, site.z))) continue;
+          if (forced && ctx.roadEnvelopes?.some((edge) => polylineDistance([edge.points], { x: nx, z: nz })
+            < site.radius + edge.width / 2 + 3)) continue;
           found = { x: nx, z: nz };
         }
       }
@@ -171,14 +192,22 @@ export function settleShoreSitesOnCoast(ctx: ShoreMoveContext): void {
  * 整个占地圈必须是深水（不在河口），且离港口 ≥ r_o+r+120 / 其它用地 ≥ +30；堤道陆地端（岸点向内 6）
  * 要踩在实地上（height ≥ 0.3）。首个满足者即落位（朝向沿离核向外，shore 记堤道端）。
  */
-export function settleSailOperaOffshore(ctx: ShoreMoveContext): void {
+export type SailOperaCandidate = { x: number; z: number; yaw: number; shore: Vec2 };
+export type SailOperaCandidateSet = { siteId: string; candidates: SailOperaCandidate[] };
+export const SAIL_OPERA_CONFIG = { version: 1, coastCandidates: 40, jointCandidates: 40 };
+
+export function settleSailOperaOffshore(ctx: ShoreMoveContext): SailOperaCandidateSet[] {
   const { publicSites, landmarks, coast, core, height } = ctx;
   const footprintGeo = { height: ctx.height, inRiver: ctx.inRiver, riverBank: ctx.riverBank };
+  const candidateSets: SailOperaCandidateSet[] = [];
   for (const site of landmarks) {
+    if (ctx.relocateSiteIds && !ctx.relocateSiteIds.has(site.id)) continue;
     if (site.kind !== "sail-opera") continue;
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 40);
-    for (const shore of targets) {
+    const targets = coast.map((shore, index) => ({ shore, index, distance: Math.hypot(shore.x - site.x, shore.z - site.z) }))
+      .sort((a, b) => a.distance - b.distance || a.index - b.index).slice(0, SAIL_OPERA_CONFIG.coastCandidates);
+    const candidates: SailOperaCandidate[] = [];
+    for (const { shore } of targets) {
       const len = Math.hypot(shore.x - core.x, shore.z - core.z) || 1;
       const out = { x: (shore.x - core.x) / len, z: (shore.z - core.z) / len };
       const c = { x: shore.x + out.x * (site.radius + 40), z: shore.z + out.z * (site.radius + 40) };
@@ -189,9 +218,11 @@ export function settleSailOperaOffshore(ctx: ShoreMoveContext): void {
       // 歌剧院岸点 21 单位处，路网变化后入口路全失败、堤道两头悬空），选址期直接避开，不靠修复遍。
       const landing = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
       if (others.some((o) => Math.hypot(o.x - landing.x, o.z - landing.z) < o.radius + 30)) continue;
-      site.x = c.x; site.z = c.z; site.shore = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
-      site.yaw = -Math.atan2(out.z, out.x);
-      break;
+      candidates.push({ x: c.x, z: c.z, yaw: -Math.atan2(out.z, out.x), shore: landing });
     }
+    candidateSets.push({ siteId: site.id ?? site.kind, candidates });
+    const first = candidates[0];
+    if (first) { site.x = first.x; site.z = first.z; site.shore = first.shore; site.yaw = first.yaw; }
   }
+  return candidateSets;
 }

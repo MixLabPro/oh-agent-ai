@@ -8,9 +8,60 @@ import { DetMath as Math } from "../detMath";
 import { fbm } from "../cityNoise";
 import { segmentDistance, type Landmark } from "../cityPlan";
 import type { CityLayout, PublicSite, Vec2 } from "../cityLayout";
-import { addNetworkEdge, keyOf, type Network } from "./network";
-import { chordClearsDisc, commitFixedLink, reStickClearance, walkableCorridor } from "./connect";
+import { addNetworkEdge, keyOf, commitNetworkPatch, previewNetworkPatch, type Network, type NetworkPatch } from "./network";
+import { chordClearsDisc, reStickClearance, walkableCorridor } from "./connect";
+import type { ConnectorWorld } from "./connect";
+import { groundJunctionCorridorViolation } from "./civicClearance";
+import { polylineDistance } from "./footprint";
 import type { Geography } from "./geography";
+
+export type SkeletonDiagnostic = { trunk: number; phase: "ground-corridor" | "bridge-ground" | "route"; reason: string; cause: string; at?: Vec2 };
+
+/** Screen quantized geometry before publication. Re-evaluate after retreat:
+ * a declined deck must not leave its approach exemption on the retained prefix. */
+export function screenTrunkRoute(world: ConnectorWorld, input: Vec2[], spans: CityLayout["bridges"], trunk: number) {
+  let points = input.map(keyOf);
+  const diagnostics: SkeletonDiagnostic[] = [];
+  const idOf = (point: Vec2) => `${point.x}:${point.z}`;
+  const isDeck = (a: Vec2, b: Vec2) => spans.some((span) => idOf(keyOf(span.from)) === idOf(a) && idOf(keyOf(span.to)) === idOf(b));
+  const patchFor = (route: Vec2[]): NetworkPatch => ({ baseVersion: world.network.version ?? 0, removeEdgeIds: [], splits: [],
+    addEdges: route.slice(1).map((b, i) => ({ a: route[i], b, arterial: true, primary: true, bridge: isDeck(route[i], b) })) });
+  const problem = (network: Network, route: Vec2[]): { index: number; diagnostic: SkeletonDiagnostic } | null => {
+    for (let k = 1; k < route.length; k += 1) {
+      const a = route[k - 1], b = route[k], id = [idOf(a), idOf(b)].sort().join("/");
+      const edge = network.edges.get(id);
+      if (!edge || edge.width !== 12 || edge.kind !== "arterial" || !!edge.bridge !== isDeck(a, b)) return { index: k,
+        diagnostic: { trunk, phase: "route", reason: "projection-loss", cause: "geometry-or-class-mismatch" } };
+      if (edge.bridge) {
+        const groundAt = (nodeId: string) => [...network.edges.values()].some((road) => !road.bridge && (road.from === nodeId || road.to === nodeId)
+          && road.points.slice(1).every((point, i) => !groundJunctionCorridorViolation({ ...world, network }, road.points[i], point, road.width, road)));
+        if (!groundAt(edge.from) || !groundAt(edge.to)) return { index: k,
+          diagnostic: { trunk, phase: "bridge-ground", reason: "no-target", cause: "missing-ground-approach" } };
+      } else {
+        const failure = groundJunctionCorridorViolation({ ...world, network }, a, b, edge.width, edge);
+        if (failure) return { index: k, diagnostic: { trunk, phase: "ground-corridor", reason: failure.kind,
+          cause: failure.cause, ...(failure.at ? { at: failure.at } : {}) } };
+      }
+    }
+    return null;
+  };
+  while (points.length >= 3) {
+    const patch = patchFor(points), preview = previewNetworkPatch(world.network, patch);
+    if (!preview.ok) {
+      diagnostics.push({ trunk, phase: "route", reason: preview.reason, cause: preview.detail ?? "patch-preview-failed" });
+      points = []; break;
+    }
+    const failed = problem(preview.network, points);
+    if (!failed) {
+      const accepted = spans.filter((span) => points.slice(1).some((b, i) => idOf(points[i]) === idOf(keyOf(span.from)) && idOf(b) === idOf(keyOf(span.to))));
+      return { points, bridges: accepted, diagnostics, patch, validate: (draft: Network) => problem(draft, points)?.diagnostic.cause ?? null };
+    }
+    diagnostics.push(failed.diagnostic);
+    points = points.slice(0, failed.index);
+  }
+  diagnostics.push({ trunk, phase: "route", reason: "no-target", cause: "no-valid-trunk-prefix" });
+  return { points: [] as Vec2[], bridges: [] as CityLayout["bridges"], diagnostics, patch: null, validate: (_draft: Network): string | null => "no-valid-trunk-prefix" };
+}
 
 /** 环线高架在方位角 t 处的采样点（唯一公式，chooseCore 的成活率估计与 buildSkeleton 共用）。 */
 function ringPointAt(core: Vec2, R: number, seed: number, t: number): Vec2 {
@@ -68,7 +119,7 @@ export function buildSkeleton(opts: {
   network: Network;
   /** buildPlan 的河道闭包（含 coastDistance>0 短路）——geography 阶段尚未收编，先作参数。 */
   inRiver: (x: number, z: number) => boolean;
-}): { trunks: TrunkRun[]; bridges: CityLayout["bridges"]; ringRuns: Vec2[][]; primaryAnchorNodeId: string | null; primaryAnchorNodeIds: string[] } {
+}): { trunks: TrunkRun[]; bridges: CityLayout["bridges"]; ringRuns: Vec2[][]; primaryAnchorNodeId: string | null; primaryAnchorNodeIds: string[]; diagnostics: SkeletonDiagnostic[] } {
   const { geo, seed, core, publicSites, landmarks, random, network } = opts;
   const SHORE_SITE_KINDS = opts.shoreSiteKinds;
   const { R, hasRiver, coastDistance, hillDir, hillProj, hillLine, buildable } = geo;
@@ -83,6 +134,7 @@ export function buildSkeleton(opts: {
   const trunkBase = random("trunkBase") * Math.PI * 2;
   const trunks: Array<{ angle: number; points: Vec2[] }> = [];
   const bridges: CityLayout["bridges"] = [];
+  const diagnostics: SkeletonDiagnostic[] = [];
   for (let i = 0; i < trunkCount; i += 1) {
     const nominal = trunkBase + (i / trunkCount) * Math.PI * 2 + (random(`trunkJ${i}`) - 0.5) * 0.35;
     // 桥址取最窄处（规划旧债 D-桥址，CITY_ROAD_SIMULATION_PROPOSAL §1）：主干道是从核心出发的射线，过河位置
@@ -111,6 +163,7 @@ export function buildSkeleton(opts: {
     // 主干道从市政广场外环出发（环形广场 = 环岛），不再穿过广场中心。
     const start = { x: core.x + dir.x * PLAZA_RING, z: core.z + dir.z * PLAZA_RING };
     const points: Vec2[] = [start];
+    const rayBridges: CityLayout["bridges"] = [];
     let water = 0;
     let lastLand: Vec2 = start;
     let farBank = 0;
@@ -136,8 +189,7 @@ export function buildSkeleton(opts: {
         farBank = 0;
         // 刚过完河：把对岸点接上，这一段是桥。
         const from = points[points.length - 1];
-        bridges.push({ from, to: q, angle: Math.atan2(q.z - from.z, q.x - from.x), length: Math.hypot(q.x - from.x, q.z - from.z) });
-        addEdge(from, q, true, true, true);
+        rayBridges.push({ from, to: q, angle: Math.atan2(q.z - from.z, q.x - from.x), length: Math.hypot(q.x - from.x, q.z - from.z) });
         points.push(q);
         water = 0;
         continue;
@@ -146,11 +198,14 @@ export function buildSkeleton(opts: {
       if (step % 3 === 0) points.push(q);
     }
     if (points.length < 3) continue;
-    for (let k = 1; k < points.length; k += 1) {
-      const isBridge = bridges.some((bridge) => bridge.to === points[k]);
-      if (!isBridge) addEdge(points[k - 1], points[k], true, false, true);
-    }
-    trunks.push({ angle, points });
+    const world = { network, geo, inRiver, reservations: () => [...publicSites, ...landmarks] };
+    const screened = screenTrunkRoute(world, points, rayBridges, i);
+    diagnostics.push(...screened.diagnostics);
+    if (!screened.patch) continue;
+    const result = commitNetworkPatch(network, screened.patch, screened.validate);
+    if (!result.ok) { diagnostics.push({ trunk: i, phase: "route", reason: result.reason, cause: result.detail ?? "commit-rejected" }); continue; }
+    bridges.push(...screened.bridges);
+    trunks.push({ angle, points: screened.points });
   }
   trunks.sort((p, q) => p.angle - q.angle);
   let primaryAnchorNodeId: string | null = null;
@@ -194,7 +249,7 @@ export function buildSkeleton(opts: {
   // the ground. Trim each end to buildable land, then connect it to a nearby arterial.
   // 批次 5-2：出口接驳弦的净空/可走校验改走连接器共享的 corridor validator（connect.ts），
   // 不再当 69 特例——公式同源（re-stick 净空 5.25 + hypot(88,88)/2 + 1，向上取整 = 69）。
-  // 落点的拆边经 commitFixedLink 事务提交（保持历史「强制 arterial」口径以不动基线）。
+  // 落点以NetworkPatch拓扑细分，继承宿主等级/宽度/结构而不按默认arterial重建。
   const chordClearance = reStickClearance(88, 88); // 88 = 高架双车道幅面（clearsHighways 同尺寸）
   for (let r = ringRuns.length - 1; r >= 0; r -= 1) {
     const points = ringRuns[r];
@@ -223,24 +278,17 @@ export function buildSkeleton(opts: {
     if (exits.length !== 2) { ringRuns.splice(r, 1); continue; }
     ringRuns[r] = [exits[0], ...points, exits[1]].filter((p, i, all) => i === 0 || Math.hypot(p.x - all[i - 1].x, p.z - all[i - 1].z) > 0.01);
     for (const endpoint of exits) {
-      const hosts = [...edges.values()].filter((edge) => !edge.bridge && segmentDistance(endpoint, edge.points[0], edge.points[1]) <= 0.02);
-      const patchOps = hosts.flatMap((edge) => [
-        { a: edge.points[0], b: endpoint, arterial: true },
-        { a: endpoint, b: edge.points[1], arterial: true },
-      ]);
+      const at = keyOf(endpoint), nodeId = `${at.x}:${at.z}`;
+      const hosts = [...edges.values()].filter((edge) => !edge.bridge && edge.from !== nodeId && edge.to !== nodeId
+        && polylineDistance([edge.points], at) <= 0.02);
       if (hosts.length) {
-        edges.delete(hosts[0].id); // 多条宿主边同点拆分时逐条事务提交（与历史顺序一致）
-        // splitInherit：原位拆分继承宿主有效性（拓扑精化，不按新定线标准重查）；结果必须检查——
-        // 静默失败会留下「宿主已删、两半未加」的网络破洞（批 A 评审 P1）。
-        const split0 = commitFixedLink({ network, geo, inRiver, reservations: () => [] }, patchOps.slice(0, 2), { splitInherit: true });
-        if (!split0.ok) throw new Error(`ring exit split failed: ${split0.detail ?? split0.reason}`);
-        for (let h = 1; h < hosts.length; h += 1) {
-          edges.delete(hosts[h].id);
-          const splitH = commitFixedLink({ network, geo, inRiver, reservations: () => [] }, [
-            { a: hosts[h].points[0], b: endpoint, arterial: true },
-            { a: endpoint, b: hosts[h].points[1], arterial: true },
-          ], { splitInherit: true });
-          if (!splitH.ok) throw new Error(`ring exit split failed: ${splitH.detail ?? splitH.reason}`);
+        // One atomic topological refinement preserves arbitrary host widths,
+        // structure, curve and ordered lineage. Never delete then recreate as8.
+        const split = commitNetworkPatch(network, { baseVersion: (network as Network & { version?: number }).version ?? 0,
+          removeEdgeIds: [], addEdges: [], splits: hosts.map((edge) => ({ edgeId: edge.id, at })) });
+        if (!split.ok) {
+          diagnostics.push({ trunk: -1, phase: "route", reason: split.reason, cause: `ring-exit-split:${split.detail ?? split.reason}` });
+          ringRuns.splice(r, 1); break;
         }
       }
     }
@@ -249,5 +297,5 @@ export function buildSkeleton(opts: {
     const p = civicNodes.get(a)!; const q = civicNodes.get(b)!;
     return Math.hypot(p.x - core.x, p.z - core.z) - Math.hypot(q.x - core.x, q.z - core.z) || (a < b ? -1 : a > b ? 1 : 0);
   });
-  return { trunks, bridges, ringRuns, primaryAnchorNodeId, primaryAnchorNodeIds };
+  return { trunks, bridges, ringRuns, primaryAnchorNodeId, primaryAnchorNodeIds, diagnostics };
 }

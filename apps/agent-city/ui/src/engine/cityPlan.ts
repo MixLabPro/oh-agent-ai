@@ -14,13 +14,20 @@ import { hashSeed } from "../cityModel";
 import { fbm, smoothstep } from "./cityNoise";
 import { boulevardSegments, buildSeasideBand, MIAMI_COASTAL, seasideStripContains, type CoastalConfig, type SeasideBand, type SeasideWorld } from "./citySeaside";
 import type { RepairContext } from "./planner/context";
-import { solvePlan } from "./planner/solve";
-import { polylineDistance } from "./planner/footprint";
+import { initializeRepairPlanningWorld, runRepairDerivedFinalization, solvePlan } from "./planner/solve";
+import { CONSTRAINTS, type CityPlan as ConstraintPlan } from "./planner/constraints";
+import { closestPolylineSegment, polylineDistance } from "./planner/footprint";
 import { coastalSitingKinds } from "./planner/sitespec";
-import { frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, type FrontageMoveContext } from "./planner/access";
-import { retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, type ShoreMoveContext } from "./planner/siting";
+import { specByKind } from "./planner/sitespec";
+import { assignConnectedSite } from "./planner/jointSite";
+import { proposeShorePlotAccess } from "./planner/shorePlotAccess";
+import { frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, groundFrontageSegments, type FrontageMoveContext } from "./planner/access";
+import { retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, SAIL_OPERA_CONFIG, type ShoreMoveContext } from "./planner/siting";
 import { buildGeography } from "./planner/geography";
-import { diagnoseNetwork } from "./planner/intent";
+import { roadCandidateCrowding } from "./planner/roadAdmission";
+import { extractRoadFaces } from "./planner/roadFaces";
+import { generateRoadBlocks, type RoadBlockReport } from "./planner/roadBlocks";
+import { componentOf, diagnoseNetwork, type ConnectionDemand } from "./planner/intent";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, parseFailure, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
@@ -88,7 +95,7 @@ export type Biome = "tropical" | "temperate" | "boreal" | "savanna" | "eastasian
 /** 致敬型地标（SPEC §4.4）：程序化几何、不复刻具体建筑；纯装饰，不占会话地块、不进统计。 */
 export type LandmarkKind = "tv-tower" | "sail-opera" | "arch" | "pagoda" | "lighthouse" | "ferris-wheel" | "suspension-bridge" | "twin-towers" | "twist-tower" | "villa-complex";
 /** shore：海上小岛地标（歌剧院）的堤道陆地端；有它即「立在水中的岛上」，不适用陆地/岸滩规则。 */
-export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; radius: number; to?: Vec2; shore?: Vec2 };
+export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; radius: number; to?: Vec2; shore?: Vec2; access?: PublicSite["access"] };
 const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasian"];
 
 /** 每档对应的目标地块数（SPEC §4.2：400 会话一档 × 1.35 余量给公共用地、花园、配套与道路损耗）。 */
@@ -102,6 +109,16 @@ export function scaleTierFor(sessions: number): number {
 }
 export const targetParcels = (tier: number) => Math.ceil(SESSIONS_PER_TIER * tier * 1.35);
 
+/** Capacity is discontinuous when terrain/site/skeleton choices change. Never
+ * extrapolate an almost-empty plan into a many-hundred-fold area expansion. */
+export const RADIUS_CALIBRATION_CONFIG = { version: 1, maxRetries: 4, maxAreaGrowth: 2, capacityMargin: 1.04 };
+export function nextCalibrationRadius(radius: number, required: number, available: number): number {
+  if (![radius, required, available].every(Number.isFinite) || radius <= 0 || required <= 0 || available < 0) throw new RangeError("invalid capacity calibration input");
+  if (available >= required) return radius;
+  return radius * Math.min(Math.sqrt(RADIUS_CALIBRATION_CONFIG.maxAreaGrowth),
+    Math.sqrt(required / Math.max(1, available)) * RADIUS_CALIBRATION_CONFIG.capacityMargin);
+}
+
 export type Shape = {
   stretch: number; spin: number;
   harmonics: Array<{ k: number; a: number; p: number }>;
@@ -109,7 +126,7 @@ export type Shape = {
 };
 
 /** `opts.skipSolve` 仅供守卫（verify-city-solve）取「修复前」的草案；生产调用不传。 */
-export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | null = null, opts: { skipSolve?: boolean } = {}) {
+export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | null = null, opts: { skipSolve?: boolean; memoizeTerrain?: boolean; legacyGridParcels?: boolean } = {}) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   // 岛形参数（与半径无关）：放大时形状不变。
   const shape: Shape = {
@@ -124,23 +141,32 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
   // 先按档位估一个半径，再按实测地块数校正（最多 4 次）：面积 ∝ R²。
   // 起始估计：390 半径 ≈ 一档 400 会话的地皮，再按实测地块数校正。
   let radius = 390 * Math.sqrt(tier);
-  let plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve);
+  let plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve, opts.memoizeTerrain === true, opts.legacyGridParcels === true);
   let radiusAttempts = 0; // 诊断（批次 8 §5.7「先测再做」）：半径校正实际重建次数的分布
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  const radiusHistory = [{ attempt: 0, radius, generatedParcels: plan.parcelGeneration.generated,
+    available: plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0), roads: plan.roadEdges.length, blocks: plan.blocks.length }];
+  for (let attempt = 0; attempt < RADIUS_CALIBRATION_CONFIG.maxRetries; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
-    radius *= Math.sqrt(targetParcels(tier) / Math.max(1, parcels)) * 1.04;
-    plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve);
+    radius = nextCalibrationRadius(radius, targetParcels(tier), parcels);
+    plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve, opts.memoizeTerrain === true, opts.legacyGridParcels === true);
     radiusAttempts += 1;
+    radiusHistory.push({ attempt: radiusAttempts, radius, generatedParcels: plan.parcelGeneration.generated,
+      available: plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0), roads: plan.roadEdges.length, blocks: plan.blocks.length });
   }
-  return { ...plan, scaleTier: tier, biome, radiusAttempts };
+  const availableParcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
+  const planningOutcome = availableParcels < targetParcels(tier)
+    ? { ...plan.planningOutcome, status: "failed" as const, reasons: [...plan.planningOutcome.reasons, "required parcel capacity remains unmet"] }
+    : plan.planningOutcome;
+  return { ...plan, planningOutcome, scaleTier: tier, biome, radiusAttempts, radiusHistory,
+    capacity: { required: targetParcels(tier), available: availableParcels, satisfied: availableParcels >= targetParcels(tier) } };
 }
 
-function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null, tier: number, skipSolve: boolean) {
+function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null, tier: number, skipSolve: boolean, memoizeTerrain: boolean, legacyGridParcels: boolean) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
 
   // ── L1 地理（V2 步 2a：逐字迁至 planner/geography.ts，random 无状态键控哈希、迁移不改调用序）──
-  const geo = buildGeography(seed, R, shape);
+  const geo = buildGeography(seed, R, shape, { memoize: memoizeTerrain });
   const { coast, bbox, hasRiver, river, riverShift, riverX, riverWidth, coastDistance, landClearance, hillAngle, hillDir, hillLine, hillProj, height, buildable, terrain } = geo;
 
   // ── 核心点（V2 步 2a 迁出；步 4 起带环线成活率降分与出口弦净空，见 skeleton.ts）──
@@ -166,6 +192,11 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
 
   // ── 公共用地：相对核心点放置再贴陆地（按条件选址在 G3 细化）。
   const publicSites: PublicSite[] = [];
+  // Municipal commitments exist before either skeleton or joint site search.
+  // A failed station/stadium candidate cannot erase its placement/access duty.
+  const declaredSiteDemands: ConnectionDemand[] = ["civic-square", "observation-tower", "riverside-park",
+    "working-harbor", "central-station", "east-stadium"].map((ownerId) => ({ id: `site:${ownerId}`,
+      class: "site-access", required: true, anchor: ownerId, originAnchor: ownerId }));
   // 离水的最小距离：港口只要 ~24（堆场 1.5r×1.2r，近边正好落在水线上），其余预留地仍是 radius+14。
   // 曾一律 radius+14=51，港口中心被推到离水 ~60 的内陆，码头和吊车立在沙地上（拍照实测）。
   const siteClearance = (kind: string, radius: number) => (kind === "harbor" ? 24 : radius + 14);
@@ -179,9 +210,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 否则环岛、放射主干道、高架都围着旧核心画，广场孤悬一旁（用户截图；30 岛里 10 个偏 12–60）。
   { const plaza = publicSites[publicSites.length - 1]; core = { x: plaza.x, z: plaza.z }; }
   place("observation-tower", "tower", around(turn + 0.9, 0.16 * R), 26, 0);
-  place("central-station", "station", around(turn + 2.2, 0.38 * R), 46, 0.12);
   place("riverside-park", "park", hasRiver ? { x: riverX(core.z + 0.18 * R) + riverWidth(core.z) + 60, z: core.z + 0.18 * R } : around(turn + 3.6, 0.3 * R), 47, 0);
-  place("east-stadium", "stadium", around(turn + 4.8, 0.45 * R), 49, 0.2);
   {
     // 港口：离核心最近的一段海岸内侧（码头离市中心不远）。
     // 取离核心 ≥150 的最近岸点：核心贴海时（用户种子）曾取到市政广场旁的岸点，再被避让推进内陆，港口落在市中心（真机截图）。
@@ -304,8 +333,19 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
 
   // 岸边类集合由 sitespec 表派生（V2 网络优先 6b-2：值 === 原 Set 字面量，守卫 verify-city-sitespec 证相等）。
   const SHORE_SITE_KINDS = coastalSitingKinds(); // 庄园：临水拱廊，同属岸边地标
+  // Selected landmarks are committed before roads; optional selection itself
+  // remains a distinct capability, not a reason to drop an accepted owner.
+  for (const site of landmarks) if (site.radius) declaredSiteDemands.push({ id: `site:${site.id}`,
+    class: "site-access", required: true, anchor: site.id, originAnchor: site.id });
   // ── 骨架（V2 步 2b-full：逐字迁至 planner/skeleton.ts::buildSkeleton）──
-  const { trunks, bridges, ringRuns, primaryAnchorNodeId, primaryAnchorNodeIds } = buildSkeleton({ geo, seed, core, publicSites, landmarks, shoreSiteKinds: SHORE_SITE_KINDS, random, network, inRiver });
+  // Only accepted fixed reservations constrain this stage. Other nominal
+  // candidates are deliberately reassigned in the frontage/shore passes below;
+  // treating their temporary locations as immutable kills valid corridors.
+  const fixedSkeletonSites = publicSites.filter((site) => site.kind === "civic" || site.kind === "harbor" || site.access);
+  const fixedSkeletonLandmarks = landmarks.filter((site) => "access" in site && site.access);
+  const skeletonReservationIds = [...fixedSkeletonSites, ...fixedSkeletonLandmarks].map((site) => site.id);
+  const { trunks, bridges, ringRuns, primaryAnchorNodeId, primaryAnchorNodeIds, diagnostics: skeletonDiagnostics } = buildSkeleton({ geo, seed, core,
+    publicSites: fixedSkeletonSites, landmarks: fixedSkeletonLandmarks, shoreSiteKinds: SHORE_SITE_KINDS, random, network, inRiver });
   const trunkRuns = trunks.map((trunk) => trunk.points);
   const trunkIndex = new SegmentIndex(trunkRuns);
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
@@ -328,7 +368,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
   // 跨路地标（门式）：凯旋门骑在主干道上、道路从拱券开口穿过——曾与其它用地一样贴到路旁，门下是草地
   // （用户截图：「凯旋门下面不是路？建筑物缺少约束」）。取最近主干道中段，开口轴（局部 z）沿道路方向。
-  straddleSitesAcrossTrunk(frontageCtx);
+  straddleSitesAcrossTrunk({ ...frontageCtx, trunkSegments: groundFrontageSegments([...network.edges.values()]) });
   frontSitesOnTrunks(frontageCtx);
   // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
   // 仍不在干地的内陆用地（岸边/跨路/广场豁免，各有专属遍或构造保证）重贴到干地。
@@ -341,7 +381,106 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   settleShoreSitesOnCoast(shoreCtx);
   // 帆形歌剧院改立在海上小岛、以堤道连岸（用户：「歌剧院不应该在河里，需要在海上」「范式和机场一样」）。
   // 取离当前位置最近的几个岸点，岸外 radius+40 处整个占地圈必须是深水（不在河口），且离港口/其它用地够远。
-  settleSailOperaOffshore(shoreCtx);
+  let sailOperaCandidateSets = settleSailOperaOffshore(shoreCtx);
+  const siteObligations: Array<{ ownerId: string; placed: boolean; reason?: string; routeRetries?: number }> = [];
+  const jointSiteProgramme = [["central-station", "station"], ["east-stadium", "stadium"]] as const;
+  for (const [ownerId, kind] of jointSiteProgramme) {
+    let assigned = assignConnectedSite({ ...geo, core, turn, trunkRuns, ringRuns, bridges, placed: [...publicSites, ...landmarks], height, inRiver,
+      riverBank: footprintGeo.riverBank }, { network, geo, inRiver, reservations }, specByKind(kind)!, ownerId, primaryAnchorNodeId);
+    let relocationFailure: string | undefined;
+    if (!assigned.site && assigned.reason?.includes("site-spacing")) {
+      type RelocationPatch = { publicSites: PublicSite[]; landmarks: Landmark[]; opera: typeof sailOperaCandidateSets };
+      const patches = new Map<string, RelocationPatch>();
+      const currentSites = [...publicSites, ...landmarks].filter((site) => site.radius);
+      const overlapCount = (sites: typeof currentSites) => {
+        let count = 0;
+        for (let i = 0; i < sites.length; i += 1) for (let j = i + 1; j < sites.length; j += 1) {
+          if (Math.hypot(sites[i].x - sites[j].x, sites[i].z - sites[j].z) < sites[i].radius + sites[j].radius) count += 1;
+        }
+        return count;
+      };
+      const baselineOverlaps = overlapCount(currentSites);
+      const currentRoads = [...network.edges.values()].map((edge) => edge.points);
+      const baselineRoadOverlaps = currentSites.filter((site) => site.kind !== "civic" && site.kind !== "arch"
+        && polylineDistance(currentRoads, site) < site.radius * 0.7).length;
+      const ownerRules = CONSTRAINTS.filter((constraint) => ["siteInWater", "siteWithoutDoorRoad", "roadThroughSite",
+        "sitesOverlap", "stationStadiumSetback", "stationDoorFacesRoad", "archStraddlesRoad"].includes(constraint.id));
+      const ownerView = (candidateNetwork: Network, sites: PublicSite[], marks: Landmark[]) => ({
+        roadEdges: [...candidateNetwork.edges.values()], roadNodes: [...candidateNetwork.nodes.values()], publicSites: sites, landmarks: marks,
+        blocks: [], terrain, core, coast, river, seaside: null, coastRoads: [], riverRoadRuns: [], primaryAnchorNodeId,
+      } as unknown as ConstraintPlan);
+      const ownerIdentity = (violation: ReturnType<typeof ownerRules[number]["measure"]>[number], sites: typeof currentSites) =>
+        sites.find((site) => site.kind === violation.site && site.x === violation.at?.x && site.z === violation.at?.z)?.id
+        ?? JSON.stringify([violation.site, violation.at, violation.detail]);
+      const previousOwnerFailures = new Map(ownerRules.map((constraint) => [constraint.id,
+        new Set(constraint.measure(ownerView(network, publicSites, landmarks)).map((violation) => ownerIdentity(violation, currentSites)))]));
+      const moveOptionalSites = (owner: PublicSite, candidateNetwork: Network): string | null => {
+        const stagedPublic = publicSites.map((site) => ({ ...site, ...(site.access ? { access: { ...site.access } } : {}) }));
+        const stagedLandmarks = landmarks.map((site) => ({ ...site, ...("shore" in site && site.shore ? { shore: { ...site.shore } } : {}) }));
+        stagedPublic.push(owner);
+        const initialSites = [...stagedPublic, ...stagedLandmarks].filter((site) => site.radius);
+        const initialOwner = initialSites.find((site) => site.id === ownerId)!;
+        const candidateRoads = [...candidateNetwork.edges.values()].map((edge) => edge.points);
+        const blockerIds = new Set(initialSites.filter((site) => site !== initialOwner && (
+          Math.hypot(site.x - initialOwner.x, site.z - initialOwner.z) < site.radius + initialOwner.radius + 10
+          || (site.kind !== "civic" && site.kind !== "arch" && polylineDistance(candidateRoads, site) < site.radius * 0.7)
+        )).map((site) => site.id));
+        if (blockerIds.size > 0) {
+          const fixedBlocker = initialSites.find((site) => blockerIds.has(site.id)
+            && (site.kind === "civic" || site.kind === "harbor" || ("access" in site && site.access)));
+          if (fixedBlocker) return `site-relocation-fixed-blocker(${fixedBlocker.id})`;
+          const actualTrunks = [...candidateNetwork.edges.values()].filter((edge) => !edge.bridge && edge.width >= 8).map((edge) => edge.points);
+          const actualSegments = actualTrunks.flatMap((run) => run.slice(1).map((point, index) => [run[index], point] as [Vec2, Vec2]));
+          const stagedFrontage = { ...frontageCtx, trunkRuns: actualTrunks, trunkSegments: actualSegments,
+            publicSites: stagedPublic, landmarks: stagedLandmarks, relocateSiteIds: blockerIds };
+          const stagedShore = { ...shoreCtx, publicSites: stagedPublic, landmarks: stagedLandmarks, relocateSiteIds: blockerIds,
+            neighbourMargins: new Map([[ownerId, 10]]), trunkRuns: actualTrunks, roadEnvelopes: [...candidateNetwork.edges.values()] };
+          restickSitesClearOfRingRuns(stagedFrontage);
+          const archSegments = groundFrontageSegments([...candidateNetwork.edges.values()]);
+          straddleSitesAcrossTrunk({ ...stagedFrontage, trunkSegments: archSegments });
+          frontSitesOnTrunks(stagedFrontage);
+          resnapSitesOntoDryLand(stagedFrontage);
+          settleShoreSitesOnCoast(stagedShore);
+          const stagedOpera = [...stagedLandmarks].some((site) => blockerIds.has(site.id) && site.kind === "sail-opera")
+            ? settleSailOperaOffshore(stagedShore) : sailOperaCandidateSets;
+          const stagedSites = [...stagedPublic, ...stagedLandmarks].filter((site) => site.radius);
+          const stagedOwner = stagedSites.find((site) => site.id === ownerId)!;
+          const ownerSpacingBlockers = stagedSites.filter((site) => site !== stagedOwner
+            && Math.hypot(site.x - stagedOwner.x, site.z - stagedOwner.z) < site.radius + stagedOwner.radius + 10);
+          const ownerSpacingConflict = ownerSpacingBlockers.length > 0;
+          const roadOverlaps = stagedSites.filter((site) => site.kind !== "civic" && site.kind !== "arch"
+            && polylineDistance(candidateRoads, site) < site.radius * 0.7).length;
+          if (ownerSpacingConflict || overlapCount(stagedSites) > baselineOverlaps || roadOverlaps > baselineRoadOverlaps) {
+            return `site-relocation-refused(ownerSpacing=${ownerSpacingConflict},siteOverlaps=${overlapCount(stagedSites)}>${baselineOverlaps},roadOverlaps=${roadOverlaps}>${baselineRoadOverlaps}) blockers=[${ownerSpacingBlockers.map((site) => site.id).join(",")}]`;
+          }
+          for (const constraint of ownerRules) if (constraint.measure(ownerView(candidateNetwork, stagedPublic, stagedLandmarks))
+            .some((violation) => !previousOwnerFailures.get(constraint.id)!.has(ownerIdentity(violation, stagedSites)))) return `site-relocation-new-${constraint.id}`;
+          patches.set(ownerId, { publicSites: stagedPublic, landmarks: stagedLandmarks, opera: stagedOpera });
+        } else patches.set(ownerId, { publicSites: stagedPublic, landmarks: stagedLandmarks, opera: sailOperaCandidateSets });
+        return null;
+      };
+      const stagedPublic = publicSites.map((site) => ({ ...site, ...(site.access ? { access: { ...site.access } } : {}) }));
+      const stagedLandmarks = landmarks.map((site) => ({ ...site, ...("shore" in site && site.shore ? { shore: { ...site.shore } } : {}) }));
+      const fixed = [...stagedPublic, ...stagedLandmarks].filter((site) => site.kind === "civic" || site.kind === "harbor" || ("access" in site && site.access));
+      const retry = assignConnectedSite({ ...geo, core, turn, trunkRuns, ringRuns, bridges, placed: fixed, height, inRiver,
+        riverBank: footprintGeo.riverBank }, { network, geo, inRiver, reservations: () => fixed }, specByKind(kind)!, ownerId, primaryAnchorNodeId, moveOptionalSites);
+      if (retry.site && retry.network) {
+        const patch = patches.get(ownerId);
+        if (!patch) throw new Error(`missing site relocation patch for ${ownerId}`);
+        publicSites.splice(0, publicSites.length, ...patch.publicSites);
+        landmarks.splice(0, landmarks.length, ...patch.landmarks);
+        sailOperaCandidateSets = patch.opera;
+        assigned = retry;
+      } else relocationFailure = `relocation retry: ${retry.reason ?? "no connected candidate"}`;
+    }
+    siteObligations.push({ ownerId, placed: !!assigned.site, ...(assigned.routeRetries ? { routeRetries: assigned.routeRetries } : {}),
+      ...(!assigned.site ? { reason: [assigned.reason, relocationFailure].filter(Boolean).join("; ") } : {}) });
+    if (!assigned.site || !assigned.network) continue;
+    nodes.clear(); for (const [id, node] of assigned.network.nodes) nodes.set(id, node);
+    edges.clear(); for (const [id, edge] of assigned.network.edges) edges.set(id, edge);
+    const versioned = network as Network & { version?: number }; versioned.version = (versioned.version ?? 0) + 1;
+    if (!publicSites.some((site) => site.id === assigned.site!.id)) publicSites.push(assigned.site);
+  }
   const ringIndex = new SegmentIndex(ringRuns);
   const distanceToRing = (p: Vec2) => polylineDistance(ringRuns, p);
 
@@ -440,18 +579,26 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     coastalRunCount = coastRoadRuns.length;
     if (hasRiver) {
       const existingArterial = new SegmentIndex([...edges.values()].filter((edge) => edge.width >= 8 && !edge.bridge).map((edge) => edge.points));
+      // Coastal candidates are accepted before publication into edges. River
+      // planning must see those actual planned corridors too, not a stale
+      // network-only reservation snapshot that permits a second width12 road.
+      const plannedCoastalArterial = new SegmentIndex(coastRoadRuns.slice(0, coastalRunCount));
       const riverUsable = (q: Vec2) => coastDistance(q.x, q.z) > 14 && !inRiver(q.x, q.z) && landClearance(q.x, q.z) > 8
         && hillProj(q.x, q.z) < hillLine - 12 && height(q.x, q.z) < 6
         && !(seaside && seasideStripContains(seaside, q, 6))
         && !reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 8)
         // 不再避让环线高架：高架是架空的，河岸路从桥下穿过（曾在高架两侧各断一截，真机截图「道路缺少连接」）。
-        && !existingArterial.closerThan(q, 28); // 28 > 规划守卫的「拥挤」阈值 25：曾 22，地标改位后 24–25 处并行被计为拥挤
+        && !existingArterial.closerThan(q, 28) && !plannedCoastalArterial.closerThan(q, 28); // 28 > 规划守卫的「拥挤」阈值 25
       for (const side of [-1, 1]) {
         let runPts: Vec2[] = [];
         for (let z = bbox.minZ; z <= bbox.maxZ; z += 20) {
           const q = { x: riverX(z) + side * (riverWidth(z) + 14), z };
           const last = runPts[runPts.length - 1];
-          const chordOk = !last || riverUsable({ x: (last.x + q.x) / 2, z: (last.z + q.z) / 2 });
+          // <=4 spacing plus the existing 3-unit separation margin prevents
+          // an unsampled chord interior from approaching a reserved coast road.
+          const steps = last ? Math.max(1, Math.ceil(Math.hypot(q.x - last.x, q.z - last.z) / 4)) : 1;
+          const chordOk = !last || Array.from({ length: steps - 1 }, (_, k) => (k + 1) / steps)
+            .every((t) => riverUsable({ x: last.x + (q.x - last.x) * t, z: last.z + (q.z - last.z) * t }));
           if (riverUsable(q) && chordOk) runPts.push(q);
           else { if (runPts.length >= 3) coastRoadRuns.push(runPts); runPts = riverUsable(q) ? [q] : []; }
         }
@@ -459,7 +606,12 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       }
     }
     // 主干级（宽 12）：与海滨大道同级，平行的街网道路据此降级为支路。
-    for (const runPts of coastRoadRuns) for (let k = 1; k < runPts.length; k += 1) addEdge(runPts[k - 1], runPts[k], true, false, true);
+    for (const runPts of coastRoadRuns) for (let k = 1; k < runPts.length; k += 1) {
+      addEdge(runPts[k - 1], runPts[k], true, false, true);
+      const id = [roadNodeId(key(runPts[k - 1])), roadNodeId(key(runPts[k]))].sort().join("/");
+      const edge = edges.get(id);
+      if (edge && !edge.bridge && edge.structure === "ground-road") edge.purpose = "waterfront";
+    }
   }
   const coastRoadIndex = new SegmentIndex(coastRoadRuns);
 
@@ -518,6 +670,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 扇区街网：相邻两条主干道之间，网格 u 轴沿扇区起始那条主干道（街区沿主干道排开、横街以 T 路口接入主干道），
   // v 轴垂直指向扇区内部。曾沿扇区平分线：街网与两侧主干道都斜交、隔 10 单位空地带浮着（审计 R3 前的第一步）。
   const blocks: CityBlock[] = [];
+  const roadGenerationDiagnostics = { crowdedBlockCandidates: 0, examples: [] as string[] };
+  const parcelBuilders = new Map<string, (block: CityBlock) => Parcel[]>();
   const angleBetween = (a: number, lo: number, hi: number) => {
     const span = ((hi - lo) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) || Math.PI * 2;
     const off = ((a - lo) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
@@ -620,7 +774,19 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       // 压到预留地的格子整格不生成（曾只是不放地块、四条边照样成路——支路穿过公园/广场）。
       if (reservations().some((site) => polygonDistance(site, polygon) > -site.radius)) continue;
       const zone = zoneFor(center);
-      const id = `plan:${sectorIndex}:${i}:${j}`; const parcels: Parcel[] = [];
+      const id = `plan:${sectorIndex}:${i}:${j}`;
+      const wasClipped = clipped;
+      const buildParcels = (block: CityBlock): Parcel[] => {
+      // Derive addresses only after accepted road/site repairs. Split nodes on a
+      // straight boundary do not turn a quadrilateral into a clipped block.
+      const polygon = block.polygon.filter((p, k, points) => {
+        const a = points[(k + points.length - 1) % points.length], b = points[(k + 1) % points.length];
+        return Math.abs((p.x - a.x) * (b.z - p.z) - (p.z - a.z) * (b.x - p.x)) > 0.001;
+      });
+      if (polygon.length < 3) return [];
+      const clipped = wasClipped || polygon.length !== 4;
+      const center = { x: polygon.reduce((sum, p) => sum + p.x, 0) / polygon.length, z: polygon.reduce((sum, p) => sum + p.z, 0) / polygon.length };
+      const parcels: Parcel[] = [];
       // 裁切出的三角/梯形街区：沿最长边排一排临街地块（内收朝多边形内侧）。
       let front = 0;
       if (clipped) for (let k = 1; k < polygon.length; k += 1) {
@@ -645,8 +811,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         if (!clearsHighways(p, 7.2, 8, ringIndex)) continue;
         parcels.push({ ...p, id: `${id}/${side}:${index}`, blockId: id, yaw: -Math.atan2(dz, dx), zone, width: Math.min(7.2, (length - 14) / columnCount), depth: 8 });
       }
+      return parcels;
+      };
       const k = (p: Vec2) => key(p);
-      blocks.push({ id, districtId: "", ...center, width: du, depth: dv, zone, parcels, polygon: polygon.map(k) });
+      const roadCandidates: Array<{ a: Vec2; b: Vec2; arterial: boolean }> = [];
       // 每 3 条网格线一条主干级街道（宽 8），其余为支路。
       polygon.forEach((p, e) => {
         const q = polygon[(e + 1) % polygon.length];
@@ -657,8 +825,18 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         // 与主干道/滨海大道近乎平行（<15°）且很近：≤12 视为同一条路不修，≤25 降为支路——不再并排出现两条大路。
         const parallel = parallelPrimaryGap(p, q);
         if (parallel <= 12) { frontNodes.push(p, q); return; }
-        addEdge(p, q, parallel > 25 && (e % 2 === 0 ? j % 3 === 0 : i % 3 === 0));
+        roadCandidates.push({ a: p, b: q, arterial: parallel > 25 && (e % 2 === 0 ? j % 3 === 0 : i % 3 === 0) });
       });
+      // 地块不能先发布、随后再接受穿设施/落水的街道；拒绝整个边界候选，无部分加边。
+      const crowded = roadCandidateCrowding([...edges.values()], roadCandidates);
+      if (crowded) {
+        roadGenerationDiagnostics.crowdedBlockCandidates += 1;
+        if (roadGenerationDiagnostics.examples.length < 4) roadGenerationDiagnostics.examples.push(`${id}/${crowded.candidateIndex} against ${crowded.hostId}`);
+        continue; // Neither roads nor block/parcels have been published; no width downgrade.
+      }
+      if (roadCandidates.length && !commitFixedLink(connectorWorld, roadCandidates).ok) continue;
+      blocks.push({ id, districtId: "", ...center, width: du, depth: dv, zone, parcels: [], polygon: polygon.map(k) });
+      parcelBuilders.set(id, buildParcels);
     }
   });
 
@@ -689,7 +867,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         maxLength: 80,
         roadClass: "arterial",
         primary: true,
-      }, connectorWorld, { strategies: ["node-merge"], siteMargin: 5, crossings: false });
+      }, connectorWorld, { strategies: ["node-merge"], siteMargin: 5, crossings: true });
       joined.add(ida); joined.add(roadNodeId(key(mate.b.p)));
     }
   }
@@ -753,6 +931,11 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 三段、桥头干地与跨距校验、候选按距离前 40 个投影点），经事务补丁提交；判据逐字保留。
   // 批 A：堤道/门路的失败都如实进 connectionLog（诊断面，不进基线哈希）。
   const connectionLog: ConnectionAttempt[] = [];
+  // Close the generated ground network before accepting a site's entrance.
+  // Otherwise a valid shore attachment can be committed to a component whose
+  // main-network route has not even been attempted yet.
+  const junctionReport = connectGroundJunctions(connectorWorld);
+  connectGeneratedComponents();
   for (const site of [...publicSites, ...landmarks]) {
     if (!site.radius) continue;
     // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。落位期已验证
@@ -760,24 +943,59 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const landmarkSite = site as typeof site & { shore?: Vec2 };
     const ref: Vec2 = landmarkSite.shore ?? site;
     if (landmarkSite.shore) {
-      const l = Math.hypot(site.x - ref.x, site.z - ref.z) || 1;
-      const edgePt = key({ x: site.x - ((site.x - ref.x) / l) * site.radius * 0.9, z: site.z - ((site.z - ref.z) / l) * site.radius * 0.9 });
-      const shorePt = key(ref);
-      // 批 A：堤道同过统一终筛（deck 段垂直净空判）；提交失败如实进诊断，不再无据登记桥注册表
-      // （曾无条件登记——若 deck 被拒，注册表里的桥没有对应路缘，渲染与规划漂移）。
-      const causeway = commitFixedLink(connectorWorld, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
-      if (causeway.ok) {
+      const candidateSet = sailOperaCandidateSets.find((set) => set.siteId === (site.id ?? site.kind));
+      const candidates = candidateSet?.candidates.slice(0, SAIL_OPERA_CONFIG.jointCandidates) ?? [{ x: site.x, z: site.z, yaw: site.yaw, shore: ref }];
+      const original = { x: site.x, z: site.z, zShore: ref.z, shoreX: ref.x, yaw: site.yaw };
+      const failed: string[] = [];
+      let accepted = false;
+      for (const candidate of candidates) {
+        site.x = candidate.x; site.z = candidate.z; site.yaw = candidate.yaw; landmarkSite.shore = candidate.shore;
+        const l = Math.hypot(site.x - candidate.shore.x, site.z - candidate.shore.z) || 1;
+        const edgePt = key({ x: site.x - ((site.x - candidate.shore.x) / l) * site.radius * 0.9, z: site.z - ((site.z - candidate.shore.z) / l) * site.radius * 0.9 });
+        const shorePt = key(candidate.shore);
+        const staged: Network = { nodes: new Map([...network.nodes].map(([id, node]) => [id, { ...node }])), edges: new Map([...network.edges].map(([id, edge]) => [id, { ...edge, points: edge.points.map((p) => ({ ...p })) }])) };
+        const stagedConnector: ConnectorWorld = { ...connectorWorld, network: staged, reservations: () => reservations().filter((reserved) => reserved !== site) };
+        const causeway = commitFixedLink(stagedConnector, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
+        if (!causeway.ok) { failed.push(`causeway:${causeway.detail ?? causeway.reason}`); continue; }
+        // 连接器的 owner-revalidation 必须能重新找到设施；路径候选本身仍从 blockers 中排除 owner。
+        stagedConnector.reservations = reservations;
+        const stagedComponents = componentOf({ roadNodes: [...staged.nodes.values()], roadEdges: [...staged.edges.values()] } as ConstraintPlan);
+        const primaryAnchor = primaryAnchorNodeIds.find((id) => staged.nodes.has(id));
+        const primaryComponent = primaryAnchor ? stagedComponents.get(primaryAnchor) : undefined;
+        if (!primaryComponent || ![...staged.edges.values()].some((edge) => !edge.bridge && stagedComponents.get(edge.from) === primaryComponent)) {
+          failed.push("no-primary-ground-network-target"); continue;
+        }
+        const access = runConnection({ id: `causeway-access:${site.id ?? site.kind}`, source: shorePt,
+          target: { kind: "primary", isPrimaryNode: (id) => stagedComponents.get(id) === primaryComponent }, purpose: "site-access", allowBridge: true, maxLength: 1000, roadClass: "local", minAngleDeg: 35 },
+        stagedConnector, { strategies: ["direct-projection", "node-merge", "detour", "bridge-candidate"],
+          bridge: { self: site, blockers: reservations().filter((reserved) => reserved !== site), siteGate: true } });
+        if (!access.ok) { failed.push(`shore:${access.detail ?? access.reason}`); continue; }
+        const acceptedComponents = componentOf({ roadNodes: [...staged.nodes.values()], roadEdges: [...staged.edges.values()] } as ConstraintPlan);
+        if (acceptedComponents.get(roadNodeId(edgePt)) !== acceptedComponents.get(primaryAnchor!)) {
+          failed.push("causeway-not-attached-to-primary"); continue;
+        }
+        site.access = { role: "plot-gate", capability: "island-causeway", nodeId: roadNodeId(edgePt), ownerX: site.x, ownerZ: site.z, ownerYaw: site.yaw };
+        nodes.clear(); for (const [id, node] of staged.nodes) nodes.set(id, node);
+        edges.clear(); for (const [id, edge] of staged.edges) edges.set(id, edge);
+        (network as Network & { version?: number }).version = (staged as Network & { version?: number }).version;
         bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
-      } else {
-        connectionLog.push({ id: `causeway:${site.id ?? site.kind}`, purpose: "site-access", ok: false, reason: parseFailure(causeway.detail), detail: `fixed causeway rejected: ${causeway.detail ?? causeway.reason}` });
+        for (const span of access.bridgeSpans) bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
+        accepted = true;
+        break;
       }
+      if (accepted) continue; // 堤道及岸侧主网引道已经作为同一草稿提交。
+      site.x = original.x; site.z = original.z; site.yaw = original.yaw;
+      landmarkSite.shore = { x: original.shoreX, z: original.zShore };
+      const detail = `no joint causeway/shore-access candidate among ${candidates.length}: ${failed.slice(-4).join("; ")}`;
+      connectionLog.push({ id: `causeway:${site.id ?? site.kind}`, purpose: "site-access", ok: false, reason: parseFailure(detail), detail });
+      continue;
     }
     let nearest: { p: Vec2; d: number; edge: RoadEdge } | null = null;
     for (const edge of edges.values()) {
       if (edge.bridge) continue;
-      const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-      const t = Math.max(0, Math.min(1, ((ref.x - a.x) * dx + (ref.z - a.z) * dz) / l2));
-      const p = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(p.x - ref.x, p.z - ref.z);
+      const closest = closestPolylineSegment(edge.points, ref);
+      if (!closest) continue;
+      const p = closest.q; const d = closest.d;
       if (!nearest || d < nearest.d) nearest = { p, d, edge };
     }
     if (!nearest || nearest.d <= (landmarkSite.shore ? 6 : site.radius + 14)) continue;
@@ -788,6 +1006,39 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     // 门口在不可建岸滩时，由下方的显式桥候选兜底（全程在陆上或 ≤84 连续水段成桥）。
     const gate = key({ x: ref.x + ux * reach, z: ref.z + uz * reach });
     if (!connectToNetwork(gate, 240, false) && !connectToNetwork(gate, 700, false, () => false, 35)) {
+      const spec = specByKind(site.kind);
+      if (spec?.plotBoundaryAccess) {
+        const view = (candidate: Network, access?: PublicSite["access"]) => ({
+          roadEdges: [...candidate.edges.values()], roadNodes: [...candidate.nodes.values()],
+          publicSites: publicSites.map((owner) => owner === site && access ? { ...owner, access } : owner),
+          landmarks, blocks: [], terrain, core, coast, river, seaside,
+          coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount),
+          primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => candidate.nodes.has(id)) ?? null,
+          siteObligations, demandCatalogue: declaredSiteDemands } as unknown as ConstraintPlan);
+        const identity = (finding: { site?: string; at?: Vec2; detail?: string }) => JSON.stringify([finding.site, finding.at, finding.detail]);
+        const baseline = new Map(CONSTRAINTS.map((rule) => [rule.id, new Set(rule.measure(view(network)).map(identity))]));
+        const binding = (point: Vec2): NonNullable<PublicSite["access"]> => ({ role: "plot-gate", capability: "shore-plot-boundary",
+          nodeId: roadNodeId(point), ownerX: site.x, ownerZ: site.z, ownerYaw: site.yaw,
+          entranceId: "shore-plot-boundary", entranceEvidence: "plot-proxy" });
+        const proposal = proposeShorePlotAccess(connectorWorld, site, spec,
+          primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, (candidate, point) => {
+            for (const rule of CONSTRAINTS) if (rule.measure(view(candidate, binding(point)))
+              .some((finding) => !baseline.get(rule.id)!.has(identity(finding)))) return `shore-plot-new-${rule.id}`;
+            return null;
+          });
+        if (!proposal.ok) connectionLog.push({ id: `gate:${site.id}`, purpose: "site-access", ok: false,
+          reason: "no-target", detail: proposal.reason });
+        else {
+          nodes.clear(); for (const [id, node] of proposal.network.nodes) nodes.set(id, node);
+          edges.clear(); for (const [id, edge] of proposal.network.edges) edges.set(id, edge);
+          network.patchRemaps = proposal.network.patchRemaps;
+          const versioned = network as Network & { version?: number }; versioned.version = (versioned.version ?? 0) + 1;
+          site.access = binding(proposal.gate);
+          for (const span of proposal.bridgeSpans) bridges.push({ from: span.from, to: span.to,
+            angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
+        }
+        continue; // Replace, rather than duplicate, the original 40-host bridge tier.
+      }
       // 兜底（批次 5-1 起统一走 bridge-candidate）：门口 → 近岸 → 桥 → 对岸 → 接入点（无水时纯地面引道）。
       // 地面引道不查 buildable/坡度（门前引道穿过不可建前滩带是历史口径，TerrainPatch 批次前的已知豁免）。
       const blockers = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
@@ -799,7 +1050,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         allowBridge: true,
         maxLength: 1e4, // 桥候选的界限是候选数（前 40 个投影点），不是半径（历史口径）
         roadClass: "local",
-      }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { self: site, blockers, siteGate: true }, crossings: false });
+      }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { self: site, blockers, siteGate: true }, crossings: true });
       for (const span of bridged.ok ? bridged.bridgeSpans : []) {
         bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
       }
@@ -807,14 +1058,13 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
 
-  const junctionReport = connectGroundJunctions(connectorWorld);
   // ── 连通（网络优先批次 4-3）：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含
   // 主网的分量经统一连接器接入。主网目标 = intent.primaryComponentId 的分量（离核心最近路端所在，
   // 批次 2 的主网定义），不许「接最近分量」——两个孤岛互连不等于接入主网。
   // 设计明令删除的 tolerance=[1,0.7,0] 不校验直连兜底（2026-10-08 实测：150 岛 141 条兜底边里
   // 63 条穿水、16 条不可建、2 条陡坡、9 条穿既有路）：禁止用降低硬约束换连通；失败进诊断
   // （intent 需求体系记 unmet + 本处 connectionLog 记原因），必要时允许局部分量保持隔离。
-  {
+  function connectGeneratedComponents() {
     const parent = new Map<string, string>();
     const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
     for (const id of nodes.keys()) parent.set(id, id);
@@ -873,7 +1123,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
           // 全在 bridge-candidate 判据内；桥梁注册表同步登记。实测 seed 123456789/t2：143 节点分量与
           // 主网隔一条 ~40 宽的河口，前几档全部 slope/water-span 拒绝。
           for (const member of ordered) {
-            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: true, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { blockers: reservations(), siteGate: true }, crossings: false }); // 过河档干地段同属历史地面容差
+            const result = runConnection({ source: member, target: { kind: "primary", isPrimaryNode }, id: `isolate:${pass}:${member.id}`, purpose: "district-access", allowBridge: true, maxLength: 700, roadClass: "local" }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { blockers: reservations(), siteGate: true }, crossings: true });
             connectionLog.push({ id: `isolate-bridge:${root}:${member.id}`, purpose: "district-access", ok: result.ok, strategy: result.ok ? result.strategy : undefined, reason: result.ok ? undefined : result.reason, detail: result.ok ? undefined : result.detail });
             if (result.ok) {
               for (const span of result.bridgeSpans) bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
@@ -926,16 +1176,24 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── 碎边合并：长度 <5 的非桥路段把两端并成一个节点。接入路吸附到离已有路口几单位处时会留下 0–4 长的碎边，
   // 与广场环路等形成 <30° 的「锐角路口」（30 岛中 10 个锐角全部是这种形状）。
   const sliverSkip = new Set<string>();
+  const declaredEntranceNodes = new Set(publicSites.flatMap((site) => site.access ? [site.access.nodeId] : []));
   for (let pass = 0; pass < 50; pass += 1) {
     // 宽 12 的骨架（海滨大道按 ~15 细分、段间可能 <5）不合并：并掉会打断大道的车流回路（seaside 守卫）。
-    const sliver = [...edges.values()].find((e) => !sliverSkip.has(e.id) && !e.bridge && e.width < 12 && Math.hypot(e.points[1].x - e.points[0].x, e.points[1].z - e.points[0].z) < 5);
+    const sliver = [...edges.values()].find((e) => !sliverSkip.has(e.id) && !declaredEntranceNodes.has(e.from) && !declaredEntranceNodes.has(e.to) && !e.bridge && e.width < 12 && Math.hypot(e.points[1].x - e.points[0].x, e.points[1].z - e.points[0].z) < 5);
     if (!sliver) break;
     // 保留挂着骨架（宽 12）的那一端：并掉海滨大道端点会让大道车流回路引用不存在的节点（seaside 守卫 10 档）。
     const touchesPrimary = (id: string) => [...edges.values()].some((e) => e !== sliver && e.width >= 12 && (e.from === id || e.to === id));
     const fromPrimary = touchesPrimary(sliver.from); const toPrimary = touchesPrimary(sliver.to);
-    if (fromPrimary && toPrimary) { sliverSkip.add(sliver.id); continue; }
+    const fromPinned = primaryAnchorNodeIds.includes(sliver.from); const toPinned = primaryAnchorNodeIds.includes(sliver.to);
+    const touchesBridge = (id: string) => [...edges.values()].some((e) => e.bridge && (e.from === id || e.to === id));
+    const fromBridge = touchesBridge(sliver.from); const toBridge = touchesBridge(sliver.to);
+    if ((fromPrimary && toPrimary) || ((fromPinned || fromBridge) && (toPinned || toBridge))) { sliverSkip.add(sliver.id); continue; }
     edges.delete(sliver.id);
-    const keepId = toPrimary ? sliver.to : sliver.from;
+    // Rebinding a deck endpoint shifts the bridge geometry while its bridge registry remains fixed.
+    // Keep the primary anchor first, then a bridge endpoint; otherwise use the established trunk rule.
+    const keepId = fromPinned ? sliver.from : toPinned ? sliver.to
+      : fromBridge ? sliver.from : toBridge ? sliver.to
+        : toPrimary ? sliver.to : sliver.from;
     const keepNode = nodes.get(keepId)!; const dropId = keepId === sliver.from ? sliver.to : sliver.from;
     for (const e of [...edges.values()]) {
       if (e.from !== dropId && e.to !== dropId) continue;
@@ -946,7 +1204,12 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     nodes.delete(dropId);
   }
 
-  const carPaths = blocks.filter((b, i) => b.parcels.length > 0 && i % 7 === 0).map((b) => [...b.polygon, b.polygon[0]]);
+  const carPaths: Vec2[][] = [];
+  const buildTrafficPaths = (blocks: CityBlock[], carPaths: Vec2[][]) => {
+  carPaths.push(...blocks.filter((b, i) => b.parcels.length > 0 && i % 7 === 0).map((b) => {
+    const boundary = b.roadBoundary ?? b.polygon;
+    return [...boundary, boundary[0]];
+  }));
   // 海滨大道车流沿海岸单向行驶，再通过真实路网回到起点；找不到完整地面回路时
   // 不生成假路线。返程搜索排除大道自身边，避免车辆在两端掉头后原路折返。
   const roadReturnPath = (from: Vec2, to: Vec2): Vec2[] | null => {
@@ -977,6 +1240,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       carPaths.push([...segment, ...segment.slice(0, -1).reverse()]);
     }
   }
+  };
 
   // 城区锚点：第一名执行环境在核心，其余绕核心等角分布再贴陆地，彼此至少隔 ~200。
   const anchorsPlaced: Array<Vec2 & { radius: number }> = [];
@@ -1026,6 +1290,48 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     for (const id of [...nodes.keys()]) if (![...edges.values()].some((e) => e.from === id || e.to === id)) nodes.delete(id);
   }
 
+  // A failed skeleton placement remains a commitment. Road growth can expose
+  // new legal frontage, so revisit only missing owners before any parcels are
+  // accepted. This bounded phase never relocates an already-bound owner.
+  for (const obligation of siteObligations.filter((entry) => !entry.placed)) {
+    const programme = jointSiteProgramme.find(([id]) => id === obligation.ownerId);
+    if (!programme || publicSites.some((site) => site.id === obligation.ownerId)) continue;
+    const ownerRules = CONSTRAINTS.filter((rule) => ["siteInWater", "siteWithoutDoorRoad", "roadThroughSite",
+      "sitesOverlap", "stationStadiumSetback", "stationDoorFacesRoad", "archStraddlesRoad", "unjoinedGroundJunctions",
+      "crowdedArterials", "bridgeheadContinuity"].includes(rule.id));
+    const view = (candidate: Network, sites: PublicSite[]) => ({ roadEdges: [...candidate.edges.values()],
+      roadNodes: [...candidate.nodes.values()], publicSites: sites, landmarks, blocks: [], terrain, core, coast, river,
+      seaside, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount),
+      primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => candidate.nodes.has(id)) ?? null } as unknown as ConstraintPlan);
+    const identity = (finding: { site?: string; at?: Vec2; detail?: string }) => JSON.stringify([finding.site, finding.at, finding.detail]);
+    const baseline = new Map(ownerRules.map((rule) => [rule.id, new Set(rule.measure(view(network, publicSites)).map(identity))]));
+    const assigned = assignConnectedSite({ ...geo, core, turn,
+      trunkRuns: [...edges.values()].filter((edge) => !edge.bridge && edge.width >= 8).map((edge) => edge.points),
+      ringRuns, bridges, placed: reservations(), height, inRiver, riverBank: footprintGeo.riverBank },
+      connectorWorld, specByKind(programme[1])!, obligation.ownerId,
+      primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, (owner, candidate) => {
+        for (const rule of ownerRules) if (rule.measure(view(candidate, [...publicSites, owner]))
+          .some((finding) => !baseline.get(rule.id)!.has(identity(finding)))) return `post-growth-new-${rule.id}`;
+        return null;
+      });
+    obligation.routeRetries = (obligation.routeRetries ?? 0) + (assigned.routeRetries ?? 0);
+    if (!assigned.site || !assigned.network) {
+      obligation.reason = `${obligation.reason ?? "initial placement failed"}; post-growth: ${assigned.reason ?? "no connected candidate"}`;
+      continue;
+    }
+    nodes.clear(); for (const [id, node] of assigned.network.nodes) nodes.set(id, node);
+    edges.clear(); for (const [id, edge] of assigned.network.edges) edges.set(id, edge);
+    const versioned = network as Network & { version?: number }; versioned.version = (versioned.version ?? 0) + 1;
+    publicSites.push(assigned.site);
+    obligation.placed = true; delete obligation.reason;
+    // Trees are presentation drafts, not accepted parcels or service owners.
+    for (let index = parkTrees.length - 1; index >= 0; index -= 1) {
+      const tree = parkTrees[index];
+      if (Math.hypot(tree.x - assigned.site.x, tree.z - assigned.site.z) < assigned.site.radius + 9
+        || [...edges.values()].some((edge) => polylineDistance([edge.points], tree) < edge.width / 2 + 3)) parkTrees.splice(index, 1);
+    }
+  }
+
   // ── 桥头落地环（E 轨 2026-10-08，planner/landing.ts）：桥全部生成、断头收尾之后、solve 之前的一遍。
   // 桥的地面端方向失配（桥轴向与接地路向夹角 >25°）或接地路缺失/可被 solve 的 pruneShortSpurs
   // 删除时，桥头插入半径 10–14 的落地环——桥面端点落在环上、接地路接入环，环形吸收方向差，
@@ -1045,8 +1351,40 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
-  const repairCtx: RepairContext = { network, connectionLog, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]), coastRoadRuns, riverRoadRuns: coastRoadRuns.slice(coastalRunCount) };
+  const repairCtx: RepairContext = { network, connectionLog, siteObligations, demandCatalogue: declaredSiteDemands, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]), coastRoadRuns, coastalRunCount, riverRoadRuns: coastRoadRuns.slice(coastalRunCount) };
   const solveReport = skipSolve ? null : solvePlan(repairCtx);
+  if (skipSolve) initializeRepairPlanningWorld(repairCtx);
+  let generatedParcels = 0;
+  let roadBlockReport: RoadBlockReport | null = null;
+  const derivedFinalization = runRepairDerivedFinalization(repairCtx, (draft) => {
+  const blocks = draft.blocks, carPaths = draft.carPaths;
+  if (legacyGridParcels) finalizeParcels(blocks);
+  else {
+    const roads = [...draft.network.edges.values()], faces = extractRoadFaces(roads);
+    // This is a finite geometric slot bound, not an increased route/snap budget:
+    // at most two frontage rows per real face, each slot retaining width 7.2.
+    const maxCandidates = faces.faces.reduce((total, face) => total + 2 * face.boundary.reduce((count, point, index) => {
+      const next = face.boundary[(index + 1) % face.boundary.length];
+      return count + Math.floor(Math.hypot(next.x - point.x, next.z - point.z) / 7.2);
+    }, 0), 0);
+    const generated = generateRoadBlocks({ faces, roads,
+      primaryAnchorNodeId: draft.primaryAnchorNodeId ?? null,
+      networkVersion: (draft.network as Network & { version?: number }).version ?? 0,
+      districtFor: () => "", zoneFor, buildable, sites: [...draft.publicSites, ...draft.landmarks], highways: draft.ringRuns,
+      reserved: (point) => !!seaside && seasideStripContains(seaside, point, 1), maxCandidates,
+      presentationSupportsHoles: true });
+    roadBlockReport = generated.report;
+    if (generated.report.status === "budget-exhausted" || generated.report.status === "cancelled") throw new Error(generated.report.status);
+    const frontage = new Map(generated.access.map((proof) => [proof.parcelId, proof]));
+    const sourceFaces = new Map(faces.faces.map((face) => [face.id, face]));
+    for (const block of generated.blocks) {
+      block.roadBoundary = sourceFaces.get(block.sourceFaceId)!.boundary.map((point) => ({ ...point }));
+      for (const parcel of block.parcels) parcel.frontage = frontage.get(parcel.id);
+    }
+    blocks.splice(0, blocks.length, ...generated.blocks);
+    generatedParcels = generated.report.accepted;
+  }
+  buildTrafficPaths(blocks, carPaths);
   // 车流折线的收口放在求解之后：修复（删冗余路段、切 T 路口、近距接入）会增删路段，车流必须按最终路网校验——
   // 曾放在求解之前，删路后海滨车流折线引用了已不存在的路段（verify-react-city-seaside 抓到）。
   // 接入路把已有路段切成 T 路口后，车流折线还按旧端点走：把落在线段上的路口节点按顺序插回去。
@@ -1114,30 +1452,47 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         }
         if (!out.length || roadNodeId(key(out[out.length - 1])) !== roadNodeId(key(cur))) out.push(cur);
       }
-      if (!ok) carPaths.splice(r, 1); else carPaths[r] = out;
+      // A graph edge may be a bent polyline; endpoint adjacency alone must not
+      // turn it into a straight traffic chord through the intervening terrain.
+      const shaped: Vec2[] = out.length ? [out[0]] : [];
+      for (let i = 1; i < out.length && ok; i += 1) {
+        const from = roadNodeId(key(out[i - 1])), to = roadNodeId(key(out[i]));
+        const edge = edges.get([from, to].sort().join("/"));
+        if (!edge) { ok = false; break; }
+        shaped.push(...(edge.from === from ? edge.points : [...edge.points].reverse()).slice(1));
+      }
+      if (!ok || shaped.length < 2) carPaths.splice(r, 1); else carPaths[r] = shaped;
     }
   }
+  draft.landmarks.splice(0, draft.landmarks.length,
+    ...withBridgeLandmark(draft.landmarks, bridges, random, highwayRuns));
+  });
+  if (!derivedFinalization.ok) generatedParcels = blocks.reduce((sum, block) => sum + block.parcels.length, 0);
   // 终筛：所有改路步骤（接入路、断头路收尾、碎边合并）之后，对每个地块统一核对「到任何路段的距离」。
   // 曾放在断头路收尾与碎边合并之前：那两步新增/移动的路段会压到地块上（凯旋门骑路改位后布局守卫抓到 gap 6.2）。
   // 块级检查只看街区四角与中心到主干道的距离，边中点更近的地块会漏过；连接支路又长达上百单位直穿街区、
   // 且在地块之后才加入——布局守卫抓到过 gap 6.4 的压路地块。
-  {
+  function finalizeParcels(blocks: CityBlock[]) {
+    for (const block of blocks) block.parcels = parcelBuilders.get(block.id)?.(block) ?? [];
+    generatedParcels = blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     const CELL = 60;
     const grid = new Map<string, RoadEdge[]>();
     for (const edge of edges.values()) {
-      const [a0, b0] = edge.points;
+      for (let segment = 1; segment < edge.points.length; segment += 1) {
+      const a0 = edge.points[segment - 1], b0 = edge.points[segment];
       for (let gx = Math.floor(Math.min(a0.x, b0.x) / CELL) - 1; gx <= Math.floor(Math.max(a0.x, b0.x) / CELL) + 1; gx += 1)
         for (let gz = Math.floor(Math.min(a0.z, b0.z) / CELL) - 1; gz <= Math.floor(Math.max(a0.z, b0.z) / CELL) + 1; gz += 1) {
           const key2 = `${gx}:${gz}`;
           const list = grid.get(key2);
           if (list) list.push(edge); else grid.set(key2, [edge]);
         }
+      }
     }
     for (const block of blocks) {
       block.parcels = block.parcels.filter((parcel) => {
         const need = Math.hypot(parcel.width, parcel.depth) / 2;
         return (grid.get(`${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`) ?? []).every((edge) =>
-          segmentDistance(parcel, edge.points[0], edge.points[1]) >= need + edge.width / 2 + 0.5);
+          edge.points.slice(1).every((b, k) => segmentDistance(parcel, edge.points[k], b) >= need + edge.width / 2 + 0.5));
       });
     }
   }
@@ -1148,9 +1503,15 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 死胡同回车圈。classifyEndpoints 经 diagnoseNetwork 调用，只读（verify-city-intent
   // 已证诊断前后 plan 深比较一致），不改任何路网/用地字段，计划基线哈希不受影响。
   const plan = { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
-    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside,
+    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks, seaside,
     // 修复可能合并掉一个 civic 节点；只在骨架预先声明的锚点集合内重绑，不能选附近支路。
-    connections: connectionLog, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, junctionReport, solveReport };
+    connections: connectionLog, primaryAnchorNodeId: repairCtx.primaryAnchorNodeId ?? null, junctionReport, solveReport, siteObligations,
+    demandCatalogue: repairCtx.demandCatalogue?.map((demand) => ({ ...demand })),
+    planningOutcome: derivedFinalization.outcome,
+    parcelSource: legacyGridParcels ? "legacy-grid" : "accepted-road-faces", roadBlockReport,
+    derivedFinalization: { ok: derivedFinalization.ok, ...(derivedFinalization.reason ? { reason: derivedFinalization.reason } : {}) },
+    derivedNetworkVersion: (network as Network & { version?: number }).version ?? 0, skeletonDiagnostics, skeletonReservationIds, roadGenerationDiagnostics,
+    parcelGeneration: { generated: generatedParcels, roadClearanceRejected: generatedParcels - blocks.reduce((sum, block) => sum + block.parcels.length, 0) } };
   const culDeSacEnds: Vec2[] = (diagnoseNetwork(plan)?.endpoints ?? [])
     .filter((endpoint) => endpoint.role.kind === "cul-de-sac")
     .map((endpoint) => endpoint.at);

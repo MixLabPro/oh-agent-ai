@@ -12,6 +12,7 @@ import { hashSeed } from "../cityModel";
 import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
 import { polygonDistance } from "./cityPlan";
+import { subtractBlockSurfaceExclusions, traceBlockSurface } from "./blockSurface";
 import { createRenderCanvas, renderContext2D, type RenderCanvas, type RenderContext2D } from "./renderCanvas";
 
 export type DistrictPalette = {
@@ -195,25 +196,34 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   }
   ground.ctx.putImageData(pixels, 0, 0);
   ctx.drawImage(ground.canvas, 0, 0, size, size);
-  const polygon = (points: Array<{x:number;z:number}>, color:string) => {
-    ctx.beginPath(); points.forEach((p,i)=> { const [x,y]=toPixel(p.x,p.z); if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y); });
-    ctx.closePath(); ctx.fillStyle=color; ctx.fill();
+  const polygon = (points: Array<{x:number;z:number}>, color:string, target = ctx) => {
+    target.beginPath(); points.forEach((p,i)=> { const [x,y]=toPixel(p.x,p.z); if(i===0)target.moveTo(x,y);else target.lineTo(x,y); });
+    target.closePath(); target.fillStyle=color; target.fill();
   };
-  const orientedRect = (x:number,z:number,width:number,depth:number,yaw:number,color:string) => {
-    const [px,py]=toPixel(x,z); ctx.save(); ctx.translate(px,py); ctx.rotate(-yaw);
-    ctx.fillStyle=color;ctx.fillRect(-width*scale/2,-depth*scale/2,width*scale,depth*scale);ctx.restore();
+  const orientedRect = (x:number,z:number,width:number,depth:number,yaw:number,color:string,target = ctx) => {
+    const [px,py]=toPixel(x,z); target.save(); target.translate(px,py); target.rotate(-yaw);
+    target.fillStyle=color;target.fillRect(-width*scale/2,-depth*scale/2,width*scale,depth*scale);target.restore();
   };
   // 空置街区（G1）：不铺地块，画成带深浅斑驳的自然绿地——城市只铺到建成区与预留圈。
   const wildGreen = toHex(mixRgb([150, 176, 118], groundColors.lawn, 0.35));
+  // Subtract reserved envelopes on a disposable transparent layer, not from
+  // terrain. One atlas-sized temporary buffer; its memory cost needs profiling.
+  const blockLayer = layout.blocks.some((block) => block.surfaceCoverage) ? canvas2d(size, size) : null;
+  const blockCtx = blockLayer?.ctx ?? ctx;
   for (const block of layout.blocks) {
+    blockCtx.save();
+    if (block.surfaceCoverage) { traceBlockSurface(blockCtx, block, toPixel); blockCtx.clip("evenodd"); }
     if (block.vacant) {
-      polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*1.02,z:block.z+(p.z-block.z)*1.02})), wildGreen);
+      polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*1.02,z:block.z+(p.z-block.z)*1.02})), wildGreen, blockCtx);
+      blockCtx.restore();
       continue;
     }
     const hardscape = viceMiami ? viceBlockPaving[block.zone] : paving;
-    polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?hardscape:lawnTint);
-    for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,viceMiami ? viceLotPaving[parcel.zone] : "#bcb8ac");
+    polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?hardscape:lawnTint, blockCtx);
+    for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,viceMiami ? viceLotPaving[parcel.zone] : "#bcb8ac", blockCtx);
+    blockCtx.restore();
   }
+  if (blockLayer) { subtractBlockSurfaceExclusions(blockCtx, layout.blocks, toPixel, scale); ctx.drawImage(blockLayer.canvas, 0, 0); }
   // 沙滩不画进这张贴图：2048px 铺满全岛只有 ~1.3px/单位，沙带与水线边缘糊成一片（真机近景）。
   // 沙滩改成贴地网格（cityParts.buildBeachRibbon），色带边缘由几何决定、与贴图分辨率无关。
   const { runs, junctions } = roadPaintPlan(layout.roadEdges);

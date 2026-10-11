@@ -19,7 +19,7 @@
  */
 import { DetMath as Math } from "../detMath";
 import { segmentDistance, type Landmark } from "../cityPlan";
-import type { PublicSite, Vec2 } from "../cityLayout";
+import type { PublicSite, RoadEdge, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
 import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount, isDry } from "./footprint";
@@ -29,6 +29,8 @@ export type SiteCandidate = {
   id: string;
   x: number; z: number; yaw: number;
   source: string;
+  /** Actual generating ground-road segment and its probe; not a virtual grid frontage. */
+  frontage?: { a: Vec2; b: Vec2; at: Vec2 };
   /** 海上岛候选的堤道陆地端（岸点向内 6）。 */
   shoreAnchor?: Vec2;
 };
@@ -44,6 +46,10 @@ export type SiteCandidateWorld = {
   coast: Vec2[];
   /** 骨架主干折线（生成临街/跨路候选）。 */
   trunkRuns: Vec2[][];
+  frontageCandidateLimit?: number;
+  frontageProbeFractions?: readonly number[];
+  /** Bounded region candidates tried only after all frontage candidates fail. */
+  frontageFallbackPoints?: readonly Vec2[];
   /** 环线高架折线（hard 闸门的净空检查）。 */
   ringRuns: Vec2[][];
   bridges: Array<{ from: Vec2; to: Vec2 }>;
@@ -83,27 +89,101 @@ export function clearsRingRuns(p: Vec2, width: number, depth: number, ringRuns: 
   return polylineDistance(ringRuns, p) >= 5.25 + Math.hypot(width, depth) / 2 + 1;
 }
 
+/** Read-only frontage spans: segmentation into short graph edges must not
+ * hide an otherwise continuous straight road. Never chord a bent road, cross
+ * a junction/bridge or merge different widths, structures or purposes. */
+export function groundFrontageSegments(edges: readonly RoadEdge[], minWidth = 12): Array<[Vec2, Vec2]> {
+  if (!Number.isFinite(minWidth) || minWidth <= 0) return [];
+  const incident = new Map<string, RoadEdge[]>();
+  for (const edge of edges) for (const id of [edge.from, edge.to]) {
+    const list = incident.get(id); if (list) list.push(edge); else incident.set(id, [edge]);
+  }
+  const eligible = (edge: RoadEdge) => !edge.bridge && edge.width >= minWidth && (edge.structure ?? "ground-road") === "ground-road"
+    && edge.points.length >= 2 && edge.points.every((point) => Number.isFinite(point.x) && Number.isFinite(point.z));
+  const straight = (points: Vec2[]) => {
+    const a = points[0], b = points[points.length - 1], dx = b.x - a.x, dz = b.z - a.z, length = Math.hypot(dx, dz);
+    if (length <= 0) return false;
+    let previous = -Infinity;
+    for (const point of points) {
+      const t = ((point.x - a.x) * dx + (point.z - a.z) * dz) / (length * length);
+      // Two centigrid endpoint roundings can differ by at most 0.02 units.
+      if (Math.abs((point.x - a.x) * dz - (point.z - a.z) * dx) / length > 0.02 || t < previous) return false;
+      previous = t;
+    }
+    return true;
+  };
+  const seen = new Set<string>(), result: Array<[Vec2, Vec2]> = [];
+  for (const edge of [...edges].filter(eligible).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
+    if (seen.has(edge.id)) continue;
+    seen.add(edge.id); let points = [...edge.points], from = edge.from, to = edge.to;
+    for (const prepend of [false, true]) for (;;) {
+      const node = prepend ? from : to, neighbors = incident.get(node) ?? [];
+      if (neighbors.length !== 2) break;
+      const other = neighbors.find((road) => !seen.has(road.id));
+      if (!other || !eligible(other) || other.width !== edge.width || other.kind !== edge.kind
+        || other.purpose !== edge.purpose || other.structure !== edge.structure) break;
+      const away = other.from === node ? other.points : [...other.points].reverse();
+      const combined = prepend ? [...[...away].reverse().slice(0, -1), ...points] : [...points, ...away.slice(1)];
+      if (!straight(combined)) break;
+      points = combined; seen.add(other.id);
+      const next = other.from === node ? other.to : other.from;
+      if (prepend) from = next; else to = next;
+    }
+    if (straight(points)) result.push([points[0], points[points.length - 1]]);
+    else for (let i = 1; i < points.length; i += 1) result.push([points[i - 1], points[i]]);
+  }
+  const id = (point: Vec2) => `${point.x}:${point.z}`;
+  return result.map(([a, b]): [Vec2, Vec2] => id(a) < id(b) ? [a, b] : [b, a])
+    .sort((a, b) => `${id(a[0])}/${id(a[1])}` < `${id(b[0])}/${id(b[1])}` ? -1 : `${id(a[0])}/${id(a[1])}` > `${id(b[0])}/${id(b[1])}` ? 1 : 0);
+}
+
 /** 临街候选：最近 4 条主干段（按离 current 距离排序）× 两侧法线偏移 radius+12（临街遍公式）。 */
 export function inlandFrontageCandidates(world: SiteCandidateWorld, spec: SiteSpec, current: Vec2): SiteCandidate[] {
+  const requested = world.frontageCandidateLimit ?? 4;
   const ranked = runsToSegments(world.trunkRuns)
     .map((s) => ({ ...s, d: polylineDistance([[s.a, s.b]], current) }))
-    .sort((x, y) => x.d - y.d || x.run - y.run || x.index - y.index)
-    .slice(0, 4);
+    .sort((x, y) => x.d - y.d || x.run - y.run || x.index - y.index);
+  let selected = ranked.slice(0, requested);
+  if (requested > 4) {
+    const diverse: typeof ranked = [];
+    const separation = Math.max(spec.radius * 2 + 20, 100);
+    for (const segment of ranked) {
+      const mid = { x: (segment.a.x + segment.b.x) / 2, z: (segment.a.z + segment.b.z) / 2 };
+      if (diverse.every((other) => Math.hypot(mid.x - (other.a.x + other.b.x) / 2, mid.z - (other.a.z + other.b.z) / 2) >= separation)) diverse.push(segment);
+      if (diverse.length === requested) break;
+    }
+    if (diverse.length < requested) for (const segment of ranked) {
+      if (!diverse.includes(segment)) diverse.push(segment);
+      if (diverse.length === requested) break;
+    }
+    selected = diverse;
+  }
+  selected = selected.slice(0, requested);
   const out: SiteCandidate[] = [];
-  for (const seg of ranked) {
+  for (const seg of selected) {
     const { foot, dx, dz, len } = projectOnSegment(current, seg.a, seg.b);
     let nx = -dz / len; let nz = dx / len;
     if ((current.x - foot.x) * nx + (current.z - foot.z) * nz < 0) { nx = -nx; nz = -nz; }
-    for (const sign of [1, -1]) {
+    const probes = [foot, ...(world.frontageProbeFractions ?? []).map((t) => ({ x: seg.a.x + dx * t, z: seg.a.z + dz * t }))];
+    for (const [probe, position] of probes.entries()) for (const sign of [1, -1]) {
       const offset = spec.radius + 12;
       out.push({
-        id: `frontage:${seg.run}:${seg.index}:${sign > 0 ? "l" : "r"}`,
-        x: foot.x + nx * sign * offset, z: foot.z + nz * sign * offset,
+        id: `frontage:${seg.run}:${seg.index}:${sign > 0 ? "l" : "r"}${probe ? `:probe${probe}` : ""}`,
+        // 与路网同一 0.01 坐标格；终筛消费的就是将发布的坐标，消除跨引擎末位漂移。
+        x: Math.round((position.x + nx * sign * offset) * 100) / 100, z: Math.round((position.z + nz * sign * offset) * 100) / 100,
         yaw: -Math.atan2(dz, dx),
         source: `trunk segment ${seg.run}/${seg.index} normal ${sign > 0 ? "+" : "-"}`,
+        frontage: { a: { ...seg.a }, b: { ...seg.b }, at: { ...position } },
       });
     }
   }
+  for (const [index, point] of (world.frontageFallbackPoints ?? []).entries()) out.push({
+    id: `service-region:${index}`,
+    x: Math.round(point.x * 100) / 100,
+    z: Math.round(point.z * 100) / 100,
+    yaw: 0,
+    source: `service region candidate ${index}`,
+  });
   return out;
 }
 
@@ -237,6 +317,10 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
 export type FrontageMoveContext = {
   publicSites: PublicSite[];
   landmarks: Landmark[];
+  /** Optional relocation transaction scope; omitted means the existing full pass. */
+  relocateSiteIds?: ReadonlySet<string>;
+  /** Additional along-road probes only for an explicit late arch retry. */
+  straddleProbeFractions?: readonly number[];
   /** 主干折线（distanceToTrunks = polylineDistance）。 */
   trunkRuns: Vec2[][];
   /** 主干按段、桥段剔除（跨路/临街遍的候选段；与 buildPlan 的 trunkSegments 同一份数组）。 */
@@ -259,7 +343,8 @@ const STRADDLE_KINDS = straddleSitingKinds();
 export function restickSitesClearOfRingRuns(ctx: FrontageMoveContext): void {
   const { publicSites, landmarks, ringRuns, snap, siteClearance } = ctx;
   for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || clearsRingRuns(site, site.radius * 2, site.radius * 2, ringRuns)) continue;
+    if (ctx.relocateSiteIds && !ctx.relocateSiteIds.has(site.id)) continue;
+    if (!site.radius || ("access" in site && site.access) || clearsRingRuns(site, site.radius * 2, site.radius * 2, ringRuns)) continue;
     const others = [...publicSites, ...landmarks].filter((o) => o !== site).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
     const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius, (c) => clearsRingRuns(c, site.radius * 2, site.radius * 2, ringRuns));
     site.x = q.x; site.z = q.z;
@@ -268,23 +353,24 @@ export function restickSitesClearOfRingRuns(ctx: FrontageMoveContext): void {
 
 /** 跨路遍（原 buildPlan「凯旋门骑上主干中段」）：取离用地最近的主干段（len ≥ 20）中点，
  *  要求可建、占地全干、不压环线高架、距其它用地 ≥ r_o+r+10；开口轴（局部 z）沿道路方向。 */
-export function straddleSitesAcrossTrunk(ctx: FrontageMoveContext): void {
+export function straddleSitesAcrossTrunk(ctx: Pick<FrontageMoveContext, "publicSites" | "landmarks" | "trunkSegments" | "ringRuns" | "buildable" | "height" | "inRiver" | "riverBank" | "relocateSiteIds" | "straddleProbeFractions">): void {
   const { publicSites, landmarks, trunkSegments, ringRuns, buildable, height, inRiver, riverBank } = ctx;
   const footprintGeo = { height, inRiver, riverBank };
   const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
   for (const site of landmarks) {
+    if (ctx.relocateSiteIds && !ctx.relocateSiteIds.has(site.id)) continue;
     if (!STRADDLE_KINDS.has(site.kind)) continue;
     const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d);
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-    for (const { a, b } of ranked) {
+    place: for (const probe of ctx.straddleProbeFractions ?? [0.5]) for (const { a, b } of ranked) {
       const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz);
       if (len < 20) continue;
-      const q = { x: a.x + dx * 0.5, z: a.z + dz * 0.5 };
+      const q = { x: a.x + dx * probe, z: a.z + dz * probe };
       if (!buildable(q.x, q.z) || !footprintDry(q, site.radius)) continue;
       if (!clearsRingRuns(q, site.radius * 2, site.radius * 2, ringRuns)) continue; // 不能压在环线高架下（geography 守卫）
       if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
       site.x = q.x; site.z = q.z; site.yaw = Math.atan2(dx, dz);
-      break;
+      break place;
     }
   }
 }
@@ -298,7 +384,8 @@ export function frontSitesOnTrunks(ctx: FrontageMoveContext): void {
   const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
   for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || FRONTAGE_EXEMPT.has(site.kind)) continue;
+    if (ctx.relocateSiteIds && !ctx.relocateSiteIds.has(site.id)) continue;
+    if (!site.radius || ("access" in site && site.access) || FRONTAGE_EXEMPT.has(site.kind)) continue;
     const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d).slice(0, 4);
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
     let placed = false;
@@ -322,9 +409,11 @@ export function frontSitesOnTrunks(ctx: FrontageMoveContext): void {
       if (placed) break;
     }
     // 找不到临街位置时，至少别让主干道从中间穿过：就近挪到离主干道 ≥ 半径+8 的位置。
-    if (!placed && distanceToTrunks(site) < site.radius + 6) {
+    const requiredRelocation = ctx.relocateSiteIds?.has(site.id) ?? false;
+    if (!placed && (requiredRelocation || distanceToTrunks(site) < site.radius + 6)) {
       const q = snap(site, siteClearance(site.kind, site.radius), others.map((o) => ({ x: o.x, z: o.z, radius: o.radius })), site.radius,
-        (c) => distanceToTrunks(c) >= site.radius + 8 && landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && clearsRingRuns(c, site.radius * 2, site.radius * 2, ringRuns));
+        (c) => distanceToTrunks(c) >= site.radius + 8 && (!requiredRelocation || distanceToTrunks(c) <= site.radius + 20)
+          && landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && clearsRingRuns(c, site.radius * 2, site.radius * 2, ringRuns));
       site.x = q.x; site.z = q.z;
     }
   }
@@ -338,7 +427,8 @@ export function resnapSitesOntoDryLand(ctx: FrontageMoveContext): void {
   const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
   const distanceToTrunks = (p: Vec2) => polylineDistance(trunkRuns, p);
   for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || FRONTAGE_EXEMPT.has(site.kind) || (landClearance(site.x, site.z) >= site.radius + 4 && footprintDry(site, site.radius))) continue;
+    if (ctx.relocateSiteIds && !ctx.relocateSiteIds.has(site.id)) continue;
+    if (!site.radius || ("access" in site && site.access) || FRONTAGE_EXEMPT.has(site.kind) || (landClearance(site.x, site.z) >= site.radius + 4 && footprintDry(site, site.radius))) continue;
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
     const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius,
       (c) => landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && distanceToTrunks(c) >= site.radius + 8 && clearsRingRuns(c, site.radius * 2, site.radius * 2, ringRuns));

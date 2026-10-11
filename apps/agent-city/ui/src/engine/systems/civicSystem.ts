@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { hashSeed, type CityModel } from "../../cityModel";
 import type { CityLayout } from "../cityLayout";
 import { paletteFor } from "../cityTextures";
+import { civicFlagLocalX, civicGroundFootprint, stationCanopyLocalZ, stationEntranceLocal, stationHallLocal } from "../models/publicSiteGeometry";
 import { BOX, CYLINDER, selfLitMaterial } from "../render/shared";
 import type { NightLights } from "../render/types";
 
@@ -58,7 +59,9 @@ export function buildPublicSites(host: CivicSystemHost): void {
       glows.push({ x: p.x, y: base + ly, z: p.z, sx, sy, sz, yaw: site.yaw + extraYaw, color });
     };
     if (site.kind === "civic") {
-      box(0, 0, 0, r * 1.2, 1.6, r * 0.9, "#e4dcc8");
+      const baseFootprint = civicGroundFootprint(r).parts[0];
+      if (baseFootprint.shape !== "rect") throw new Error("civic base must be rectangular");
+      box(baseFootprint.center.x, 0, baseFootprint.center.z, baseFootprint.width, 1.6, baseFootprint.depth, "#e4dcc8");
       box(0, 1.6, 0, r * 0.9, 9, r * 0.55, "#efe7d6");
       for (let column = -3; column <= 3; column += 1) cyl(column * r * 0.12, 1.6, r * 0.34, 0.75, 9, "#f6f0e2");
       box(0, 10.6, 0, r * 0.98, 1.1, r * 0.62, "#cdbf9f");
@@ -99,7 +102,7 @@ export function buildPublicSites(host: CivicSystemHost): void {
       const total = host.model.districts.reduce((t, d) => t + d.sessionCount, 0) || 1;
       const districts = host.model.districts.filter((d) => d.sessionCount > 0);
       districts.forEach((district, i) => {
-        const fx = (i - (districts.length - 1) / 2) * 5.5;
+        const fx = civicFlagLocalX(r, i, districts.length);
         const pole = 6 + 14 * (district.sessionCount / total);
         cyl(fx, 0, r * 0.78, 0.15, pole, "#d9d9d4");
         box(fx + 1.2, pole - 1.6, r * 0.78, 2.4, 1.4, 0.08, paletteFor(district.id).accent);
@@ -117,16 +120,18 @@ export function buildPublicSites(host: CivicSystemHost): void {
       glow(0, 17.4, 0, r * 0.41, 0.25, r * 0.41, "#46e6ff");
       glow(0, 25.6, 0, 0.6, 0.9, 0.6, "#ff5a7a");
     } else if (site.kind === "station") {
+      const entrance = stationEntranceLocal(r);
+      const hall = stationHallLocal(r);
       box(0, 0, 0, r * 1.5, 0.7, r * 1.1, "#cfc7b3");
       for (const track of [-18, -10, -2, 6]) box(track, 0.7, 0, 0.5, 0.15, r * 1.1, "#6f7773");
       box(0, 7.4, 0, r * 1.4, 0.55, r * 0.9, "#8e9a9c");
       for (const px of [-r * 0.6, 0, r * 0.6]) for (const pz of [-r * 0.38, r * 0.38]) cyl(px, 0.7, pz, 0.55, 6.7, "#a9b0b0");
-      box(0, 0, -r * 0.62, r * 1.3, 11, 7, "#d9cdb5");
-      cyl(r * 0.5, 11, -r * 0.62, 1.6, 10, "#c8bba0");
-      cyl(r * 0.5, 21, -r * 0.62, 2.1, 1.2, "#f4efe0");
+      box(hall.centre.x, 0, hall.centre.z, hall.width, hall.height, hall.depth, "#d9cdb5");
+      cyl(r * 0.5, hall.height, hall.centre.z, 1.6, 10, "#c8bba0");
+      cyl(r * 0.5, hall.height + 10, hall.centre.z, 2.1, 1.2, "#f4efe0");
       // 细化：站房拱形大窗与入口雨篷、雨棚屋脊、站台上停靠的列车（车头 + 3 节车厢）。
-      for (let k = -2; k <= 2; k += 1) box(k * r * 0.22, 2, -r * 0.62 + 3.55, r * 0.14, 6.5, 0.15, "#5c7380");
-      box(0, 3.8, -r * 0.62 + 4.6, r * 0.5, 0.35, 2.4, "#8e9a9c");
+      for (let k = -2; k <= 2; k += 1) box(k * r * 0.22, 2, entrance.z, r * 0.14, 6.5, 0.15, "#5c7380");
+      box(0, 3.8, stationCanopyLocalZ(r), r * 0.5, 0.35, 2.4, "#8e9a9c");
       box(0, 7.95, 0, r * 1.4, 0.8, 1.2, "#7c878a");
       for (let car = 0; car < 4; car += 1) {
         const z = -r * 0.42 + car * 9.5;
@@ -135,9 +140,9 @@ export function buildPublicSites(host: CivicSystemHost): void {
         box(-10, 0.85, z, 3.1, 0.35, 9, car % 2 ? "#ff6fae" : "#38c3c9");
       }
       // 站房钟面发光 + 雨棚两侧边缘光 + 站台边线。
-      glow(r * 0.5, 21.15, -r * 0.62, 1.7, 0.9, 1.7, "#fff3cf");
+      glow(r * 0.5, hall.height + 10.15, hall.centre.z, 1.7, 0.9, 1.7, "#fff3cf");
       for (const sz of [-1, 1]) glow(0, 7.5, sz * r * 0.45, r * 1.4, 0.22, 0.22, "#58e0ff");
-      glow(0, 11, -r * 0.62 + 3.6, r * 1.3, 0.22, 0.22, "#ffd08a");
+      glow(0, hall.height, hall.centre.z + hall.depth / 2 + 0.1, hall.width, 0.22, 0.22, "#ffd08a");
     } else if (site.kind === "stadium") {
       const segments = 18;
       for (let index = 0; index < segments; index += 1) {

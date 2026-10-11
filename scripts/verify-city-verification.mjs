@@ -11,8 +11,29 @@ for (const group of ["network", "sites", "planning", "display", "game"]) assert(
 assert(manifest.some((s) => s.env.CITY_SEASIDE_TIER === "10"));
 assert(manifest.some((s) => s.file === "verify-city-cross-engine.mjs" && !s.shared));
 assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
-// Preserve all 32 original stages plus six game guards, exact terrain regression, and the physical-declaration guard.
-assert.equal(manifest.length, 41);
+// Preserve the existing stages and register the new production causeway guard.
+assert.equal(manifest.length, 54);
+for (const id of ["verify-city-block-surface", "verify-city-shore-plot-access"]) {
+  assert(selectStages("fast").some((stage) => stage.id === id));
+  assert(selectStages("module", "planning").some((stage) => stage.id === id));
+}
+assert(selectStages("module", "sites").some((stage) => stage.id === "verify-city-shore-plot-access-named"));
+for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "sites" : undefined)
+  .some((stage) => stage.id === "verify-city-joint-frontage"));
+for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
+  .some((stage) => stage.id === "verify-city-road-blocks"));
+for (const group of ["sites", "planning"]) assert(selectStages("module", group)
+  .some((stage) => stage.id === "verify-city-required-placement"));
+for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
+  .some((stage) => stage.id === "verify-city-road-admission"));
+for (const group of ["network", "sites", "planning"]) assert(selectStages("module", group)
+  .some((stage) => stage.id === "verify-city-causeway-primary"));
+for (const id of ["verify-city-world", "verify-city-access-capabilities", "verify-city-endpoint-routing", "verify-city-road-faces"]) {
+  assert(manifest.some((stage) => stage.id === id));
+  assert(selectStages("fast").some((stage) => stage.id === id));
+}
+for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
+  .some((stage) => stage.id === "verify-city-radius"));
 assert(manifest.some((s) => s.id === "verify-city-road-report"));
 assert.equal(selectStages("module", "game").length, 6);
 let calls = 0;

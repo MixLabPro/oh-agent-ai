@@ -3,19 +3,27 @@ import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath
 import { hashSeed, type CityModel } from "../cityModel";
 import { clearsHighways, createCityPlan, polygonDistance, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
 import { seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
-import { preserveDemandPaths } from "./planner/retention";
+import { preserveDemandPaths, preserveDisplayJunctions, retainBridgeLandings } from "./planner/retention";
+import { diagnoseNetwork } from "./planner/intent";
+import type { ParcelFrontageProof } from "./planner/roadBlocks";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
-export type Parcel = Vec2 & { id: string; blockId: string; yaw: number; zone: Zone; width: number; depth: number };
+export type Parcel = Vec2 & { id: string; blockId: string; yaw: number; zone: Zone; width: number; depth: number; frontage?: ParcelFrontageProof };
+export type BlockSurfaceExclusion = { kind: "road-corridor" | "highway-corridor"; id: string; points: Vec2[]; width: number }
+  | { kind: "site-circle"; id: string; x: number; z: number; radius: number };
 export type CityBlock = {
   id: string; districtId: string; x: number; z: number; width: number; depth: number;
   zone: Zone; parcels: Parcel[]; polygon: Vec2[];
+  /** Derived from accepted roads; these are not invented grid boundaries. */
+  sourceFaceId?: string; networkVersion?: number; roadBoundary?: Vec2[]; holes?: Vec2[][];
+  surfaceCoverage?: "road-width-inset" | "requires-envelope-clipping";
+  surfaceExclusions?: BlockSurfaceExclusion[];
   /** 无楼且不在已建街区旁的预留圈内：地面画成自然绿地，不铺地块（G1「街区随建成量生长」）。 */
   vacant?: boolean;
 };
 export type RoadNode = Vec2 & { id: string };
-export type RoadEdge = { id: string; from: string; to: string; width: number; kind: "arterial" | "local"; points: Vec2[]; bridge?: boolean };
+export type RoadEdge = { id: string; from: string; to: string; width: number; kind: "arterial" | "local"; points: Vec2[]; bridge?: boolean; structure?: "ground-road" | "ground-approach" | "deck"; purpose?: "waterfront" };
 export type TerrainField = {
   height: (x: number, z: number) => number; slope: (x: number, z: number) => number;
   buildable: (x: number, z: number) => boolean; coastRadius: (angle: number) => number;
@@ -56,7 +64,7 @@ export const CIVIC_PER_SESSIONS = 45;
 const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
 
 export type BridgeLayout = { from: Vec2; to: Vec2; angle: number; length: number };
-export type PublicSite = Vec2 & { id: string; kind: "civic" | "station" | "stadium" | "park" | "tower" | "harbor"; radius: number; yaw: number };
+export type PublicSite = Vec2 & { id: string; kind: "civic" | "station" | "stadium" | "park" | "tower" | "harbor"; radius: number; yaw: number; access?: import("./planner/jointSite").PlotAccess };
 export type CityLayout = {
   /** G1：规模档位、生态带与城市核心点（下游取景/航拍/植被读这里，不再假设岛在原点、固定大小）。 */
   scaleTier: number; biome: Biome; core: Vec2; islandRadius: number;
@@ -512,18 +520,26 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
     return anchors.some((anchor) => Math.hypot(anchor.x - m.x, anchor.z - m.z) < anchor.r);
   };
   // 骨架（宽 12、桥）永远保留；宽 ≤8 的街道只在服务活动区时保留。
-  const selected = new Set(plan.roadEdges.filter((edge) => edge.bridge || edge.width >= 12 || serves(edge)).map((edge) => edge.id));
-  const required = plan.roadEdges.filter((edge) => selected.has(edge.id)).flatMap((edge) => [edge.from, edge.to]);
+  const selection = new Set(plan.roadEdges.filter((edge) => edge.bridge || edge.width >= 12 || serves(edge)).map((edge) => edge.id));
+  const landings = retainBridgeLandings(plan.roadEdges, selection);
+  const selected = landings.selected;
+  const required = [
+    ...plan.roadEdges.filter((edge) => selected.has(edge.id)).flatMap((edge) => [edge.from, edge.to]),
+    ...[...plan.publicSites, ...(plan.landmarks ?? [])].flatMap((site) => site.access ? [site.access.nodeId] : []),
+  ];
   const retention = preserveDemandPaths(plan.roadEdges, selected, plan.primaryAnchorNodeId, required);
-  const keep = retention.keep;
+  const terminals = new Set((diagnoseNetwork(plan)?.endpoints ?? []).filter((end) => end.role.kind !== "must-connect").map((end) => end.node));
+  const closure = preserveDisplayJunctions(plan.roadEdges, retention.keep, terminals);
+  const keep = closure.keep;
   const roadEdges = plan.roadEdges.filter((edge) => keep.has(edge.id));
   const nodeIds = new Set(roadEdges.flatMap((edge) => [edge.from, edge.to]));
   const roadNodes = plan.roadNodes.filter((node) => nodeIds.has(node.id));
-  const pairs = new Set(roadEdges.map((edge) => [edge.from, edge.to].sort().join("/")));
+  const pairs = new Set(roadEdges.flatMap((edge) => edge.points.slice(1).map((point, i) =>
+    [`${edge.points[i].x}:${edge.points[i].z}`, `${point.x}:${point.z}`].sort().join("/"))));
   for (const district of districts) {
     district.carPaths = district.carPaths.filter((route) => route.every((p, i) => i === 0 || pairs.has([`${route[i - 1].x}:${route[i - 1].z}`, `${p.x}:${p.z}`].sort().join("/"))));
   }
-  return { blocks, roadEdges, roadNodes, retentionReport: { restored: retention.restored, unresolved: retention.unresolved, anchorMissing: retention.anchorMissing }, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
+  return { blocks, roadEdges, roadNodes, retentionReport: { restored: [...keep].filter((id) => !selection.has(id)).sort(), unresolved: retention.unresolved, unresolvedPruningEnds: closure.unresolved, anchorMissing: retention.anchorMissing, missingBridgeLandings: landings.missing }, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。

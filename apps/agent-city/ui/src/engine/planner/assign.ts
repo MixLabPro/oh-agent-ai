@@ -10,7 +10,8 @@
  *   - 顺序：specs 按 priority 升序、同 priority 按 kind 字典序——与 place() 的调用序一致；
  *     接受的用地追加进 world.placed，后续 kind 的间距判据立即可见（同今天的顺序放置语义）。
  *
- * 本批**不接线**：生产管线不调用 runAssignment（place()/十道挪动遍行为不变，基线哈希证明）。
+ * 原迁移批只提供骨架；当前 station/stadium 的联合指派已在生产调用 assignSite 的额外接受闸门。
+ * runAssignment 仍是批量候选接口，不代表所有模型入口、占地与基础已接线。
  * 守卫（verify-city-sitespec.mjs 的 6a-3 段）证明：同输入两次运行同输出、hard 闸门拒绝已知
  * 违例候选、无候选时的显式失败原因。
  */
@@ -48,7 +49,7 @@ function preferenceValue(world: SiteCandidateWorld, spec: SiteSpec, candidate: S
       return clamp01(1 - Math.abs(road - (spec.radius + 12)) / (spec.radius + 12));
     }
     case "hug-coast-0.7r": {
-      const target = (spec.kind === "harbor" ? 0.3 : 0.7) * spec.radius;
+      const target = (spec.shoreTargetRadiusFactor ?? 0.7) * spec.radius;
       return clamp01(1 - Math.abs(world.coastDistance(at.x, at.z) - target) / (spec.radius * 0.7));
     }
     case "spread-from-others": {
@@ -76,26 +77,28 @@ export type SiteAssignment = {
   /** 候选总数 / hard 拒绝数；chosen 为 null 时的首个拒绝原因样本（诊断）。 */
   candidates: number;
   rejected: number;
+  rejectionReasons?: Array<{ reason: string; count: number }>;
   reason?: string;
 };
 
 /** 单类指派：生成 → hard 过滤 → soft 排序（降序，id 升序 tie-break）→ 取第一。纯函数（不改 world）。 */
-export function assignSite(world: SiteCandidateWorld, spec: SiteSpec, current: { x: number; z: number }, weights: AssignWeights = ASSIGN_WEIGHTS): SiteAssignment {
+export function assignSite(world: SiteCandidateWorld, spec: SiteSpec, current: { x: number; z: number }, weights: AssignWeights = ASSIGN_WEIGHTS, acceptCandidate?: (candidate: SiteCandidate) => string | null): SiteAssignment {
   const candidates = candidatesFor(world, spec, current);
   let rejected = 0; let firstReject: string | undefined;
-  const viable = candidates.filter((c) => {
-    const bad = siteCandidateHardReject(world, spec, c);
-    if (bad === null) return true;
-    rejected += 1;
-    firstReject ??= bad;
-    return false;
-  });
-  if (!viable.length) return { kind: spec.kind, chosen: null, candidates: candidates.length, rejected, reason: firstReject ?? "no candidates generated" };
-  viable.sort((a, b) => {
-    const sa = softScore(world, spec, a, weights); const sb = softScore(world, spec, b, weights);
-    return sb - sa || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  });
-  return { kind: spec.kind, chosen: viable[0], candidates: candidates.length, rejected };
+  const rejectionCounts = new Map<string, number>();
+  const reject = (reason: string) => { rejected += 1; rejectionCounts.set(reason, (rejectionCounts.get(reason) ?? 0) + 1); firstReject ??= reason; };
+  const rejectionSummary = () => acceptCandidate ? [...rejectionCounts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([reason, count]) => ({ reason, count })) : undefined;
+  const ordered = candidates.map((candidate) => ({ candidate, score: softScore(world, spec, candidate, weights) }))
+    .sort((a, b) => b.score - a.score || (a.candidate.id < b.candidate.id ? -1 : a.candidate.id > b.candidate.id ? 1 : 0));
+  // 按既定软分顺序试联合硬闸门，首个合法候选即全局最高偏好者，无需保存后续网络草稿。
+  for (const { candidate } of ordered) {
+    const hardReject = siteCandidateHardReject(world, spec, candidate);
+    if (hardReject) { reject(hardReject); continue; }
+    const bad = acceptCandidate?.(candidate) ?? null;
+    if (bad === null) return { kind: spec.kind, chosen: candidate, candidates: candidates.length, rejected, ...(rejectionSummary() ? { rejectionReasons: rejectionSummary() } : {}) };
+    reject(bad);
+  }
+  return { kind: spec.kind, chosen: null, candidates: candidates.length, rejected, ...(rejectionSummary() ? { rejectionReasons: rejectionSummary() } : {}), reason: firstReject ?? "all joint candidates refused" };
 }
 
 /**

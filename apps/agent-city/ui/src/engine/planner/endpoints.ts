@@ -6,7 +6,8 @@
  * 至少藏 1 个真断头；t1 的 753 个盲区端里 186 个不属于任何合法豁免类）。
  * 本模块把豁免从地形代理改为语义分类，高度不再参与判定。
  *
- * 计划内终点（不计违例）：
+ * 合法地面度1节点（不计松断头）：
+ *  - 连续桥头：同一实际节点接有桥边和地面边，是道路的结构转换，不是尽端；
  *  - 滨海大道端点：海滨景观带按设计在无效样本（河口、陡岸、港区缺口）处断开、不跨接（citySeaside 段规则）；
  *  - 用地门前终点：主干道到岸边用地门口为止，那一段就是它的入口路；
  *  - 沿海/河岸路的 run 端点：遇主干道/桥头/预留地按设计断开，段端以 T 路口接入路网；
@@ -20,12 +21,32 @@
  * 立即打架（实测 seed 1703318715/t2、1703429581/t5）。修复效果：普查松断头
  * t1 45→29 / t3 26→8 / t5 18→8 / t10 7→2，回归 30 岛 65→16。剩余断头由统一连接器批次接手。
  */
-import type { Vec2 } from "../cityLayout";
+import type { RoadEdge, Vec2 } from "../cityLayout";
+
+/** 只有同一真实节点同时接桥边与地面边，才是连续桥头；空间邻近不算。 */
+export function bridgeLandingNodes(edges: readonly RoadEdge[]): Set<string> {
+  const ground = new Set(edges.filter((edge) => !edge.bridge).flatMap((edge) => [edge.from, edge.to]));
+  return new Set(edges.filter((edge) => edge.bridge).flatMap((edge) => [edge.from, edge.to]).filter((id) => ground.has(id)));
+}
+
+type IslandGateOwner = Vec2 & { yaw: number; radius?: number; shore?: Vec2;
+  access?: { role?: string; nodeId?: string; ownerX?: number; ownerZ?: number; ownerYaw?: number } };
+
+/** An island-side causeway may terminate at its declared owner's gate. This
+ * is not a landing or a proximity exemption; callers must first prove that
+ * the actual endpoint node exists in the graph. */
+export function isOwnedIslandGate(nodeId: string, sites: readonly IslandGateOwner[]): boolean {
+  return sites.some((site) => site.shore && Number.isFinite(site.shore.x) && Number.isFinite(site.shore.z)
+    && [site.x, site.z, site.yaw, site.radius].every(Number.isFinite) && (site.radius ?? 0) > 0
+    && site.access?.role === "plot-gate" && site.access.nodeId === nodeId
+    && site.access.ownerX === site.x && site.access.ownerZ === site.z && site.access.ownerYaw === site.yaw);
+}
 
 /** 近水终止带宽：沿海/河岸路中心线离水 14–22，端头与 run 端邻域再放宽。 */
 export const WATER_STOP_MARGIN = 40;
 
 export type PlannedEndInputs = {
+  bridgeLandings?: ReadonlySet<string>;
   sites: Array<{ x: number; z: number; radius: number }>;
   /** 滨海大道合法断点（plan.seaside.samples[].boulevard，仅 valid 采样）。 */
   boulevardEnds: Vec2[];
@@ -49,7 +70,8 @@ const polylineDistance = (pts: Vec2[], p: Vec2): number => {
 };
 
 /** 度为 1 的路端是否属于计划内终点（见模块头）。除 node 外全部是只读数据，无随机。 */
-export function isPlannedRoadEnd(node: Vec2, world: PlannedEndInputs): boolean {
+export function isPlannedRoadEnd(node: Vec2 & { id?: string }, world: PlannedEndInputs): boolean {
+  if (world.bridgeLandings?.has(node.id ?? `${node.x}:${node.z}`)) return true;
   if (world.boulevardEnds.some((b) => Math.hypot(b.x - node.x, b.z - node.z) < 1)) return true;
   if (world.sites.some((s) => Math.hypot(s.x - node.x, s.z - node.z) < s.radius + 12)) return true;
   if (world.coastRoadRunEnds.some((c) => Math.hypot(c.x - node.x, c.z - node.z) < 1)) return true;

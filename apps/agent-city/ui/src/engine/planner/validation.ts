@@ -17,9 +17,9 @@
  */
 import { DetMath as Math } from "../detMath";
 import type { Vec2 } from "../cityLayout";
-import type { Network } from "./network";
+import { keyOf, type Network } from "./network";
 import type { ConnectorWorld, ConnectionFailure } from "./connect";
-import { crosses as crossesSeg } from "./footprint";
+import { classifyRoadSegments } from "./relations";
 
 export const VALIDATION_CONFIG = {
   version: 2,
@@ -58,15 +58,16 @@ export type CandidateValidation = { ok: true } | { ok: false; violations: Candid
 
 /** 圆预留采用精确胶囊距离；地形在纵向/横向 ≤4 单位格点采样（不是连续地形证明）。
  *  skipEnds 只豁免桥接点水线，不豁免障碍、坡度或 buildable。 */
-export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy, opts: { skipEnds?: boolean; spacing?: number } = {}): ConnectionFailure | null {
+export type CorridorViolation = { kind: ConnectionFailure; cause: "invalid-geometry" | "site-envelope" | "water-envelope" | "building-setback" | "road-slope" | "roadway-setback"; at?: Vec2 };
+export function corridorViolation(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy, opts: { skipEnds?: boolean; spacing?: number } = {}): CorridorViolation | null {
   const distance = Math.hypot(b.x - a.x, b.z - a.z);
   const width = policy.roadWidth ?? 0;
-  if (!Number.isFinite(width) || width < 0 || !Number.isFinite(distance)) return "projection-loss";
+  if (!Number.isFinite(width) || width < 0 || !Number.isFinite(distance)) return { kind: "projection-loss", cause: "invalid-geometry" };
   // 圆预留与道路胶囊精确相交；不依赖纵向采样相位，不能漏掉采样点之间的小障碍。
   for (const site of policy.sites) {
     const dx = b.x - a.x; const dz = b.z - a.z;
     const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (distance * distance || 1)));
-    if (Math.hypot(site.x - a.x - dx * t, site.z - a.z - dz * t) < site.radius + policy.siteMargin + width / 2) return "site-clearance";
+    if (Math.hypot(site.x - a.x - dx * t, site.z - a.z - dz * t) < site.radius + policy.siteMargin + width / 2) return { kind: "site-clearance", cause: "site-envelope" };
   }
   const nx = distance ? -(b.z - a.z) / distance : 0;
   const nz = distance ? (b.x - a.x) / distance : 1;
@@ -78,14 +79,26 @@ export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy:
       const offset = width * (j / (lateralSteps || 1) - 0.5);
       const p = { x: a.x + (b.x - a.x) * i / steps + nx * offset, z: a.z + (b.z - a.z) * i / steps + nz * offset };
       const height = world.geo.height(p.x, p.z);
-      if (!Number.isFinite(height)) return "projection-loss";
-      if (!(opts.skipEnds && (i === 0 || i === steps)) && (height <= 0.5 || world.inRiver(p.x, p.z))) return "water-span";
-      if (policy.requireBuildable && !world.geo.buildable(p.x, p.z)) return "slope";
+      if (!Number.isFinite(height)) return { kind: "projection-loss", cause: "invalid-geometry", at: p };
+      if (!(opts.skipEnds && (i === 0 || i === steps)) && (height <= 0.5 || world.inRiver(p.x, p.z))) return { kind: "water-span", cause: "water-envelope", at: p };
+      if (policy.requireBuildable && !world.geo.buildable(p.x, p.z)) return { kind: "slope", cause: "building-setback", at: p };
+      if (policy.waterfront) {
+        const clearance = world.geo.landClearance?.(p.x, p.z);
+        const hillGap = world.geo.hillLine - world.geo.hillProj?.(p.x, p.z);
+        if (!Number.isFinite(clearance) || !Number.isFinite(hillGap)) return { kind: "projection-loss", cause: "invalid-geometry", at: p };
+        if (clearance <= policy.waterfront.minLandClearance || hillGap <= policy.waterfront.hillSetback
+          || height >= policy.waterfront.maxHeight) return { kind: "slope", cause: "roadway-setback", at: p };
+      }
       const slope = world.geo.terrain.slope(p.x, p.z);
-      if (!Number.isFinite(slope) || slope > policy.maxSlope) return "slope";
+      if (!Number.isFinite(slope) || slope > policy.maxSlope) return { kind: "slope", cause: "road-slope", at: p };
     }
   }
   return null;
+}
+
+/** Preserve the legacy failure enum while detailed diagnostics distinguish causes. */
+export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy, opts: { skipEnds?: boolean; spacing?: number } = {}): ConnectionFailure | null {
+  return corridorViolation(world, a, b, policy, opts)?.kind ?? null;
 }
 
 export type CorridorPolicy = {
@@ -99,6 +112,8 @@ export type CorridorPolicy = {
   roadWidth?: number;
   /** 批 A 起验证不再因该旗标授予任何豁免（保留仅为调用位标注用途）；豁免语义见 RouteCandidate.blockers。 */
   siteGate?: boolean;
+  /** Explicit road-use predicate, in addition to full-width water/slope/site checks. */
+  waterfront?: { minLandClearance: number; hillSetback: number; maxHeight: number };
 };
 
 /**
@@ -115,14 +130,39 @@ export function validateCandidate(
 ): CandidateValidation {
   const violations: CandidateViolation[] = [];
   for (let i = 0; i < candidate.segments.length; i += 1) {
-    const s = candidate.segments[i];
+    const original = candidate.segments[i];
+    const s = { ...original, a: keyOf(original.a), b: keyOf(original.b) };
     if (!Number.isFinite(s.width) || s.width <= 0 || ![s.a.x, s.a.z, s.b.x, s.b.z].every(Number.isFinite)) {
       violations.push({ segment: i, kind: "projection-loss", detail: `${candidate.id} segment ${i} has invalid geometry/width` });
       continue;
     }
+    const actual = network.edges.get([`${s.a.x}:${s.a.z}`, `${s.b.x}:${s.b.z}`].sort().join("/"));
+    const same = (a: Vec2, b: Vec2) => a.x === b.x && a.z === b.z;
+    if (actual && (actual.points.length !== 2 || !Number.isFinite(actual.width) || actual.width <= 0 || !!actual.bridge !== (s.kind === "deck")
+      || !((same(actual.points[0], s.a) && same(actual.points[1], s.b)) || (same(actual.points[0], s.b) && same(actual.points[1], s.a))))) {
+      violations.push({ segment: i, kind: "projection-loss", detail: `${candidate.id} segment ${i} conflicts with existing geometry/structure` });
+      continue;
+    }
+    if (actual) s.width = actual.width;
+    const contact = (other: typeof actual) => {
+      if (!other || other.id === actual?.id) return null;
+      for (let k = 1; k < other.points.length; k += 1) {
+        const relation = classifyRoadSegments(s.a, s.b, other.points[k - 1], other.points[k]);
+        if (relation.kind === "separate") continue;
+        // Only contact at the same registered endpoint is a real junction.
+        const shared = [other.from, other.to].some((id) => {
+          const node = network.nodes.get(id);
+          return node && (same(node, s.a) || same(node, s.b))
+            && same(node, relation.a.point) && same(node, relation.b.point);
+        });
+        if (relation.kind === "endpoint-contact" && shared) continue;
+        return relation.kind;
+      }
+      return null;
+    };
     if (s.kind === "deck") {
       for (const other of network.edges.values()) {
-        if (other.points.slice(1).some((p, k) => crossesSeg(s.a, s.b, other.points[k], p))) {
+        if (contact(other)) {
           violations.push({ segment: i, kind: "vertical-clearance-unsupported", detail: `deck overlaps edge ${other.id}; RoadEdge carries no elevation model` });
           break;
         }
@@ -130,18 +170,19 @@ export function validateCandidate(
       continue;
     }
     const failure = s.kind === "ground-approach"
-      ? corridorFailure(world, s.a, s.b, {
+      ? corridorViolation(world, s.a, s.b, {
           requireBuildable: false,
           maxSlope: VALIDATION_CONFIG.roadApproachMaxSlope,
           sites: candidate.blockers,
           siteMargin: VALIDATION_CONFIG.approachSiteMargin,
           roadWidth: s.width,
         }, { skipEnds: s.touchesDeck })
-      : corridorFailure(world, s.a, s.b, { ...opts.roadPolicy, roadWidth: s.width }, {});
-    if (failure) violations.push({ segment: i, kind: failure, detail: `${candidate.id} segment ${i} failed ${failure}` });
+      : corridorViolation(world, s.a, s.b, { ...opts.roadPolicy, roadWidth: s.width }, {});
+    if (failure) violations.push({ segment: i, kind: failure.kind, detail: `${candidate.id} segment ${i} failed ${failure.cause}${failure.at ? ` at ${failure.at.x}:${failure.at.z}` : ""}` });
     for (const other of network.edges.values()) {
-      if (other.points.slice(1).some((p, k) => crossesSeg(s.a, s.b, other.points[k], p))) {
-        violations.push({ segment: i, kind: "crossing", detail: `${candidate.id} segment ${i} crosses edge ${other.id}` });
+      const relation = contact(other);
+      if (relation) {
+        violations.push({ segment: i, kind: other.bridge ? "vertical-clearance-unsupported" : "crossing", detail: `${candidate.id} segment ${i} has ${relation} with edge ${other.id}` });
         break;
       }
     }

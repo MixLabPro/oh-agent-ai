@@ -14,6 +14,8 @@
  * scripts/verify-city-sitespec.mjs 用真实规划核对「每个被放置的 kind 都有行、半径一致」。
  */
 import type { Vec2 } from "../cityLayout";
+import type { PlanarAccessDeclaration } from "../models/siteAccess";
+import { STATION_PLANAR_ACCESS } from "../models/publicSiteGeometry";
 
 /** 选址五类（设计 §5：候选沿骨架道路或岸线生成）。 */
 export type PlacementClass =
@@ -101,6 +103,13 @@ export type SiteSpec = {
   /** 现行占地半径（place()/candidates 常量；守卫核对与实际放置一致）。 */
   radius: number;
   placement: PlacementClass;
+  /** Legacy placement default, not permission to move a bound/frozen instance. */
+  mobility: "fixed" | "relocatable" | "dependency-bound";
+  shoreTargetRadiusFactor?: number;
+  /** Explicit supported access capability; absence is unsupported, not implicit geometry. */
+  planarAccess?: PlanarAccessDeclaration;
+  /** Legacy circular plot evidence only; not a physical model entrance declaration. */
+  plotBoundaryAccess?: { schemaVersion: 1; type: "shore-plot-proxy"; gateOffset: number };
   /** 放置顺序：public 用地 = place() 调用序（0..5）；地标 = 100（先后由抽签/miami 固定位决定）。 */
   priority: number;
   /** 地标抽签权重（public 用地不抽签）。pagoda/villa 随生态带加权。 */
@@ -118,7 +127,7 @@ export type SiteSpec = {
 };
 
 /** 表版本（改表 = 改选址契约，需在提交信息写明；守卫输出记录该值）。 */
-export const SITING_TABLE_VERSION = 1;
+export const SITING_TABLE_VERSION = 3;
 
 /** 内陆公共用地/地标的共用 hard 集（snap 初始 + 避高架 + 临街 + 干地兜底）。 */
 const INLAND_HARD: HardCheckId[] = [
@@ -138,39 +147,43 @@ const SHORE_HARD: HardCheckId[] = [
  */
 export const SITE_SPECS: readonly SiteSpec[] = [
   {
-    kind: "civic", radius: 44, placement: "plaza", priority: 0,
+    kind: "civic", radius: 44, placement: "plaza", mobility: "fixed", priority: 0,
     nominalAnchor: { at: "core" }, clearance: 58, initialYaw: { value: -0.15, rule: "constant" },
     hard: ["plaza-ring-by-construction", "snap-land-clearance", "snap-hill-line", "snap-site-spacing", "clear-of-highways"],
     soft: ["near-nominal-anchor"],
     passes: ["place/snap（广场 === 核心点；snap 推开时核心跟随）", "避高架遍", "修复:resiteViolatingSites（豁免：civic 不挪）"],
   },
   {
-    kind: "tower", radius: 26, placement: "inland-frontage", priority: 1,
+    kind: "tower", radius: 26, placement: "inland-frontage", mobility: "relocatable", priority: 1,
     nominalAnchor: { at: "around", turnOffset: 0.9, distanceFactor: 0.16 }, clearance: 40, initialYaw: { value: 0, rule: "constant" },
     hard: INLAND_HARD, soft: ["near-nominal-anchor", "frontage-offset-r+12"],
     passes: ["place/snap", "避高架遍", "临街遍", "干地遍", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "station", radius: 46, placement: "inland-frontage", priority: 2,
+    kind: "station", radius: 46, placement: "inland-frontage", mobility: "relocatable", priority: 2,
+    planarAccess: STATION_PLANAR_ACCESS,
     nominalAnchor: { at: "around", turnOffset: 2.2, distanceFactor: 0.38 }, clearance: 60, initialYaw: { value: 0.12, rule: "road-facing" },
     hard: INLAND_HARD, soft: ["near-nominal-anchor", "frontage-offset-r+12", "face-road"],
     passes: ["place/snap", "避高架遍", "临街遍", "干地遍", "修复:frontStationsAndStadiums（拉到 0.85r + 正面朝路）", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "park", radius: 47, placement: "inland-frontage", priority: 3,
+    kind: "park", radius: 47, placement: "inland-frontage", mobility: "relocatable", priority: 3,
     nominalAnchor: { at: "river-bank", alongZFactor: 0.18, bankOffset: 60, fallbackTurnOffset: 3.6, fallbackDistanceFactor: 0.3 },
     clearance: 61, initialYaw: { value: 0, rule: "constant" },
     hard: INLAND_HARD, soft: ["near-nominal-anchor", "frontage-offset-r+12"],
     passes: ["place/snap", "避高架遍", "临街遍", "干地遍", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "stadium", radius: 49, placement: "inland-frontage", priority: 4,
+    kind: "stadium", radius: 49, placement: "inland-frontage", mobility: "relocatable", priority: 4,
+    // Existing plot-gate proxy only; no invented model door or verified approach.
+    planarAccess: { schemaVersion: 1, type: "ground-frontage", entrance: { id: "plot", outward: { x: 0, z: 1 } } },
     nominalAnchor: { at: "around", turnOffset: 4.8, distanceFactor: 0.45 }, clearance: 63, initialYaw: { value: 0.2, rule: "constant" },
     hard: INLAND_HARD, soft: ["near-nominal-anchor", "frontage-offset-r+12", "face-road"],
     passes: ["place/snap", "避高架遍", "临街遍", "干地遍", "修复:frontStationsAndStadiums", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "harbor", radius: 37, placement: "shore", priority: 5,
+    kind: "harbor", radius: 37, placement: "shore", mobility: "fixed", shoreTargetRadiusFactor: 0.3, priority: 5,
+    plotBoundaryAccess: { schemaVersion: 1, type: "shore-plot-proxy", gateOffset: 6 },
     nominalAnchor: { at: "coast-near-core", minCoreDistance: 150, inwardInset: 10 }, clearance: 24,
     initialYaw: { rule: "shore-to-core" },
     hard: [...SHORE_HARD, "coast-distance-12"],
@@ -178,27 +191,27 @@ export const SITE_SPECS: readonly SiteSpec[] = [
     passes: ["place/snap（离水仅 24：堆场近边正好落在水线上）", "避高架遍", "港口贴岸遍（最后执行：把被避让推进内陆的港口拉回离岸 ≤12）", "修复:resiteViolatingSites（豁免：harbor 不挪）"],
   },
   {
-    kind: "tv-tower", radius: 16, placement: "inland-frontage", priority: 100, drawWeight: 2,
+    kind: "tv-tower", radius: 16, placement: "inland-frontage", mobility: "relocatable", priority: 100, drawWeight: 2,
     nominalAnchor: { at: "around", turnOffset: 0.4, distanceFactor: 0.14 }, clearance: 20, initialYaw: { value: 0, rule: "constant" },
     hard: INLAND_HARD, soft: ["near-nominal-anchor", "frontage-offset-r+12", "spread-from-others"],
     passes: ["抽签/snap", "避高架遍", "临街遍", "干地遍", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "twin-towers", radius: 22, placement: "inland-frontage", priority: 100, drawWeight: 1,
+    kind: "twin-towers", radius: 22, placement: "inland-frontage", mobility: "relocatable", priority: 100, drawWeight: 1,
     fixedInMiami: "downtown 高塔（与 twist-tower 二选一，另一个不进池）",
     nominalAnchor: { at: "around", turnOffset: 3.1, distanceFactor: 0.12 }, clearance: 20, initialYaw: { rule: "constant" },
     hard: INLAND_HARD, soft: ["near-nominal-anchor", "frontage-offset-r+12", "spread-from-others"],
     passes: ["抽签或 miami 固定/snap", "避高架遍", "临街遍", "干地遍", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "twist-tower", radius: 16, placement: "inland-frontage", priority: 100, drawWeight: 1,
+    kind: "twist-tower", radius: 16, placement: "inland-frontage", mobility: "relocatable", priority: 100, drawWeight: 1,
     fixedInMiami: "downtown 高塔（与 twin-towers 二选一，另一个不进池）",
     nominalAnchor: { at: "around", turnOffset: 2.6, distanceFactor: 0.17 }, clearance: 20, initialYaw: { value: 0, rule: "constant" },
     hard: INLAND_HARD, soft: ["near-nominal-anchor", "frontage-offset-r+12", "spread-from-others"],
     passes: ["抽签或 miami 固定/snap", "避高架遍", "临街遍", "干地遍", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "arch", radius: 18, placement: "straddle-trunk", priority: 100, drawWeight: 1,
+    kind: "arch", radius: 18, placement: "straddle-trunk", mobility: "dependency-bound", priority: 100, drawWeight: 1,
     nominalAnchor: { at: "around", turnOffset: 5.6, distanceFactor: 0.26 }, clearance: 20,
     initialYaw: { rule: "trunk-direction" },
     hard: ["snap-land-clearance", "snap-hill-line", "snap-site-spacing", "trunk-mid-segment",
@@ -207,7 +220,7 @@ export const SITE_SPECS: readonly SiteSpec[] = [
     passes: ["抽签/snap", "避高架遍", "跨路遍（骑上最近主干中段，开口轴沿路向）", "修复:resiteViolatingSites（豁免：arch 不挪）"],
   },
   {
-    kind: "sail-opera", radius: 34, placement: "offshore-island", priority: 100, drawWeight: 2,
+    kind: "sail-opera", radius: 34, placement: "offshore-island", mobility: "dependency-bound", priority: 100, drawWeight: 2,
     fixedInMiami: "海滨城固定锚点（不再靠抽签）",
     nominalAnchor: { at: "coast-rank-from-core", index: 3, inwardFactor: 0.1 }, clearance: 16,
     initialYaw: { rule: "outward-from-core" },
@@ -217,14 +230,14 @@ export const SITE_SPECS: readonly SiteSpec[] = [
     passes: ["抽签或 miami 固定/snap（名义在岸上）", "避高架遍", "岸边内移遍", "贴岸遍", "海上岛遍（最终落位：岸外 r+40 深水 + 堤道）", "入口路（堤道桥 + 岸点接路）"],
   },
   {
-    kind: "lighthouse", radius: 12, placement: "shore", priority: 100, drawWeight: 2,
+    kind: "lighthouse", radius: 12, placement: "shore", mobility: "relocatable", priority: 100, drawWeight: 2,
     fixedInMiami: "海滨城固定锚点（不再靠抽签）",
     nominalAnchor: { at: "coast-farthest-from-core", inwardFactor: 0.04 }, clearance: 6, initialYaw: { value: 0, rule: "constant" },
     hard: SHORE_HARD, soft: ["near-nominal-anchor", "hug-coast-0.7r", "spread-from-others"],
     passes: ["抽签或 miami 固定/snap", "避高架遍", "岸边内移遍", "贴岸遍", "入口路（兜底直连常服务岬角灯塔）"],
   },
   {
-    kind: "ferris-wheel", radius: 26, placement: "shore", priority: 100, drawWeight: 2,
+    kind: "ferris-wheel", radius: 26, placement: "shore", mobility: "relocatable", priority: 100, drawWeight: 2,
     fixedInMiami: "海滨城固定锚点（不再靠抽签）",
     nominalAnchor: { at: "coast-fraction-from-core", fraction: 0.45, inwardFactor: 0.08 }, clearance: 14,
     initialYaw: { rule: "coast-tangent" },
@@ -232,7 +245,7 @@ export const SITE_SPECS: readonly SiteSpec[] = [
     passes: ["抽签或 miami 固定/snap", "避高架遍", "岸边内移遍", "贴岸遍", "入口路"],
   },
   {
-    kind: "pagoda", radius: 18, placement: "inland-frontage", priority: 100,
+    kind: "pagoda", radius: 18, placement: "inland-frontage", mobility: "relocatable", priority: 100,
     drawWeight: { byBiome: { eastasian: 5, default: 1 } },
     nominalAnchor: { at: "hillside", insetFromHillLine: 80 }, clearance: 18,
     initialYaw: { rule: "hill-angle" },
@@ -240,7 +253,7 @@ export const SITE_SPECS: readonly SiteSpec[] = [
     passes: ["抽签/snap（hillDir·(hillLine−80)）", "避高架遍", "临街遍", "干地遍", "修复:nudgeSitesOffRoads", "修复:resiteViolatingSites"],
   },
   {
-    kind: "villa-complex", radius: 34, placement: "shore", priority: 100,
+    kind: "villa-complex", radius: 34, placement: "shore", mobility: "relocatable", priority: 100,
     drawWeight: { byBiome: { tropical: 4, default: 1 } },
     fixedInMiami: "海滨城固定锚点（与帆顶剧院 shoreOrder[3]/[5] 错开）",
     nominalAnchor: { at: "coast-rank-from-core", index: 5, inwardFactor: 0.08 }, clearance: 16,
@@ -253,6 +266,12 @@ export const SITE_SPECS: readonly SiteSpec[] = [
 /** 按种类查行（守卫与行为变更批的入口）。 */
 export function specByKind(kind: string): SiteSpec | undefined {
   return SITE_SPECS.find((row) => row.kind === kind);
+}
+
+/** The registry is an adapter. Core movement permission follows declarations
+ * and current bindings, not a special list of building names. */
+export function canRelocateGroundSite(site: { kind: string; access?: unknown; shore?: unknown }, spec = specByKind(site.kind)): boolean {
+  return !site.access && !site.shore && spec?.mobility === "relocatable";
 }
 
 /**
@@ -272,7 +291,7 @@ export function straddleSitingKinds(): Set<string> {
 export function frontageExemptKinds(): Set<string> {
   const kinds = coastalSitingKinds();
   for (const kind of straddleSitingKinds()) kinds.add(kind);
-  kinds.add("civic");
+  for (const row of SITE_SPECS) if (row.placement === "plaza") kinds.add(row.kind);
   return kinds;
 }
 

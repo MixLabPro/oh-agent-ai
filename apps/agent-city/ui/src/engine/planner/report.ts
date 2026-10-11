@@ -28,6 +28,8 @@
 import { seasideHotelLots, type SeasideBand } from "../citySeaside";
 import type { CityBlock, PublicSite, RoadEdge, RoadNode, Vec2 } from "../cityLayout";
 import type { Landmark } from "../cityPlan";
+import { bridgeLandingNodes, isOwnedIslandGate } from "./endpoints";
+import { classifyRoadSegments, closestSegmentPoints, ROAD_RELATION_CONFIG, type SegmentRelationKind } from "./relations";
 
 // ── 输入/输出契约 ─────────────────────────────────────────────────────────────
 
@@ -49,11 +51,11 @@ export type RoadReportInput = {
 
 export type Degree1Finding = {
   id: string;
-  cls: "legal-cul-de-sac" | "approachable-gap" | "unclassified";
+  cls: "bridge-landing" | "legal-cul-de-sac" | "approachable-gap" | "unclassified";
   at: Vec2;
   reason: string;
 };
-export type CrossingFinding = { id: string; edges: [string, string]; reason: string };
+export type CrossingFinding = { id: string; edges: [string, string]; reason: string; relation: SegmentRelationKind; distance: number };
 export type AcuteJunctionFinding = { id: string; angleDeg: number; reason: string };
 export type BridgeFinding = { id: string; reason: string };
 export type FacilityFinding = {
@@ -75,7 +77,7 @@ export type RoadReport = {
     componentCount: number;
     primaryComponentId: string | null;
     primaryBasis: string;
-    degree1: { total: number; legalCulDeSac: number; approachableGap: number; unclassified: number; findings: Degree1Finding[] };
+    degree1: { total: number; bridgeLandings: number; legalCulDeSac: number; approachableGap: number; unclassified: number; findings: Degree1Finding[] };
     planarCrossings: { count: number; findings: CrossingFinding[] };
     lengthByWidth: { ge12: { length: number; share: number }; ge8lt12: { length: number; share: number }; lt8: { length: number; share: number } };
     junctions: { total: number; degreeHistogram: Array<{ degree: number; count: number }>; minAngleDeg: number | null; acuteBelow30: number; findings: AcuteJunctionFinding[] };
@@ -108,7 +110,7 @@ export type RoadReport = {
 
 // ── 几何与统计原语（全部纯函数） ──────────────────────────────────────────────
 
-const CROSSING_TOLERANCE = 0.5;
+const CROSSING_TOLERANCE = ROAD_RELATION_CONFIG.nearDistance;
 const FRONTAGE_MAX_DISTANCE = 3;
 const FRONTAGE_MAX_ANGLE_DEG = 25;
 const SERVICE_RADIUS = 30;
@@ -129,30 +131,7 @@ const pointSegDistance = (p: Vec2, a: Vec2, b: Vec2): number => {
 
 /** 两线段最小距离（Ericson《Real-Time Collision Detection》闭式解，含端点钳制）。 */
 const segSegDistance = (p1: Vec2, q1: Vec2, p2: Vec2, q2: Vec2): number => {
-  const d1x = q1.x - p1.x; const d1z = q1.z - p1.z;
-  const d2x = q2.x - p2.x; const d2z = q2.z - p2.z;
-  const rx = p1.x - p2.x; const rz = p1.z - p2.z;
-  const a = d1x * d1x + d1z * d1z;
-  const e = d2x * d2x + d2z * d2z;
-  const f = d2x * rx + d2z * rz;
-  const EPS = 1e-12;
-  let s = 0; let t = 0;
-  if (a > EPS || e > EPS) {
-    if (a <= EPS) t = Math.max(0, Math.min(1, f / e));
-    else {
-      const c = d1x * rx + d1z * rz;
-      if (e <= EPS) s = Math.max(0, Math.min(1, -c / a));
-      else {
-        const b = d1x * d2x + d1z * d2z;
-        const denom = a * e - b * b;
-        s = denom > EPS ? Math.max(0, Math.min(1, (b * f - c * e) / denom)) : 0;
-        t = (b * s + f) / e;
-        if (t < 0) { t = 0; s = Math.max(0, Math.min(1, -c / a)); }
-        else if (t > 1) { t = 1; s = Math.max(0, Math.min(1, (b - c) / a)); }
-      }
-    }
-  }
-  return Math.hypot(p1.x + d1x * s - (p2.x + d2x * t), p1.z + d1z * s - (p2.z + d2z * t));
+  return closestSegmentPoints(p1, q1, p2, q2).distance;
 };
 
 /** 两方向所在的直线夹角（0 = 平行，90 = 垂直）。 */
@@ -223,6 +202,38 @@ const componentsOf = (edges: RoadEdge[]): { compOf: Map<string, string>; count: 
 
 // ── 报告主体 ─────────────────────────────────────────────────────────────────
 
+/** 求解与报告共用的未接入平面交叉/近接度量。 */
+export function groundJunctionFindings(edges: readonly RoadEdge[]): CrossingFinding[] {
+  const segments: Seg[] = [...edges].sort(byId).flatMap((edge) => edge.points.slice(1).map((point, index) => ({ id: JSON.stringify([edge.id, index]), edge, a: edge.points[index], b: point })));
+  const nonBridgeSegs = segments.filter((s) => !s.edge.bridge);
+  const cells = bucket(nonBridgeSegs);
+  const findings = new Map<string, { finding: CrossingFinding; distance: number }>();
+  for (const s of nonBridgeSegs) {
+    const pad = CROSSING_TOLERANCE;
+    const minX = Math.min(s.a.x, s.b.x) - pad; const maxX = Math.max(s.a.x, s.b.x) + pad;
+    const minZ = Math.min(s.a.z, s.b.z) - pad; const maxZ = Math.max(s.a.z, s.b.z) + pad;
+    for (const o of querySegs(cells, minX, minZ, maxX, maxZ)) {
+      if (o.id <= s.id) continue; // 每个无序对只从字典序小的一侧看一次
+      if (o.edge.id === s.edge.id) continue;
+      const same = (a: Vec2, b: Vec2) => a.x === b.x && a.z === b.z;
+      const containsEndpoint = (segment: Seg, node: string) => {
+        const point = node === segment.edge.from ? segment.edge.points[0] : segment.edge.points[segment.edge.points.length - 1];
+        return same(segment.a, point) || same(segment.b, point);
+      };
+      const shared = [s.edge.from, s.edge.to].filter((node) => node === o.edge.from || node === o.edge.to);
+      if (shared.some((node) => containsEndpoint(s, node) && containsEndpoint(o, node))) continue;
+      const relation = classifyRoadSegments(s.a, s.b, o.a, o.b);
+      const d = relation.distance;
+      if (d <= CROSSING_TOLERANCE) {
+        const pair = [s.edge.id, o.edge.id].sort() as [string, string];
+        const id = pair.join("|");
+        if (!findings.has(id) || d < findings.get(id)!.distance) findings.set(id, { distance: d, finding: { id, edges: pair, relation: relation.kind, distance: round4(d), reason: `non-bridge segments meet (distance ${round2(d)} ≤ ${CROSSING_TOLERANCE}) without a shared node at this location` } });
+      }
+    }
+  }
+  return [...findings.values()].map(({ finding }) => finding).sort(byId);
+}
+
 export function roadReport(input: RoadReportInput): RoadReport {
   // 输入顺序不影响任何输出：先按 id 排序再消费。
   const edges = [...input.roadEdges].sort(byId);
@@ -265,17 +276,20 @@ export function roadReport(input: RoadReportInput): RoadReport {
     if (list) list.push(e.id); else incidence.set(id, [e.id]);
   }
 
-  // A2 度1非桥端三分：合法尽端（culDeSacEnds，即 intent cul-de-sac 投影）／可接近缺口
+  // A2 度1非桥端：连续桥头／合法尽端（culDeSacEnds，即 intent cul-de-sac 投影）／可接近缺口
   // （完整图里邻边更多，仅显示图有意义）／未分类。优先级 legal > gap > unclassified。
   const culDeSacKeys = new Set((input.culDeSacEnds ?? []).map((p) => `${p.x}:${p.z}`));
   const referenceDegree = new Map<string, number>();
   for (const e of input.referenceRoadEdges ?? []) if (!e.bridge) for (const id of [e.from, e.to]) referenceDegree.set(id, (referenceDegree.get(id) ?? 0) + 1);
   const degree1Findings: Degree1Finding[] = [];
+  const landings = bridgeLandingNodes(edges);
   for (const id of [...incidence.keys()].sort()) {
     const list = incidence.get(id)!;
     if (list.length !== 1) continue;
     const at = positions.get(id) ?? { x: 0, z: 0 };
-    if (culDeSacKeys.has(id)) {
+    if (landings.has(id)) {
+      degree1Findings.push({ id, cls: "bridge-landing", at, reason: "ground and bridge edges share this actual node; continuation is present in the full road graph" });
+    } else if (culDeSacKeys.has(id)) {
       degree1Findings.push({ id, cls: "legal-cul-de-sac", at, reason: "degree-1 non-bridge end listed in culDeSacEnds (intent classifyEndpoints cul-de-sac)" });
     } else if ((referenceDegree.get(id) ?? 0) >= 2) {
       degree1Findings.push({ id, cls: "approachable-gap", at, reason: `degree-1 in this graph but ${referenceDegree.get(id)} non-bridge edges meet here in the reference (full) graph — growth pruning left an approachable gap` });
@@ -285,6 +299,7 @@ export function roadReport(input: RoadReportInput): RoadReport {
   }
   const degree1 = {
     total: degree1Findings.length,
+    bridgeLandings: degree1Findings.filter((f) => f.cls === "bridge-landing").length,
     legalCulDeSac: degree1Findings.filter((f) => f.cls === "legal-cul-de-sac").length,
     approachableGap: degree1Findings.filter((f) => f.cls === "approachable-gap").length,
     unclassified: degree1Findings.filter((f) => f.cls === "unclassified").length,
@@ -292,23 +307,8 @@ export function roadReport(input: RoadReportInput): RoadReport {
   };
 
   // A3 平面交叉：非桥边两两线段最小距离 ≤ 0.5 且无共享节点（包围盒分格粗筛 + id 严格序去重）。
-  const nonBridgeSegs = segments.filter((s) => !s.edge.bridge);
-  const cells = bucket(nonBridgeSegs);
-  const crossingFindings: CrossingFinding[] = [];
-  for (const s of nonBridgeSegs) {
-    const pad = CROSSING_TOLERANCE;
-    const minX = Math.min(s.a.x, s.b.x) - pad; const maxX = Math.max(s.a.x, s.b.x) + pad;
-    const minZ = Math.min(s.a.z, s.b.z) - pad; const maxZ = Math.max(s.a.z, s.b.z) + pad;
-    for (const o of querySegs(cells, minX, minZ, maxX, maxZ)) {
-      if (o.id <= s.id) continue; // 每个无序对只从字典序小的一侧看一次
-      if (o.edge.from === s.edge.from || o.edge.from === s.edge.to || o.edge.to === s.edge.from || o.edge.to === s.edge.to) continue;
-      const d = segSegDistance(s.a, s.b, o.a, o.b);
-      if (d <= CROSSING_TOLERANCE) {
-        crossingFindings.push({ id: `${s.id}|${o.id}`, edges: [s.id, o.id], reason: `non-bridge edges meet (segment distance ${round2(d)} ≤ ${CROSSING_TOLERANCE}) without sharing a node` });
-      }
-    }
-  }
-  crossingFindings.sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const crossingFindings = groundJunctionFindings(edges);
+  const cells = bucket(segments.filter((segment) => !segment.edge.bridge));
 
   // A4 长度占比：宽 ≥12 / ≥8 且 <12 / 其余（12/8/5 三级；桥计入长度）。
   const lengthOf = (s: Seg) => Math.hypot(s.b.x - s.a.x, s.b.z - s.a.z);
@@ -330,7 +330,9 @@ export function roadReport(input: RoadReportInput): RoadReport {
     const at = positions.get(id) ?? { x: 0, z: 0 };
     const dirs = list.map((eid) => {
       const e = edgeById.get(eid)!;
-      const far = e.from === id ? e.points[e.points.length - 1] : e.points[0];
+      // Junction angle is the tangent of the road as it enters/leaves this
+      // node, not the chord to the far endpoint (which is wrong for curves).
+      const far = e.from === id ? e.points[1] : e.points[e.points.length - 2];
       const dx = far.x - at.x; const dz = far.z - at.z;
       const l = Math.hypot(dx, dz) || 1;
       return { x: dx / l, z: dz / l };
@@ -377,17 +379,21 @@ export function roadReport(input: RoadReportInput): RoadReport {
     });
   }
 
-  // A7 桥连续：每条桥边两端在本图内各有 ≥1 条相邻非桥边。
+  // A7 Same contract as bridgeheadContinuity: an actual node plus a ground
+  // road, or an explicitly owned, current island-side gate (not a landing).
   const bridgeViolations: BridgeFinding[] = [];
+  const declaredNodes = new Set(input.nodes ? input.nodes.map((node) => node.id) : positions.keys());
+  const islandSites = [...input.publicSites, ...input.landmarks];
   let bridgeTotal = 0;
   for (const e of edges) {
     if (!e.bridge) continue;
     bridgeTotal += 1;
-    const fromOk = (incidence.get(e.from)?.length ?? 0) >= 1;
-    const toOk = (incidence.get(e.to)?.length ?? 0) >= 1;
+    const endOk = (id: string) => declaredNodes.has(id) && ((incidence.get(id)?.length ?? 0) >= 1 || isOwnedIslandGate(id, islandSites));
+    const fromOk = endOk(e.from);
+    const toOk = endOk(e.to);
     if (!fromOk || !toOk) {
       const missing = [!fromOk ? e.from : null, !toOk ? e.to : null].filter(Boolean).join(", ");
-      bridgeViolations.push({ id: e.id, reason: `bridge end ${missing} has no adjacent non-bridge edge in this graph` });
+      bridgeViolations.push({ id: e.id, reason: `bridge end ${missing} is missing or has neither an adjacent non-bridge edge nor a current owned island gate` });
     }
   }
 

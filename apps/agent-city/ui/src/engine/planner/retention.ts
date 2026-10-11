@@ -4,6 +4,101 @@ import type { RoadEdge } from "../cityLayout";
 
 export type RetentionReport = { keep: Set<string>; restored: string[]; unresolved: string[]; anchorMissing: boolean };
 
+/** Restore pruning gaps to a retained node or a genuine full-graph terminal. */
+export function preserveDisplayJunctions(edges: readonly RoadEdge[], selected: ReadonlySet<string>, terminals: ReadonlySet<string>): { keep: Set<string>; restored: string[]; unresolved: string[] } {
+  const keep = new Set(selected);
+  const adjacency = new Map<string, RoadEdge[]>();
+  for (const edge of edges) if (!edge.bridge) for (const node of [edge.from, edge.to]) {
+    const list = adjacency.get(node) ?? []; list.push(edge); adjacency.set(node, list);
+  }
+  for (const list of adjacency.values()) list.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const degree = () => {
+    const counts = new Map<string, number>();
+    for (const edge of edges) if (!edge.bridge && keep.has(edge.id)) for (const node of [edge.from, edge.to]) counts.set(node, (counts.get(node) ?? 0) + 1);
+    return counts;
+  };
+  const initial = degree();
+  const gaps = [...initial.keys()].filter((node) => initial.get(node) === 1 && (adjacency.get(node)?.length ?? 0) > 1 && !terminals.has(node)).sort();
+  const unresolved: string[] = [];
+  for (const origin of gaps) {
+    const current = degree();
+    if (current.get(origin) !== 1) continue;
+    const distances = new Map<string, number>([[origin, 0]]);
+    const previous = new Map<string, { node: string; edge: string }>();
+    const visited = new Set<string>();
+    let goal: string | null = null;
+    let closingEdge: string | null = null; let cyclePath: string[] | null = null; let goalCost = Infinity;
+    const pathToOrigin = (node: string) => {
+      const path: string[] = [];
+      for (let cursor = node; cursor !== origin;) { const step = previous.get(cursor)!; path.push(step.edge); cursor = step.node; }
+      return path;
+    };
+    while (true) {
+      let next: string | null = null; let cost = Infinity;
+      for (const [node, value] of distances) if (!visited.has(node) && (value < cost || (value === cost && (next === null || node < next)))) { next = node; cost = value; }
+      if (next === null || cost >= goalCost) break;
+      if (next !== origin && (current.has(next) || adjacency.get(next)?.length === 1)) { goal = next; cyclePath = null; break; }
+      visited.add(next);
+      for (const edge of adjacency.get(next) ?? []) {
+        if (keep.has(edge.id)) continue;
+        const to: string = edge.from === next ? edge.to : edge.from;
+        const length = edge.points.slice(1).reduce((sum, p, i) => sum + Math.hypot(p.x - edge.points[i].x, p.z - edge.points[i].z), 0);
+        if (!Number.isFinite(length) || length <= 0) continue;
+        // A culled loop may return only to its own retained attachment. Do not
+        // mistake that cycle for a missing route, or for immediate backtracking.
+        if (to === origin && next !== origin && previous.get(next)?.edge !== edge.id) {
+          const total = cost + length;
+          if (total < goalCost || (total === goalCost && edge.id < (closingEdge ?? "\uffff"))) {
+            goal = next; cyclePath = [edge.id, ...pathToOrigin(next)]; closingEdge = edge.id; goalCost = total;
+          }
+          continue;
+        }
+        if (next !== origin && to !== origin && previous.has(to)
+          && previous.get(next)?.edge !== edge.id && previous.get(to)?.edge !== edge.id) {
+          const chain = (node: string) => {
+            const path = new Set<string>();
+            for (let cursor = node; cursor !== origin;) { path.add(cursor); cursor = previous.get(cursor)!.node; }
+            return path;
+          };
+          const left = chain(next), right = chain(to);
+          if (![...left].some((node) => right.has(node))) {
+            const total = cost + distances.get(to)! + length;
+            if (total < goalCost || (total === goalCost && edge.id < (closingEdge ?? "\uffff"))) {
+              goal = next; cyclePath = [edge.id, ...pathToOrigin(next), ...pathToOrigin(to)]; closingEdge = edge.id; goalCost = total;
+            }
+          }
+        }
+        if (visited.has(to)) continue;
+        const total = cost + length, old = distances.get(to) ?? Infinity;
+        if (total < old || (total === old && edge.id < (previous.get(to)?.edge ?? "\uffff"))) {
+          distances.set(to, total); previous.set(to, { node: next, edge: edge.id });
+        }
+      }
+    }
+    if (!goal) { unresolved.push(origin); continue; }
+    for (const id of cyclePath ?? pathToOrigin(goal)) keep.add(id);
+  }
+  return { keep, restored: [...keep].filter((id) => !selected.has(id)).sort(), unresolved };
+}
+
+/** 桥头地面接驳是独立于图连通的必要边：两座相接的桥不能替代地面落地。 */
+export function retainBridgeLandings(edges: readonly RoadEdge[], selected: ReadonlySet<string>): { selected: Set<string>; missing: string[] } {
+  const keep = new Set(selected);
+  const ground = new Map<string, RoadEdge[]>();
+  const length = (edge: RoadEdge) => edge.points.slice(1).reduce((sum, p, i) => sum + Math.hypot(p.x - edge.points[i].x, p.z - edge.points[i].z), 0);
+  for (const edge of edges) if (!edge.bridge) for (const node of [edge.from, edge.to]) {
+    const list = ground.get(node) ?? []; list.push(edge); ground.set(node, list);
+  }
+  const missing = new Set<string>();
+  for (const bridge of [...edges].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) if (bridge.bridge && keep.has(bridge.id)) for (const node of [bridge.from, bridge.to]) {
+    const candidates = ground.get(node) ?? [];
+    if (candidates.some((edge) => keep.has(edge.id))) continue;
+    const best = [...candidates].sort((a, b) => length(a) - length(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+    if (best) keep.add(best.id); else missing.add(node);
+  }
+  return { selected: keep, missing: [...missing].sort() };
+}
+
 export function preserveDemandPaths(edges: readonly RoadEdge[], selected: ReadonlySet<string>, anchor: string | null, required: readonly string[]): RetentionReport {
   const keep = new Set(selected);
   const adjacency = new Map<string, RoadEdge[]>();

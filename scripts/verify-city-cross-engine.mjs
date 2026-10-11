@@ -18,14 +18,34 @@ const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
 const entry = `
 import { createCityPlan } from ${JSON.stringify(path.join(engine, "cityPlan.ts"))};
 import { MIAMI_COASTAL } from ${JSON.stringify(path.join(engine, "citySeaside.ts"))};
+import { CONSTRAINTS } from ${JSON.stringify(path.join(engine, "planner/constraints.ts"))};
+import { diagnoseNetwork } from ${JSON.stringify(path.join(engine, "planner/intent.ts"))};
 const fnv = (t) => { let h = 0x811c9dc5; for (let i = 0; i < t.length; i += 1) { h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16); };
 const out = [];
 for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
+  const trace = typeof process !== "undefined" && process.env.CITY_VERIFY_PROGRESS === "1";
+  if (trace) console.error("City cross-engine V8: start " + tier + "/" + i);
   const plan = createCityPlan(1703294958 + i * 7919, tier, MIAMI_COASTAL);
+  const constraintCounts = Object.fromEntries(CONSTRAINTS.map(c => [c.id, c.measure(plan).length]));
+  const unmet = diagnoseNetwork(plan)?.unmet ?? null;
+  if (trace) console.error("City cross-engine V8: done " + tier + "/" + i + " R=" + plan.islandRadius + " attempts=" + plan.radiusAttempts + " edges=" + plan.roadEdges.length
+    + " capacity=" + plan.capacity.available + "/" + plan.capacity.required + " nonzero=" + JSON.stringify(Object.fromEntries(Object.entries(constraintCounts).filter(([_, count]) => count)))
+    + " unmet=" + JSON.stringify(unmet));
   const shape = JSON.stringify({
-    roads: plan.roadEdges.map((e) => [e.id, e.width, e.points.map((p) => [p.x, p.z])]),
+    roads: plan.roadEdges.map((e) => [e.id, e.width, e.kind, !!e.bridge, e.structure ?? null, e.purpose ?? null, e.points.map((p) => [p.x, p.z])]),
     blocks: plan.blocks.map((b) => [b.id, b.parcels.map((p) => [p.id, p.x, p.z, p.yaw])]),
-    sites: [...plan.publicSites, ...plan.landmarks].map((s) => [s.kind, s.x, s.z]),
+    sites: [...plan.publicSites, ...plan.landmarks].map((s) => [s.kind, s.x, s.z, s.yaw, s.radius, s.access ?? null]),
+    primaryAnchorNodeId: plan.primaryAnchorNodeId,
+    siteObligations: plan.siteObligations,
+    demandCatalogue: plan.demandCatalogue,
+    solveReport: plan.solveReport,
+    skeletonDiagnostics: plan.skeletonDiagnostics,
+    skeletonReservationIds: plan.skeletonReservationIds,
+    radiusHistory: plan.radiusHistory,
+    capacity: plan.capacity,
+    parcelGeneration: plan.parcelGeneration,
+    constraintCounts,
+    unmet,
   });
   out.push(tier + "/" + i + ":" + fnv(shape));
 }
@@ -35,11 +55,11 @@ if (typeof print === "function") print(line); else console.log(line);
 const bundle = buildSync({ stdin: { contents: entry, resolveDir: engine, loader: "ts" }, bundle: true, write: false, format: "iife", platform: "neutral", logLevel: "silent" }).outputFiles[0].text;
 const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "city-xengine-")), "plan.js");
 fs.writeFileSync(file, bundle);
-const v8 = execFileSync(process.execPath, [file], { encoding: "utf8" }).trim();
+const v8 = execFileSync(process.execPath, [file], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
 if (!fs.existsSync(jsc)) {
   console.log("City cross-engine: skipped (no JavaScriptCore shell on this platform).");
 } else {
-  const core = execFileSync(jsc, [file], { encoding: "utf8" }).trim();
+  const core = execFileSync(jsc, [file], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
   const a = v8.split(" "); const b = core.split(" ");
   const differing = a.filter((digest, i) => digest !== b[i]);
   assert.equal(differing.length, 0, `V8 and JavaScriptCore produced different layouts for ${differing.length}/${a.length} seeds: ${differing.slice(0, 5).join(" ")}`);

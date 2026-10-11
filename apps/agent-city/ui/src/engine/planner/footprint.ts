@@ -12,6 +12,7 @@
 import { DetMath as Math } from "../detMath";
 import { segmentDistance } from "../cityPlan";
 import type { Vec2 } from "../cityLayout";
+import { roadSegmentsCrossInterior } from "./relations";
 
 /** 现有各口径的水位常量：siteInWater 系 <0.5；占地「干地」≥0.8；海上岛「深水」≤-0.8。 */
 export const WATER_LEVEL = 0.5;
@@ -75,15 +76,24 @@ export function polylineDistance(runs: Vec2[][], p: Vec2): number {
   return d;
 }
 
+/** Closest actual segment, including its tangent; never substitute the endpoint chord. */
+export function closestPolylineSegment(points: Vec2[], p: Vec2): { d: number; q: Vec2; a: Vec2; b: Vec2; index: number } | null {
+  let best: { d: number; q: Vec2; a: Vec2; b: Vec2; index: number } | null = null;
+  for (let k = 1; k < points.length; k += 1) {
+    const a = points[k - 1], b = points[k], dx = b.x - a.x, dz = b.z - a.z;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+    const q = { x: a.x + dx * t, z: a.z + dz * t }, d = Math.hypot(q.x - p.x, q.z - p.z);
+    if (!best || d < best.d) best = { d, q, a, b, index: k - 1 };
+  }
+  return best;
+}
+
 /** 同上，但连最近点一起返回（临街修复要沿「路→用地」方向拉，需要垂足坐标）。 */
 export function polylineClosest(runs: Vec2[][], p: Vec2): { d: number; q: Vec2 } | null {
   let best: { d: number; q: Vec2 } | null = null;
-  for (const run of runs) for (let k = 1; k < run.length; k += 1) {
-    const a = run[k - 1]; const b = run[k];
-    const dx = b.x - a.x; const dz = b.z - a.z;
-    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
-    const q = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(q.x - p.x, q.z - p.z);
-    if (!best || d < best.d) best = { d, q };
+  for (const run of runs) {
+    const near = closestPolylineSegment(run, p);
+    if (near && (!best || near.d < best.d)) best = { d: near.d, q: near.q };
   }
   return best;
 }
@@ -97,8 +107,7 @@ export function nearBridgeEnd(bridges: Array<{ from: Vec2; to: Vec2 }>, x: numbe
 
 /** 线段 ab 与 cd 是否真相交（不含共端点）。 */
 export function crosses(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
-  const o = (p: Vec2, q: Vec2, r: Vec2) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
-  return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
+  return roadSegmentsCrossInterior(a, b, c, d);
 }
 
 // ── 网络优先批次 6a-2：实际占地几何原语（设计 §2 P2「圆形稀疏占地采样 → 实际 footprint 终筛」）──

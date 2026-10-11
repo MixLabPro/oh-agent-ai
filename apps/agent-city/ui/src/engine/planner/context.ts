@@ -4,6 +4,8 @@ import type { SeasideBand } from "../citySeaside";
 import type { Network } from "./network";
 import type { Geography } from "./geography";
 import type { ConnectionAttempt } from "./connect";
+import type { ConnectionDemand } from "./intent";
+import type { PlanningWorld } from "./world";
 
 /**
  * 规划尾部修复遍用到的成员（CITY_ARCHITECTURE §2 迁移步 5b；V2 步 2b-lite 起路网原语走 network 对象）。
@@ -15,6 +17,11 @@ export interface RepairContext {
   network: Network;
   connectionLog?: ConnectionAttempt[];
   primaryAnchorNodeId?: string | null;
+  siteObligations?: Array<{ ownerId: string; placed: boolean; reason?: string }>;
+  /** Persistent commitments; only the transaction dispatcher may update bindings. */
+  demandCatalogue?: readonly ConnectionDemand[];
+  /** Dispatcher-owned authority. Pending reservations do not certify complete model physics. */
+  readonly planningWorld?: PlanningWorld;
   height: (x: number, z: number) => number;
   inRiver: (x: number, z: number) => boolean;
   publicSites: PublicSite[];
@@ -39,6 +46,8 @@ export interface RepairContext {
   coastRoadRunEnds: Vec2[];
   /** 沿海路段（批次 8：solve 的违例测量需要 plan 视图）。 */
   coastRoadRuns: Vec2[][];
+  /** Production coastRoadRuns includes river runs; exclude that suffix in intent. */
+  coastalRunCount?: number;
   /** 河岸路段（同上）。 */
   riverRoadRuns: Vec2[][];
 }

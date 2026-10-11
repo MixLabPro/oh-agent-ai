@@ -11,7 +11,10 @@
  */
 import { DetMath as Math } from "../detMath";
 import { segmentDistance, targetParcels } from "../cityPlan";
-import { CONSTRAINTS, type CityPlan } from "./constraints";
+import { CONSTRAINTS, stationDoorFacesRoad, type CityPlan } from "./constraints";
+import { polylineClosest } from "./footprint";
+import { coastalSitingKinds, specByKind } from "./sitespec";
+import { planarAccessAtYaw, resolvePlanarAccess } from "../models/siteAccess";
 
 export type ScoreTerm = "siteDrift" | "doorAlignment" | "shoreHug" | "landmarkSpread" | "networkQuality" | "parcelYield";
 export type ScoreWeights = Record<ScoreTerm, number>;
@@ -26,7 +29,7 @@ export const SCORE_WEIGHTS: ScoreWeights = {
   parcelYield: 1.0,      // 档位面积利用率（半径校正的质量）
 };
 
-const SHORE_KINDS = new Set(["lighthouse", "sail-opera", "ferris-wheel", "villa-complex", "harbor"]);
+const SHORE_KINDS = coastalSitingKinds();
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 const measure = (id: string, plan: CityPlan) => CONSTRAINTS.find((c) => c.id === id)?.measure(plan).length ?? 0;
@@ -46,21 +49,22 @@ export function scoreTerms(plan: CityPlan): Record<ScoreTerm, number> {
       }, 0) / sites.length
     : 0;
 
-  // 车站/体育场正门贴合（与 stationDoorFacesRoad 同口径）：局部 +z 法向对「建筑→最近路投影点」
-  // 方向的 cos——投影点取代整边切向，端点序反转不再改变分数。
+  // Declared entrance normal against the bound gate or the actual nearest polyline.
   let doorSum = 0; let doorN = 0;
   for (const s of sites) {
-    if (s.kind !== "station" && s.kind !== "stadium") continue;
-    let best: { d: number; cos: number } | null = null;
-    for (const e of solid) {
-      const a = e.points[0]; const b = e.points[e.points.length - 1];
-      const dx = b.x - a.x; const dz = b.z - a.z;
-      const t = Math.max(0, Math.min(1, ((s.x - a.x) * dx + (s.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
-      const qx = a.x + dx * t; const qz = a.z + dz * t;
-      const d = Math.hypot(qx - s.x, qz - s.z);
-      if (!best || d < best.d) best = { d, cos: (Math.sin(s.yaw) * (qx - s.x) + Math.cos(s.yaw) * (qz - s.z)) / (d || 1) };
-    }
-    if (best) { doorSum += clamp01(best.cos); doorN += 1; }
+    const declaration = specByKind(s.kind)?.planarAccess;
+    if (!declaration && "shore" in s && s.shore && s.access?.capability === "island-causeway") continue;
+    if (!declaration && !s.access) continue;
+    doorN += 1;
+    const resolved = resolvePlanarAccess(declaration, s.radius);
+    if (!resolved.ok || !Number.isFinite(s.yaw)) continue;
+    if (s.access && stationDoorFacesRoad.measure({ ...plan, publicSites: [s as CityPlan["publicSites"][number]], landmarks: [] }).length) continue;
+    const pose = planarAccessAtYaw(resolved.access, s, s.yaw);
+    const origin = s.access ? pose.door ?? s : s;
+    const target = s.access ? plan.roadNodes.find((n) => n.id === s.access!.nodeId) : polylineClosest(solid.map((e) => e.points), s)?.q;
+    if (!target) continue;
+    const dx = target.x - origin.x, dz = target.z - origin.z, d = Math.hypot(dx, dz);
+    if (d > 0) doorSum += clamp01((pose.outward.x * dx + pose.outward.z * dz) / d);
   }
 
   // 岸类用地贴岸程度：中心到真实岸线折线的距离 ≈ 目标（0.7 半径；港口贴岸到 ~12，取 0.3）最佳。
@@ -75,7 +79,7 @@ export function scoreTerms(plan: CityPlan): Record<ScoreTerm, number> {
   let shoreSum = 0; let shoreN = 0;
   for (const s of sites) {
     if (!SHORE_KINDS.has(s.kind)) continue;
-    const target = (s.kind === "harbor" ? 0.3 : 0.7) * s.radius;
+    const target = (specByKind(s.kind)?.shoreTargetRadiusFactor ?? 0.7) * s.radius;
     shoreSum += 1 - clamp01(Math.abs(coastDist(s) - target) / (s.radius * 0.7)); shoreN += 1;
   }
 

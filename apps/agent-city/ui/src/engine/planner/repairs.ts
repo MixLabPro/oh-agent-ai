@@ -2,14 +2,21 @@ import { DetMath as Math } from "../detMath"; // 跨引擎确定性：与 cityPl
 import { clearsHighways, roadNodeId, segmentDistance } from "../cityPlan";
 import type { RoadEdge, Vec2 } from "../cityLayout";
 import { polylineClosest, wetCount } from "./footprint";
-import { addNetworkEdge, keyOf } from "./network";
+import { addNetworkEdge, keyOf, commitNetworkPatch } from "./network";
+import { endpointClear, parseFailure } from "./connect";
+import { validateCandidate } from "./validation";
+import { JUNCTION_CONFIG } from "./junctions";
+import { groundJunctionCorridorFailure } from "./civicClearance";
 import { crosses, nearBridgeEnd, polylineDistance, safeRoadLink } from "./footprint";
-import { isPlannedRoadEnd } from "./endpoints";
+import { bridgeLandingNodes, isPlannedRoadEnd } from "./endpoints";
+import { canRelocateGroundSite, specByKind } from "./sitespec";
+import { planarAccessPose, resolvePlanarAccess } from "../models/siteAccess";
 
 /** 与 constraints/networkRepairs 同一计划内终点视图（批次 3-2：repairs 的两处 height 门切语义判定）。 */
 function plannedEndWorld(ctx: RepairContext) {
   const sites = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius);
   return {
+    bridgeLandings: bridgeLandingNodes([...ctx.network.edges.values()]),
     sites,
     boulevardEnds: (ctx.seaside?.samples ?? []).filter((x: { valid: boolean; boulevard?: Vec2 }) => x.valid && x.boulevard).map((x: { boulevard?: Vec2 }) => x.boulevard!),
     coastRoadRunEnds: ctx.coastRoadRunEnds,
@@ -23,9 +30,12 @@ import type { RepairContext } from "./context";
 // 迭代顺序、阈值与常数一律不变（planner 基线哈希是证明）。每个遍返回「改动数」，供 solve.ts 汇总。
 
 /** 用地修复遍共用的几何：可挪动的用地、最近非桥路段（含垂足）、占地圈湿点数。路网在这些遍内不变，所以每个遍各算一份与原先共用一份等价。 */
-function siteGeometry(ctx: RepairContext) {
+export function siteGeometry(ctx: RepairContext, onlyOwnerId?: string) {
   const { publicSites, landmarks, height, inRiver } = ctx; const { edges } = ctx.network;
-  const movable = [...publicSites, ...landmarks].filter((s) => s.radius && s.kind !== "civic" && s.kind !== "arch" && !(s as { shore?: Vec2 }).shore);
+  // 港口在 solve 前有专属贴岸遍。通用避路遍会把它从岸边推到内陆，覆盖明确的岸线规划意图；
+  // 港口的道路接入由 site-access 连接负责，不应通过移动港口中心来解决。
+  const movable = [...publicSites, ...landmarks].filter((s) => s.radius && canRelocateGroundSite(s)
+    && (onlyOwnerId === undefined || s.id === onlyOwnerId));
   const solidRuns = [...edges.values()].filter((e) => !e.bridge).map((e) => e.points);
   const geo = { height, inRiver };
   const nearestRoad = (x: number, z: number) => polylineClosest(solidRuns, { x, z });
@@ -43,7 +53,7 @@ export function frontStationsAndStadiums(ctx: RepairContext): number {
   // 沿「路 → 用地中心」反方向的反向把它拉到离路 0.85 半径（占地前沿 ≈ 0.65 半径，贴着人行道），
   // 仍满足上面的「中心到路 ≥ 0.7 半径」；新位置须是干地、不压其它用地/高架、不让别的路穿过。
   for (const site of movable) {
-    if (site.kind !== "station" && site.kind !== "stadium") continue;
+    if (!resolvePlanarAccess(specByKind(site.kind)?.planarAccess, site.radius).ok) continue;
     const near = nearestRoad(site.x, site.z);
     if (!near || near.d <= site.radius * 0.95 || near.d > site.radius + 90) continue;
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
@@ -61,11 +71,13 @@ export function frontStationsAndStadiums(ctx: RepairContext): number {
   // 沿「路 → 用地中心」反方向的反向把它拉到离路 0.85 半径（占地前沿 ≈ 0.65 半径，贴着人行道），
   // 仍满足上面的「中心到路 ≥ 0.7 半径」；新位置须是干地、不压其它用地/高架、不让别的路穿过。
   for (const site of movable) {
-    if (site.kind !== "station" && site.kind !== "stadium") continue;
+    const resolved = resolvePlanarAccess(specByKind(site.kind)?.planarAccess, site.radius);
+    if (!resolved.ok) continue;
     const near = nearestRoad(site.x, site.z);
     if (!near || near.d > site.radius + 90) continue;
-    // 车站正面（站房入口/雨篷）在局部 +z：转向最近的路（原先是固定朝向 0.12，从不看路）。
-    if (site.kind === "station" && near.d > 0.5) site.yaw = Math.atan2(near.q.x - site.x, near.q.z - site.z);
+    // Entrance direction comes from the declaration, not a building-name convention.
+    if (near.d > 0.5) { const yaw = planarAccessPose(resolved.access, site, { x: (near.q.x - site.x) / near.d, z: (near.q.z - site.z) / near.d }).yaw;
+      if (yaw !== site.yaw) { site.yaw = yaw; moved += 1; } }
     if (near.d <= site.radius * 0.95) continue;
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
     const dirx = (site.x - near.q.x) / near.d; const dirz = (site.z - near.q.z) / near.d;
@@ -81,17 +93,17 @@ export function frontStationsAndStadiums(ctx: RepairContext): number {
   return moved;
 }
 
-/** 兜底：岸边用地附近推不开时，沿海岸换一个位置（nudge 轮次里逐用地调用）。成功返回 true。 */
-export function relocateShoreSite(ctx: RepairContext, site: { x: number; z: number; radius: number; kind: string }, g: SiteGeometry, others: Array<{ x: number; z: number; radius: number }>): boolean {
-  const { blocks, ringRuns, coast, core, height, SHORE_SITE_KINDS } = ctx;
+/** Read-only, lazy candidates for the existing bounded coastal fallback. */
+export function* shoreRelocationCandidates(ctx: RepairContext, site: { x: number; z: number; radius: number; kind: string }, g: SiteGeometry,
+  others: Array<{ x: number; z: number; radius: number }>): Iterable<Vec2> {
+  const { ringRuns, coast, core, height, SHORE_SITE_KINDS } = ctx;
   const { nearestRoad, wetAt } = g;
-  if (!(SHORE_SITE_KINDS.has(site.kind)) || (site as { shore?: Vec2 }).shore) return false;
-  let done = false;
+  if (!(SHORE_SITE_KINDS.has(site.kind)) || (site as { shore?: Vec2 }).shore) return;
   const ranked2 = [...coast].sort((u, v) => Math.hypot(u.x - site.x, u.z - site.z) - Math.hypot(v.x - site.x, v.z - site.z));
   // 向内移 0.7 / 1.0 / 1.5 / 2.0 个半径各试一次：沿海大道离水线 ~22，贴岸 0.7 半径的位置正好压在它上面，
   // 退到大道内侧（岸边用地与海之间隔一条路）也算临水。
   const slots = ranked2.slice(0, 400).flatMap((q) => [0.7, 1.0, 1.5, 2.0].map((f) => ({ q, f })));
-  for (let idx = 0; idx < slots.length && !done; idx += 1) {
+  for (let idx = 0; idx < slots.length; idx += 1) {
     const { q, f } = slots[idx]; const lx = core.x - q.x; const lz = core.z - q.z; const ll = Math.hypot(lx, lz) || 1;
     const nx = q.x + (lx / ll) * site.radius * f; const nz = q.z + (lz / ll) * site.radius * f;
     const probe = nearestRoad(nx, nz);
@@ -100,16 +112,23 @@ export function relocateShoreSite(ctx: RepairContext, site: { x: number; z: numb
     if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
     if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;
     if (polylineDistance(ctx.trunkRuns, { x: nx, z: nz }) < site.radius * 0.7) continue;
-    site.x = nx; site.z = nz; done = true;
-    for (const block of blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - nx, pc.z - nz) >= site.radius);
+    yield { x: nx, z: nz };
   }
-  return done;
+}
+
+export function relocateShoreSite(ctx: RepairContext, site: { x: number; z: number; radius: number; kind: string }, g: SiteGeometry, others: Array<{ x: number; z: number; radius: number }>): boolean {
+  for (const at of shoreRelocationCandidates(ctx, site, g, others)) {
+    site.x = at.x; site.z = at.z;
+    for (const block of ctx.blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - at.x, pc.z - at.z) >= site.radius);
+    return true;
+  }
+  return false;
 }
 
 /** 穿路的用地推离路（最多 6 轮直到没有挪动）；推不开的岸边用地走 relocateShoreSite。返回总挪动数。 */
-export function nudgeSitesOffRoads(ctx: RepairContext): number {
+export function nudgeSitesOffRoads(ctx: RepairContext, onlyOwnerId?: string): number {
   const { publicSites, landmarks, blocks, ringRuns, height } = ctx;
-  const g = siteGeometry(ctx);
+  const g = siteGeometry(ctx, onlyOwnerId);
   const { movable, nearestRoad, wetAt } = g;
   let total = 0;
   for (let round = 0; round < 6; round += 1) {
@@ -194,8 +213,8 @@ export function detourAroundSites(ctx: RepairContext): number {
 }
 
 /** 断头顺着自己的方向直接延伸到下一条路（两遍）。返回接上的断头数。 */
-export function extendLooseEnds(ctx: RepairContext): number {
-  const { height, publicSites, landmarks } = ctx; const { nodes, edges } = ctx.network; const addEdge = (a: Vec2, b: Vec2, arterial: boolean, bridge = false, primary = false) => addNetworkEdge(ctx.network, a, b, arterial, bridge, primary); const key = keyOf;
+export function extendLooseEnds(ctx: RepairContext, onlyNodeId?: string): number {
+  const { publicSites, landmarks } = ctx; const { nodes, edges } = ctx.network; const key = keyOf;
   let total = 0;
     for (let pass = 0; pass < 2; pass += 1) {
       const solidEdges = [...edges.values()].filter((e) => !e.bridge);
@@ -204,41 +223,71 @@ export function extendLooseEnds(ctx: RepairContext): number {
       const sitesAll2 = [...publicSites, ...landmarks].filter((o) => o.radius);
       let healed = 0;
       for (const [id, list] of inc) {
+        if (onlyNodeId !== undefined && id !== onlyNodeId) continue;
         if (list.length !== 1) continue;
         const at = nodes.get(id); if (!at || isPlannedRoadEnd(at, plannedEndWorld(ctx))) continue;
         if (sitesAll2.some((o) => Math.hypot(o.x - at.x, o.z - at.z) < o.radius + 12)) continue; // 伸进用地边缘的门前路是正常终点
-        const own = list[0]; const [p0, p1] = own.points; const from = roadNodeId(p0) === id ? p1 : p0;
+        const own = list[0];
+        if (own.width !== (own.kind === "arterial" ? own.width >= 12 ? 12 : 8 : 5)) continue;
+        const from = own.from === id ? own.points[1] : own.points[own.points.length - 2];
         const dx = at.x - from.x; const dz = at.z - from.z; const dl = Math.hypot(dx, dz); if (dl < 1) continue;
         const ux = dx / dl; const uz = dz / dl;
-        let best: { t: number; edge: RoadEdge } | null = null;
+        let best: { t: number; edge: RoadEdge; c: Vec2; d: Vec2 } | null = null;
         for (const e of solidEdges) {
           if (e === own) continue;
-          const [c, d] = e.points; const ex = d.x - c.x; const ez = d.z - c.z;
+          for (let k = 1; k < e.points.length; k += 1) {
+          const c = e.points[k - 1], d = e.points[k]; const ex = d.x - c.x; const ez = d.z - c.z;
           const den = ux * ez - uz * ex; if (Math.abs(den) < 1e-6) continue;
           const t = ((c.x - at.x) * ez - (c.z - at.z) * ex) / den;
           const w = ((c.x - at.x) * uz - (c.z - at.z) * ux) / den;
-          if (t < 3 || t > 320 || w < -0.02 || w > 1.02) continue;
-          if (!best || t < best.t) best = { t, edge: e };
+          if (t < 3 || t > 320 || w < 0 || w > 1) continue;
+          if (!best || t < best.t) best = { t, edge: e, c, d };
+          }
         }
         if (!best) continue;
-        const [c, d] = best.edge.points;
+        const { c, d } = best;
         let target = key({ x: at.x + ux * best.t, z: at.z + uz * best.t });
         const lenE = Math.hypot(d.x - c.x, d.z - c.z) || 1;
-        const along = Math.hypot(target.x - c.x, target.z - c.z);
-        if (along < 12) target = c; else if (lenE - along < 12) target = d;
+        const hostStart = best.edge.points[0], hostEnd = best.edge.points[best.edge.points.length - 1];
+        if (Math.hypot(target.x - hostStart.x, target.z - hostStart.z) < 12) target = hostStart;
+        else if (Math.hypot(target.x - hostEnd.x, target.z - hostEnd.z) < 12) target = hostEnd;
         if (roadNodeId(target) === id) continue;
         if (!safeRoadLink(ctx.geo, [...publicSites, ...landmarks], at, target)) continue;
-        // 与落点处已有道路夹角 ≥ 30°（clearAngle 的 35° 对「延伸」略严，这里只防折回重叠）。
+        // Ordinary new T junctions share the same 35-degree contract.
         const ex2 = d.x - c.x; const ez2 = d.z - c.z; const cosA = Math.abs((ux * ex2 + uz * ez2) / lenE);
-        if (target !== c && target !== d && cosA > Math.cos((30 * Math.PI) / 180)) continue;
-        if ([...edges.values()].some((o) => o !== best!.edge && !o.bridge && o !== own && crosses(at, target, o.points[0], o.points[1]) )) continue;
+        const targetIsEndpoint = target === hostStart || target === hostEnd;
+        if (!targetIsEndpoint && cosA > Math.cos((JUNCTION_CONFIG.minAngleDeg * Math.PI) / 180)) continue;
+        if (!endpointClear(ctx.network, at, target) || !endpointClear(ctx.network, target, at)) continue;
         const host = best.edge;
-        if (target !== c && target !== d && edges.has(host.id)) {
-          edges.delete(host.id);
-          addEdge(c, target, host.kind === "arterial", false, host.width >= 12);
-          addEdge(target, d, host.kind === "arterial", false, host.width >= 12);
-        }
-        addEdge(at, target, own.kind === "arterial", false, own.width >= 12);
+        const world = { network: ctx.network, geo: ctx.geo, inRiver: ctx.inRiver, reservations: () => [...publicSites, ...landmarks] };
+        const result = commitNetworkPatch(ctx.network, { baseVersion: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+          removeEdgeIds: [], splits: targetIsEndpoint ? [] : [{ edgeId: host.id, at: target }],
+          addEdges: [{ a: at, b: target, arterial: own.kind === "arterial", primary: own.width >= 12 }] }, (draft) => {
+          const verdict = validateCandidate(world, draft, { id: `extend:${id}`, crossings: true, blockers: [],
+            segments: [{ a: at, b: target, width: own.width, kind: "ground-road" }] },
+          { roadPolicy: { requireBuildable: true, maxSlope: 0.9, sites: world.reservations(), siteMargin: 3, roadWidth: own.width } });
+          if (!verdict.ok) return `${verdict.violations[0].kind} ${verdict.violations[0].detail}`;
+          const targetId = roadNodeId(target);
+          const legs = [...draft.edges.values()].filter((edge) => !edge.bridge && (edge.from === targetId || edge.to === targetId));
+          const directions = legs.map((edge) => {
+            const outward = edge.from === targetId ? edge.points[1] : edge.points[edge.points.length - 2];
+            return { x: outward.x - target.x, z: outward.z - target.z };
+          });
+          for (let i = 0; i < directions.length; i += 1) for (let j = i + 1; j < directions.length; j += 1) {
+            const a = directions[i], b = directions[j], la = Math.hypot(a.x, a.z), lb = Math.hypot(b.x, b.z);
+            if ((!targetIsEndpoint && (la < JUNCTION_CONFIG.minLegLength || lb < JUNCTION_CONFIG.minLegLength))
+              || (a.x * b.x + a.z * b.z) / (la * lb) > Math.cos(JUNCTION_CONFIG.minAngleDeg * Math.PI / 180)) return "junction-angle extension";
+          }
+          for (const edge of legs) if (edge.from !== id && edge.to !== id) for (let k = 1; k < edge.points.length; k += 1) {
+            const parent = edges.get(edge.id) ?? host;
+            const failure = groundJunctionCorridorFailure({ ...world, network: draft }, edge.points[k - 1], edge.points[k], edge.width, parent);
+            if (failure) return `${failure} extension host corridor`;
+          }
+          return null;
+        });
+        ctx.connectionLog?.push({ id: `extend:${id}`, purpose: "district-access", ok: result.ok,
+          ...(!result.ok ? { reason: parseFailure(result.detail), detail: result.detail ?? result.reason } : {}) });
+        if (!result.ok) continue;
         healed += 1;
       }
       total += healed;

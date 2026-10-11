@@ -15,6 +15,16 @@ function model(count, harnesses = ["codex", "claude-code", "dsh", "harness:zcode
   return { buildings, districts: harnesses.map((id) => ({ id, label: id, sessionCount: buildings.filter((b) => b.districtId === id).length, anomaly: null })) };
 }
 const addresses = (layout) => Object.fromEntries(layout.districts.flatMap((district) => [...district.slots].map(([id, p]) => [id, [p.id, p.x, p.z, p.yaw]])));
+function coastGap(layout, p) {
+  let best = Infinity;
+  for (let i = 0; i < layout.coast.length; i += 1) {
+    const a = layout.coast[i], b = layout.coast[(i + 1) % layout.coast.length];
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+    best = Math.min(best, Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t));
+  }
+  return best;
+}
 function validate(layout, input) {
   const all = layout.districts.flatMap((district) => [...district.slots]);
   assert.equal(all.length, input.buildings.length, "every building must be placed");
@@ -38,6 +48,13 @@ function validate(layout, input) {
     for (const neighbor of adjacency.get(queue[index])) if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor); }
   }
   assert.equal(visited.size, nodes.size, "surface road graph is connected across harnesses");
+  for (const site of layout.publicSites) if (site.access) {
+    assert(visited.has(site.access.nodeId), `${site.id}: declared plot gate must survive display pruning on the primary network`);
+  }
+  const groundNodes = new Set(layout.roadEdges.filter((edge) => !edge.bridge).flatMap((edge) => [edge.from, edge.to]));
+  for (const edge of layout.roadEdges) if (edge.bridge) for (const id of [edge.from, edge.to]) {
+    assert(groundNodes.has(id) || layout.retentionReport.missingBridgeLandings.includes(id), `${edge.id}: display pruning lost a planned ground landing at ${id}`);
+  }
   for (const [, parcel] of all) {
     assert(Number.isFinite(layout.terrain.height(parcel.x, parcel.z)));
     assert.equal(layout.terrain.height(parcel.x, parcel.z), 1.2, "buildings occupy the level coastal plain");
@@ -113,7 +130,12 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   const input = model(700);
   const layout = layoutCity(input, null, seed);
   validate(layout, input);
-  for (const site of layout.publicSites) assert(layout.terrain.height(site.x, site.z) > 0.5, `seed ${seed}: ${site.id} must sit on land`);
+  for (const site of layout.publicSites) {
+    // Production's 12-unit setback is a conservative polar distance; the exposed 96-segment
+    // coast polyline has chord error, so its Euclidean gap can be several units larger.
+    if (site.kind === "harbor") assert(coastGap(layout, site) <= 20, `seed ${seed}: harbor remains within the coastal setback (including coast approximation)`);
+    else assert(layout.terrain.height(site.x, site.z) > 0.5, `seed ${seed}: ${site.id} must sit on land`);
+  }
   for (const anchor of layout.districtAnchors) assert(layout.terrain.height(anchor.x, anchor.z) > 0.5, `seed ${seed}: district anchor must sit on land`);
   assert.deepEqual(addresses(layoutCity(input, null, seed)), addresses(layout), `seed ${seed}: deterministic`);
 }

@@ -19,10 +19,11 @@
 import { DetMath as Math } from "../detMath";
 import { roadNodeId, segmentDistance } from "../cityPlan";
 import type { RoadEdge, Vec2 } from "../cityLayout";
-import { commitNetworkPatch, keyOf, type Network, type NetworkPatch, type PatchResult } from "./network";
-import { crosses } from "./footprint";
+import { commitNetworkPatch, previewNetworkPatch, keyOf, type Network, type NetworkPatch, type PatchResult } from "./network";
+import { crosses, closestPolylineSegment } from "./footprint";
 import type { Geography } from "./geography";
 import { corridorFailure, validateCandidate, VALIDATION_CONFIG, type CorridorPolicy, type RouteCandidate, type RouteSegment } from "./validation";
+import { ROAD_RELATION_CONFIG, classifyRoadSegments } from "./relations";
 
 export { corridorFailure, VALIDATION_CONFIG } from "./validation";
 export type { CorridorPolicy, RouteCandidate, RouteSegment, CandidateValidation, CandidateViolation } from "./validation";
@@ -43,9 +44,9 @@ export type ConnectionStrategy = "direct-projection" | "node-merge" | "detour" |
 const FAILURES: readonly string[] = ["water-span", "slope", "site-clearance", "junction-angle", "search-budget", "no-target", "stale-base", "projection-loss", "crossing", "vertical-clearance-unsupported"];
 
 /** 版本化连接器配置（设计 §6.3：参数取值实测后锁入版本化配置，禁散落默认数值）。
- *  v2（city-roundabout 批次）：新增 mini-roundabout 策略档参数，旧键不动。 */
+ *  v3：无入射道路的新入口允许惰性替代起向，共用原扩展预算；旧参数不变。 */
 export const CONNECTOR_CONFIG = {
-  version: 2,
+  version: 3,
   minJunctionAngleDeg: 60,      // 直连落点在中段时的最小夹角（connectToNetwork 历史默认档）
   endpointClearAngleDeg: 35,    // 端点处与既有路的净空角（clearAngle 历史口径）
   snapEndDistance: 12,          // 垂足离路段端 <12 吸附到端点（不留碎段）
@@ -125,6 +126,8 @@ export type ConnectionAttempt = {
 };
 
 export type ConnectorWorld = {
+  /** Pure caller-owned acceptance guard, checked on every final search proposal and commit. */
+  draftAcceptance?: (draft: Network) => string | null;
   network: Network & { version?: number };
   geo: Geography;
   inRiver: (x: number, z: number) => boolean;
@@ -160,7 +163,7 @@ export function endpointClear(network: Network, at: Vec2, toward: Vec2): boolean
   const ux = toward.x - at.x; const uz = toward.z - at.z; const ul = Math.hypot(ux, uz) || 1;
   for (const edge of network.edges.values()) {
     if (edge.from !== id && edge.to !== id) continue;
-    const other = edge.from === id ? edge.points[edge.points.length - 1] : edge.points[0];
+    const other = edge.from === id ? edge.points[1] : edge.points[edge.points.length - 2];
     const vx = other.x - at.x; const vz = other.z - at.z; const vl = Math.hypot(vx, vz) || 1;
     if ((ux * vx + uz * vz) / (ul * vl) > Math.cos((CONNECTOR_CONFIG.endpointClearAngleDeg * Math.PI) / 180)) return false;
   }
@@ -182,7 +185,16 @@ function targetIncludes(request: ConnectionRequest, edge: RoadEdge): boolean {
 function crossAny(network: Network, a: Vec2, b: Vec2, skip: RoadEdge | null): boolean {
   for (const other of network.edges.values()) {
     if (other === skip) continue;
-    if (crosses(a, b, other.points[0], other.points[1])) return true;
+    if (other.points.length === 2 && ((other.from === roadNodeId(keyOf(a)) && other.to === roadNodeId(keyOf(b)))
+      || (other.to === roadNodeId(keyOf(a)) && other.from === roadNodeId(keyOf(b))))) continue;
+    for (let i = 1; i < other.points.length; i += 1) {
+      const relation = classifyRoadSegments(a, b, other.points[i - 1], other.points[i]);
+      if (relation.kind === "separate") continue;
+      const shared = [other.from, other.to].some((id) => id === roadNodeId(keyOf(relation.a.point))
+        && id === roadNodeId(keyOf(relation.b.point)) && (id === roadNodeId(keyOf(a)) || id === roadNodeId(keyOf(b))));
+      if (relation.kind === "endpoint-contact" && shared) continue;
+      return true;
+    }
   }
   return false;
 }
@@ -340,7 +352,7 @@ function startHeading(network: Network, source: Vec2, toward: Vec2): number {
   const incident = [...network.edges.values()].filter((e) => e.from === id || e.to === id);
   if (incident.length === 1) {
     const e = incident[0];
-    const other = e.from === id ? network.nodes.get(e.to) : network.nodes.get(e.from);
+    const other = e.from === id ? e.points[1] : e.points[e.points.length - 2];
     if (other) return dirIndex(source.x - other.x, source.z - other.z);
   }
   return dirIndex(toward.x - source.x, toward.z - source.z);
@@ -356,6 +368,17 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
     .filter((g) => g.id !== sourceId && !network.edges.has([sourceId, g.id].sort().join("/"))) // 已直连的节点（源悬挂边对端）不是目标
     .filter((g) => g.d <= request.maxLength).slice(0, CONNECTOR_CONFIG.aStarGoals);
   if (!goals.length) return { ok: false, reason: "no-target", detail: `no target node within ${request.maxLength}` };
+  const roadCell = 60;
+  const roadBuckets = new Map<string, Array<{ edge: RoadEdge; a: Vec2; b: Vec2 }>>();
+  for (const edge of network.edges.values()) for (let i = 1; i < edge.points.length; i += 1) {
+    const a = edge.points[i - 1], b = edge.points[i];
+    const segment = { edge, a, b };
+    for (let gx = Math.floor(Math.min(a.x, b.x) / roadCell); gx <= Math.floor(Math.max(a.x, b.x) / roadCell); gx += 1)
+      for (let gz = Math.floor(Math.min(a.z, b.z) / roadCell); gz <= Math.floor(Math.max(a.z, b.z) / roadCell); gz += 1) {
+        const key = `${gx}:${gz}`, bucket = roadBuckets.get(key);
+        if (bucket) bucket.push(segment); else roadBuckets.set(key, [segment]);
+      }
+  }
   const cellMemo = new Map<string, boolean>(); // 胞元可通过性只依赖 geo/用地（请求内不变），按格记忆化
   const cellBlocked = (cx: number, cz: number) => {
     const ck = `${cx},${cz}`;
@@ -364,7 +387,29 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
     const p = { x: cx * step, z: cz * step };
     let blocked = true;
     if (world.geo.height(p.x, p.z) > 0.5 && !world.inRiver(p.x, p.z) && world.geo.buildable(p.x, p.z) && world.geo.terrain.slope(p.x, p.z) <= policy.maxSlope) {
-      blocked = policy.sites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + policy.siteMargin);
+      blocked = policy.sites.some((site) => Math.hypot(p.x - site.x, p.z - site.z)
+        < site.radius + policy.siteMargin + (policy.roadWidth ?? 0) / 2);
+      if (!blocked) {
+        // Roads are obstacles too: terrain-only A* can return a line that touches
+        // or skirts an arterial, which passes the strict-cross test but becomes an
+        // unjoined endpoint-near-edge relation. Keep a small attachment aperture
+        // only around the source/goal node; the final corridor/report checks stay
+        // authoritative after reconstruction.
+        const sourceNear = Math.hypot(p.x - request.source.x, p.z - request.source.z) <= step * 2;
+        const nearbyGoals = goals.filter((goal) => Math.hypot(p.x - goal.p.x, p.z - goal.p.z) <= step * 2);
+        const gx = Math.floor(p.x / roadCell), gz = Math.floor(p.z / roadCell);
+        const segments = new Map<string, { edge: RoadEdge; a: Vec2; b: Vec2 }>();
+        for (let bx = gx - 1; bx <= gx + 1; bx += 1) for (let bz = gz - 1; bz <= gz + 1; bz += 1)
+          for (const segment of roadBuckets.get(`${bx}:${bz}`) ?? []) segments.set(`${segment.edge.id}:${segment.a.x}:${segment.a.z}:${segment.b.x}:${segment.b.z}`, segment);
+        for (const { edge, a, b } of segments.values()) {
+          const sourceAperture = sourceNear && (edge.from === sourceId || edge.to === sourceId);
+          const goalAperture = nearbyGoals.some((goal) => edge.from === goal.id || edge.to === goal.id);
+          if (sourceAperture || goalAperture) continue;
+          const clearance = (policy.roadWidth ?? roadWidthOf(request)) / 2 + edge.width / 2 + ROAD_RELATION_CONFIG.nearDistance;
+          if (segmentDistance(p, a, b) < clearance) blocked = true;
+          if (blocked) break;
+        }
+      }
     }
     cellMemo.set(ck, blocked);
     return blocked;
@@ -377,6 +422,8 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
   };
   const sourceCell = { x: Math.round(request.source.x / step), z: Math.round(request.source.z / step) };
   const sdir = startHeading(network, request.source, goals[0].p);
+  const alternateHeadings = [...network.edges.values()].some((edge) => edge.from === sourceId || edge.to === sourceId)
+    ? [] : Array.from({ length: 7 }, (_, i) => (sdir + i + 1) % 8);
   const keyOf3 = (cx: number, cz: number, dir: number) => `${cx},${cz},${dir}`;
   type State = { f: number; g: number; seq: number; cx: number; cz: number; dir: number };
   const open: State[] = [];
@@ -403,13 +450,61 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
   best.set(startKey, 0); prev.set(startKey, "");
   let seq = 1;
   push({ f: heuristic(sourceCell.x, sourceCell.z), g: 0, seq: seq++, cx: sourceCell.x, cz: sourceCell.z, dir: sdir });
-  let expansions = 0;
-  let goalState: { key: string; cx: number; cz: number } | null = null;
-  while (open.length) {
-    if (expansions >= budget) return { ok: false, reason: "search-budget", detail: `A* exceeded ${budget} expansions (search-budget ≠ no path, 设计 §6.3)` };
+  // Reaching a goal cell is only a proposal: grid centres do not prove the
+  // full-width route or its final attachment safe. Reject locally and resume
+  // the same heap, with the same expansion budget, rather than ending A*.
+  const reconstruct = (s: State, goal: typeof goals[number]): StrategyOutcome => {
+    const cells: Array<{ x: number; z: number }> = [];
+    for (let k: string = keyOf3(s.cx, s.cz, s.dir); k; k = prev.get(k)!) { const [x, z] = k.split(","); cells.unshift({ x: Number(x), z: Number(z) }); }
+    const kept = cells.filter((c, i) => i === 0 || i === cells.length - 1
+      || (c.x - cells[i - 1].x) * (cells[i + 1].z - c.z) - (c.z - cells[i - 1].z) * (cells[i + 1].x - c.x) !== 0);
+    while (kept.length && Math.hypot(kept[0].x * step - request.source.x, kept[0].z * step - request.source.z) < step) kept.shift();
+    const polyline = [request.source, ...kept.map((c) => ({ x: c.x * step, z: c.z * step })), goal.p];
+    let cost = 0; for (let k = 1; k < polyline.length; k += 1) cost += Math.hypot(polyline[k].x - polyline[k - 1].x, polyline[k].z - polyline[k - 1].z);
+    if (cost > request.maxLength) return { ok: false, reason: "no-target", detail: `reconstructed path ${Math.round(cost)} exceeds maxLength ${request.maxLength}` };
+    for (let k = 1; k < polyline.length; k += 1) {
+      const failure = corridorFailure(world, polyline[k - 1], polyline[k], policy);
+      if (failure) return { ok: false, reason: failure, detail: `A* polyline segment ${k} (${polyline[k - 1].x}:${polyline[k - 1].z}->${polyline[k].x}:${polyline[k].z}) failed ${failure}` };
+      if (crossAny(network, polyline[k - 1], polyline[k], null)) return { ok: false, reason: "crossing", detail: `A* polyline segment ${k} crosses an existing edge` };
+    }
+    if (!endpointClear(network, request.source, polyline[1]) || !endpointClear(network, goal.p, polyline[polyline.length - 2])) return { ok: false, reason: "junction-angle", detail: "A* join fails the endpoint clearance angle" };
+    const join = { edge: null, at: goal.p, onEnd: true };
+    const proposal: Extract<ConnectionResult, { ok: true }> = { ok: true, patch: buildPatch(world, request, join, polyline, []),
+      cost, strategy: "grid-astar", policy, purpose: request.purpose, crossings: true, bridgeSpans: [] };
+    const preview = previewNetworkPatch(network, proposal.patch);
+    if (!preview.ok) return { ok: false, reason: "projection-loss", detail: preview.detail ?? preview.reason };
+    const failure = draftProblem(world, proposal, preview.network);
+    if (failure) return { ok: false, reason: parseFailure(failure), detail: failure };
+    return { ok: true, join, polyline, cost };
+  };
+  let expansions = 0, rejected = 0;
+  const rejectionCounts = new Map<ConnectionFailure, number>();
+  const rejectionSummary = () => [...rejectionCounts].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([reason, count]) => `${reason}:${count}`).join(",");
+  let lastRejection: Extract<StrategyOutcome, { ok: false }> | null = null;
+  let nextHeading = 0;
+  while (open.length || nextHeading < alternateHeadings.length) {
+    if (expansions >= budget) return { ok: false, reason: "search-budget", detail: `A* exceeded ${budget} expansions; rejected ${rejected} goal candidates [${rejectionSummary()}]${lastRejection ? `, last: ${lastRejection.detail}` : ""} (search-budget ≠ no path, 设计 §6.3)` };
+    if (!open.length) {
+      // Keep successful historical routes unchanged. Only after that heap is
+      // exhausted may an unbound entrance use another unconstrained start
+      // direction; neither the expansion counter nor validation is reset.
+      const dir = alternateHeadings[nextHeading++], key = keyOf3(sourceCell.x, sourceCell.z, dir);
+      if (best.get(key) === 0) continue;
+      best.set(key, 0); prev.set(key, "");
+      push({ f: heuristic(sourceCell.x, sourceCell.z), g: 0, seq: seq++, cx: sourceCell.x, cz: sourceCell.z, dir });
+    }
     const s = pop();
     expansions += 1;
-    if (goals.some((g) => { const c = goalCell(g); return Math.abs(c.x - s.cx) <= 1 && Math.abs(c.z - s.cz) <= 1; })) { goalState = { key: keyOf3(s.cx, s.cz, s.dir), cx: s.cx, cz: s.cz }; break; }
+    if (s.g !== best.get(keyOf3(s.cx, s.cz, s.dir))) continue;
+    const nearby = goals.filter((g) => { const c = goalCell(g); return Math.abs(c.x - s.cx) <= 1 && Math.abs(c.z - s.cz) <= 1; })
+      .sort((a, b) => Math.hypot(a.p.x - s.cx * step, a.p.z - s.cz * step) - Math.hypot(b.p.x - s.cx * step, b.p.z - s.cz * step) || (a.id < b.id ? -1 : 1));
+    for (const goal of nearby) {
+      const outcome = reconstruct(s, goal);
+      if (outcome.ok) return outcome;
+      rejected += 1; lastRejection = outcome;
+      rejectionCounts.set(outcome.reason, (rejectionCounts.get(outcome.reason) ?? 0) + 1);
+    }
     for (const nd of [(s.dir + 7) % 8, s.dir, (s.dir + 1) % 8]) { // 只允许直行/±45°：平滑路径
       const nx = s.cx + DIRS[nd][0]; const nz = s.cz + DIRS[nd][1];
       if (Math.hypot(nx * step - request.source.x, nz * step - request.source.z) > request.maxLength) continue; // 有界搜索区域
@@ -423,26 +518,7 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
       push({ f: ng + heuristic(nx, nz), g: ng, seq: seq++, cx: nx, cz: nz, dir: nd });
     }
   }
-  if (!goalState) return { ok: false, reason: "no-target", detail: `grid search exhausted within ${request.maxLength} after ${expansions} expansions` };
-  // 重构：格心序列 → 共线合并 → [source, ..., 目标节点]
-  const cells: Array<{ x: number; z: number }> = [];
-  for (let k: string = goalState.key; k; k = prev.get(k)!) { const [x, z] = k.split(","); cells.unshift({ x: Number(x), z: Number(z) }); }
-  const kept: Array<{ x: number; z: number }> = cells.filter((c, i) =>
-    i === 0 || i === cells.length - 1 || (c.x - cells[i - 1].x) * (cells[i + 1].z - c.z) - (c.z - cells[i - 1].z) * (cells[i + 1].x - c.x) !== 0);
-  // 起点不在格点上：首个格心可能在源「身后」几单位（round 对齐），留着会沿悬挂边折回（端点净空角拒绝）。
-  while (kept.length && Math.hypot(kept[0].x * step - request.source.x, kept[0].z * step - request.source.z) < step) kept.shift();
-  const goal = goals.slice().sort((a, b) => Math.hypot(a.p.x - goalState.cx * step, a.p.z - goalState.cz * step) - Math.hypot(b.p.x - goalState.cx * step, b.p.z - goalState.cz * step) || (a.id < b.id ? -1 : 1))[0];
-  const polyline = [request.source, ...kept.map((c) => ({ x: c.x * step, z: c.z * step })), goal.p];
-  let cost = 0; for (let k = 1; k < polyline.length; k += 1) cost += Math.hypot(polyline[k].x - polyline[k - 1].x, polyline[k].z - polyline[k - 1].z);
-  if (cost > request.maxLength) return { ok: false, reason: "no-target", detail: `reconstructed path ${Math.round(cost)} exceeds maxLength ${request.maxLength}` };
-  // 全线终筛（格心检查是初筛，宽走廊以密集采样为准——§9.2「格点合法 ≠ 整个宽路面合法」）
-  for (let k = 1; k < polyline.length; k += 1) {
-    const failure = corridorFailure(world, polyline[k - 1], polyline[k], policy);
-    if (failure) return { ok: false, reason: failure, detail: `A* polyline segment ${k} failed ${failure}` };
-    if (crossAny(network, polyline[k - 1], polyline[k], null)) return { ok: false, reason: "crossing", detail: `A* polyline segment ${k} crosses an existing edge` };
-  }
-  if (!endpointClear(network, request.source, polyline[1]) || !endpointClear(network, goal.p, polyline[polyline.length - 2])) return { ok: false, reason: "junction-angle", detail: "A* join fails the endpoint clearance angle" };
-  return { ok: true, join: { edge: null, at: goal.p, onEnd: true }, polyline, cost };
+  return { ok: false, reason: lastRejection?.reason ?? "no-target", detail: `grid search exhausted within ${request.maxLength} after ${expansions} expansions; rejected ${rejected} goal candidates [${rejectionSummary()}]${lastRejection ? `, last: ${lastRejection.detail}` : ""}` };
 }
 
 // ── 阶梯 5（批次 5-1）：显式桥候选 ground→bridge→ground（§4.2 桥梁统一）──────────────────
@@ -463,21 +539,29 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
   const candidates: Array<{ edge: RoadEdge; p: Vec2; d: number }> = [];
   for (const edge of network.edges.values()) {
     if (edge.bridge || !targetIncludes(request, edge)) continue;
-    const [a, b] = edge.points;
-    const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-    const t = Math.max(0, Math.min(1, ((request.source.x - a.x) * dx + (request.source.z - a.z) * dz) / l2));
-    const p = { x: a.x + dx * t, z: a.z + dz * t }; // 原始投影（不吸附端点——历史口径）
-    candidates.push({ edge, p, d: Math.hypot(p.x - request.source.x, p.z - request.source.z) });
+    const closest = closestPolylineSegment(edge.points, request.source);
+    if (!closest) continue;
+    // One projection per host, on its real polyline. Keep the 40-host budget.
+    candidates.push({ edge, p: closest.q, d: closest.d });
   }
   candidates.sort((x, y) => x.d - y.d || (x.edge.id < y.edge.id ? -1 : 1));
   let nearestReject: ConnectionFailure = "no-target";
+  const rejections = new Map<ConnectionFailure, { count: number; first: string }>();
+  const reject = (reason: ConnectionFailure, evidence: string) => {
+    nearestReject = reason;
+    const previous = rejections.get(reason);
+    if (previous) previous.count += 1;
+    else rejections.set(reason, { count: 1, first: evidence });
+  };
   // sourceHasRoad 是循环不变量，提出循环外只算一次（评审 P2：原在每候选内全量扫边 O(40×|E|)）。
   const sourceId = roadNodeId(keyOf(request.source));
   let sourceHasRoad = false;
   for (const edge of world.network.edges.values()) if (!edge.bridge && (edge.from === sourceId || edge.to === sourceId)) { sourceHasRoad = true; break; } // 桥链末端的节点度>0 但无地面路，不算
   for (const candidate of candidates.slice(0, CONNECTOR_CONFIG.bridgeCandidates)) {
     if (candidate.d < CONNECTOR_CONFIG.minLinkDistance) continue; // 源自身悬挂边的投影（d≈0）：连到原地不是连接
-    if (!endpointClear(network, request.source, candidate.p) || !endpointClear(network, candidate.p, request.source)) { nearestReject = "junction-angle"; continue; }
+    const evidence = `${candidate.edge.id}@${candidate.p.x}:${candidate.p.z}`;
+    if (!endpointClear(network, request.source, candidate.p)) { reject("junction-angle", `source ${evidence}`); continue; }
+    if (!endpointClear(network, candidate.p, request.source)) { reject("junction-angle", `target ${evidence}`); continue; }
     // 连线水段分析：首/末水采样界定连续水段；无水 = 纯地面引道。
     // 6 单位采样只用于提出桥跨候选；最终各段按统一路幅终筛，不以历史漏检授予豁免。
     const n = Math.max(4, Math.ceil(Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z) / (VALIDATION_CONFIG.sampleSpacing / 2)));
@@ -502,7 +586,7 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
       if (blockers.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + 2)) { blocked = true; break; }
       if (self && Math.hypot(self.x - q.x, self.z - q.z) < self.radius) { blocked = true; break; }
     }
-    if (blocked) { nearestReject = "site-clearance"; continue; }
+    if (blocked) { reject("site-clearance", `sampled envelope ${evidence}`); continue; }
     let span: [Vec2, Vec2] | null = null;
     if (first >= 0) {
       // 近岸引道存在性（批 A）：非门路且源头不是路网节点（度 0 新点）时 deck 不得直接从源头
@@ -513,18 +597,18 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
       //    （实测 3005969553：first≥2 误杀门路 → siteWithoutDoorRoad）；
       // ② 源头本就是带地面边的路端节点（isolate 场景）。远端落点必在既有路边（T 拆分后两侧
       //    有地面路），维持历史 last≤n-2。
-      if ((last - first + 1) * distance / n > maxWetLength || first < (sourceHasRoad ? 1 : 2) || last > n - 2) { nearestReject = "water-span"; continue; }
+      if ((last - first + 1) * distance / n > maxWetLength || first < (sourceHasRoad ? 1 : 2) || last > n - 2) { reject("water-span", `span/landing ${evidence}`); continue; }
       let continuous = true;
       for (let k = first; k <= last; k += 1) if (!wet(k)) { continuous = false; break; }
-      if (!continuous) { nearestReject = "water-span"; continue; }
+      if (!continuous) { reject("water-span", `discontinuous span ${evidence}`); continue; }
       const near = at(first - 1);
-      if (self && Math.hypot(self.x - near.x, self.z - near.z) < self.radius + 2) { nearestReject = "site-clearance"; continue; } // 桥头不得落在用地圈里
+      if (self && Math.hypot(self.x - near.x, self.z - near.z) < self.radius + 2) { reject("site-clearance", `owner landing ${evidence}`); continue; } // 桥头不得落在用地圈里
       span = [near, at(last + 1)];
     }
     const join = keyOf(candidate.p);
     const polyline = span ? [request.source, span[0], span[1], join] : [request.source, join];
     const cost = polyline.slice(1).reduce((sum, q, k) => sum + Math.hypot(q.x - polyline[k].x, q.z - polyline[k].z), 0);
-    if (cost > request.maxLength) { nearestReject = "no-target"; continue; }
+    if (cost > request.maxLength) { reject("no-target", `route length ${cost} ${evidence}`); continue; }
     // 提议期终筛（批 A §4-A：提交被拒的候选在候选预算内续试后续投影点，不让第一个草案堵住
     // 其它合法候选）：ground-approach 标准（有限坡度实测 6/前滩不套 buildable/只避让 blockers）+ deck
     // 段垂直净空判。失败记因续试；候选预算 = bridgeCandidates（40 个投影点）。
@@ -535,16 +619,20 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
           { a: polyline[2], b: polyline[3], kind: "ground-approach", width: roadWidthOf(request), touchesDeck: true },
         ]
       : [{ a: polyline[0], b: polyline[1], kind: "ground-approach", width: roadWidthOf(request) }];
-    const verdict = validateCandidate(world, world.network, { id: `${request.id}:bridge`, crossings, blockers, gate: request.purpose === "site-access", segments }, { roadPolicy: bridgePolicy(bridge, request) });
+    const onEnd = roadNodeId(join) === candidate.edge.from || roadNodeId(join) === candidate.edge.to;
+    const preview = previewNetworkPatch(world.network, buildPatch(world, request, { edge: candidate.edge, at: join, onEnd }, polyline, span ? [2] : []));
+    if (!preview.ok) { reject("projection-loss", `${preview.detail ?? preview.reason} ${evidence}`); continue; }
+    const verdict = validateCandidate(world, preview.network, { id: `${request.id}:bridge`, crossings, blockers, gate: request.purpose === "site-access", segments }, { roadPolicy: bridgePolicy(bridge, request) });
     if (!verdict.ok) {
       const v = verdict.violations[0];
-      nearestReject = v.kind;
+      reject(v.kind, `${v.detail} ${evidence}`);
       continue;
     }
-    const onEnd = roadNodeId(join) === candidate.edge.from || roadNodeId(join) === candidate.edge.to;
     return { ok: true, join: { edge: candidate.edge, at: join, onEnd }, polyline, cost, bridgeSpans: span ? [{ from: span[0], to: span[1] }] : [] };
   }
-  return { ok: false, reason: nearestReject, detail: `no bridge candidate within ${CONNECTOR_CONFIG.bridgeCandidates} projections (${nearestReject})` };
+  const summary = [...rejections].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([reason, entry]) => `${reason}=${entry.count} first:${entry.first}`).join(" | ");
+  return { ok: false, reason: nearestReject, detail: `no bridge candidate within ${CONNECTOR_CONFIG.bridgeCandidates} projections (${nearestReject}); rejections [${summary}]` };
 }
 
 // ── 策略档（不在 DEFAULT_LADDER）：mini-roundabout 小型交通环（city-roundabout 批次，形态盘点 §5-1）──
@@ -576,6 +664,7 @@ function proposeMiniRoundabout(
   world: ConnectorWorld,
   center: { id: string; x: number; z: number },
   legs: RoadEdge[],
+  groundCorridorFailure?: (a: Vec2, b: Vec2, width: number) => ConnectionFailure | null,
 ): { patch: NetworkPatch; radius: number; ring: Vec2[] } | { reason: ConnectionFailure; detail: string } {
   const centerId = center.id;
   if (legs.length !== 3) return { reason: "no-target", detail: `mini-roundabout needs a 3-way junction, got ${legs.length} legs` };
@@ -632,7 +721,7 @@ function proposeMiniRoundabout(
     for (let k = 0; k < ring.length && !failure; k += 1) {
       const p = ring[k].p; const q = ring[(k + 1) % ring.length].p;
       if (Math.hypot(q.x - p.x, q.z - p.z) < CONNECTOR_CONFIG.roundaboutMinChord) { failure = "no-target"; detail = `arc chord ${k} shorter than ${CONNECTOR_CONFIG.roundaboutMinChord} at r=${radius}`; break; }
-      const corridor = corridorFailure(world, p, q, policy);
+      const corridor = groundCorridorFailure ? groundCorridorFailure(p, q, policy.roadWidth ?? 5) : corridorFailure(world, p, q, policy);
       if (corridor) { failure = corridor; detail = `arc chord ${k} failed ${corridor} at r=${radius}`; break; }
       for (const other of world.network.edges.values()) {
         if (legIds.has(other.id)) continue;
@@ -665,10 +754,11 @@ function proposeMiniRoundabout(
 /** 建环并事务提交。成功后清掉环心 V（三条腿全删后成为孤立节点——componentOf 按节点并查集算分量，
  *  孤立节点会被 disconnectedComponents 计成新分量；applyOps 无节点删除原语，这里与 dropEdge 同款
  *  只在成功提交后清这一个 id，且仅当它确实无关联边）。 */
-export function runMiniRoundabout(world: ConnectorWorld, center: { id: string; x: number; z: number }, legs: RoadEdge[]): RoundaboutResult {
+export function runMiniRoundabout(world: ConnectorWorld, center: { id: string; x: number; z: number }, legs: RoadEdge[],
+  groundCorridorFailure?: (a: Vec2, b: Vec2, width: number) => ConnectionFailure | null): RoundaboutResult {
   const live = legs.map((e) => world.network.edges.get(e.id)).filter((e): e is RoadEdge => !!e);
   if (live.length !== legs.length) return { ok: false, reason: "projection-loss", detail: `only ${live.length}/${legs.length} legs still in the network` };
-  const proposal = proposeMiniRoundabout(world, center, live);
+  const proposal = proposeMiniRoundabout(world, center, live, groundCorridorFailure);
   if ("reason" in proposal) return { ok: false, reason: proposal.reason, detail: proposal.detail };
   const legIds = new Set(live.map((e) => e.id));
   const committed = commitNetworkPatch(world.network, proposal.patch, (draft) => {
@@ -766,7 +856,7 @@ export function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal
     })),
   };
   const verdict = validateCandidate(world, draft, candidate, { roadPolicy: { ...proposed.policy, sites: reservations } });
-  if (verdict.ok) return null;
+  if (verdict.ok) return world.draftAcceptance?.(draft) ?? null;
   const v = verdict.violations[0];
   return v.kind === "crossing" ? `${proposed.strategy}-crossing ${v.detail}` : `${v.kind} ${v.detail}`;
 }
@@ -791,7 +881,7 @@ export function proposeConnection(request: ConnectionRequest, world: ConnectorWo
       return { ok: true, patch: buildPatch(world, request, outcome.join, outcome.polyline, bridgeAt), cost: outcome.cost, strategy, policy, purpose: request.purpose, crossings: options.crossings !== false, bridgeSpans: outcome.bridgeSpans ?? [], ...(strategy === "bridge-candidate" && options.bridge?.self ? { reservationOwner: { ...options.bridge.self } } : {}) };
     }
     lastReason = outcome.reason;
-    failures.push(`${strategy}:${outcome.reason}`);
+    failures.push(`${strategy}:${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ""}`);
   }
   return { ok: false, reason: lastReason, attempted: ladder.length, detail: failures.join(", ") };
 }
@@ -829,12 +919,19 @@ export function parseFailure(detail: string | undefined): ConnectionFailure {
 
 /** 搜索 + 事务提交（§9.1：失败进诊断，不触碰正式网络）。 */
 export function runConnection(request: ConnectionRequest, world: ConnectorWorld, options: LadderOptions = {}): ConnectionResult {
-  const proposed = proposeConnection(request, world, options);
-  if (!proposed.ok) return proposed;
-  const committed = commitConnection(world, proposed);
-  if (!committed.ok) {
-    if (committed.reason === "stale-base") return { ok: false, reason: "stale-base", attempted: 1, detail: committed.detail };
-    return { ok: false, reason: parseFailure(committed.detail), attempted: 1, detail: `${committed.reason}: ${committed.detail ?? ""}` };
+  const ladder = options.strategies ?? (request.allowBridge ? [...DEFAULT_LADDER, "bridge-candidate" as const] : DEFAULT_LADDER);
+  let last: Extract<ConnectionResult, { ok: false }> = { ok: false, reason: "no-target", attempted: 0 };
+  let attempted = 0;
+  const rejections: string[] = [];
+  for (const strategy of ladder) {
+    const proposed = proposeConnection(request, world, { ...options, strategies: [strategy] });
+    attempted += proposed.ok ? 1 : proposed.attempted;
+    if (!proposed.ok) { last = proposed; rejections.push(`${strategy}:${proposed.detail ?? proposed.reason}`); continue; }
+    const committed = commitConnection(world, proposed);
+    if (committed.ok) return { ...proposed, version: committed.version };
+    if (committed.reason === "stale-base") return { ok: false, reason: "stale-base", attempted, detail: committed.detail };
+    last = { ok: false, reason: parseFailure(committed.detail), attempted, detail: committed.detail };
+    rejections.push(`${strategy}:${committed.reason}: ${committed.detail ?? ""}`);
   }
-  return { ...proposed, version: committed.version };
+  return { ...last, attempted, detail: rejections.join("; ") };
 }

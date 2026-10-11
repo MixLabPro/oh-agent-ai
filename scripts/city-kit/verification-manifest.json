@@ -1,4 +1,22 @@
 [
+  { "id": "verify-city-block-surface", "file": "verify-city-block-surface.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-shore-plot-access", "file": "verify-city-shore-plot-access.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-shore-plot-access-named", "file": "verify-city-shore-plot-access.mjs", "env": { "CITY_SHORE_NAMED": "1" }, "shared": false },
+  { "id": "verify-city-joint-frontage", "file": "verify-city-joint-frontage.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-road-blocks", "file": "verify-city-road-blocks.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-required-placement", "file": "verify-city-required-placement.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-road-admission", "file": "verify-city-road-admission.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-causeway-primary", "file": "verify-city-causeway-primary.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-world", "file": "verify-city-world.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-access-capabilities", "file": "verify-city-access-capabilities.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-endpoint-routing", "file": "verify-city-endpoint-routing.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-road-faces", "file": "verify-city-road-faces.mjs", "env": {}, "shared": false },
+  {
+    "id": "verify-city-radius",
+    "file": "verify-city-radius.mjs",
+    "env": {},
+    "shared": false
+  },
   {
     "id": "verify-city-road-report",
     "file": "verify-city-road-report.mjs",

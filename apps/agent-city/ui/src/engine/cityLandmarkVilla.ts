@@ -13,9 +13,10 @@
  * position/yaw 由调用方（cityParts.buildLandmarks）设置。
  */
 import * as THREE from "three";
+import { villaGeometryParameters, villaSeedStream } from "./models/villaGeometry";
 
 /** 选址半径（与 sail-opera 同档）：整体占地（含钟塔）x 向 ≈ 64.6–67.0 ≤ 2×半径，供 cityPlan 的 snap/clearance 用。 */
-export const VILLA_SITE_RADIUS = 34;
+export { VILLA_SITE_RADIUS } from "./models/villaGeometry";
 
 export type LandmarkBuild = {
   group: THREE.Group;
@@ -30,17 +31,7 @@ export function buildVillaComplex(seed: number, neon: boolean): LandmarkBuild {
   // seed（约定为 hashSeed 派生的 [0,1)，但也兼容整数入参）经整数雪崩派生多条互不相关的恒定随机流：
   // 整数部分与小数部分分别折进 32 位状态——否则 42×2³² 的低 32 位是 0，所有整数 seed 会坍缩成同一座庄园。
   // 不用 Math.random，保证同 seed 逐字节复现。
-  const base = (() => {
-    const n = Math.abs(seed);
-    const frac = n - Math.floor(n);
-    return ((Math.floor(n) % 0x1_0000_0000) ^ Math.floor(frac * 0x1_0000_0000)) >>> 0;
-  })();
-  const stream = (salt: number): number => {
-    let h = (base ^ Math.imul(salt + 1, 0x9e3779b9)) >>> 0;
-    h = Math.imul(h ^ (h >>> 13), 0x01000193);
-    h = Math.imul(h ^ (h >>> 16), 0x01000193);
-    return (h >>> 0) / 0x1_0000_0000;
-  };
+  const stream = (salt: number): number => villaSeedStream(seed, salt);
 
   const material = (color: string, emissive = 0): THREE.MeshLambertMaterial => {
     // 与 cityParts.buildLandmarks 同一惯用法：Lambert + 自发光色 = 基色乘系数，进 bloom 即成霓虹/灯室。
@@ -65,27 +56,8 @@ export function buildVillaComplex(seed: number, neon: boolean): LandmarkBuild {
   // 主体长取 backlog 规格下限 60 起步：占地必须压在 2×VILLA_SITE_RADIUS=68 内
   // （台基两端各出 0.6、钟塔再悬出 4.0，主体+塔共 ≈ 64.6–67.0），拉长只会挤掉钟塔；
   // 低层纪念性靠 60:13 的横竖比（≈4.6:1）成立，不需要更长。
-  const bodyL = 60 + stream(1) * 2.4;
-  const bodyD = 13;
-  const groundH = 4.6; // 底层（拱廊层）比上层高：拱券需要起券高度，也是基座应有的分量
-  const upperH = 3.8;
-  const wallTop = groundH + upperH; // 8.4，自台基面起
-  const deckTop = 0.55; // 台基面：建筑从台基上「长」出来，避免贴地悬浮感
-  const bays = 8 + Math.floor(stream(2) * 5); // 拱廊 8–12 跨（L-3 规格）
-  const margin = 3.5; // 拱廊两端各让出一段实墙：连续拱廊顶到山墙会显得像凉亭而不像庄园
-  const pitch = (bodyL - margin * 2) / bays; // 券心距 4.4–6.9，随主体长/跨数联动
-  const pierS = 1.2; // 方墩截面：柱距的 ~20%，太细读不成承重拱廊
-  const pierH = 3.1;
-  const archR = (pitch - pierS) / 2; // 券半径 = 净跨一半：券脚正好落在墩顶，半圆拱的经典几何
-  const towerSide = stream(3) < 0.5 ? 1 : -1; // 钟塔随机在 +x / −x 端，避免同种子城市里庄园千篇一律
-  const towerHalf = 2.6; // 平面 5.2²：塔身宽 ≈ 主体进深 40%，细而不弱
-  const towerEmbed = 1.05; // 塔心悬出主体端墙 1.05（嵌入端墙 1.9）：留缝会像两栋楼，全贴进去会消失
-  const towerOut = towerEmbed + towerHalf; // 4.0，塔外皮到主体端墙的距离
-  const deckOut = 0.6; // 台基两端超出主体的距离
-  const shift = (-towerSide * (towerOut - deckOut)) / 2; // 含塔含台基整体对原点居中（占地中心约定）
-  const bodyCx = shift;
-  const bodyEnd = shift + (towerSide * bodyL) / 2;
-  const towerX = bodyEnd + towerSide * towerEmbed;
+  const params = villaGeometryParameters(seed);
+  const { bodyL, bodyD, wallTop, deckTop, bays, margin, pitch, pierS, pierH, archR, bodyCx, towerX } = params;
 
   const group = new THREE.Group();
   group.name = "city-landmark-villa-complex";
@@ -99,12 +71,12 @@ export function buildVillaComplex(seed: number, neon: boolean): LandmarkBuild {
   const lamp = material("#ffedb8", neon ? 1.15 : 0.85); // 钟塔灯室：常亮（L-3 夜景要求），neon 只提亮度
 
   // ── 台基与踏步：把整组建筑从地形上「托」起来，前端（+Z，临水）给两步下行的台阶 ──
-  const deck = useGeometry(new THREE.BoxGeometry(bodyL + deckOut * 2, deckTop, 19.2));
+  const deck = useGeometry(new THREE.BoxGeometry(params.deckWidth, deckTop, params.deckDepth));
   mesh(deck, trim, group, bodyCx, deckTop / 2, 0);
-  const step = useGeometry(new THREE.BoxGeometry(8, 0.28, 1.4));
-  mesh(step, trim, group, bodyCx, 0.42, 8.9);
-  const step2 = useGeometry(new THREE.BoxGeometry(8, 0.28, 1.4));
-  mesh(step2, trim, group, bodyCx, 0.14, 9.9);
+  const step = useGeometry(new THREE.BoxGeometry(params.stepWidth, params.stepHeight, params.stepDepth));
+  mesh(step, trim, group, bodyCx, params.firstStepY, params.firstStepZ);
+  const step2 = useGeometry(new THREE.BoxGeometry(params.stepWidth, params.stepHeight, params.stepDepth));
+  mesh(step2, trim, group, bodyCx, params.secondStepY, params.secondStepZ);
 
   // ── 主体：两层长条灰泥盒 ──
   const body = useGeometry(new THREE.BoxGeometry(bodyL, wallTop, bodyD));
@@ -118,8 +90,8 @@ export function buildVillaComplex(seed: number, neon: boolean): LandmarkBuild {
   // 坡太陡就变成北欧大屋顶；出檐 1.4–1.5 让屋顶在墙上投出自己的影子带。
   // 4 棱锥转 45° 再压成矩形（pagoda 檐同一惯用法，这里拉到全高成真四坡顶）。
   const roofH = 2.5;
-  const roofHX = (bodyL + 3) / 2;
-  const roofHZ = (bodyD + 2.8) / 2;
+  const roofHX = params.roofWidth / 2;
+  const roofHZ = params.roofDepth / 2;
   const roof = useGeometry(new THREE.ConeGeometry(1, 1, 4).rotateY(Math.PI / 4).scale(roofHX * Math.SQRT2, roofH, roofHZ * Math.SQRT2).translate(0, deckTop + wallTop + 0.65 + roofH / 2 - 0.1, 0));
   mesh(roof, terra, group, bodyCx, 0, 0);
 
@@ -165,8 +137,8 @@ export function buildVillaComplex(seed: number, neon: boolean): LandmarkBuild {
   const campanile = new THREE.Group();
   campanile.name = "villa-campanile";
   group.add(campanile);
-  const plinth = useGeometry(new THREE.BoxGeometry(5.9, 1.9, 5.9));
-  mesh(plinth, trim, campanile, towerX, 0.95, 0);
+  const plinth = useGeometry(new THREE.BoxGeometry(params.towerBaseWidth, params.towerBaseHeight, params.towerBaseWidth));
+  mesh(plinth, trim, campanile, towerX, params.towerBaseY, 0);
   const shaftH = 15.1;
   const shaft = useGeometry(new THREE.BoxGeometry(4.4, shaftH, 4.4));
   mesh(shaft, stucco, campanile, towerX, 1.9 + shaftH / 2, 0);

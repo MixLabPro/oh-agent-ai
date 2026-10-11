@@ -32,6 +32,7 @@ const TIERS = [
 // 实测 t1 8→4 / t3 5→5 / t5 4→1 / t10 1→1；残留全部是安全检查如实 declined（water-span 无干环位 /
 // no-ground-reach 环缘外 ≤26 无路 / edge-inside / acute）。副作用：disconnectedComponents t1 2→0。
 const CEILING = {
+  unjoinedGroundJunctions: 0,
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
   stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,
   suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 17, acuteJunctions: 5, crowdedArterials: 4,
@@ -48,8 +49,8 @@ const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity
 });
 const summaries = [];
 // 独立验收集（评审 2026-10-09：seed 只进测试、不决定规则；调参集 2_000_000_000 系与验收集分离）。
-// 3_000_000_000 系从未参与本线任何调试/阈值决策，同上限独立跑一遍——过拟合在它面前现形。
-const ACCEPT_BASE = 3_000_000_000;
+// 旧3B线曾参与候选参数试验，已失去独立验收资格；4B线仅供冻结源码后的验收，不用于调参。
+const ACCEPT_BASE = 4_000_000_000;
 const acceptance = [];
 const ACCEPT_CEILING = { siteWithoutDoorRoad: 1, looseInlandRoadEnds: 16, acuteJunctions: 4, crowdedArterials: 2, bridgeheadContinuity: 5 };
 // 2026-10-09 独立验收集（3_000_000_000 系）首测基线=实测值（棘轮起点，只降不升）：t1 门路 1（seed 3005341179

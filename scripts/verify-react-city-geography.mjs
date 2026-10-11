@@ -36,8 +36,31 @@ function correlation(a, b) {
   const na = Math.sqrt(a.reduce((s, v) => s + v * v, 0)); const nb = Math.sqrt(b.reduce((s, v) => s + v * v, 0));
   return dot / (na * nb || 1);
 }
+function coastGap(layout, p) {
+  let best = Infinity;
+  for (let i = 0; i < layout.coast.length; i += 1) {
+    const a = layout.coast[i], b = layout.coast[(i + 1) % layout.coast.length];
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+    best = Math.min(best, Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t));
+  }
+  return best;
+}
 
 const seeds = [1485618003, ...Array.from({ length: 30 }, (_, i) => (i * 2654435761 + 12345) >>> 0 || 1)];
+function inRiver(layout, p) {
+  const river = layout.river;
+  if (!river || river.length < 2) return false;
+  let segment = 0;
+  while (segment + 1 < river.length - 1 && river[segment + 1].z < p.z) segment += 1;
+  const a = river[segment], b = river[segment + 1];
+  const t = Math.max(0, Math.min(1, (p.z - a.z) / (b.z - a.z || 1)));
+  const riverX = a.x + (b.x - a.x) * t;
+  const minZ = river[0].z + 60, maxZ = river[river.length - 1].z - 60;
+  const smoothAt = (x, lo, hi) => { const u = Math.max(0, Math.min(1, (x - lo) / (hi - lo || 1))); return u * u * (3 - 2 * u); };
+  const halfWidth = 16 + 4 * Math.cos(p.z * 0.012) + smoothAt(p.z, minZ + (maxZ - minZ) * 0.55, maxZ) * 34;
+  return Math.abs(p.x - riverX) < halfWidth;
+}
 const profiles = [];
 const biomes = new Set();
 const landmarkKinds = new Set();
@@ -47,10 +70,28 @@ for (const seed of seeds) {
   const layout = layoutCity(input, null, seed);
   const placed = layout.districts.reduce((sum, d) => sum + d.slots.size, 0);
   assert.equal(placed, 700, `seed ${seed}: every session gets a lot (${placed}/700)`);
-  for (const site of layout.publicSites) assert(layout.terrain.buildable(site.x, site.z) || layout.terrain.height(site.x, site.z) > 0.5, `seed ${seed}: ${site.id} on land`);
+  for (const site of layout.publicSites) {
+    // Production's 12-unit setback is a conservative polar distance, while layout.coast is a 96-segment
+    // polyline; chord error plus the conservative shrink can make the displayed Euclidean gap ~16.
+    if (site.kind === "harbor") assert(coastGap(layout, site) <= 20, `seed ${seed}: harbor remains within the coastal setback (including coast approximation)`);
+    else assert(layout.terrain.buildable(site.x, site.z) || layout.terrain.height(site.x, site.z) > 0.5, `seed ${seed}: ${site.id} on land`);
+  }
   for (const bridge of layout.bridges) {
-    const mid = { x: (bridge.from.x + bridge.to.x) / 2, z: (bridge.from.z + bridge.to.z) / 2 };
-    assert(layout.terrain.height(mid.x, mid.z) < 0.5, `seed ${seed}: bridge spans water`);
+    const same = (a, b) => Math.hypot(a.x - b.x, a.z - b.z) <= 0.02;
+    const edge = layout.roadEdges.find((road) => road.bridge &&
+      ((same(road.points[0], bridge.from) && same(road.points[road.points.length - 1], bridge.to)) ||
+       (same(road.points[0], bridge.to) && same(road.points[road.points.length - 1], bridge.from))));
+    assert(edge, `seed ${seed}: bridge registry entry has no deck edge`);
+    const dx = bridge.to.x - bridge.from.x, dz = bridge.to.z - bridge.from.z;
+    const length = Math.hypot(dx, dz); const nx = -dz / (length || 1), nz = dx / (length || 1);
+    const steps = Math.max(2, Math.ceil(length / 3));
+    let crossesWater = false;
+    for (let i = 1; i < steps && !crossesWater; i += 1) for (const lateral of [-0.5, 0, 0.5]) {
+      const x = bridge.from.x + dx * i / steps + nx * edge.width * lateral;
+      const z = bridge.from.z + dz * i / steps + nz * edge.width * lateral;
+      if (layout.terrain.height(x, z) < 0.5 || inRiver(layout, { x, z })) { crossesWater = true; break; }
+    }
+    assert(crossesWater, `seed ${seed}: bridge road envelope does not span ocean or river water`);
   }
   // 小区连片且彼此分开：曾按固定锚点就近落楼，两个城区挤成一团、标签重叠（seed 42）。
   const centers = layout.districts.filter((d) => d.slots.size).map((d) => {

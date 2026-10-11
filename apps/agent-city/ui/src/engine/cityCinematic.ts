@@ -235,8 +235,8 @@ function planRoute(layout: CityLayout, model: CityModel, heights: Map<string, { 
     const point = positionCurve.getPointAt(Math.min(1, Math.max(0, u)));
     return Math.max(12, point.y - groundAt(point.x, point.z));
   };
-  // 短版略快（0.62 rad/s）：分享片 30–45 秒；视觉速度仍低于守卫的 0.7 上限。
-  const OMEGA = Number((globalThis as { __CITY_CINE_OMEGA__?: number }).__CITY_CINE_OMEGA__ ?? (short ? 0.62 : 0.55));
+  // 短版略快（0.61 rad/s）：分享片 30–45 秒；留出跨种子地形与采样误差余量，低于守卫的 0.7 上限。
+  const OMEGA = Number((globalThis as { __CITY_CINE_OMEGA__?: number }).__CITY_CINE_OMEGA__ ?? (short ? 0.61 : 0.55));
   const MIN_SPEED = 9; // 单位/秒：起落之外最慢也在动
   const MAX_SPEED = 120; // 高空全景也不允许飞得比这快
   const RAMP_SECONDS = 3; // 起飞/降落各自的加减速时长（按距离折算）

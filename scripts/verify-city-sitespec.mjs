@@ -10,13 +10,73 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject } = await loadCity({
+const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject, assignConnectedSite, JOINT_SITE_CONFIG, stationEntranceLocal, emptyNetwork, addNetworkEdge } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/sitespec.ts": ["SITE_SPECS", "specByKind", "coastalSitingKinds", "straddleSitingKinds", "frontageExemptKinds", "nominalAnchorPoint", "SITING_TABLE_VERSION"],
   "engine/planner/assign.ts": ["runAssignment"],
   "engine/planner/access.ts": ["siteCandidateHardReject"],
+  "engine/planner/jointSite.ts": ["assignConnectedSite", "JOINT_SITE_CONFIG"],
+  "engine/models/publicSiteGeometry.ts": ["stationEntranceLocal"],
+  "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
 });
+
+const frontagePrimaryMax = JOINT_SITE_CONFIG.frontageSegments * (1 + JOINT_SITE_CONFIG.probes.length) * 2;
+const frontageFallbackMax = JOINT_SITE_CONFIG.fallbackCandidateLimit * (1 + JOINT_SITE_CONFIG.fallbackProbes.length) * 2;
+const regionFallbackMax = 1 + (JOINT_SITE_CONFIG.fallbackRegionRadii.length - 1) * JOINT_SITE_CONFIG.fallbackRegionDirections
+  + JOINT_SITE_CONFIG.outerRegionRadii.length * JOINT_SITE_CONFIG.outerRegionDirections;
+assert.equal(JOINT_SITE_CONFIG.maxCandidateEvaluations, frontagePrimaryMax + frontageFallbackMax + regionFallbackMax,
+  "required-site search candidate bound must match its configured frontage and region tiers");
+
+// 联合指派：只有真实主网可达的入口候选才返回位置/网络；拒绝没有名义位置或正式图副作用。
+{
+  const a = { x: -600, z: 0 }; const b = { x: 600, z: 0 };
+  const network = emptyNetwork(); addNetworkEdge(network, a, b, true, false, true);
+  const world = { core: { x: 0, z: 0 }, R: 1200, turn: 0, coast: [], trunkRuns: [[a, b]], ringRuns: [], bridges: [], placed: [],
+    height: () => 1.2, inRiver: () => false, riverBank: () => false, coastDistance: () => 1000, landClearance: () => 1000, buildable: () => true,
+    hasRiver: false, riverX: () => 9999, riverWidth: () => 0, hillDir: { x: 0, z: 1 }, hillLine: 9999, hillProj: () => 0 };
+  const connector = { network, geo: { height: world.height, buildable: world.buildable, terrain: { slope: () => 0 } }, inRiver: world.inRiver, reservations: () => [] };
+  const before = JSON.stringify([...network.edges]);
+  for (const kind of ["station", "stadium"]) {
+    const assigned = assignConnectedSite(world, connector, specByKind(kind), `test:${kind}`, "-600:0");
+    assert.ok(assigned.site && assigned.network);
+    assert.equal(assigned.site.access.role, "plot-gate");
+    assert.ok(assigned.network.nodes.has(assigned.site.access.nodeId));
+    if (kind === "stadium") {
+      let screened = 0;
+      const retried = assignConnectedSite(world, connector, specByKind(kind), "retry:stadium", "-600:0", () => {
+        screened += 1;
+        return screened === 1 ? "candidate-local-relocation-refused" : null;
+      });
+      assert.ok(retried.site && retried.network, "a proposal-local relocation refusal must continue to the next candidate");
+      assert.ok(screened >= 2, "the proposal validator must screen each candidate until one can commit");
+    }
+    if (kind === "station") {
+      const localDoor = stationEntranceLocal(assigned.site.radius);
+      const expectedDoor = { x: assigned.site.x + localDoor.x * Math.cos(assigned.site.yaw) + localDoor.z * Math.sin(assigned.site.yaw), z: assigned.site.z - localDoor.x * Math.sin(assigned.site.yaw) + localDoor.z * Math.cos(assigned.site.yaw) };
+      assert.ok(Math.hypot(assigned.site.access.doorX - expectedDoor.x, assigned.site.access.doorZ - expectedDoor.z) <= 0.01, "station access must reference the actual hall's positive-z entrance facade");
+      const gate = assigned.network.nodes.get(assigned.site.access.nodeId);
+      const dx = gate.x - assigned.site.access.doorX; const dz = gate.z - assigned.site.access.doorZ; const length = Math.hypot(dx, dz);
+      const normal = specByKind(kind).planarAccess.entrance.outward;
+      const yaw = assigned.site.yaw;
+      const facing = ((normal.x * Math.cos(yaw) + normal.z * Math.sin(yaw)) * dx + (-normal.x * Math.sin(yaw) + normal.z * Math.cos(yaw)) * dz) / length;
+      assert.ok(facing >= Math.cos(Math.PI / 4), "station model entrance must face its declared gate");
+    }
+    for (const edge of assigned.network.edges.values()) {
+      const [a, b] = [edge.points[0], edge.points.at(-1)];
+      const dx = b.x - a.x; const dz = b.z - a.z;
+      const t = Math.max(0, Math.min(1, ((assigned.site.x - a.x) * dx + (assigned.site.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+      const gap = Math.hypot(assigned.site.x - a.x - dx * t, assigned.site.z - a.z - dz * t);
+      assert.ok(gap >= assigned.site.radius + edge.width / 2, `${kind} candidate overlaps ${edge.id} road envelope (${gap} < ${assigned.site.radius + edge.width / 2})`);
+    }
+    assert.equal(JSON.stringify([...network.edges]), before, "joint proposals cannot pre-publish road changes");
+    const rejected = assignConnectedSite({ ...world, buildable: () => false }, connector, specByKind(kind), `bad:${kind}`, "-600:0");
+    assert.equal(rejected.site, null); assert.ok(rejected.reason);
+    const blocked = assignConnectedSite(world, { ...connector, geo: { ...connector.geo, terrain: { slope: () => 2 } } }, specByKind(kind), `blocked:${kind}`, "-600:0");
+    assert.equal(blocked.site, null, "valid land alone cannot accept an unsafe entrance corridor");
+    assert.equal(JSON.stringify([...network.edges]), before);
+  }
+}
 
 // ── (a) 完整性：真实规划的放置种类 ↔ 表行 一一对应（含半径常量）──────────────────────
 const ISLANDS = [[1, 0, null], [2, 3, MIAMI_COASTAL], [5, 7, MIAMI_COASTAL], [2, 13, null], [3, 21, MIAMI_COASTAL]];

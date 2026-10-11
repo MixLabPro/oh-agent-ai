@@ -14,12 +14,16 @@
 // 边界：这里只放「单个违规的几何定义」（如中心到路 < 0.7 半径算穿路）；
 // 「允许多少条」的容忍计数是策略，留在守卫里。逻辑逐字取自两个守卫，勿在此改语义。
 import type { createCityPlan } from "../cityPlan";
-import { isPlannedRoadEnd } from "./endpoints";
-import { wetCount } from "./footprint";
+import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
+import { wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
 import { componentOf, primaryComponentId } from "./intent";
+import { planarAccessAtYaw, resolvePlanarAccess } from "../models/siteAccess";
+import { specByKind } from "./sitespec";
+import { groundJunctionFindings } from "./report";
+import { crowdedPolylinePair } from "./relations";
 
 export type CityPlan = ReturnType<typeof createCityPlan>;
-export type Violation = { constraint: string; site?: string; at?: { x: number; z: number }; detail: string };
+export type Violation = { constraint: string; site?: string; at?: { x: number; z: number }; detail: string; identity?: string };
 export type Constraint = { id: string; description: string; measure: (plan: CityPlan) => Violation[] };
 
 type Pt = { x: number; z: number };
@@ -34,7 +38,7 @@ const SHORE = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel", "vi
 export const planSites = (plan: CityPlan): Site[] => [...plan.publicSites, ...plan.landmarks].filter((s: Site) => s.radius);
 const nonBridge = (plan: CityPlan): Site[] => plan.roadEdges.filter((e: Site) => !e.bridge);
 /** 用地中心到最近非桥路段的距离。 */
-const nearRoad = (plan: CityPlan, s: Site) => Math.min(...nonBridge(plan).map((e: Site) => seg(s, e.points[0], e.points.at(-1))));
+const nearRoad = (plan: CityPlan, s: Site) => polylineDistance(nonBridge(plan).map((e: Site) => e.points), s);
 const v = (constraint: string, s: Site, detail: string): Violation => ({ constraint, site: s.kind, at: { x: s.x, z: s.z }, detail });
 
 export const siteInWater: Constraint = {
@@ -55,10 +59,16 @@ export const siteWithoutDoorRoad: Constraint = {
   measure(plan) {
     const out: Violation[] = [];
     for (const s of planSites(plan)) {
+      if (s.access) {
+        const comp = componentOf(plan); const primary = primaryComponentId(plan, comp);
+        if (s.x !== s.access.ownerX || s.z !== s.access.ownerZ || s.yaw !== s.access.ownerYaw || !primary || comp.get(s.access.nodeId) !== primary) out.push(v("siteWithoutDoorRoad", s, "declared plot entrance detached or moved"));
+        continue;
+      }
       const near = nearRoad(plan, s);
-      const nearAny = Math.min(near, ...plan.roadEdges.filter((e: Site) => e.bridge).map((e: Site) => seg(s, e.points[0], e.points.at(-1)))); // 门口直接起桥（岸边地标隔河）也是门前有路
+      const nearAny = Math.min(near, polylineDistance(plan.roadEdges.filter((e: Site) => e.bridge).map((e: Site) => e.points), s)); // 门口直接起桥（岸边地标隔河）也是门前有路
       if (nearAny > s.radius + 20) out.push(v("siteWithoutDoorRoad", s, `${s.kind} gap=${Math.round(nearAny - s.radius)}`));
     }
+    for (const obligation of plan.siteObligations ?? []) if (!planSites(plan).some((s) => s.id === obligation.ownerId)) out.push({ constraint: "siteWithoutDoorRoad", site: obligation.ownerId, detail: obligation.reason ?? "required site unplaced" });
     return out;
   },
 };
@@ -101,24 +111,56 @@ export const stationStadiumSetback: Constraint = {
     const out: Violation[] = [];
     for (const s of planSites(plan)) {
       const near = nearRoad(plan, s);
-      if ((s.kind === "station" || s.kind === "stadium") && near > s.radius * 1.3 && near <= s.radius + 90) out.push(v("stationStadiumSetback", s, `${s.kind} d=${Math.round(near)} r=${s.radius}`));
+      if (specByKind(s.kind)?.planarAccess && near > s.radius * 1.3 && near <= s.radius + 90) out.push(v("stationStadiumSetback", s, `${s.kind} d=${Math.round(near)} r=${s.radius}`));
     }
     return out;
   },
 };
 
 export const stationDoorFacesRoad: Constraint = {
-  id: "stationDoorFacesRoad", description: "车站正门（局部 +z）朝向最近的路：夹角 < 45°",
+  id: "stationDoorFacesRoad", description: "车站模型局部 -z 正门对准已声明入口节点，夹角 < 45°",
   measure(plan) {
     const out: Violation[] = [];
     const roads = nonBridge(plan);
     for (const s of planSites(plan)) {
+      const declaration = specByKind(s.kind)?.planarAccess;
+      if (!declaration && s.access?.capability === "shore-plot-boundary") {
+        const plot = specByKind(s.kind)?.plotBoundaryAccess;
+        const gate = plan.roadNodes.find((node) => node.id === s.access!.nodeId);
+        if (!plot || plot.schemaVersion !== 1 || plot.type !== "shore-plot-proxy" || !gate
+          || Math.abs(Math.hypot(gate.x - s.x, gate.z - s.z) - s.radius - plot.gateOffset) > 0.02
+          || s.access.entranceId !== "shore-plot-boundary" || s.access.entranceEvidence !== "plot-proxy"
+          || s.access.doorX !== undefined || s.access.doorZ !== undefined || s.shore) {
+          out.push(v("stationDoorFacesRoad", s, "invalid shore plot-boundary proxy (not a model door)"));
+        }
+        continue;
+      }
+      // An explicit offshore contract is validated by bridge/shore obligations,
+      // not by a ground entrance normal. A tag alone cannot exempt a land owner.
+      if (!declaration && s.shore && s.access?.capability === "island-causeway") continue;
+      if (!declaration && !s.access) continue;
+      const resolved = resolvePlanarAccess(declaration, s.radius);
+      if (!resolved.ok || !Number.isFinite(s.yaw)) { out.push(v("stationDoorFacesRoad", s, "unsupported or invalid planar entrance declaration/pose")); continue; }
+      const pose = planarAccessAtYaw(resolved.access, s, s.yaw);
+      if (s.access) {
+        const gate = plan.roadNodes.find((n) => n.id === s.access.nodeId);
+        const expectedDoor = pose.door;
+        const doorMatches = expectedDoor ? Number.isFinite(s.access.doorX) && Number.isFinite(s.access.doorZ)
+          && Math.hypot(s.access.doorX! - expectedDoor.x, s.access.doorZ! - expectedDoor.z) <= 0.01
+          && s.access.entranceEvidence === "model-position" : s.access.entranceEvidence === "plot-proxy" && s.access.doorX === undefined && s.access.doorZ === undefined;
+        const origin = expectedDoor ?? s;
+        const dx = gate ? gate.x - origin.x : 0;
+        const dz = gate ? gate.z - origin.z : 0;
+        const length = Math.hypot(dx, dz);
+        const cosine = gate && length > 0 ? (pose.outward.x * dx + pose.outward.z * dz) / length : -1;
+        if (!gate || !doorMatches || s.access.entranceId !== resolved.access.entranceId || cosine < Math.cos((45 * Math.PI) / 180)) out.push(v("stationDoorFacesRoad", s, "declared entrance position/evidence does not align with the plot gate"));
+        continue;
+      }
       const near = nearRoad(plan, s);
-      if (s.kind === "station" && near <= s.radius + 90) {
-        let best: { d: number; q: Pt } | null = null;
-        for (const e of roads) { const [a, b] = [e.points[0], e.points.at(-1)]; const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((s.x - a.x) * dx + (s.z - a.z) * dz) / l2)); const q = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(q.x - s.x, q.z - s.z); if (!best || d < best.d) best = { d, q }; }
+      if (near <= s.radius + 90) {
+        const best = polylineClosest(roads.map((e: Site) => e.points), s);
         const bq = best as unknown as { d: number; q: Pt };
-        const cos = (Math.sin(s.yaw) * (bq.q.x - s.x) + Math.cos(s.yaw) * (bq.q.z - s.z)) / (bq.d || 1);
+        const cos = (pose.outward.x * (bq.q.x - s.x) + pose.outward.z * (bq.q.z - s.z)) / (bq.d || 1);
         if (cos < Math.cos((45 * Math.PI) / 180)) out.push(v("stationDoorFacesRoad", s, `${s.kind} door faces away from the road (cos ${cos.toFixed(2)})`));
       }
     }
@@ -133,10 +175,10 @@ export const archStraddlesRoad: Constraint = {
     const roads = nonBridge(plan);
     for (const s of planSites(plan)) {
       if (s.kind !== "arch") continue;
-      const host = roads.filter((e: Site) => e.width >= 12).find((e: Site) => seg(s, e.points[0], e.points.at(-1)) < 3);
+      const host = roads.filter((e: Site) => e.width >= 12).map((e: Site) => closestPolylineSegment(e.points, s)).find((near) => near && near.d < 3);
       if (!host) out.push(v("archStraddlesRoad", s, `${s.kind} not on a road`));
       else {
-        const dir = Math.atan2(host.points.at(-1).x - host.points[0].x, host.points.at(-1).z - host.points[0].z);
+        const dir = Math.atan2(host.b.x - host.a.x, host.b.z - host.a.z);
         let d = Math.abs(dir - s.yaw) % Math.PI; d = Math.min(d, Math.PI - d);
         if (d > (15 * Math.PI) / 180) out.push(v("archStraddlesRoad", s, `${s.kind} opening off road by ${Math.round((d * 180) / Math.PI)}deg`));
       }
@@ -178,6 +220,7 @@ export const looseInlandRoadEnds: Constraint = {
     // 豁免改用语义判定（planner/endpoints.ts，网络优先设计批次 1）：旧 height ≥ 2.5 是「靠水断头=合法」的
     // 地形代理，把平岛的内陆断头全部藏进盲区（四档 75–90% 的岛至少 1 个，2026-10-08 实测）。
     const world = {
+      bridgeLandings: bridgeLandingNodes(plan.roadEdges),
       sites: planSites(plan),
       boulevardEnds: (plan.seaside?.samples ?? []).filter((s: Site) => s.valid && s.boulevard).map((s: Site) => s.boulevard),
       // 海段 + 河岸段（批次 3-2 清偿切片分歧：曾只看海段，宽河 run 端 >40 时修复豁免、检测计违例）
@@ -213,17 +256,13 @@ export const crowdedArterials: Constraint = {
   id: "crowdedArterials", description: "主干道不扎堆：不共享节点、彼此 < 25、夹角 < 15° 且侧向重叠的段对",
   measure(plan) {
     const out: Violation[] = [];
-    const arterials: Site[] = plan.roadEdges.filter((edge: Site) => edge.kind === "arterial" && !edge.bridge);
+    const arterials: Site[] = plan.roadEdges.filter((edge: Site) => edge.kind === "arterial" && !edge.bridge).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
     for (let a = 0; a < arterials.length; a += 1) for (let b = a + 1; b < arterials.length; b += 1) {
       const A = arterials[a]; const B = arterials[b];
       if ([A.from, A.to].some((id: string) => id === B.from || id === B.to)) continue;
-      const [b0, b1] = [B.points[0], B.points.at(-1)];
-      const mid = { x: (A.points[0].x + A.points.at(-1).x) / 2, z: (A.points[0].z + A.points.at(-1).z) / 2 };
-      const l2 = (b1.x - b0.x) ** 2 + (b1.z - b0.z) ** 2 || 1;
-      const t = ((mid.x - b0.x) * (b1.x - b0.x) + (mid.z - b0.z) * (b1.z - b0.z)) / l2;
-      if (t <= 0.1 || t >= 0.9 || seg(mid, b0, b1) >= 25) continue;
-      const angle = Math.abs(Math.atan2(A.points.at(-1).z - A.points[0].z, A.points.at(-1).x - A.points[0].x) - Math.atan2(b1.z - b0.z, b1.x - b0.x)) % Math.PI;
-      if (Math.min(angle, Math.PI - angle) < (15 * Math.PI) / 180) out.push({ constraint: "crowdedArterials", at: mid, detail: `${A.from}-${A.to} ~ ${B.from}-${B.to}` });
+      const conflict = crowdedPolylinePair(A.points, B.points);
+      if (conflict) out.push({ constraint: "crowdedArterials", at: conflict.at, detail: `${A.from}-${A.to} ~ ${B.from}-${B.to}`,
+        identity: JSON.stringify([[A.id, A.points], [B.id, B.points]]) });
     }
     return out;
   },
@@ -265,18 +304,32 @@ export const bridgeheadContinuity: Constraint = {
     for (const e of plan.roadEdges) {
       if (!e.bridge) continue;
       for (const id of [e.from, e.to]) {
-        if (grounded.get(id)) continue;
         const node = nodes.get(id);
-        if (!node) continue;
-        if (islandSites.some((s: Site) => Math.hypot(s.x - node.x, s.z - node.z) < s.radius + 12)) continue; // 堤道尽端 = 地标入口
-        out.push({ constraint: "bridgeheadContinuity", at: { x: node.x, z: node.z }, detail: `bridge ${e.id} end ${id} has no ground road` });
+        if (!node) { out.push({ constraint: "bridgeheadContinuity", identity: `${e.id}:${id}`, detail: `bridge ${e.id} end ${id} is missing` }); continue; }
+        if (grounded.get(id)) continue;
+        if (isOwnedIslandGate(id, islandSites)) continue;
+        out.push({ constraint: "bridgeheadContinuity", identity: `${e.id}:${id}`, at: { x: node.x, z: node.z }, detail: `bridge ${e.id} end ${id} has no ground road` });
       }
     }
     return out;
   },
 };
 
+export const unjoinedGroundJunctions: Constraint = {
+  id: "unjoinedGroundJunctions", description: "地面交叉/近接0.5范围必须共用真实节点，桥不平接",
+  measure: (plan) => {
+    const edges = new Map(plan.roadEdges.map((edge) => [edge.id, edge]));
+    return groundJunctionFindings(plan.roadEdges).map((finding) => ({
+      constraint: "unjoinedGroundJunctions", detail: finding.id,
+      // Until verified lineage/remap is available, changed participant geometry
+      // cannot claim to be the same pre-existing contact merely by keeping IDs.
+      identity: JSON.stringify(finding.edges.map((id) => [id, edges.get(id)?.points])),
+    }));
+  },
+};
+
 export const CONSTRAINTS: Constraint[] = [
+  unjoinedGroundJunctions,
   siteInWater, siteWithoutDoorRoad, roadThroughSite, sitesOverlap, parcelInsideSite,
   stationStadiumSetback, stationDoorFacesRoad, archStraddlesRoad, civicPlazaCentred,
   suspensionBridgeClearOfHighways, looseInlandRoadEnds, acuteJunctions, crowdedArterials,

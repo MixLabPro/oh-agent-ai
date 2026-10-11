@@ -10,6 +10,7 @@ import { hashSeed } from "../../cityModel";
 import { fbm, smoothstep } from "../cityNoise";
 import type { TerrainField, Vec2 } from "../cityLayout";
 import type { Shape } from "../cityPlan";
+import { exactFieldCache } from "./exactFieldCache";
 
 export type Geography = {
   R: number;
@@ -31,7 +32,12 @@ export type Geography = {
   terrain: TerrainField;
 };
 
-export function buildGeography(seed: number, R: number, shape: Shape): Geography {
+export function buildGeography(seed: number, R: number, shape: Shape, opts: { memoize?: boolean } = {}): Geography {
+  // Each radius attempt owns its caches. Only the original exact scalar result
+  // is reused, and eviction affects cost rather than planning decisions.
+  const field = <T extends number | boolean>(evaluate: (x: number, z: number) => T) =>
+    opts.memoize === true ? exactFieldCache(evaluate).query : evaluate;
+  const stretch = shape.stretch; // Field closures must not depend on mutable caller-owned scalars.
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   const phase = random("river") * 3;
 
@@ -70,16 +76,16 @@ export function buildGeography(seed: number, R: number, shape: Shape): Geography
   const radiusTable = Array.from({ length: 721 }, (_, i) => islandRadius((i / 720) * Math.PI * 2) * R);
   const shrink = Math.min(shape.stretch, 1 / shape.stretch) * 0.92;
   const cosSpin = Math.cos(shape.spin); const sinSpin = Math.sin(shape.spin);
-  const coastDistance = (x: number, z: number) => {
+  const coastDistance = field((x: number, z: number) => {
     const lx = x * cosSpin + z * sinSpin;
     const lz = -x * sinSpin + z * cosSpin;
-    const ux = lx / shape.stretch; const uz = lz * shape.stretch;
+    const ux = lx / stretch; const uz = lz * stretch;
     let theta = Math.atan2(uz, ux); if (theta < 0) theta += Math.PI * 2;
     const f = (theta / (Math.PI * 2)) * 720; const i = Math.floor(f);
     const edge = radiusTable[i] + (radiusTable[Math.min(720, i + 1)] - radiusTable[i]) * (f - i);
     return (edge - Math.hypot(ux, uz)) * shrink;
-  };
-  const landClearance = (x: number, z: number) => Math.min(coastDistance(x, z), Math.abs(x - riverX(z)) - riverWidth(z));
+  });
+  const landClearance = field((x: number, z: number) => Math.min(coastDistance(x, z), Math.abs(x - riverX(z)) - riverWidth(z)));
 
   // ── 山脊：方位随种子，占岛在该方向上最外侧的一带。
   const hillAngle = random("hillAngle") * Math.PI * 2;
@@ -87,18 +93,18 @@ export function buildGeography(seed: number, R: number, shape: Shape): Geography
   const reach = Math.max(...coast.map((p) => p.x * hillDir.x + p.z * hillDir.z));
   const hillLine = reach * 0.6;
   const hillProj = (x: number, z: number) => x * hillDir.x + z * hillDir.z;
-  const height = (x: number, z: number) => {
+  const height = field((x: number, z: number) => {
     const inland = landClearance(x, z);
     if (inland < 0) return -0.65 - Math.min(5, -inland * 0.25);
     const hillWeight = smoothstep(hillLine - 10, hillLine + reach * 0.3, hillProj(x, z));
     // 平地权重严格为零时，噪声不影响高度；路网验证会反复采样这些点。
     const hills = hillWeight === 0 ? 0 : hillWeight * (30 + 65 * fbm(x * 0.012, z * 0.013, seed, 4));
     return smoothstep(0, 10, inland) * (1.2 + hills);
-  };
+  });
   // 离山脚留 12：山体高度从 hillLine−10 开始起坡，地块要落在 1.2 的平地上。
-  const buildable = (x: number, z: number) => landClearance(x, z) > 12 && hillProj(x, z) < hillLine - 12;
+  const buildable = field((x: number, z: number) => landClearance(x, z) > 12 && hillProj(x, z) < hillLine - 12);
   const terrain: TerrainField = {
-    height, slope: (x, z) => Math.hypot(height(x + 1, z) - height(x - 1, z), height(x, z + 1) - height(x, z - 1)) / 2,
+    height, slope: field((x, z) => Math.hypot(height(x + 1, z) - height(x - 1, z), height(x, z + 1) - height(x, z - 1)) / 2),
     buildable, center: { x: 0, z: 0 }, radius: R * 1.3, coastRadius: () => R, hasRiver,
   };
 

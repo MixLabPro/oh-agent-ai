@@ -6,15 +6,18 @@
  * 骨架节点的连通分量）。「怎么合法连接」属于批次 3+ 的统一连接器——本模块**不改动任何
  * 网络状态**（守卫用前后深比较证明），unmet 只进诊断，不触发补路。
  *
- * 派生来源是当前管线的最终产物（后验意图）：批次 6 SiteSpec 落地后，demand 改为在骨架
- * 生成前显式声明（先验意图），本文件的类型与判定函数继续复用。
+ * 生产用地承诺在骨架前声明，求解器持续保留需求目录及显式重绑证据。未迁移调用方仍能
+ * 后验派生；街区/必要走廊/冗余的先验声明尚待完整迁移。诊断本身保持只读。
  */
 import type { Vec2 } from "../cityLayout";
 import type { CityPlan } from "./constraints";
-import { isPlannedRoadEnd, WATER_STOP_MARGIN } from "./endpoints";
+import { bridgeLandingNodes, isPlannedRoadEnd, WATER_STOP_MARGIN } from "./endpoints";
+import { polylineDistance } from "./footprint";
+import type { NetworkRemap } from "./network";
 
 /** 度为 1 路端的角色（设计 §3：角色携带所有权或需求引用）。 */
 export type EndpointRole =
+  | { kind: "bridge-landing"; bridgeIds: string[] }
   | { kind: "site-access"; ownerId: string }
   | { kind: "cul-de-sac"; reason: "coast" | "planned-local" | "terrain" }
   | { kind: "must-connect"; demandId: string };
@@ -22,10 +25,12 @@ export type EndpointRole =
 /** 必须互通的需求（设计 §3 ConnectionDemand 的诊断子集；corridor/redundancy 留给批次 4+）。 */
 export type ConnectionDemand = {
   id: string;
-  class: "district-access" | "site-access" | "coastal-link";
+  class: "district-access" | "site-access" | "coastal-link" | "endpoint-access";
   required: boolean;
   /** 需求锚点（分量 id / 用地 id / 沿海路段序号），仅供诊断输出定位。 */
   anchor: string;
+  /** Original binding evidence; identity remains id when an explicit remap moves it. */
+  originAnchor?: string;
 };
 
 export type EndpointDiagnostic = { node: string; at: Vec2; role: EndpointRole };
@@ -39,16 +44,11 @@ export type NetworkDiagnostics = {
 };
 
 type Site = { id?: string; kind: string; x: number; z: number; radius: number };
-const seg = (p: Vec2, a: Vec2, b: Vec2) => {
-  const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
-  return Math.hypot(a.x + dx * t - p.x, a.z + dz * t - p.z);
-};
 
 /** 意图诊断实际消费的 plan 结构子集（structural typing）：createCityPlan 的完整产物满足，
  *  cityPlan 组装中的中间产物（尚未补 scaleTier/biome 等外层字段）也满足——形态批 §5-3
  *  在 buildPlan 末尾直接取 cul-de-sac 端点而无需等外层包装。 */
-export type NetworkIntentPlan = Pick<CityPlan, "roadNodes" | "roadEdges" | "publicSites" | "landmarks" | "seaside" | "coastRoads" | "riverRoadRuns" | "coast" | "river" | "core"> & { primaryAnchorNodeId?: string | null };
+export type NetworkIntentPlan = Pick<CityPlan, "roadNodes" | "roadEdges" | "publicSites" | "landmarks" | "seaside" | "coastRoads" | "riverRoadRuns" | "coast" | "river" | "core"> & { primaryAnchorNodeId?: string | null; siteObligations?: Array<{ ownerId: string; placed: boolean; reason?: string }>; demandCatalogue?: readonly ConnectionDemand[] };
 
 /** 连通分量（桥计入连通——车能过桥）。返回 node id → 分量 id（复用 roadNodeId 作分量代表）。 */
 export function componentOf(plan: NetworkIntentPlan): Map<string, string> {
@@ -84,7 +84,11 @@ export function deriveDemands(plan: NetworkIntentPlan, comp: Map<string, string>
   const demands: ConnectionDemand[] = districtDemands(comp, primary);
   const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius) as Site[];
   for (const s of sites) demands.push({ id: `site:${s.id ?? s.kind}`, class: "site-access", required: true, anchor: s.id ?? s.kind });
+  for (const obligation of plan.siteObligations ?? []) if (!sites.some((s) => s.id === obligation.ownerId)) demands.push({ id: `site:${obligation.ownerId}`, class: "site-access", required: true, anchor: obligation.ownerId });
   [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])].forEach((_run, i) => demands.push({ id: `coastal:${i}`, class: "coastal-link", required: true, anchor: `run ${i}` }));
+  for (const endpoint of classifyEndpoints(plan, comp, primary)) if (endpoint.role.kind === "must-connect"
+    && endpoint.role.demandId.startsWith("endpoint:")) demands.push({ id: endpoint.role.demandId,
+      class: "endpoint-access", required: true, anchor: endpoint.node });
   return demands;
 }
 
@@ -96,17 +100,29 @@ export function deriveDemands(plan: NetworkIntentPlan, comp: Map<string, string>
 export function evaluateDemands(plan: NetworkIntentPlan, comp: Map<string, string>, primary: string, demands: ConnectionDemand[]): DemandDiagnostic[] {
   const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius) as Site[];
   return demands.map((d) => {
+    if (d.class === "endpoint-access") {
+      const degree = plan.roadEdges.filter((edge) => !edge.bridge && (edge.from === d.anchor || edge.to === d.anchor)).length;
+      const satisfied = degree >= 2 && comp.get(d.anchor) === primary;
+      return { demand: d, satisfied, reason: satisfied ? undefined : "required road endpoint has no accepted continuation on the primary network" };
+    }
     if (d.class === "district-access") {
       const satisfied = comp.get(d.anchor) === primary;
       return { demand: d, satisfied, reason: satisfied ? undefined : "component not merged into the primary network" };
     }
     if (d.class === "site-access") {
       const s = sites.find((x) => (x.id ?? x.kind) === d.anchor)!;
+      if (!s) return { demand: d, satisfied: false, reason: plan.siteObligations?.find((o) => o.ownerId === d.anchor)?.reason ?? "required site unplaced" };
+      const access = (s as Site & { access?: import("./jointSite").PlotAccess }).access;
+      if (access) {
+        const unchanged = s.x === access.ownerX && s.z === access.ownerZ && (s as Site & { yaw?: number }).yaw === access.ownerYaw;
+        const attached = unchanged && comp.get(access.nodeId) === primary;
+        return { demand: d, satisfied: attached, reason: attached ? undefined : "declared plot entrance moved or detached from primary network" };
+      }
       // 评审 P1-2：近旁有路 ≠ 可达——必须绑定到主网分量（含桥，门口起桥也是门前有路；
       // 车站旁只有孤立环路时曾误报满足）。
       let best: { d: number; onPrimary: boolean } | null = null;
       for (const e of plan.roadEdges) {
-        const d0 = seg(s, e.points[0], e.points[e.points.length - 1]);
+        const d0 = polylineDistance([e.points], s);
         const onPrimary = comp.get(e.from) === primary || comp.get(e.to) === primary;
         // 主网道路独立取最小距离；孤立近路不能掩盖稍远但合格的主网接入。
         if (!best || (onPrimary && !best.onPrimary) || (onPrimary === best.onPrimary && d0 < best.d)) best = { d: d0, onPrimary };
@@ -123,6 +139,47 @@ export function evaluateDemands(plan: NetworkIntentPlan, comp: Map<string, strin
   });
 }
 
+/** Rebind evidence, not identity. Only explicit transaction journals authorize
+ * replacing an old node; spatial proximity and new component IDs do not. */
+export function remapDemandNode(id: string, remaps: readonly NetworkRemap[]): string | null {
+  let current: string | null = id;
+  for (const remap of remaps) {
+    if (current === null) break;
+    if (Object.prototype.hasOwnProperty.call(remap.nodes, current)) current = remap.nodes[current];
+  }
+  return current;
+}
+
+/** All old required obligations survive an individual repair, including unmet
+ * ones. This is transaction-boundary retention, not the prior demand catalogue. */
+export function retainRepairDemands(before: NetworkIntentPlan, after: NetworkIntentPlan, remaps: readonly NetworkRemap[] = []): {
+  demands: DemandDiagnostic[]; reason?: string;
+} {
+  const previous = diagnoseNetwork(before);
+  if (!previous) return { demands: [], reason: "required primary network evidence missing" };
+  const comp = componentOf(after), primary = primaryComponentId(after, comp);
+  if (!primary) return { demands: [], reason: "required primary network evidence lost" };
+  const retained: ConnectionDemand[] = [];
+  for (const { demand } of previous.demands) {
+    if (!demand.required) continue;
+    let anchor = demand.anchor;
+    if (demand.class === "endpoint-access" || demand.class === "district-access") {
+      const next = remapDemandNode(anchor, remaps);
+      if (!next || !comp.has(next)) return { demands: [], reason: `required demand binding removed: ${demand.id}` };
+      anchor = next;
+    } else if (demand.class === "site-access") {
+      const exists = [...after.publicSites, ...after.landmarks].some((site) => (site.id ?? site.kind) === anchor && site.radius)
+        || after.siteObligations?.some((obligation) => obligation.ownerId === anchor);
+      if (!exists) return { demands: [], reason: `required demand owner removed: ${demand.id}` };
+    } else {
+      const run = [...(after.coastRoads ?? []), ...(after.riverRoadRuns ?? [])][Number(anchor.replace("run ", ""))];
+      if (!run?.length) return { demands: [], reason: `required coastal run removed: ${demand.id}` };
+    }
+    retained.push({ ...demand, anchor });
+  }
+  return { demands: evaluateDemands(after, comp, primary, retained) };
+}
+
 /** 每个度为 1 的非桥路端一个角色（与 endpoints.isPlannedRoadEnd 同一豁免口径）：
  *  门前终点 → site-access（带 ownerId）；滨海大道断点 → cul-de-sac(planned-local)（海滨段规则：
  *  无效样本处断开、不跨接）；沿海/河岸路段端 → must-connect（挂对应 coastal-link 需求）；
@@ -133,20 +190,23 @@ export function classifyEndpoints(plan: NetworkIntentPlan, comp: Map<string, str
   const nodes = new Map(plan.roadNodes.map((n) => [n.id, n]));
   const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius) as Site[];
   const boulevardEnds = (plan.seaside?.samples ?? []).filter((s: { valid: boolean; boulevard?: Vec2 }) => s.valid && s.boulevard).map((s: { boulevard?: Vec2 }) => s.boulevard!);
-  const coastRoadRunEnds = [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])].flatMap((r: Vec2[]) => [r[0], r[r.length - 1]]);
+  const coastRoadRuns = [...(plan.coastRoads ?? []), ...(plan.riverRoadRuns ?? [])];
   const out: EndpointDiagnostic[] = [];
+  const landings = bridgeLandingNodes(plan.roadEdges);
   for (const [id, d] of deg) {
     if (d !== 1) continue;
     const q = nodes.get(id);
     if (!q) continue;
     let role: EndpointRole;
     const site = sites.find((s) => Math.hypot(s.x - q.x, s.z - q.z) < s.radius + 12);
-    const coastRunEnd = coastRoadRunEnds.findIndex((c) => Math.hypot(c.x - q.x, c.z - q.z) < 1);
-    if (site) role = { kind: "site-access", ownerId: site.id ?? site.kind };
+    const coastRunEnd = coastRoadRuns.findIndex((run) => [run[0], run[run.length - 1]]
+      .some((end) => end && Math.hypot(end.x - q.x, end.z - q.z) < 1));
+    if (landings.has(id)) role = { kind: "bridge-landing", bridgeIds: plan.roadEdges.filter((edge) => edge.bridge && (edge.from === id || edge.to === id)).map((edge) => edge.id).sort() };
+    else if (site) role = { kind: "site-access", ownerId: site.id ?? site.kind };
     else if (boulevardEnds.some((b) => Math.hypot(b.x - q.x, b.z - q.z) < 1)) role = { kind: "cul-de-sac", reason: "planned-local" };
     else if (coastRunEnd >= 0) role = { kind: "must-connect", demandId: `coastal:${coastRunEnd}` };
     else if (isPlannedRoadEnd(q, { sites, boulevardEnds, coastRoadRunEnds: [], coast: plan.coast ?? [], river: plan.river ?? null })) role = { kind: "cul-de-sac", reason: "coast" };
-    else role = { kind: "must-connect", demandId: `district:${comp.get(id) ?? "?"}` };
+    else role = { kind: "must-connect", demandId: `endpoint:${id}` };
     out.push({ node: id, at: { x: q.x, z: q.z }, role });
   }
   return out;
@@ -157,7 +217,7 @@ export function diagnoseNetwork(plan: NetworkIntentPlan): NetworkDiagnostics | n
   const comp = componentOf(plan);
   const primary = primaryComponentId(plan, comp);
   if (!primary) return null;
-  const demands = deriveDemands(plan, comp, primary);
+  const demands = collectDemandCatalogue(plan, comp, primary);
   const evaluated = evaluateDemands(plan, comp, primary, demands);
   return {
     primaryComponentId: primary,
@@ -165,6 +225,17 @@ export function diagnoseNetwork(plan: NetworkIntentPlan): NetworkDiagnostics | n
     endpoints: classifyEndpoints(plan, comp, primary),
     unmet: evaluated.filter((d) => d.demand.required && !d.satisfied).map((d) => ({ demandId: d.demand.id, reason: d.reason ?? "unmet" })),
   };
+}
+
+/** Retained commitments precede new observations. Binding deduplication avoids
+ * inventing a second endpoint demand after a legitimate node remap. */
+export function collectDemandCatalogue(plan: NetworkIntentPlan, comp: Map<string, string>, primary: string): ConnectionDemand[] {
+  const demands = (plan.demandCatalogue ?? []).map((demand) => ({ ...demand }));
+  for (const demand of deriveDemands(plan, comp, primary)) if (!demands.some((old) => old.id === demand.id
+    || (old.class === demand.class && old.anchor === demand.anchor)
+    || (old.class === "district-access" && demand.class === "district-access" && comp.has(old.anchor)
+      && comp.get(old.anchor) === comp.get(demand.anchor)))) demands.push({ ...demand, originAnchor: demand.anchor });
+  return demands;
 }
 
 export { WATER_STOP_MARGIN };

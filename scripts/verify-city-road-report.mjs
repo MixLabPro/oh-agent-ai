@@ -10,7 +10,8 @@
 //   (b) roadEdges 以固定种子洗牌后再喂 → 报告 JSON 全等（顺序无关）；
 //   (c) 报告前后对 roadEdges/blocks/publicSites/landmarks 的 JSON 指纹不变（无副作用；
 //       指纹在首次调用前取自深拷贝快照字符串，读侧自证）；
-//   (d) 度1非桥端三分完备恒等式：legal + gap + unclassified === total。
+//   (d) 度1非桥端分类完备：landing + legal + gap + unclassified === total。
+//   (e) 固定显示样本：交叉/裁剪缺口为0，只保留原规划边，近接重复节点真实合并。
 //
 //   ⚠ 口径修正（2026-10-09 首测）：批次规格原定「完整规划图平面交叉数 == 0（planner 保证）」
 //   的回归断言，实测前提不成立——本报告口径（非桥边两两线段最小距离 ≤ 0.5 且无共享节点）下，
@@ -43,7 +44,7 @@ const { buildCityModel, layoutCity, createCityPlan, scaleTierFor, MIAMI_COASTAL,
 // 调优线（普查种子线；不得用于设阈值——本批只测量）。
 const TUNING_BASE = 2_000_000_000;
 const TUNING_STEP = 104_729;
-const CASES = [
+const CASES = process.argv.includes("--display-only") ? [] : [
   ...Array.from({ length: 8 }, (_, i) => ({ seed: TUNING_BASE + i * TUNING_STEP, tier: 1 })),
   { seed: TUNING_BASE + 8 * TUNING_STEP, tier: 3 },
   { seed: TUNING_BASE + 9 * TUNING_STEP, tier: 5 },
@@ -98,12 +99,25 @@ function runCase(label, input, { assertZeroCrossings }) {
   assert.equal(JSON.stringify(roadReport({ ...input, roadEdges: mixed })), JSON.stringify(first), `${label}: report depends on roadEdges order`);
   assert.equal(fingerprint(input), before, `${label}: report mutated its input`);
   const d1 = first.graph.degree1;
-  assert.equal(d1.legalCulDeSac + d1.approachableGap + d1.unclassified, d1.total, `${label}: degree-1 classification incomplete`);
+  assert.equal(d1.bridgeLandings + d1.legalCulDeSac + d1.approachableGap + d1.unclassified, d1.total, `${label}: degree-1 classification incomplete`);
   if (assertZeroCrossings && PLAN_ASSERT_ZERO_CROSSINGS) {
     assert.equal(first.graph.planarCrossings.count, 0,
       `${label}: full-plan graph has ${first.graph.planarCrossings.count} planar crossings (planner regression): ${first.graph.planarCrossings.findings.slice(0, 5).map((f) => f.edges.join("↔")).join(", ")}`);
   }
   return first;
+}
+
+// Curved roads must use the local endpoint tangent for junction angles; the
+// endpoint chord would falsely report an acute overlap at this 3-way node.
+{
+  const j = { x: 0, z: 0 };
+  const report = roadReport({ roadEdges: [
+    { id: "0:0/-10:-10", from: "0:0", to: "-10:-10", points: [j, { x: 0, z: -2 }, { x: -10, z: -10 }], width: 5, kind: "local" },
+    { id: "-10:-10.1/0:0", from: "0:0", to: "-10:-10.1", points: [j, { x: -10, z: -10.1 }], width: 8, kind: "arterial" },
+    { id: "0:0/10:10", from: "0:0", to: "10:10", points: [j, { x: 10, z: 10 }], width: 8, kind: "arterial" },
+  ], nodes: [{ ...j, id: "0:0" }], blocks: [], publicSites: [], landmarks: [] });
+  assert.equal(report.graph.junctions.acuteBelow30, 0, "curve tangent should separate the junction legs");
+  assert.ok((report.graph.junctions.minAngleDeg ?? 0) >= 30, "road report must not use a curved edge's end-to-end chord");
 }
 
 const began = performance.now();
@@ -120,7 +134,7 @@ for (const { seed, tier } of CASES) {
   dump.plan[`${seed}/t${tier}`] = report;
   const g = report.graph;
   lines.push(`plan   seed=${seed} tier=${tier} edges=${report.edgeCount} nodes=${report.nodeCount} comps=${g.componentCount}`
-    + ` deg1=${g.degree1.total}(legal=${g.degree1.legalCulDeSac},gap=${g.degree1.approachableGap},unclass=${g.degree1.unclassified})`
+    + ` deg1=${g.degree1.total}(landing=${g.degree1.bridgeLandings},legal=${g.degree1.legalCulDeSac},gap=${g.degree1.approachableGap},unclass=${g.degree1.unclassified})`
     + ` cross=${g.planarCrossings.count} junctions=${g.junctions.total}(acute<30=${g.junctions.acuteBelow30},min=${g.junctions.minAngleDeg ?? "n/a"})`
     + ` len[12=${g.lengthByWidth.ge12.share},8=${g.lengthByWidth.ge8lt12.share},5=${g.lengthByWidth.lt8.share}]`
     + ` blocks=${report.blocks.analyzed} gridMax=${report.blocks.gridRepetition.cityMax}`
@@ -139,6 +153,20 @@ const displayReport = runCase(`display ${DISPLAY_SEED}/t${displayTier}`, {
   culDeSacEnds: layout.culDeSacEnds ?? [], seaside: layout.seaside ?? null,
   referenceRoadEdges: reference.roadEdges,
 }, { assertZeroCrossings: false });
+assert.equal(displayReport.graph.degree1.approachableGap, 0, "fixed display fixture must not acquire degree-1 gaps through activity pruning");
+assert.equal(displayReport.graph.planarCrossings.count, 0, "fixed display fixture must have real shared nodes at every ground crossing");
+// The civic layout/radius may change when unsafe skeleton routes are rejected.
+// Preserve real junctions from this plan, not coordinates from an older plan.
+// The historical sub-unit gap is replayed independently in verify-city-connect.
+const degree = (edges, id) => edges.filter((edge) => !edge.bridge && (edge.from === id || edge.to === id)).length;
+const civic = reference.publicSites.find((site) => site.kind === "civic");
+assert.ok(civic, "display fixture requires a planned civic site");
+const civicJunctions = reference.roadNodes.filter((node) => Math.hypot(node.x - civic.x, node.z - civic.z) <= civic.radius + 20
+  && degree(reference.roadEdges, node.id) >= 3);
+assert.ok(civicJunctions.length > 0, "planned civic perimeter must have a real road junction");
+for (const node of civicJunctions) assert.ok(degree(layout.roadEdges, node.id) >= 3, `display must preserve civic junction ${node.id}`);
+const plannedIds = new Set(reference.roadEdges.map((edge) => edge.id));
+assert.ok(layout.roadEdges.every((edge) => plannedIds.has(edge.id)), "display closure must only retain existing planning edges");
 for (const blocks of [[], layout.blocks.map((b) => ({ ...b, vacant: false }))]) {
   const report = roadReport({ layer: "display", roadEdges: layout.roadEdges, blocks, publicSites: layout.publicSites, landmarks: layout.landmarks });
   assert.equal(report.layer, "display", "empty/fully built display stays a display graph");
@@ -149,7 +177,7 @@ dump.display = displayReport;
   const g = displayReport.graph;
   const d = displayReport.display;
   lines.push(`display seed=${DISPLAY_SEED} tier=${displayTier} edges=${displayReport.edgeCount} nodes=${displayReport.nodeCount} comps=${g.componentCount}`
-    + ` deg1=${g.degree1.total}(legal=${g.degree1.legalCulDeSac},gap=${g.degree1.approachableGap},unclass=${g.degree1.unclassified})`
+    + ` deg1=${g.degree1.total}(landing=${g.degree1.bridgeLandings},legal=${g.degree1.legalCulDeSac},gap=${g.degree1.approachableGap},unclass=${g.degree1.unclassified})`
     + ` cross=${g.planarCrossings.count} junctions=${g.junctions.total}(acute<30=${g.junctions.acuteBelow30},min=${g.junctions.minAngleDeg ?? "n/a"})`
     + ` len[12=${g.lengthByWidth.ge12.share},8=${g.lengthByWidth.ge8lt12.share},5=${g.lengthByWidth.lt8.share}]`
     + ` blocks(live/vac)=${d ? `${d.liveBlocks}/${d.vacantBlocks}` : "n/a"} service=${d ? d.activityServiceRate : "n/a"}`
@@ -165,8 +193,8 @@ const worst = ranked[0];
 const worstCross = [...ranked].sort((a, b) => b.cross - a.cross || (a.key < b.key ? -1 : 1))[0];
 
 for (const line of lines) console.log(line);
-console.log(`worst plan seed by unclassified degree-1 ends: ${worst.key} (unclass=${worst.unclass}, acute<30=${worst.acute})`);
-console.log(`worst plan seed by planar crossings: ${worstCross.key} (cross=${worstCross.cross}) — first-measurement baseline, no threshold (see header: ==0 premise disproven)`);
+if (worst) console.log(`worst plan seed by unclassified degree-1 ends: ${worst.key} (unclass=${worst.unclass}, acute<30=${worst.acute})`);
+if (worstCross) console.log(`worst plan seed by planar crossings: ${worstCross.key} (cross=${worstCross.cross}) — first-measurement baseline, no threshold (see header: ==0 premise disproven)`);
 console.log(`display-graph first-measurement baseline (no thresholds): crossings=${displayReport.graph.planarCrossings.count}`
   + ` unclassified=${displayReport.graph.degree1.unclassified}`
   + ` serviceRate=${displayReport.display ? displayReport.display.activityServiceRate : "n/a"}`
