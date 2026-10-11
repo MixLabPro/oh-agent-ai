@@ -29,7 +29,7 @@ export function CityApp() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<CityEngine | null>(null);
   const [projection, setProjection] = useState<CityProjectionV1 | null>(null);
-  const [windowDays, setWindowDays] = useState<WindowDays>(30);
+  const [windowDays, setWindowDays] = useState<WindowDays>(366); // 默认全年窗口：近 500 条会话先载入（coverage.truncated 如实披露）
   const [status, setStatus] = useState("正在载入 City 插槽数据…");
   const [sceneUnavailable, setSceneUnavailable] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
