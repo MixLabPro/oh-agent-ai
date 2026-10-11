@@ -1,4 +1,5 @@
 [
+  { "id": "verify-city-joint-site-road", "file": "verify-city-joint-site-road.mjs", "env": {}, "shared": false },
   { "id": "verify-city-site-registry-scene", "file": "verify-city-site-registry-scene.mjs", "env": {}, "shared": false },
   { "id": "verify-city-site-registry", "file": "verify-city-site-registry.mjs", "env": {}, "shared": false },
   { "id": "verify-city-villa-placement", "file": "verify-city-villa-placement.mjs", "env": {}, "shared": false },

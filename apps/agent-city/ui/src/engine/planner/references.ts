@@ -71,7 +71,7 @@ export function applyNetworkReferences(ctx: RepairContext, remaps: readonly Netw
       if (!next) return "required primary anchor removed";
       ctx.primaryAnchorNodeId = next;
     }
-    for (const runs of [ctx.carPaths, ctx.coastRoadRuns, ctx.riverRoadRuns]) for (let i = 0; i < runs.length; i += 1) {
+    for (const runs of [ctx.carPaths, ctx.trunkRuns ?? [], ctx.coastRoadRuns, ctx.riverRoadRuns]) for (let i = 0; i < runs.length; i += 1) {
       const next = remapRoadPath(runs[i], remap, ctx.network);
       if (!next) return "referenced road removed without a replacement path";
       runs[i] = next;

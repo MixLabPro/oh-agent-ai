@@ -12,12 +12,13 @@ assert(manifest.some((s) => s.env.CITY_SEASIDE_TIER === "10"));
 assert(manifest.some((s) => s.file === "verify-city-cross-engine.mjs" && !s.shared));
 assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // Preserve the existing stages and register the new production causeway guard.
-// 63 + city-opt 的 4 个（villa-placement / model-envelope / site-registry / site-registry-scene）+ 规划修复的 5 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller / -bulldozer）。计数锁防的是悄悄增减，
+// 63 + city-opt 的 5 个（villa-placement / model-envelope / site-registry / site-registry-scene / joint-site-road）+ 规划修复的 5 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller / -bulldozer）。计数锁防的是悄悄增减，
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
-assert.equal(manifest.length, 72);
+assert.equal(manifest.length, 73);
 for (const id of ["verify-plan-patch", "verify-plan-road-rules", "verify-plan-sites", "verify-plan-repair-controller", "verify-plan-bulldozer"]) {
   assert(selectStages("module", "planning").some((stage) => stage.id === id), `${id} must run in the planning group`);
 }
+for (const group of ["network", "planning", "sites"]) assert(selectStages("module", group).some(stage => stage.id === "verify-city-joint-site-road"));
 for (const group of ["planning", "sites"]) assert(selectStages("module", group).some(stage => stage.id === "verify-city-site-registry-scene"));
 for (const group of ["planning", "sites"]) assert(selectStages("module", group).some(stage => stage.id === "verify-city-site-registry"));
 for (const group of ["planning", "sites"]) assert(selectStages("module", group).some(stage => stage.id === "verify-city-villa-placement"));
