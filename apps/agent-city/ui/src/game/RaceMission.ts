@@ -97,7 +97,9 @@ export class RaceMission {
     if (!teleport) {
       // 同一步可能跨多个相邻环：按交点时间升序处理（帧率无关）。
       for (let guard = 0; guard < this.course.rings.length; guard += 1) {
-        const crossing = ringCrossing(this.course.rings[this.targetIndex], prev, next, this.params.planeRadius);
+        // 2026-10-09：安全半径减半（planeRadius * 0.5）——全值时环半径 8.2 减 2.4
+        // 只剩 5.8 有效区，视觉上穿了环但判定说擦边不算。
+        const crossing = ringCrossing(this.course.rings[this.targetIndex], prev, next, this.params.planeRadius * 0.5);
         if (!crossing) break;
         this.progress += 1;
         events.push({ type: "ring-passed", index: this.targetIndex, progress: this.progress });

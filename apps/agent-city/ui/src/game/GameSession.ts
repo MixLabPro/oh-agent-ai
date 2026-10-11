@@ -521,12 +521,28 @@ export class GameSession {
       this.softOutside = distance > world.bounds.softRadius;
     }
     if (this.mission) {
-      for (const event of this.mission.step(sim, this.sim, FIXED_DT * 1000, teleported)) {
-        if (event.type === "finished") this.finishRace(event.result);
-        else if (event.type === "failed") this.finishRace(event.result);
-        else {
-          if (event.type === "ring-passed") this.sfx.ringPass();
-          this.emit(true);
+      // 穿环检测优先用碰撞前的真实飞行段（sim→next）；碰撞瞬移（sim→safe）跳过。
+      // 2026-10-09 修复：环放在建筑旁（v2 路线），穿环同时擦楼会触发碰撞瞬移，
+      // 旧实现 teleported=true 直接跳过环检测——用户穿过了环但没反应。
+      if (teleported) {
+        // 先用真实飞行段检测穿环（飞到碰撞点为止的路径可能穿过环）。
+        for (const event of this.mission.step(sim, next, FIXED_DT * 1000, false)) {
+          if (event.type === "finished") { this.finishRace(event.result); return; }
+          else if (event.type === "failed") { this.finishRace(event.result); return; }
+          else if (event.type === "ring-passed") this.sfx.ringPass();
+        }
+        // 推进任务时钟（不重复穿环检测——位置已瞬移回安全点）。
+        for (const event of this.mission.step(this.sim, this.sim, FIXED_DT * 1000, true)) {
+          if (event.type === "failed") this.finishRace(event.result);
+        }
+      } else {
+        for (const event of this.mission.step(sim, this.sim, FIXED_DT * 1000, false)) {
+          if (event.type === "finished") this.finishRace(event.result);
+          else if (event.type === "failed") this.finishRace(event.result);
+          else {
+            if (event.type === "ring-passed") this.sfx.ringPass();
+            this.emit(true);
+          }
         }
       }
     }
