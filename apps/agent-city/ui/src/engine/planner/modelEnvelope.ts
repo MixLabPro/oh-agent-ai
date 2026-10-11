@@ -3,7 +3,7 @@
  */
 import { hashSeed } from "../../cityModel";
 import { DetMath as Math } from "../detMath";
-import { resolveGroundModel } from "../models/groundRegistry";
+import { resolveGroundModel, type GroundModelResolution } from "../models/groundRegistry";
 import { pointInRegion, MAX_FOOTPRINT_PARTS, MAX_CONVEX_VERTICES, type LocalFootprint, type LocalRegion, type Vec2 } from "../models/physical";
 import type { GroundOwner } from "./modelGround";
 
@@ -13,6 +13,7 @@ export type PlotReservationProxy = { readonly semantic: "nominal-plot-reservatio
 export type ModelEnvelope =
   | { readonly status: "partial"; readonly ownerId: string; readonly modelId: string; readonly modelRevision: string;
       readonly groundFootprint: LocalFootprint; readonly conservativeProjection: LocalFootprint; readonly plotReservation: PlotReservationProxy;
+      readonly relocationCorridorEnvelope?: Extract<GroundModelResolution, { status: "partial" }>["relocationCorridorEnvelope"];
       readonly wholeModelReady: false; readonly missing: readonly string[] }
   | { readonly status: "unsupported"; readonly ownerId: string; readonly reason: string;
       readonly plotReservation?: PlotReservationProxy; readonly wholeModelReady: false };
@@ -85,6 +86,7 @@ export function resolveModelEnvelope(owner: GroundOwner): ModelEnvelope {
     if (!plotReservation || !validFootprint(groundFootprint) || !validFootprint(conservativeProjection)) return unsupported("model declaration has no usable projection", plotReservation);
     return { status: "partial", ownerId: owner.id, modelId: declaration.modelId, modelRevision: declaration.modelRevision,
       groundFootprint, conservativeProjection, plotReservation, wholeModelReady: false,
+      ...(resolution.relocationCorridorEnvelope ? { relocationCorridorEnvelope: { ...resolution.relocationCorridorEnvelope } } : {}),
       missing: [...resolution.missing, "height-qualified collision", "full model physical readiness"] };
   } catch (error) { return unsupported(error instanceof Error ? error.message : "invalid model projection", plotReservation); }
 }

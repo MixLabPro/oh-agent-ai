@@ -100,7 +100,7 @@ for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.isla
     river: ctx.geo.river, seaside: ctx.seaside, primaryAnchorNodeId: ctx.primaryAnchorNodeId, siteObligations: ctx.siteObligations, demandCatalogue: ctx.demandCatalogue };
   const components = module.componentOf(view), primary = module.primaryComponentId(view, components);
   const primaryRoads = view.roadEdges.filter(edge => !edge.bridge && components.get(edge.from) === primary).map(edge => edge.points);
-  const counts = {}, examples = {}, groundAdmissibleRejectedBy = {}, groundAdmissibleExamples = {}, entityFactCounts = {}, entityFactExamples = {}; let attempts = 0;
+  const counts = {}, examples = {}, groundAdmissibleRejectedBy = {}, groundAdmissibleExamples = {}, entityFactCounts = {}, entityFactExamples = {}, remainingPolicyCandidates = []; let attempts = 0;
   for (const at of module.localResiteCandidates(owner)) {
     attempts += 1;
     let reason = module.relocatedSitePositionFailure(ctx, owner, at, true);
@@ -121,10 +121,36 @@ for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.isla
         : ownerFacts.some(fact => fact.status === "unsupported" && fact.proxy?.relation !== "clear") ? "unknown-owner-proxy-conflict-or-missing"
         : "partial-XY-facts-clear-still-plot-highway-entrance-policy-pending";
       tally(entityFactExamples, entityFactCounts, entityReason, at);
+      if (entityReason === "partial-XY-facts-clear-still-plot-highway-entrance-policy-pending") {
+        const riverBank = (x, z, bank) => ctx.geo.hasRiver && Math.abs(x - ctx.geo.riverX(z)) < ctx.geo.riverWidth(z) + bank;
+        const wetCircle = module.wetCount({ height: ctx.geo.height, inRiver: ctx.inRiver, riverBank }, at, owner.radius, { river: true, riverBank: 14 });
+        const coastDistance = ctx.geo.coastDistance(at.x, at.z);
+        const maximumCoastDistance = Math.max(owner.radius * 2, ctx.geo.coastDistance(owner.x, owner.z));
+        const overlappingPlotOwners = [...ctx.publicSites, ...ctx.landmarks].filter(other => other.id !== owner.id
+          && Math.hypot(other.x - at.x, other.z - at.z) < other.radius + owner.radius).map(other => other.id);
+        const reservedParcelIds = ctx.blocks.flatMap(block => block.parcels).filter(parcel => Math.hypot(parcel.x - at.x, parcel.z - at.z)
+          < owner.radius + 9 + Math.hypot(parcel.width, parcel.depth) / 2).map(parcel => parcel.id);
+        const primaryDistance = module.polylineDistance(primaryRoads, at);
+        const highwayClear = module.clearsHighways(at, owner.radius * 2, owner.radius * 2, ctx.ringRuns);
+        // Same deck half-width 5.25 and sidewalk setback 1 as clearsHighways;
+        // compare the actual XY projection rather than the square's circumscribed circle.
+        const highwayProjectionFacts = ctx.ringRuns.map(points => module.inspectEnvelopeRoad(candidate, { width: 10.5, points }, { setback: 1 }));
+        const highwayProjection = highwayProjectionFacts.some(fact => fact.status !== "partial" || fact.entity.relation === "unsupported") ? "unsupported"
+          : highwayProjectionFacts.some(fact => fact.entity.relation === "conflict") ? "conflict" : "clear";
+        remainingPolicyCandidates.push({ at, wetCircle, wetCircleLimit: 3, coastDistance, maximumCoastDistance,
+          overlappingPlotOwners, reservedParcelIds, primaryDistance, maximumPrimaryDistance: owner.radius + 20, highwayClear, highwayProjection,
+          rejectedBy: [...(wetCircle > 3 ? ["nominal-plot-wet-budget"] : []),
+            ...(coastDistance > maximumCoastDistance ? ["coastal-reassignment-band"] : []),
+            ...(overlappingPlotOwners.length ? ["nominal-plot-owner-spacing"] : []),
+            ...(reservedParcelIds.length ? ["reserved-parcel-envelope"] : []),
+            ...(primaryDistance > owner.radius + 20 ? ["primary-service-bound"] : []),
+            ...(!highwayClear ? ["nominal-square-highway-clearance"] : [])],
+          admission: "not-admitted; actual entrance and full physical policy remain unverified" });
+      }
     }
   }
   console.log(JSON.stringify({ stage: "pre-solve-wet-local-tier", radius, owner, attempts, firstRejectionCounts: counts, examples,
-    groundAdmissibleRejectedBy, groundAdmissibleExamples, entityFactCounts, entityFactExamples,
+    groundAdmissibleRejectedBy, groundAdmissibleExamples, entityFactCounts, entityFactExamples, remainingPolicyCandidates,
     entityFactScope: "read-only conservative XY projection; neighbor extra setback=0; highway/plot/entrance policy remains pending; no candidate published" }));
 }
 delete globalThis.__groundDiagnostic;

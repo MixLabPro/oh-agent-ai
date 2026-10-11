@@ -4,6 +4,30 @@
 不能把某一小批提交、相关单测通过或截图变好替代整个目标。实施分支 `worktree-city-opt`。
 本表是未完成项台账，不修改原 SPEC 的范围和合并标准。
 
+## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
+
+- 在bb76bc87之后继续修改，尚未提交。完整渲染XY外廓与局部ground-only声明现在分别登记；
+  只有明确声明schema1/complete-conservative-renderer-xy的模型才能在迁移候选中使用实际并集
+  road/highway净距。未知或仅ground声明仍走原圆保护；无新增模型名分支。
+  原3单位道路setback、10.5高架全宽与1单位sidewalk、岸线68界限、circle湿预算、邻居plot、
+  原400候选/120搜索半径、服务距离与既有地块预留均保持，不删owner/路、不缩小模型。
+- 实际renderer守卫覆盖6个id×4个yaw×昼夜，每个mesh的所有顶点都须在同一凸外廓片内，
+  防止仅分散顶点落入并集却有未覆盖跨度；另验证capability alias、缺XY声明的legacy保护及
+  实体压路拒绝。外廓不是完整基础/门/高程通行证明，wholeModelReady仍false。
+- 1703310796/t2真实恢复：R583.4109452474155、容量1546/1080，庄园仍r34、同yaw，
+  从(358.808185,-297.703930)迁到原候选(472.418959,-288.291595)。基础实际海面下478→0、
+  gap6.85→0，groundFailures清零，25项required unmet0，Outcome.failed→degraded。
+  命名独立guard session13229 exit0：全部registered约束0、完整道路/高架XY净距、必要需求、
+  owner保留、容量、派生发布及修复归因通过。不是通过删除庄园或把失败期望改为容忍。
+- 2003037141/t1仍失败，required-placement session43434 exit1保持原degraded期望不降低。
+  4个XY暂清候选都超岸线68限制（70.78–71.18）并与working-harbor名义plot重叠，
+  没有直接取消岸线/固定港口保护。后续需联合姿态/道路/预留修复，不能把4候选当合法位置。
+- 两样本诊断增加remainingPolicyCandidates，逐项列wet/coast界限、owner/parcel引用、
+  主网距离、nominal高架与实际投影区别。1703310796原12候选中只有两个满足原岸线等条件，
+  它们真实高架外廓清净但旧circumscribed-circle拒绝，提供本次准入迁移的证据。
+  类型检查、envelope/ground/repair-safety专项通过；manifest65项登记新的命名回归。
+  最新完整planning/无缓存full/跨引擎/独立集/视觉/性能仍未完成，不能合并main。
+
 ## 2026-10-12 全折线消费者与实体外廓检查（最新，整体未完成）
 
 - 背景建筑仍沿用原半对角线+路幅/2+0.5净距，只把首段查询改为整折线；地价查询同样

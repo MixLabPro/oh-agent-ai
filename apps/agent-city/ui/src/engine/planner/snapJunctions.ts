@@ -13,6 +13,7 @@ import { bridgeLandingNodes, isPlannedRoadEnd } from "./endpoints";
 import { JUNCTION_CONFIG } from "./junctions";
 import { siteGeometry, shoreRelocationCandidates } from "./repairs";
 import { canRelocateGroundSite } from "./sitespec";
+import { resolveModelEnvelope, footprintPolylineDistance } from "./modelEnvelope";
 
 export const SNAP_JUNCTION_CONFIG = { version: 3, maxDistance: 0.5, maxShortLegMove: JUNCTION_CONFIG.minLegLength, minAngleDeg: JUNCTION_CONFIG.minAngleDeg };
 
@@ -91,13 +92,25 @@ export function relocatedSitePositionFailure(ctx: RepairContext, owner: RepairCo
   if (shore ? wetCount(geo, at, owner.radius, { river: true, riverBank: 14 }) > 3 || ctx.geo.height(at.x, at.z) <= 0.5
     || ctx.geo.coastDistance(at.x, at.z) > Math.max(owner.radius * (shoreReassignment ? 2 : 0.7), ctx.geo.coastDistance(old.x, old.z))
     : !ctx.geo.buildable(at.x, at.z) || !isDry(geo, at, owner.radius)) return "owner-footprint-unsafe";
-  if (!clearsRingRuns(at, owner.radius * 2, owner.radius * 2, ctx.ringRuns)) return "owner-highway-clearance";
+  const envelope = resolveModelEnvelope({ ...owner, ...at });
+  const declaredXY = envelope.status === "partial" && envelope.relocationCorridorEnvelope?.schemaVersion === 1
+    && envelope.relocationCorridorEnvelope.coverage === "complete-conservative-renderer-xy";
+  const projectionClear = (points: readonly Vec2[], required: number) => {
+    if (envelope.status !== "partial") return false;
+    const distance = footprintPolylineDistance(envelope.conservativeProjection, points);
+    return Number.isFinite(distance) && distance >= required;
+  };
+  // Same accepted deck width and sidewalk setback; change only the explicitly
+  // declared complete XY obstacle, never the shore/plot/service constraints.
+  if (declaredXY ? ctx.ringRuns.some(run => !projectionClear(run, 5.25 + 1))
+    : !clearsRingRuns(at, owner.radius * 2, owner.radius * 2, ctx.ringRuns)) return "owner-highway-clearance";
   if ([...ctx.publicSites, ...ctx.landmarks].some((other) => other !== owner
     && Math.hypot(other.x - at.x, other.z - at.z) < other.radius + owner.radius)) return "owner-spacing";
   // Generic sites keep the existing full capsule r + width/2 + 3 contract;
   // no other untouched road may become a new obstacle to the moved owner.
   const roads = [...ctx.network.edges.values()];
-  if (roads.some((road) => polylineDistance([road.points], at) < owner.radius + road.width / 2 + 3)) return "owner-road-envelope";
+  if (roads.some((road) => declaredXY ? !projectionClear(road.points, road.width / 2 + 3)
+    : polylineDistance([road.points], at) < owner.radius + road.width / 2 + 3)) return "owner-road-envelope";
   if (shoreReassignment && polylineDistance(roads.filter((road) => !road.bridge).map((road) => road.points), at) > owner.radius + 20) return "owner-access-too-far";
   return null;
 }

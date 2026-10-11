@@ -12,7 +12,8 @@ assert(manifest.some((s) => s.env.CITY_SEASIDE_TIER === "10"));
 assert(manifest.some((s) => s.file === "verify-city-cross-engine.mjs" && !s.shared));
 assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // Preserve the existing stages and register the new production causeway guard.
-assert.equal(manifest.length, 64);
+assert.equal(manifest.length, 65);
+for (const group of ["planning", "sites"]) assert(selectStages("module", group).some(stage => stage.id === "verify-city-villa-placement"));
 for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "sites" : undefined).some(stage => stage.id === "verify-city-model-envelope"));
 for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined).some(stage => stage.id === "verify-city-layout-capacity"));
 for (const id of ["verify-city-layout-envelopes", "verify-city-parcel-frontage", "verify-city-block-placement", "verify-city-block-lot-candidates", "verify-city-villa-physical", "verify-city-model-ground"]) {
