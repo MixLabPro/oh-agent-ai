@@ -4,6 +4,18 @@
 不能把某一小批提交、相关单测通过或截图变好替代整个目标。实施分支 `worktree-city-opt`。
 本表是未完成项台账，不修改原 SPEC 的范围和合并标准。
 
+## 2026-10-12 对象注册表协作接口（B3前置，非整批完成）
+
+生成器现导出cityLayout.checkSitePlacement(layout, footprint, occupied, options?)。
+footprint须带真实blockId，缺失或重复宿主拒绝，不猜最近街区；尺寸由消费者提供实际renderer
+外廓，occupied须排除移动对象自身。生成器与接口共用同一layoutPlacementEnvironment，
+检查真实面/洞、完整道路、高架及原site/occupied圆代理，显式返回原partial scope。
+默认采样上限沿用500000，支持调用者剩余采样预算和取消；不是全城全操作预算完成。
+专项验证纯函数、真实洞、后段弯路、occupied/site、高架、未知/重复宿主及预算/取消；
+typecheck通过。生成器选择逻辑未改，编辑器尚未消费这个接口，不能记作B3完成。
+B0 siteClasses、B1全部名称派生、B2实例拾取及B4配套稳定id/旧补丁映射均仍未完成；
+学校/商场/医院仍civic:index，不因市政用地已有固定id而记作B4完成。
+
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 
 - 本批已提交为8881f482（基于bb76bc87）。完整渲染XY外廓与局部ground-only声明现在分别登记；
