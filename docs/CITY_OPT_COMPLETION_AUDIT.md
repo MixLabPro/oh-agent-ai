@@ -13,8 +13,22 @@ footprint须带真实blockId，缺失或重复宿主拒绝，不猜最近街区�
 默认采样上限沿用500000，支持调用者剩余采样预算和取消；不是全城全操作预算完成。
 专项验证纯函数、真实洞、后段弯路、occupied/site、高架、未知/重复宿主及预算/取消；
 typecheck通过。生成器选择逻辑未改，编辑器尚未消费这个接口，不能记作B3完成。
-B0 siteClasses、B1全部名称派生、B2实例拾取及B4配套稳定id/旧补丁映射均仍未完成；
+B0完整siteClasses、B1全部名称派生、B2实例拾取及B4配套稳定id/旧补丁映射均仍未完成；
 学校/商场/医院仍civic:index，不因市政用地已有固定id而记作B4完成。
+
+### B0准备层：类别/目录与布局来源登记
+
+新增纯siteClasses模块，登记8个族、30个类；31个目录条目恰有一个类归属，五个会话目录
+共享data:session。六个布局数组按kind/来源分类；致敬模型标题引用原纯模型叶声明。
+face-lot/face-reserve/parcel模式及minimumSize引用既有renderer声明，未硬写宽深常量。
+未知类保持unknown；支持class#instance与旧decor:site:kind查询，不改既有生产拾取返回值。
+实际实例包络/高度尚缺，pendingCapabilities显式保留，不把plot圆或旧PICK_HEIGHT冒充实体。
+合并city-civic-*及city-public-sites-*在同族多个类共享：目前只登记元数据，不能将此当作
+唯一网格实例归属证明；B2须根据piece/实例映射区分类别，仍待接入。
+守卫验证目录/标题、唯一类id、合成六数组分类、未知类、原minimumSize及生成器依赖方向，
+登记manifest66项、fast/planning/sites。typecheck与专项通过；真实380/1600全实例唯一id、
+renderer外廓/拾取高度、场景逐字节前后对照、全场景网格归属及编辑器跨层守卫尚未执行/实现。
+当前没有生产消费者导入siteClasses，未改生产规划/渲染逻辑；仍不记作B0完整验收通过。
 
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 
