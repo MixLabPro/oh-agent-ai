@@ -160,7 +160,7 @@ export class GameSession {
     const params = this.params!;
     if (!this.visuals) {
       this.visuals = new FlightVisuals(params);
-      this.engine.attachGameObjects(this.visuals.group);
+      this.engine.attachGameObjects(this.visuals.group, this.visuals.sceneRoot);
     }
     if (this.course) this.visuals.setRings(this.course.rings);
     else this.visuals.clearRings();
@@ -307,7 +307,7 @@ export class GameSession {
     this.sfx.stop();
     this.engine.setGameFrameHook(null);
     if (this.visuals) {
-      this.engine.detachGameObjects(this.visuals.group);
+      this.engine.detachGameObjects(this.visuals.group, this.visuals.sceneRoot);
       this.visuals.dispose();
       this.visuals = null;
     }
