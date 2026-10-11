@@ -120,10 +120,33 @@ export function relocatedSitePositionFailure(ctx: RepairContext, owner: RepairCo
 export function endpointRelineCandidates(ctx: RepairContext, sourceId: string): Array<{ hostId: string; at: Vec2 }> {
   const source = ctx.network.nodes.get(sourceId);
   const own = [...ctx.network.edges.values()].filter((edge) => edge.from === sourceId || edge.to === sourceId);
-  if (!source || sourceId === ctx.primaryAnchorNodeId || own.length !== 1 || own[0].bridge
-    || own[0].structure !== "ground-road" || own[0].points.length !== 2
+  if (!source || sourceId === ctx.primaryAnchorNodeId || ![1, 2].includes(own.length)
+    || own.some(edge => edge.bridge || edge.structure !== "ground-road" || edge.points.length !== 2)
     || [...ctx.publicSites, ...ctx.landmarks].some((site) => site.access?.nodeId === sourceId)) return [];
   const candidates: Array<{ hostId: string; at: Vec2 }> = [];
+  if (own.length === 2) {
+    // A degree-two bend may have a near-coincident common stem with a wider
+    // host. Realign to the host's existing junction, never widen the snap or
+    // delete an independent branch. Strict coalescing preserves both lineages.
+    for (const host of ctx.network.edges.values()) {
+      if (host.bridge || host.structure !== "ground-road" || host.points.length !== 2 || own.some(edge => edge.id === host.id)
+        || host.from === sourceId || host.to === sourceId || polylineDistance([host.points], source) > SNAP_JUNCTION_CONFIG.maxDistance) continue;
+      const stem = own.find(edge => {
+        const far = edge.from === sourceId ? edge.to : edge.from;
+        return (far === host.from || far === host.to) && edge.width <= host.width
+          && (edge.kind !== "arterial" || host.kind === "arterial") && edge.purpose === host.purpose;
+      });
+      if (!stem) continue;
+      const common = stem.from === sourceId ? stem.to : stem.from;
+      const target = ctx.network.nodes.get(host.from === common ? host.to : host.from);
+      if (!target) continue;
+      const distance = Math.hypot(target.x - source.x, target.z - source.z);
+      if (distance <= SNAP_JUNCTION_CONFIG.maxDistance || distance > 24) continue;
+      candidates.push({ hostId: host.id, at: { x: target.x, z: target.z } });
+    }
+    return candidates.sort((a, b) => Math.hypot(a.at.x - source.x, a.at.z - source.z) - Math.hypot(b.at.x - source.x, b.at.z - source.z)
+      || (a.hostId < b.hostId ? -1 : a.hostId > b.hostId ? 1 : 0)).slice(0, 16);
+  }
   for (const host of ctx.network.edges.values()) {
     if (host.bridge || host.id === own[0].id || host.from === sourceId || host.to === sourceId) continue;
     for (let k = 1; k < host.points.length; k += 1) {
@@ -419,7 +442,10 @@ export function snapNearEdgeJunctions(ctx: RepairContext, preferHost = false, on
               accepted = moveHost ? commitSnap(ctx, target, source) : commitSnap(ctx, source, target);
             }
           } else {
-            accepted = commitSnap(ctx, source, { ...at, id: `${at.x}:${at.z}` }, [{ edgeId: host.id, at }]);
+            // A split child can coincide with a rebound incoming leg. Use the
+            // patch's strict straight-ground coalescing: exact shape, matching
+            // purpose/structure, both lineages and the widest class survive.
+            accepted = commitSnap(ctx, source, { ...at, id: `${at.x}:${at.z}` }, [{ edgeId: host.id, at }], true);
           }
           if (accepted) { changed += 1; break; }
         }
