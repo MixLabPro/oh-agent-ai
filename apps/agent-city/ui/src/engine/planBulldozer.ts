@@ -11,7 +11,7 @@
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge } from "./cityLayout";
 import { applyPlanPatch, appendSiteOp, buildingRect, clearanceRoads, nearestOnPolyline, rectClearOfEdges, validateBuildingMove, type PlanPatchV1 } from "./planPatch";
-import { roadImpact } from "./planRoadRules";
+import { roadImpact, viaductEdges } from "./planRoadRules";
 import { listSites } from "./planSites";
 
 export type BulldozeResult = {
@@ -46,6 +46,17 @@ export function freshRoadGeometry(before: CityLayout, after: CityLayout): RoadEd
   return after.roadEdges.filter((edge) => !edge.bridge && !ids.has(edge.id) && !covered(edge));
 }
 
+/** 编辑后新出现的高架段（不在编辑前任一高架上），按桥面净空当「路段」用（SPEC §17.2：高架下不能有楼）。 */
+export function freshViaductGeometry(before: CityLayout, after: CityLayout): RoadEdge[] {
+  const old = before.highways ?? [];
+  if (after.highways === before.highways) return [];
+  const onOld = (p: { x: number; z: number }) => old.some((run) => run.length >= 2 && nearestOnPolyline(p, run).distance <= 0.5);
+  return (after.highways ?? []).flatMap((run) => viaductEdges(run).filter((edge) => {
+    const [a, b] = edge.points;
+    return !(onOld(a) && onOld(b) && onOld({ x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 }));
+  }));
+}
+
 /** 编辑前就被地面路压着的矩形（生成器残余）：不该被这一笔顺手拆掉或搬走。 */
 function alreadyHit(before: CityLayout, rect: { x: number; z: number; yaw: number; width: number; depth: number }): boolean {
   const near = clearanceRoads(before).filter((edge) => edge.points.some((p) => Math.hypot(p.x - rect.x, p.z - rect.z) < 80) || nearestOnPolyline(rect, edge.points).distance < 60);
@@ -55,7 +66,7 @@ function alreadyHit(before: CityLayout, rect: { x: number; z: number; yaw: numbe
 export function bulldozeForRoads(generated: CityLayout, model: CityModel, before: CityLayout, patch: PlanPatchV1): BulldozeResult {
   let next = patch;
   let after = applyPlanPatch(generated, next).layout;
-  const fresh = freshRoadGeometry(before, after);
+  const fresh = [...freshRoadGeometry(before, after), ...freshViaductGeometry(before, after)];
   const result: BulldozeResult = { patch: next, bulldozed: [], relocated: [], homeless: [] };
   if (!fresh.length) return result;
   const impact = roadImpact(after, model, fresh);

@@ -9,7 +9,8 @@
 //   (e) 真实城市：画一条横穿城区的路，推平与安置后补丁干净重放、没有会话楼仍压在新路上（除非 homeless）；
 //       搬一座地标并补接入路，干净重放（SPEC §16.3）；
 //   (f) 接入路：新位置离路远就补一条最短的、不推平不安置的接入路；挨着路不补；原址断头接入路沿单行链列出，到岔路口为止；
-//   (g) 清除失效修改：只删失效条目，其余重放结果不变；跨档整份失效 → 空补丁。
+//   (g) 清除失效修改：只删失效条目，其余重放结果不变；跨档整份失效 → 空补丁；
+//   (h) 高架下不能有楼：新高架压到的设施推平、会话楼安置；切高架不算新几何；真实城市跨河高架 + 滨海大道干净重放（SPEC §17）。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
@@ -17,13 +18,13 @@ globalThis.window ??= globalThis;
 const {
   bulldozeForRoads, freshRoadGeometry, applyPlanPatch, emptyPlanPatch, appendRoadOp, appendSiteOp, listSites, siteMoveProblem, reservedParcelIds,
   validateRoadAdd, rectClearOfEdges, buildingRect, buildCityModel, layoutCity, MIAMI_COASTAL,
-  accessRoadFor, strandedAccessEdges, pruneStalePatch,
+  accessRoadFor, strandedAccessEdges, pruneStalePatch, appendHighwayOp, validateHighwayAdd, freshViaductGeometry,
 } = await loadCity({
   "engine/planAccess.ts": ["accessRoadFor", "strandedAccessEdges"],
-  "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry"],
-  "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch"],
+  "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry", "freshViaductGeometry"],
+  "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch", "appendHighwayOp"],
   "engine/planSites.ts": ["listSites", "siteMoveProblem"],
-  "engine/planRoadRules.ts": ["validateRoadAdd"],
+  "engine/planRoadRules.ts": ["validateRoadAdd", "validateHighwayAdd"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
@@ -209,6 +210,23 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   assert.equal(pruneStalePatch(patch, []), patch, "no stale entries → unchanged");
 }
 
+// (h) 高架下不能有楼（合成城市：高架 z=30 横穿 a 排地块）。
+{
+  const base = makeLayout(); base.highways = [];
+  const verdict = validateHighwayAdd(base, model, [{ x: -50, z: 30 }, { x: 350, z: 30 }]);
+  assert.deepEqual(verdict.blockers, []);
+  assert.ok(verdict.warnings.includes("relocate:1") && verdict.warnings.includes("bulldoze:1"), `a viaduct over b1 and the context building re-homes / bulldozes them — ${verdict.warnings}`);
+  const patch = appendHighwayOp(fresh(), { t: "add", points: [{ x: -50, z: 30 }, { x: 350, z: 30 }] }, 1);
+  const result = bulldozeForRoads(base, model, base, patch);
+  assert.deepEqual(result.bulldozed, ["context:a5"]); assert.deepEqual(result.relocated.map((r) => r.id), ["b1"]);
+  const after = applyPlanPatch(base, result.patch).layout;
+  assert.ok(Math.abs(slotOf(after, "b1").z - 30) > 8, "b1 moved off the deck's row");
+  // 切一刀：切口两侧都在旧高架上，不是新几何——不会因为切高架去推平谁。
+  const withDeck = { ...base, highways: [[{ x: -50, z: 30 }, { x: 350, z: 30 }]] };
+  const cut = applyPlanPatch(withDeck, appendHighwayOp(fresh(), { t: "cut", at: { x: 100, z: 30 } }, 1)).layout;
+  assert.equal(freshViaductGeometry(withDeck, cut).length, 0, "the two halves of a cut viaduct are not new geometry");
+}
+
 // (e) 真实城市：一条横穿城区的路。
 {
   const HARNESSES = ["codex", "claude-code", "dsh", "harness:zcode"];
@@ -276,7 +294,49 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
     if (movedOne) break;
   }
   assert.ok(movedOne, "some landmark can be moved and given an access road in the real city");
+
+  // 跨河高架：找一段两端在陆地、中间过水的直线（岛中间有河），画成高架——地面路过不了河，高架可以。
+  let crossing = null;
+  const isWater = (p) => !layout.terrain.buildable(p.x, p.z);
+  for (let i = 0; i < slots.length && !crossing; i += 5) {
+    for (let k = 0; k < 8 && !crossing; k += 1) {
+      const ang = (k * Math.PI) / 8; const c = slots[i]; const half = 160;
+      const a = { x: c.x - Math.cos(ang) * half, z: c.z - Math.sin(ang) * half }; const b = { x: c.x + Math.cos(ang) * half, z: c.z + Math.sin(ang) * half };
+      const samples = Array.from({ length: 33 }, (_, t) => ({ x: a.x + (b.x - a.x) * t / 32, z: a.z + (b.z - a.z) * t / 32 }));
+      if (isWater(a) || isWater(b) || !samples.some(isWater)) continue;
+      if (validateRoadAdd(layout, real, a, b, 5).blockers.includes("road-in-water") === false) continue; // 要的是地面路过不去的地方
+      const verdict = validateHighwayAdd(layout, real, [a, b]);
+      if (!verdict.blockers.length) crossing = { a, b, verdict };
+    }
+  }
+  assert.ok(crossing, "somewhere a ground road is blocked by water but a viaduct can span it");
+  const viaductPatch = appendHighwayOp(emptyPlanPatch(layout.seed, layout.scaleTier), { t: "add", points: [crossing.a, crossing.b] }, 1);
+  const vResult = bulldozeForRoads(layout, real, layout, viaductPatch);
+  const vApplied = applyPlanPatch(layout, vResult.patch);
+  assert.equal(vApplied.stale.length, 0, `the river-crossing viaduct (with its bulldoze/relocations) replays cleanly — ${JSON.stringify(vApplied.stale.slice(0, 3))}`);
+  assert.equal(vApplied.layout.highways.length, (layout.highways ?? []).length + 1, "…as one more viaduct run");
+  const deck = freshViaductGeometry(layout, vApplied.layout);
+  const stillUnder = vApplied.layout.districts.flatMap((d) => [...d.slots]).filter(([id, slot]) => !vResult.homeless.includes(id) && !rectClearOfEdges(buildingRect(buildings.get(id), slot), deck, 0.5));
+  assert.deepEqual(stillUnder.map(([id]) => id), [], "no session building is left under the new deck");
+  console.log(`  真实城市：跨河高架 ${Math.round(Math.hypot(crossing.b.x - crossing.a.x, crossing.b.z - crossing.a.z))} 长 ${crossing.verdict.warnings.join("、") || "无提示"} → 推平 ${vResult.bulldozed.length}、安置 ${vResult.relocated.length}`);
+
+  // 滨海大道：沿一段生成器滨海路外侧平行画一段，景观带折线随之增加，补丁干净重放。
+  const run = (layout.coastRoads ?? []).find((r) => r.length >= 6);
+  if (run) {
+    const [p0, p1] = [run[1], run[4]];
+    const along = { x: p1.x - p0.x, z: p1.z - p0.z }; const len = Math.hypot(along.x, along.z) || 1;
+    const inland = (q) => ({ x: q.x - (along.z / len) * 30, z: q.z + (along.x / len) * 30 });
+    const options = [[inland(p0), inland(p1)], [{ x: p0.x + (along.z / len) * 30, z: p0.z - (along.x / len) * 30 }, { x: p1.x + (along.z / len) * 30, z: p1.z - (along.x / len) * 30 }]];
+    const pick = options.find(([a, b]) => !validateRoadAdd(layout, real, a, b, 12, "waterfront").blockers.length);
+    if (pick) {
+      const wf = bulldozeForRoads(layout, real, layout, appendRoadOp(emptyPlanPatch(layout.seed, layout.scaleTier), { t: "add", from: pick[0], to: pick[1], width: 12, purpose: "waterfront" }, 1));
+      const wfApplied = applyPlanPatch(layout, wf.patch);
+      assert.equal(wfApplied.stale.length, 0, "a waterfront boulevard replays cleanly");
+      assert.ok(wfApplied.layout.coastRoads.length > (layout.coastRoads ?? []).length, "…and grows a promenade run");
+      console.log(`  真实城市：滨海大道一段 → 景观带折线 ${(layout.coastRoads ?? []).length} → ${wfApplied.layout.coastRoads.length}`);
+    } else console.log("  真实城市：滨海路两侧都放不下平行的滨海大道（跳过）");
+  }
   console.log(`  真实城市：${movedOne.site} → ${movedOne.target}，补接入路 ${movedOne.length}（求路耗时 ${movedOne.accessMs}ms）`);
 }
 
-console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; moved sites get a non-destructive access road and their old dead-end access road is listed; pruning stale entries leaves the rest unchanged; real-city cross-town road and landmark move replay cleanly.");
+console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; moved sites get a non-destructive access road and their old dead-end access road is listed; pruning stale entries leaves the rest unchanged; viaducts clear the ground beneath them like roads do; real-city cross-town road, landmark move, river-crossing viaduct and waterfront boulevard replay cleanly.");

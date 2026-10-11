@@ -28,7 +28,7 @@ import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { clearsHighways, roadNodeId } from "./cityPlan";
 import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 import { applySiteOps, type SiteOp } from "./planSites";
-import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectsOverlap, reservedParcelIds } from "./planGeometry";
+import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectsOverlap, reservedParcelIds, VIADUCT_DECK_WIDTH } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
 
@@ -38,8 +38,18 @@ export const PLAN_PATCH_VERSION = 1;
 export type RoadOp =
   | { t: "drop"; edge: string }
   | { t: "move"; node: string; to: Vec2 }
-  /** 新增一段直路。端点吸附规则见 resolveEndpoint：靠近路口 → 接到路口；落在路段中间 → 把该路段拆成两半；否则新建路口。 */
-  | { t: "add"; from: Vec2; to: Vec2; width: number };
+  /** 新增一段直路。端点吸附规则见 resolveEndpoint：靠近路口 → 接到路口；落在路段中间 → 把该路段拆成两半；否则新建路口。
+   *  purpose=waterfront：滨海大道（与生成器的环岛滨海路同级，沿它铺滨海景观带）。
+   *  起点是一条路的尽头且新路拐弯时，重放会在拐角处自动倒圆（filletAt，SPEC §17.3）。 */
+  | { t: "add"; from: Vec2; to: Vec2; width: number; purpose?: "waterfront" };
+
+/**
+ * 高架操作日志（SPEC §17.2）。高架（layout.highways）是独立于地面路网的折线：渲染层两端各 90 平滑落地成匝道、
+ * 中段架在 8.2 高，桥墩可以立在河里——所以它也是本期唯一能过河的路。
+ *   add：一条新高架（≥ 2 点）；首/尾点落在已有高架的开口端附近就接上去，接缝处不会凭空多出两段匝道。
+ *   cut：在 at 处切掉一截（最长 VIADUCT_CUT），一条高架断成两条，各自在断口落地成匝道。
+ */
+export type HighwayOp = { t: "add"; points: Vec2[] } | { t: "cut"; at: Vec2 };
 
 export type PlanPatchV1 = {
   version: 1;
@@ -49,6 +59,8 @@ export type PlanPatchV1 = {
   updatedAt: number;
   /** 道路操作日志，按顺序重放。 */
   roadOps: RoadOp[];
+  /** 高架操作日志（可缺省，旧存档没有这一项）。 */
+  highwayOps?: HighwayOp[];
   /** 设施（公共设施/花园/城区地标/背景楼）操作日志，按顺序重放，带位置校验（docs/…SPEC §14）。 */
   siteOps: SiteOp[];
   /** 会话楼 id（session_ref）→ 新地块 id（Parcel.id）。 */
@@ -59,9 +71,9 @@ export type PlanPatchV1 = {
 
 /** 条目无法套用的原因——诚实降级：丢弃 + 上报，绝不猜测替代目标。 */
 export type PatchStaleEntry = {
-  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "site-remove" | "site-move" | "context-suppress";
+  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "site-remove" | "site-move" | "context-suppress" | "highway-add" | "highway-cut";
   id: string;
-  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked";
+  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway";
   detail: string;
 };
 
@@ -92,7 +104,13 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     if (!isRecord(op)) continue;
     if (op.t === "drop" && typeof op.edge === "string") roadOps.push({ t: "drop", edge: op.edge });
     else if (op.t === "move" && typeof op.node === "string") { const to = point(op.to); if (to) roadOps.push({ t: "move", node: op.node, to }); }
-    else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); if (from && to) roadOps.push({ t: "add", from, to, width: op.width }); }
+    else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); if (from && to) roadOps.push({ t: "add", from, to, width: op.width, ...(op.purpose === "waterfront" ? { purpose: "waterfront" as const } : {}) }); }
+  }
+  const highwayOps: HighwayOp[] = [];
+  if (Array.isArray(raw.highwayOps)) for (const op of raw.highwayOps) {
+    if (!isRecord(op)) continue;
+    if (op.t === "add" && Array.isArray(op.points)) { const points = op.points.map(point).filter((q): q is Vec2 => !!q); if (points.length >= 2) highwayOps.push({ t: "add", points }); }
+    else if (op.t === "cut") { const at = point(op.at); if (at) highwayOps.push({ t: "cut", at }); }
   }
   const siteOps: SiteOp[] = [];
   if (Array.isArray(raw.siteOps)) for (const op of raw.siteOps) {
@@ -110,6 +128,7 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     version: PLAN_PATCH_VERSION, seed: raw.seed, scaleTier: raw.scaleTier,
     updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : 0,
     roadOps, siteOps, buildingMoves, suppressedContext: strings(raw.suppressedContext),
+    ...(highwayOps.length ? { highwayOps } : {}),
   };
 }
 
@@ -119,6 +138,8 @@ export function hashPlanPatch(patch: PlanPatchV1): string {
     version: patch.version,
     scaleTier: patch.scaleTier,
     roadOps: patch.roadOps,
+    // 只在有高架操作时进指纹：没有高架编辑的旧补丁指纹不变（activityKey 不变，静态城缓存不白白重画）。
+    ...(patch.highwayOps?.length ? { highwayOps: patch.highwayOps } : {}),
     siteOps: patch.siteOps,
     buildingMoves: Object.keys(patch.buildingMoves).sort().map((id) => [id, patch.buildingMoves[id]]),
     suppressedContext: [...patch.suppressedContext].sort(),
@@ -127,7 +148,7 @@ export function hashPlanPatch(patch: PlanPatchV1): string {
 }
 
 
-export { edgeLocked, clearanceRoads, parcelIndex, reservedParcelIds, rectClearOfEdges, buildingRect, rectsOverlap, quantize, type BuildingRect } from "./planGeometry";
+export { edgeLocked, clearanceRoads, parcelIndex, reservedParcelIds, rectClearOfEdges, buildingRect, rectsOverlap, quantize, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, type BuildingRect } from "./planGeometry";
 
 /** 编辑前校验（SPEC §7.3）：blockers 非空必须拒绝提交；warnings 只提示。
  *  `layout` 是当前 effective 布局（已套补丁），校验看的是用户眼前的城市。 */
@@ -184,6 +205,15 @@ export function appendSiteOp(patch: PlanPatchV1, op: SiteOp, now = Date.now()): 
   return { ...patch, updatedAt: now, siteOps: [...patch.siteOps, op] };
 }
 
+export function appendHighwayOp(patch: PlanPatchV1, op: HighwayOp, now = Date.now()): PlanPatchV1 {
+  return { ...patch, updatedAt: now, highwayOps: [...(patch.highwayOps ?? []), op] };
+}
+
+/** 补丁是否什么都没改（会话据此把空补丁存成「无补丁」）。 */
+export function planPatchEmpty(patch: PlanPatchV1): boolean {
+  return !patch.roadOps.length && !(patch.highwayOps?.length) && !patch.siteOps.length && !Object.keys(patch.buildingMoves).length && !patch.suppressedContext.length;
+}
+
 /**
  * 删掉已失效的条目（用户在面板上点「清除失效修改」）。失效条目重放时本来就没生效（道路/设施操作先在试算副本上跑，
  * 失败即丢弃），删掉它们不改变其余条目的重放结果——后面的操作引用的是 id，不是序号。
@@ -194,17 +224,18 @@ export function pruneStalePatch(patch: PlanPatchV1, stale: readonly PatchStaleEn
   if (stale.some((entry) => entry.reason === "tier-changed")) return null;
   const roadLabels = new Set(stale.filter((entry) => entry.kind.startsWith("road-")).map((entry) => entry.id));
   const siteLabels = new Set(stale.filter((entry) => entry.kind.startsWith("site-")).map((entry) => entry.id));
+  const highwayLabels = new Set(stale.filter((entry) => entry.kind.startsWith("highway-")).map((entry) => entry.id));
   const buildings = new Set(stale.filter((entry) => entry.kind === "building-move").map((entry) => entry.id));
   const contexts = new Set(stale.filter((entry) => entry.kind === "context-suppress").map((entry) => entry.id));
   const next: PlanPatchV1 = {
     ...patch, updatedAt: now,
     roadOps: patch.roadOps.filter((op, index) => !roadLabels.has(`${index + 1}:${op.t}`)),
+    ...(patch.highwayOps?.length ? { highwayOps: patch.highwayOps.filter((op, index) => !highwayLabels.has(`${index + 1}:${op.t}`)) } : {}),
     siteOps: patch.siteOps.filter((op, index) => !siteLabels.has(`${index + 1}:${op.t}`)),
     buildingMoves: Object.fromEntries(Object.entries(patch.buildingMoves).filter(([id]) => !buildings.has(id))),
     suppressedContext: patch.suppressedContext.filter((id) => !contexts.has(id)),
   };
-  const empty = !next.roadOps.length && !next.siteOps.length && !Object.keys(next.buildingMoves).length && !next.suppressedContext.length;
-  return empty ? null : next;
+  return planPatchEmpty(next) ? null : next;
 }
 
 /** 端点离已有路口这么近就接到路口上。 */
@@ -282,6 +313,37 @@ function resolveEndpoint(state: RoadState, p: Vec2): { id: string } | { error: "
   return { id };
 }
 
+/** 拐角倒圆：转角小于这个角度不倒（几乎直行），大于这个角度不倒（掉头式回折，倒出来是个小圈）。 */
+const FILLET_MIN_TURN = (12 * Math.PI) / 180;
+const FILLET_MAX_TURN = (150 * Math.PI) / 180;
+
+export type Fillet = { center: Vec2; mid: Vec2; /** P1（含）→ mid（不含）的弧点 */ before: Vec2[]; /** mid（不含）→ P2（含）的弧点 */ after: Vec2[] };
+
+/**
+ * 在路口 b 处给「从 a 来、往 c 去」的拐弯倒一个圆角（SPEC §17.3）。半径按路宽取 3 倍（12–36），
+ * 且切点离拐点不超过两侧路段长度的 45%（短路段上倒小圆）。不该倒（近乎直行 / 回折 / 路段太短）返回 null。
+ * 用户画路是一段段直线，拐弯处原来是两个矩形硬接，贴图的圆角线帽只有半个路宽，看上去是一个硬折角。
+ */
+export function filletAt(a: Vec2, b: Vec2, c: Vec2, width: number): Fillet | null {
+  const l1 = Math.hypot(b.x - a.x, b.z - a.z); const l2 = Math.hypot(c.x - b.x, c.z - b.z);
+  if (l1 < 4 || l2 < 4) return null;
+  const u1 = { x: (b.x - a.x) / l1, z: (b.z - a.z) / l1 }; const u2 = { x: (c.x - b.x) / l2, z: (c.z - b.z) / l2 };
+  const turn = Math.acos(Math.max(-1, Math.min(1, u1.x * u2.x + u1.z * u2.z)));
+  if (turn < FILLET_MIN_TURN || turn > FILLET_MAX_TURN) return null;
+  const half = Math.tan(turn / 2);
+  const tangent = Math.min(Math.max(12, Math.min(36, width * 3)) * half, l1 * 0.45, l2 * 0.45);
+  if (tangent < 1.5) return null;
+  const radius = tangent / half;
+  const side = u1.x * u2.z - u1.z * u2.x > 0 ? 1 : -1; // 左转 / 右转
+  const n1 = { x: -u1.z * side, z: u1.x * side };
+  const p1 = { x: b.x - u1.x * tangent, z: b.z - u1.z * tangent };
+  const center = { x: p1.x + n1.x * radius, z: p1.z + n1.z * radius };
+  const start = Math.atan2(p1.z - center.z, p1.x - center.x);
+  const steps = Math.max(4, Math.ceil(turn / (Math.PI / 16))) & ~1; // 偶数段：中点正好是一个弧点
+  const arc = Array.from({ length: steps + 1 }, (_, k) => quantize({ x: center.x + Math.cos(start + side * turn * (k / steps)) * radius, z: center.z + Math.sin(start + side * turn * (k / steps)) * radius }));
+  return { center, mid: arc[steps / 2], before: arc.slice(0, steps / 2), after: arc.slice(steps / 2 + 1) };
+}
+
 /**
  * 重放道路操作日志。每个操作在**试算副本**上执行，成功才提交——否则「端点已把路拆了、整条边却因重复而失败」
  * 会留下半截改动。失败的操作进 stale、不影响后续操作（后续操作若引用了它产生的 id，会各自报 missing）。
@@ -328,11 +390,31 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
       const b = resolveEndpoint(trial, op.to);
       if ("error" in b) { stale.push({ kind: "road-add", id: label, reason: b.error, detail: "终点落在桥/引道/滨海段上，不能从这里接路" }); return; }
       if (a.id === b.id) { stale.push({ kind: "road-add", id: label, reason: "degenerate", detail: "起点和终点是同一个路口" }); return; }
-      const na = trial.nodes.find((node) => node.id === a.id)!; const nb = trial.nodes.find((node) => node.id === b.id)!;
+      let na = trial.nodes.find((node) => node.id === a.id)!; const nb = trial.nodes.find((node) => node.id === b.id)!;
+      // 拐角倒圆：起点是一条地面路的尽头（度为 1）且这一笔拐了弯——把拐点挪到圆弧中点，旧路尾段与新路首段各带半段弧。
+      let lead: Vec2[] = []; // 新路首段在起点之后、交叉检测之前要经过的弧点（含 P2）
+      const incident = trial.edges.filter((edge) => edge.from === na.id || edge.to === na.id);
+      if (incident.length === 1 && !edgeLocked(incident[0])) {
+        const prev = incident[0];
+        const oriented = prev.to === na.id ? prev.points : [...prev.points].reverse(); // na 在末尾
+        const fillet = filletAt(oriented[oriented.length - 2], na, nb, Math.min(prev.width, op.width));
+        const midId = fillet ? roadNodeId(fillet.mid) : null;
+        if (fillet && midId && !trial.nodes.some((node) => node.id === midId)) {
+          const old = na.id;
+          const node = { id: midId, x: fillet.mid.x, z: fillet.mid.z };
+          trial.nodes = trial.nodes.map((candidate) => (candidate.id === old ? node : candidate));
+          const bent = [...oriented.slice(0, -1), ...fillet.before, fillet.mid];
+          const other = prev.to === old ? prev.from : prev.to;
+          trial.edges = trial.edges.map((edge) => (edge !== prev ? edge
+            : prev.to === old ? { ...prev, id: edgeIdOf(other, midId), to: midId, points: bent } : { ...prev, id: edgeIdOf(midId, other), from: midId, points: [...bent].reverse() }));
+          for (const [key, value] of endMap) if (value === old) endMap.set(key, midId);
+          na = node; lead = fillet.after;
+        }
+      }
       // 交叉：SimCity 式自动路口——在每个交点处把被交的路拆开，新路分段经过这些路口。曾经直接拒绝交叉，
       // 用户画路处处碰壁；交点按离起点的距离排序，拆路复用端点解析（交点离已有路口 < 1 时直接接到那个路口）。
-      const chain = [a.id];
-      for (const point of crossingsOf(trial.edges, na, nb)) {
+      const chain = [na.id];
+      for (const point of crossingsOf(trial.edges, lead.length ? lead[lead.length - 1] : na, nb)) {
         const hit = resolveEndpoint(trial, point);
         if ("error" in hit) { stale.push({ kind: "road-add", id: label, reason: hit.error, detail: "新路要穿过桥面，桥上不能开路口" }); return; }
         if (hit.id !== chain[chain.length - 1]) chain.push(hit.id);
@@ -345,7 +427,8 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
         const p = trial.nodes.find((node) => node.id === chain[i - 1])!; const q = trial.nodes.find((node) => node.id === chain[i])!;
         trial.edges.push({
           id, from: chain[i - 1], to: chain[i], width: op.width, kind: op.width >= 8 ? "arterial" : "local",
-          points: [{ x: p.x, z: p.z }, { x: q.x, z: q.z }], structure: "ground-road",
+          points: [{ x: p.x, z: p.z }, ...(i === 1 ? lead : []), { x: q.x, z: q.z }], structure: "ground-road",
+          ...(op.purpose ? { purpose: op.purpose } : {}),
         });
         added += 1;
       }
@@ -354,6 +437,125 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
     state = trial;
   });
   return { nodes: state.nodes, edges: state.edges, endMap };
+}
+
+/** 高架首尾点离已有高架开口端这么近就接上去。 */
+export const VIADUCT_JOIN_RADIUS = 12;
+/** 一次切掉的最长一截。 */
+export const VIADUCT_CUT = 40;
+
+/** 线段 a→b 上离 p 最近的参数 t∈[0,1]。 */
+const projectT = (p: Vec2, a: Vec2, b: Vec2) => {
+  const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+  return Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
+};
+const isClosed = (run: readonly Vec2[]) => run.length > 2 && Math.hypot(run[0].x - run[run.length - 1].x, run[0].z - run[run.length - 1].z) < 0.01;
+
+/** 高架上离 p 最近的位置（宽容半径 = 桥面半宽 + 4）。 */
+export function highwayHit(highways: readonly Vec2[][], p: Vec2): { run: number; segment: number; point: Vec2; distance: number } | null {
+  let best: { run: number; segment: number; point: Vec2; distance: number } | null = null;
+  highways.forEach((run, r) => {
+    for (let i = 1; i < run.length; i += 1) {
+      const t = projectT(p, run[i - 1], run[i]);
+      const q = { x: run[i - 1].x + (run[i].x - run[i - 1].x) * t, z: run[i - 1].z + (run[i].z - run[i - 1].z) * t };
+      const distance = Math.hypot(p.x - q.x, p.z - q.z);
+      if (distance <= VIADUCT_DECK_WIDTH / 2 + 4 && (!best || distance < best.distance)) best = { run: r, segment: i, point: q, distance };
+    }
+  });
+  return best;
+}
+
+/** 切掉的那一截（落在 at 所在的线段内，长度 ≤ VIADUCT_CUT）：返回切口两端。 */
+export function highwayCutWindow(run: readonly Vec2[], segment: number, at: Vec2): { from: Vec2; to: Vec2 } {
+  const a = run[segment - 1]; const b = run[segment];
+  const length = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+  const centre = projectT(at, a, b) * length;
+  const lo = Math.max(0, Math.min(centre - VIADUCT_CUT / 2, length - VIADUCT_CUT)); const hi = Math.min(length, lo + VIADUCT_CUT);
+  const at_ = (d: number) => quantize({ x: a.x + (b.x - a.x) * (d / length), z: a.z + (b.z - a.z) * (d / length) });
+  return { from: at_(lo), to: at_(hi) };
+}
+
+function replayHighwayOps(highways: readonly Vec2[][], ops: readonly HighwayOp[], stale: PatchStaleEntry[]): Vec2[][] {
+  let runs = highways.map((run) => [...run]);
+  ops.forEach((op, index) => {
+    const label = `${index + 1}:${op.t}`;
+    if (op.t === "cut") {
+      const hit = highwayHit(runs, op.at);
+      if (!hit) { stale.push({ kind: "highway-cut", id: label, reason: "missing-highway", detail: "这里已经没有高架了（规划已重算或前序操作已改动）" }); return; }
+      const run = runs[hit.run];
+      const cut = highwayCutWindow(run, hit.segment, op.at);
+      const head = [...run.slice(0, hit.segment), cut.from]; const tail = [cut.to, ...run.slice(hit.segment)];
+      const dedupe = (piece: Vec2[]) => piece.filter((q, i) => i === 0 || Math.hypot(q.x - piece[i - 1].x, q.z - piece[i - 1].z) > 0.01);
+      // 环线切一刀变成一条首尾在切口两侧的开线。
+      const pieces = isClosed(run) ? [dedupe([...tail, ...run.slice(1, hit.segment), cut.from])] : [dedupe(head), dedupe(tail)];
+      runs = [...runs.slice(0, hit.run), ...pieces.filter((piece) => piece.length >= 2 && Math.hypot(piece[0].x - piece[piece.length - 1].x, piece[0].z - piece[piece.length - 1].z) > 1), ...runs.slice(hit.run + 1)];
+      return;
+    }
+    let points = op.points.map(quantize);
+    if (points.length < 2 || points.every((q) => Math.hypot(q.x - points[0].x, q.z - points[0].z) < 1)) { stale.push({ kind: "highway-add", id: label, reason: "degenerate", detail: "高架至少要两个不同的点" }); return; }
+    // 首/尾接到已有高架的开口端上：拼成一条，接缝处不落地。
+    const join = (end: Vec2): { run: number; atStart: boolean } | null => {
+      for (let r = 0; r < runs.length; r += 1) {
+        const run = runs[r];
+        if (isClosed(run)) continue;
+        if (Math.hypot(run[0].x - end.x, run[0].z - end.z) <= VIADUCT_JOIN_RADIUS) return { run: r, atStart: true };
+        if (Math.hypot(run[run.length - 1].x - end.x, run[run.length - 1].z - end.z) <= VIADUCT_JOIN_RADIUS) return { run: r, atStart: false };
+      }
+      return null;
+    };
+    const head = join(points[0]);
+    if (head) {
+      const run = runs[head.run];
+      const oriented = head.atStart ? [...run].reverse() : run; // 让接口在末尾
+      points = [...oriented, ...points.slice(1)];
+      runs = runs.filter((_, r) => r !== head.run);
+    }
+    const tail = join(points[points.length - 1]);
+    if (tail && !(head && tail.run === head.run)) {
+      const run = runs[tail.run];
+      const oriented = tail.atStart ? run : [...run].reverse(); // 让接口在开头
+      points = [...points.slice(0, -1), ...oriented];
+      runs = runs.filter((_, r) => r !== tail.run);
+    }
+    runs.push(points);
+  });
+  return runs;
+}
+
+/**
+ * 滨海景观带的折线（layout.coastRoads，seasideSystem 沿它向海一侧铺步道/矮墙/路灯）跟着滨海路走（SPEC §17.1）：
+ *   - 生成器的岸段只保留仍压在滨海路上的那几段（擦掉/拖走的滨海路，景观带一起消失——曾留下悬空的景观带）；
+ *   - 滨海路上还没被覆盖的部分（用户画的滨海大道、拖动过的滨海路段）按 8 加密补成新折线。
+ * 河岸路（riverRoadRuns）也标 waterfront，但不铺海滨景观带：已在河岸折线上的不补。
+ * 没有道路操作时不调用（底层布局逐字节不变）。
+ */
+function deriveCoastRoads(layout: CityLayout, edges: readonly RoadEdge[]): Vec2[][] {
+  const waterfront = edges.filter((edge) => edge.purpose === "waterfront" && !edge.bridge);
+  const onWaterfront = (p: Vec2) => waterfront.some((edge) => nearestOnPolyline(p, edge.points).distance <= 0.75);
+  const kept: Vec2[][] = [];
+  for (const run of layout.coastRoads ?? []) {
+    let piece: Vec2[] = [];
+    for (let i = 0; i < run.length; i += 1) {
+      const mid = i ? { x: (run[i - 1].x + run[i].x) / 2, z: (run[i - 1].z + run[i].z) / 2 } : null;
+      if (!i || (mid && onWaterfront(mid))) piece.push(run[i]);
+      else { if (piece.length >= 2) kept.push(piece); piece = [run[i]]; }
+    }
+    if (piece.length >= 2) kept.push(piece);
+  }
+  const covered = [...kept, ...((layout as { riverRoadRuns?: Vec2[][] }).riverRoadRuns ?? [])];
+  const isCovered = (p: Vec2) => covered.some((run) => nearestOnPolyline(p, run).distance <= 0.75);
+  const added: Vec2[][] = [];
+  for (const edge of waterfront) {
+    const dense: Vec2[] = [];
+    for (let i = 1; i < edge.points.length; i += 1) {
+      const a = edge.points[i - 1]; const b = edge.points[i];
+      const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 8));
+      for (let k = i === 1 ? 0 : 1; k <= steps; k += 1) dense.push({ x: a.x + (b.x - a.x) * (k / steps), z: a.z + (b.z - a.z) * (k / steps) });
+    }
+    const mid = dense[Math.floor(dense.length / 2)];
+    if (dense.length >= 2 && mid && !isCovered(mid)) added.push(dense);
+  }
+  return [...kept, ...added];
 }
 
 /** 套用补丁（SPEC §5；顺序 道路日志 → 设施日志 → buildingMoves → 派生重算 → suppressedContext）。
@@ -368,6 +570,7 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     for (const id of Object.keys(patch.buildingMoves).sort()) stale.push({ kind: "building-move", id, reason: "tier-changed", detail });
     patch.roadOps.forEach((op, index) => stale.push({ kind: op.t === "drop" ? "road-drop" : op.t === "move" ? "road-move" : "road-add", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
     patch.siteOps.forEach((op, index) => stale.push({ kind: op.t === "remove" ? "site-remove" : "site-move", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
+    (patch.highwayOps ?? []).forEach((op, index) => stale.push({ kind: op.t === "add" ? "highway-add" : "highway-cut", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
     for (const id of [...patch.suppressedContext].sort()) stale.push({ kind: "context-suppress", id, reason: "tier-changed", detail });
     return { layout, stale, patchHash };
   }
@@ -376,10 +579,14 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   const replayed = patch.roadOps.length ? replayRoadOps(layout, patch.roadOps, stale) : null;
   const roadNodes = replayed ? replayed.nodes : layout.roadNodes;
   const roadEdges = replayed ? replayed.edges : layout.roadEdges;
+  const highways = patch.highwayOps?.length ? replayHighwayOps(layout.highways ?? [], patch.highwayOps, stale) : layout.highways;
+  const coastRoads = replayed ? deriveCoastRoads(layout, roadEdges) : layout.coastRoads;
 
   // ── 2. 设施操作日志（删/移）：先于会话楼移动套用，后者看到的是设施改动后的占用 ──
-  const sites = patch.siteOps.length ? applySiteOps(layout, patch.siteOps, patch.suppressedContext, stale) : null;
-  const view: CityLayout = sites ? { ...layout, ...sites } : layout;
+  // 设施与会话楼的落位判定要看到改过的高架（新高架下不能落楼）。
+  const base: CityLayout = highways === layout.highways ? layout : { ...layout, highways };
+  const sites = patch.siteOps.length ? applySiteOps(base, patch.siteOps, patch.suppressedContext, stale) : null;
+  const view: CityLayout = sites ? { ...base, ...sites } : base;
 
   // ── 3. buildingMoves：目标缺失/被占（按套用顺序先到先得）→ stale；否则换 slot 重算地面高度 ──
   const districts = layout.districts.map((district) => ({ ...district, slots: new Map(district.slots), grounds: new Map(district.grounds), carPaths: district.carPaths }));
@@ -437,5 +644,5 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     ? layout.activityKey // 叠套时不重复追加指纹
     : `${layout.activityKey ?? ""}${suffix}`;
 
-  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey }, stale, patchHash };
+  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}) }, stale, patchHash };
 }

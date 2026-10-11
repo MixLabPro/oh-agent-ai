@@ -7,6 +7,11 @@ import type { CityLayout, Parcel, RoadEdge, Vec2 } from "./cityLayout";
 
 export const quantize = (p: Vec2): Vec2 => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
 
+/** 高架桥面宽与两端匝道长——与渲染层 render/shared.ts 的 EXPRESSWAY_DECK_WIDTH / EXPRESSWAY_RAMP 同值
+ *  （那个模块带 three，规则层不引；verify-plan-bulldozer 断言两边相等）。 */
+export const VIADUCT_DECK_WIDTH = 10.5;
+export const VIADUCT_RAMP = 90;
+
 /** 锁定口径（放权后，SPEC §15）：只锁**桥面**——它的几何由桥梁模型（桥塔/桁架）绑定，单独擦或拖会留下悬空的桥。
  *  曾经连桥头引道、滨海路一起锁（M1 求稳），用户实测「很多东西都不能改」：滨海路占全城道路总长的大头，
  *  一锁就把最显眼的路全锁了。现在它们可编辑，改动的影响以提示呈现（擦掉引道桥会断开），不再拒绝。 */

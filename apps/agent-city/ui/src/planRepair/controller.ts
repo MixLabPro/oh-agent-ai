@@ -10,6 +10,8 @@
  *   橡皮擦（erase）：悬停高亮将被擦掉的路段（红；不能擦的变灰并说明原因），点击擦除。
  *   设施（site）：悬停高亮非会话建筑（公共设施/花园/地标/市政用地/背景楼），点选后点目标空地搬家，或拆除。
  *   路口（node）：点一个路口拿起来，鼠标移动预览关联路段跟着走（含推平/安置后果），再点一下放下。
+ * 画路有五种路型（SPEC §17）：小路 5 / 次干道 8 / 主干道 12 / 滨海大道（12，铺滨海景观带）/ 高架（逐点折线，回车或双击完成）。
+ * 从路尽头接着画并拐弯时，拐角自动倒圆（预览按实际铺成的弧线画）。
  * 选中建筑后悬停有落位试算（绿 = 能放，红 = 不能放并写原因）；画路/拖路口的推平与安置是推土机试算的确切结果（SPEC §16）。
  * 画路/橡皮擦只用地面点（引擎射线与地形的交点），不看射线先打到的建筑——与悬停预览用的是同一个点，所见即所点。
  */
@@ -17,17 +19,23 @@ import type { SnapPoint, RoadVerdict } from "../engine/planRoadRules";
 import type { Vec2 } from "../engine/cityLayout";
 import type { RepairRay } from "../engine/CityEngine";
 import type { SiteInfo, SiteTarget } from "../engine/planSites";
-import type { EditResult, ImpactPreview, NodeHandle, PlacementGhost, PlanRect, RepairCandidate, RoadPreview, SiteEditResult } from "./session";
+import type { EditResult, ImpactPreview, NodeHandle, PlacementGhost, PlanRect, RepairCandidate, RoadPreview, RoadPurpose, SiteEditResult } from "./session";
 
 export type RepairTool = "build" | "draw" | "erase" | "site" | "node";
-export type RoadWidth = 5 | 8;
+/** 画路的路型：地面路三档宽度 + 滨海大道 + 高架。 */
+export type RoadType = "local" | "secondary" | "main" | "waterfront" | "viaduct";
+export const ROAD_SPEC: Record<Exclude<RoadType, "viaduct">, { width: number; purpose?: RoadPurpose }> = {
+  local: { width: 5 }, secondary: { width: 8 }, main: { width: 12 }, waterfront: { width: 12, purpose: "waterfront" },
+};
 
 export type RepairMessage = { kind: "hint" | "ok" | "warn" | "error"; text: string };
 
 /** 悬停预览（叠加层据此画色带/标记）。reason 非空时面板在消息下方显示。 */
 export type RepairPreview =
   | { kind: "erase"; points: Vec2[]; width: number; ok: boolean; reason: string | null; warning: string | null }
-  | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; warning: string | null; snap: SnapPoint; impact: ImpactPreview | null }
+  | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; warning: string | null; snap: SnapPoint; impact: ImpactPreview | null; /** 实际铺成的折线（拐角倒圆）；null = 直线 from→to */ path: Vec2[] | null; waterfront: boolean }
+  /** 高架：已点下的点 + 鼠标位置。 */
+  | { kind: "viaduct"; points: Vec2[]; ok: boolean; reason: string | null; warning: string | null; impact: ImpactPreview | null }
   | { kind: "snap"; at: Vec2; ok: boolean; snap: SnapPoint }
   | { kind: "site"; rect: { x: number; z: number; yaw: number; width: number; depth: number }; label: string }
   /** 选中建筑后悬停的落位试算。 */
@@ -51,7 +59,9 @@ export type RepairState = {
   dragNode: NodeHandle | null;
   /** 刚搬走的地标/市政用地在原址留下的断头接入路（面板给一键擦掉）。 */
   stranded: string[];
-  roadWidth: RoadWidth;
+  roadType: RoadType;
+  /** 高架：已点下、还没完成的折线点。 */
+  viaduct: Vec2[];
   preview: RepairPreview;
   message: RepairMessage | null;
 };
@@ -67,8 +77,14 @@ export type RepairDeps = {
   // 道路
   snap(x: number, z: number): SnapPoint | null;
   edgeAt(x: number, z: number): { id: string; points: Vec2[]; width: number; locked: boolean } | null;
-  validateAdd(from: Vec2, to: Vec2, width: number): RoadPreview;
-  addRoad(from: Vec2, to: Vec2, width: number): EditResult;
+  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose): RoadPreview;
+  addRoad(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose): EditResult;
+  // 高架
+  validateHighway(points: readonly Vec2[]): RoadPreview;
+  addHighway(points: readonly Vec2[]): EditResult;
+  highwayAt(x: number, z: number): { points: Vec2[]; width: number } | null;
+  cutHighway(x: number, z: number): EditResult;
+  highwayEndAt(x: number, z: number): Vec2 | null;
   validateDrop(edgeId: string): RoadVerdict;
   dropEdge(edgeId: string): EditResult;
   dropEdges(edgeIds: readonly string[]): EditResult;
@@ -123,6 +139,9 @@ const BLOCKER_TEXT: Record<string, string> = {
   "target-occupied": "目标已被占用（会话楼、配套、花园或背景楼）",
   "site-over-road": "会压到道路上",
   "missing-target": "这里没有可落位的街区或地块",
+  "viaduct-too-short": "高架太短（至少 30）",
+  "viaduct-end-in-water": "匝道落地点在水里——高架两端要落在陆地上，或接到已有高架上",
+  "missing-highway": "这里没有高架",
   "tier-changed": "城市已随数据增长扩大了一档，旧修改已失效——请先在面板上点「清除失效修改」",
 };
 const WARNING_TEXT: Record<string, string> = {
@@ -138,6 +157,10 @@ const WARNING_TEXT: Record<string, string> = {
   "isolated-road": "这段路两端都没接上路网",
   "acute-junction": "会形成夹角小于 30° 的路口",
   "no-access-road": "新位置附近没有能顺手接上的路（会压到建筑或入水），需要你用画路工具接一条",
+  "short-viaduct": "不到 180，桥面升不到全高（两端各要 90 的匝道）",
+  "joins-viaduct": "将接上已有高架（接缝处不落地）",
+  "cuts-viaduct": "高架会断成两条，断口各自落地成匝道",
+  "far-from-coast": "离海岸较远——滨海景观带会铺在离海近的一侧",
 };
 /** 带数量的提示码（`code:N`）。 */
 const COUNTED_TEXT: Record<string, (n: number) => string> = {
@@ -165,7 +188,7 @@ const noteOf = (warnings: readonly string[]) => (warnings.length ? warnings.map(
 
 const HINT: Record<RepairTool, RepairMessage> = {
   build: { kind: "hint", text: "点选任意建筑（会话楼、设施、地标、市政用地），再点要搬去的空地" },
-  draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，Esc 结束" },
+  draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，拐弯自动倒圆，Esc 结束" },
   erase: { kind: "hint", text: "把橡皮擦移到道路上，红色高亮的路段点击即擦掉" },
   site: { kind: "hint", text: "点选任意非会话建筑（公共设施、花园、地标、市政用地、背景楼）；再点空地搬家，或点「拆除」" },
   node: { kind: "hint", text: "点一个路口拿起来，移动鼠标预览，再点一下放下；Esc 放回原处" },
@@ -188,6 +211,8 @@ const footprintContains = (site: SiteInfo, p: Vec2) => {
   return Math.abs(lx) <= site.width / 2 && Math.abs(lz) <= site.depth / 2;
 };
 
+const VIADUCT_HINT: RepairMessage = { kind: "hint", text: "高架：逐点点击画折线（可跨河、跨路），回车或在最后一点上再点一下完成；Esc 撤回上一个点" };
+
 const ghostPreview = (ghost: PlacementGhost | null): RepairPreview =>
   ghost ? { kind: "ghost", rect: ghost.rect, ok: ghost.blockers.length === 0, reason: ghost.blockers[0] === "unchanged" ? "它已经在这里了" : reasonOf(ghost.blockers), warning: noteOf(ghost.warnings) } : null;
 /** 把路段朝向路口的一端换成 to（拖路口预览）。 */
@@ -200,7 +225,7 @@ const movedEdges = (node: NodeHandle, to: Vec2) => node.edges.map((edge) => {
 const HOVER_EPS = 0.75; // 地面点移动不到这么多就不重算预览（鼠标抖动）
 
 export class RepairController {
-  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadWidth: 5, preview: null, message: null };
+  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], preview: null, message: null };
   private readonly listeners = new Set<(state: RepairState) => void>();
   private lastGround: Vec2 | null = null;
   private lastRay: RepairRay | null = null;
@@ -224,26 +249,40 @@ export class RepairController {
   enter(): void {
     if (this.state.active) return;
     this.lastGround = null;
-    this.set({ active: true, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], preview: null, message: HINT.build });
+    this.set({ active: true, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], preview: null, message: HINT.build });
   }
 
   exit(): void {
     if (!this.state.active) return;
     this.deps.setSelected(null);
     this.lastGround = null;
-    this.set({ active: false, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], preview: null, message: null });
+    this.set({ active: false, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], preview: null, message: null });
   }
 
   setTool(tool: RepairTool): void {
     if (!this.state.active || this.state.tool === tool) return;
     this.deps.setSelected(null);
     this.lastGround = null;
-    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], preview: null, message: HINT[tool] });
+    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], preview: null, message: tool === "draw" && this.state.roadType === "viaduct" ? VIADUCT_HINT : HINT[tool] });
   }
 
-  setRoadWidth(roadWidth: RoadWidth): void {
-    if (!this.state.active || this.state.roadWidth === roadWidth) return;
-    this.set({ roadWidth });
+  /** 换路型。地面路之间互换保留起点（接着画、只换宽度）；进出高架清掉进行中的笔画（两种画法不一样）。 */
+  setRoadType(roadType: RoadType): void {
+    if (!this.state.active || this.state.roadType === roadType) return;
+    const crossing = (roadType === "viaduct") !== (this.state.roadType === "viaduct");
+    this.set({ roadType, ...(crossing ? { drawStart: null, viaduct: [], message: this.state.tool === "draw" ? (roadType === "viaduct" ? VIADUCT_HINT : HINT.draw) : this.state.message } : {}) });
+    this.recomputePreview();
+  }
+
+  /** 高架：完成当前折线（回车 / 在最后一点上再点一下）。 */
+  finishViaduct(): void {
+    const { active, tool, roadType, viaduct } = this.state;
+    if (!active || tool !== "draw" || roadType !== "viaduct") return;
+    if (viaduct.length < 2) { this.set({ message: { kind: "warn", text: "高架至少要两个点：再点一个点" } }); return; }
+    const result = this.deps.addHighway(viaduct);
+    if (!result.ok) { this.set({ message: { kind: "error", text: failText("不能这样架", result) } }); return; }
+    const warnings = result.warnings.map(warningText);
+    this.set({ viaduct: [], message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已架好一条高架（${warnings.join("；")}）` : "已架好一条高架" } });
     this.recomputePreview();
   }
 
@@ -251,6 +290,11 @@ export class RepairController {
   cancel(): void {
     const { active, tool, buildingId, drawStart } = this.state;
     if (!active) return;
+    if (tool === "draw" && this.state.viaduct.length) {
+      const viaduct = this.state.viaduct.slice(0, -1);
+      this.set({ viaduct, message: viaduct.length ? { kind: "hint", text: `已撤回一个点（还有 ${viaduct.length} 个）` } : VIADUCT_HINT });
+      this.recomputePreview(); return;
+    }
     if (tool === "draw" && drawStart) { this.set({ drawStart: null, preview: null, message: HINT.draw }); this.recomputePreview(); return; }
     if (tool === "node" && this.state.dragNode) { this.set({ dragNode: null, preview: null, message: HINT.node }); this.recomputePreview(); return; }
     if (tool === "site" && this.state.site) { this.clearSite(HINT.site); return; }
@@ -289,7 +333,7 @@ export class RepairController {
   /** 状态变了（工具/宽度/起点/擦除成功）但鼠标没动：用最后的地面点重算预览。 */
   private recomputePreview(): void {
     const ground = this.lastGround;
-    const { tool, drawStart, roadWidth } = this.state;
+    const { tool, drawStart, roadType } = this.state;
     if (!ground) { if (this.state.preview) this.set({ preview: null }); return; }
     if (tool === "build") {
       const { buildingId } = this.state;
@@ -318,10 +362,21 @@ export class RepairController {
       return;
     }
     if (tool === "erase") {
+      // 高架在上面、看得见：鼠标在桥面范围内优先擦高架。
+      const deck = this.deps.highwayAt(ground.x, ground.z);
+      if (deck) { this.set({ preview: { kind: "erase", points: deck.points, width: deck.width, ok: true, reason: null, warning: warningText("cuts-viaduct") } }); return; }
       const edge = this.deps.edgeAt(ground.x, ground.z);
       if (!edge) { this.set({ preview: null }); return; }
       const verdict = this.deps.validateDrop(edge.id);
       this.set({ preview: { kind: "erase", points: edge.points, width: edge.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings) } });
+      return;
+    }
+    if (roadType === "viaduct") {
+      const at = this.deps.highwayEndAt(ground.x, ground.z) ?? ground;
+      const points = [...this.state.viaduct, at];
+      if (points.length < 2) { this.set({ preview: { kind: "viaduct", points, ok: true, reason: null, warning: this.deps.highwayEndAt(ground.x, ground.z) ? warningText("joins-viaduct") : null, impact: null } }); return; }
+      const verdict = this.deps.validateHighway(points);
+      this.set({ preview: { kind: "viaduct", points, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), impact: verdict.impact ?? null } });
       return;
     }
     const snap = this.deps.snap(ground.x, ground.z);
@@ -330,8 +385,9 @@ export class RepairController {
       this.set({ preview: { kind: "snap", at: { x: snap.x, z: snap.z }, ok: !snap.locked, snap } });
       return;
     }
-    const verdict = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, roadWidth);
-    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: roadWidth, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), snap, impact: ("impact" in verdict ? verdict.impact : null) ?? null } });
+    const spec = ROAD_SPEC[roadType];
+    const verdict: RoadPreview = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, spec.width, spec.purpose);
+    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: spec.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), snap, impact: verdict.impact ?? null, path: verdict.path ?? null, waterfront: spec.purpose === "waterfront" } });
   }
 
   // ── 点击 ────────────────────────────────────────────────────────────────
@@ -383,6 +439,15 @@ export class RepairController {
   private clickDraw(ground: Vec2 | null): void {
     if (!ground) return;
     this.lastGround = ground;
+    if (this.state.roadType === "viaduct") {
+      const at = this.deps.highwayEndAt(ground.x, ground.z) ?? ground;
+      const last = this.state.viaduct[this.state.viaduct.length - 1];
+      if (last && Math.hypot(at.x - last.x, at.z - last.z) < 3) { this.finishViaduct(); return; } // 在最后一点上再点一下 = 完成（双击）
+      const viaduct = [...this.state.viaduct, at];
+      this.set({ viaduct, message: viaduct.length === 1 ? { kind: "hint", text: "起点已落下，接着逐点点击；回车或在最后一点上再点一下完成" } : { kind: "hint", text: `已点 ${viaduct.length} 个点；回车完成，Esc 撤回上一个点` } });
+      this.recomputePreview();
+      return;
+    }
     const snap = this.deps.snap(ground.x, ground.z);
     if (!snap) return;
     if (snap.locked) { this.set({ message: { kind: "error", text: `不能从这里接路：${blockerText("locked-edge")}` } }); return; }
@@ -392,7 +457,8 @@ export class RepairController {
       this.recomputePreview();
       return;
     }
-    const result = this.deps.addRoad(start, snap, this.state.roadWidth);
+    const spec = ROAD_SPEC[this.state.roadType as Exclude<RoadType, "viaduct">];
+    const result = this.deps.addRoad(start, snap, spec.width, spec.purpose);
     if (!result.ok) {
       this.set({ message: { kind: "error", text: failText("不能这样画", result) } });
       return;
@@ -484,6 +550,12 @@ export class RepairController {
   private clickErase(ground: Vec2 | null): void {
     if (!ground) return;
     this.lastGround = ground;
+    if (this.deps.highwayAt(ground.x, ground.z)) {
+      const result = this.deps.cutHighway(ground.x, ground.z);
+      this.set({ message: result.ok ? { kind: "ok", text: "已切掉一截高架（断口各自落地成匝道）" } : { kind: "error", text: failText("不能切", result) } });
+      this.recomputePreview();
+      return;
+    }
     const edge = this.deps.edgeAt(ground.x, ground.z);
     if (!edge) { this.set({ message: { kind: "warn", text: "这里没有道路可擦" } }); return; }
     const result = this.deps.dropEdge(edge.id);

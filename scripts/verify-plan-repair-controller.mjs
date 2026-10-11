@@ -21,7 +21,7 @@ import { loadCity } from "./city-kit/index.mjs";
 const { RepairController, blockerText } = await loadCity({ "planRepair/controller.ts": ["RepairController", "blockerText"] });
 
 function harness(overrides = {}) {
-  const log = { moves: [], selected: [], candidateCalls: [], adds: [], drops: [], siteMoves: [], siteRemoves: [], nodeMoves: [] };
+  const log = { moves: [], selected: [], candidateCalls: [], adds: [], drops: [], siteMoves: [], siteRemoves: [], nodeMoves: [], viaducts: [], cuts: [] };
   const buildings = new Set(["b1", "b2"]);
   const parcelOf = { b1: "p1", b2: "p2" };
   const cand = (parcelId, x) => ({ parcelId, x, z: 0, yaw: 0, width: 8, depth: 8, distance: 5, warnings: [] });
@@ -36,7 +36,13 @@ function harness(overrides = {}) {
     snap: (x, z) => ({ x, z, kind: "free", locked: x < 0 }),
     edgeAt: (x, z) => (Math.abs(z) < 4 ? { id: z < -1 ? "bridge" : "e1", points: [{ x: 0, z: 0 }, { x: 100, z: 0 }], width: 5, locked: z < -1 } : null),
     validateAdd: (from, to) => (deps.addVerdict ?? { blockers: [], warnings: [] }),
-    addRoad: (from, to, width) => { log.adds.push([from, to, width]); return deps.addResult ?? { ok: true, patch: {}, warnings: [] }; },
+    addRoad: (from, to, width, purpose) => { log.adds.push([from, to, width, purpose]); return deps.addResult ?? { ok: true, patch: {}, warnings: [] }; },
+    // 高架：z∈[290,310] 的带里有一条东西向高架；(500,300) 是它的开口端。
+    validateHighway: (points) => (deps.viaductVerdict ?? { blockers: [], warnings: [] }),
+    addHighway: (points) => { log.viaducts.push(points.map((q) => ({ ...q }))); return deps.viaductResult ?? { ok: true, patch: {}, warnings: [] }; },
+    highwayAt: (x, z) => (Math.abs(z - 300) < 10 && x < 500 ? { points: [{ x: x - 20, z: 300 }, { x: x + 20, z: 300 }], width: 10.5 } : null),
+    cutHighway: (x, z) => { log.cuts.push([x, z]); return { ok: true, patch: {}, warnings: ["cuts-viaduct"] }; },
+    highwayEndAt: (x, z) => (Math.hypot(x - 500, z - 300) <= 12 ? { x: 500, z: 300 } : null),
     validateDrop: (id) => (id === "bridge" ? { blockers: ["locked-edge"], warnings: [] } : (deps.dropVerdict ?? { blockers: [], warnings: [] })),
     dropEdge: (id) => { log.drops.push(id); return deps.dropResult ?? { ok: true, patch: {}, warnings: [] }; },
     dropEdges: (ids) => { log.drops.push(...ids); return { ok: true, patch: {}, warnings: [] }; },
@@ -263,7 +269,7 @@ function harness(overrides = {}) {
   assert.deepEqual({ x: controller.snapshot.drawStart.x, z: controller.snapshot.drawStart.z }, { x: 80, z: 30 }, "after a stroke the end point becomes the next start (chain drawing)");
   assert.equal(controller.snapshot.drawStart.kind, "node", "the placed end is a junction now");
   assert.equal(controller.snapshot.message.kind, "ok");
-  controller.setRoadWidth(8);
+  controller.setRoadType("secondary");
   controller.hover({ x: 120, z: 30 });
   assert.equal(controller.snapshot.preview.width, 8, "the width selector drives the preview");
   controller.click({ pickedId: null, ground: { x: 120, z: 30 } });
@@ -585,4 +591,64 @@ function harness(overrides = {}) {
   assert.match(controller.snapshot.preview.warning, /1 栋会话楼附近没有空地块，会留在路上/);
 }
 
-console.log("City plan repair controller: junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (v) 路型（SPEC §17）：主干道/滨海大道传宽度与 purpose；高架逐点画、回车或再点最后一点完成、Esc 撤点、接已有高架端点；
+//     橡皮擦在桥面范围内切高架；拐角倒圆的预览按实际折线画。
+{
+  const { controller, log, deps } = harness();
+  controller.enter(); controller.setTool("draw");
+  controller.setRoadType("waterfront");
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  controller.click({ pickedId: null, ground: { x: 60, z: 10 } });
+  assert.deepEqual(log.adds.at(-1).slice(2), [12, "waterfront"], "a waterfront boulevard is a 12-wide road tagged waterfront");
+  deps.addVerdict = { blockers: [], warnings: [], path: [{ x: 55, z: 10 }, { x: 60, z: 12 }, { x: 62, z: 17 }, { x: 62, z: 60 }] };
+  controller.hover({ x: 62, z: 60 });
+  assert.equal(controller.snapshot.preview.path.length, 4, "the preview follows the filleted path, not the straight chord");
+  assert.equal(controller.snapshot.preview.waterfront, true);
+  deps.addVerdict = undefined;
+  controller.setRoadType("main");
+  assert.ok(controller.snapshot.drawStart, "switching between ground road types keeps the start (only the width changes)");
+  controller.click({ pickedId: null, ground: { x: 60, z: 80 } });
+  assert.deepEqual(log.adds.at(-1).slice(2), [12, undefined], "a main road is 12 wide with no purpose");
+
+  controller.setRoadType("viaduct");
+  assert.equal(controller.snapshot.drawStart, null, "entering viaduct mode drops the ground-road start");
+  assert.match(controller.snapshot.message.text, /逐点点击/);
+  controller.click({ pickedId: null, ground: { x: 0, z: 0 } });
+  controller.click({ pickedId: null, ground: { x: 100, z: 0 } });
+  controller.click({ pickedId: null, ground: { x: 200, z: 50 } });
+  assert.equal(controller.snapshot.viaduct.length, 3);
+  controller.cancel();
+  assert.equal(controller.snapshot.viaduct.length, 2, "Esc takes back the last point");
+  controller.hover({ x: 250, z: 60 });
+  assert.equal(controller.snapshot.preview.kind, "viaduct"); assert.equal(controller.snapshot.preview.points.length, 3, "the preview is the placed points plus the cursor");
+  deps.viaductVerdict = { blockers: ["viaduct-end-in-water"], warnings: [] };
+  controller.hover({ x: 260, z: 70 });
+  assert.equal(controller.snapshot.preview.ok, false); assert.match(controller.snapshot.preview.reason, /匝道落地点在水里/);
+  deps.viaductVerdict = undefined;
+  controller.click({ pickedId: null, ground: { x: 250, z: 60 } });
+  controller.click({ pickedId: null, ground: { x: 251, z: 60.5 } }); // 在最后一点上再点一下 = 完成
+  assert.equal(log.viaducts.length, 1, "clicking the last point again finishes the viaduct");
+  assert.deepEqual(log.viaducts[0].map((q) => q.x), [0, 100, 250]);
+  assert.deepEqual(controller.snapshot.viaduct, [], "…and starts a fresh one");
+  controller.click({ pickedId: null, ground: { x: 495, z: 305 } });
+  assert.deepEqual(controller.snapshot.viaduct[0], { x: 500, z: 300 }, "a point near an existing viaduct's open end snaps onto it (to extend it)");
+  controller.click({ pickedId: null, ground: { x: 700, z: 300 } });
+  controller.finishViaduct();
+  assert.equal(log.viaducts.length, 2, "Enter (finishViaduct) commits too");
+  controller.click({ pickedId: null, ground: { x: 800, z: 0 } });
+  controller.finishViaduct();
+  assert.match(controller.snapshot.message.text, /至少要两个点/, "a single point cannot be committed");
+  assert.equal(log.viaducts.length, 2);
+  controller.setRoadType("local");
+  assert.deepEqual(controller.snapshot.viaduct, [], "leaving viaduct mode drops the pending points");
+
+  controller.setTool("erase");
+  controller.hover({ x: 300, z: 302 });
+  assert.equal(controller.snapshot.preview.width, 10.5, "over a viaduct deck the eraser targets the viaduct");
+  assert.match(controller.snapshot.preview.warning, /断成两条/);
+  controller.click({ pickedId: null, ground: { x: 300, z: 302 } });
+  assert.deepEqual(log.cuts.at(-1), [300, 302]);
+  assert.match(controller.snapshot.message.text, /切掉一截高架/);
+}
+
+console.log("City plan repair controller: road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");

@@ -8,12 +8,12 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { CityModel } from "../cityModel";
 import type { CityEngine } from "../engine/CityEngine";
 import type { PlanIssue } from "../engine/planAudit";
-import { RepairController, type RepairState, type RepairTool, type RoadWidth } from "./controller";
+import { RepairController, type RepairState, type RepairTool, type RoadType } from "./controller";
 import { ParcelOverlay, type OverlayMarker, type OverlayRibbon, type OverlaySiteMark } from "./overlay";
 import { installPlanRepairDebug, planDevEnabled, type PlanRect, type PlanRepairSession } from "./session";
 
 export type RepairInfo = {
-  counts: { buildingMoves: number; roadOps: number; roadAdds: number; roadDrops: number; siteOps: number; suppressedContext: number } | null;
+  counts: { buildingMoves: number; roadOps: number; highwayOps: number; roadAdds: number; roadDrops: number; siteOps: number; suppressedContext: number } | null;
   staleCount: number;
   /** 补丁写于更小的档位（城市随数据增长扩大过）：整份失效。 */
   tierChanged: boolean;
@@ -22,7 +22,7 @@ export type RepairInfo = {
   saveFailed: boolean;
 };
 
-const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadWidth: 5, preview: null, message: null };
+const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], preview: null, message: null };
 const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, canUndo: false, canRedo: false, saveFailed: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
@@ -60,8 +60,13 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         setSelected: (id) => current.setSelected(id),
         snap: (x, z) => session.snap(x, z),
         edgeAt: (x, z) => session.edgeAt(x, z),
-        validateAdd: (from, to, width) => session.validateAdd(from, to, width),
-        addRoad: (from, to, width) => session.addRoad(from, to, width),
+        validateAdd: (from, to, width, purpose) => session.validateAdd(from, to, width, purpose),
+        addRoad: (from, to, width, purpose) => session.addRoad(from, to, width, purpose),
+        validateHighway: (points) => session.validateHighway(points),
+        addHighway: (points) => session.addHighway(points),
+        highwayAt: (x, z) => session.highwayAt(x, z),
+        cutHighway: (x, z) => session.cutHighway(x, z),
+        highwayEndAt: (x, z) => session.highwayEndAt(x, z),
         validateDrop: (id) => session.validateDrop(id),
         dropEdge: (id) => session.dropEdge(id),
         dropEdges: (ids) => session.dropEdges(ids),
@@ -112,6 +117,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
       if (event.key === "Escape") { event.preventDefault(); controller.cancel(); return; }
+      if (event.key === "Enter" && controller.snapshot.viaduct.length) { event.preventDefault(); controller.finishViaduct(); syncInfo(); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         const session = installed.current?.session; if (!session) return;
@@ -157,7 +163,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     if (preview?.kind === "ghost") marks.push(mark(preview.rect, preview.ok ? "ghost-ok" : "ghost-bad"));
     const ribbons: OverlayRibbon[] = []; const markers: OverlayMarker[] = [];
     // 道路编辑的后果（推土机试算）：推平红、安置琥珀（原址 → 新家连线）、无处安置深红。
-    const impact = preview?.kind === "draw" || preview?.kind === "node" ? preview.impact : null;
+    const impact = preview?.kind === "draw" || preview?.kind === "node" || preview?.kind === "viaduct" ? preview.impact : null;
     if (impact && preview && "ok" in preview && preview.ok) {
       for (const rect of impact.bulldozed) marks.push(mark(rect, "doomed"));
       for (const { from, to } of impact.relocated) { marks.push(mark(from, "relocate-from"), mark(to, "relocate-to")); ribbons.push({ points: [from, to], width: 0.8, tone: "link" }); }
@@ -166,14 +172,20 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     overlay.setSiteMarks(marks);
     const hasImpact = !!impact && (impact.bulldozed.length > 0 || impact.relocated.length > 0 || impact.homeless.length > 0);
     if (preview?.kind === "erase") ribbons.push({ points: preview.points, width: preview.width, tone: preview.ok ? "erase" : "erase-blocked" });
-    if (preview?.kind === "draw") { ribbons.push({ points: [preview.from, preview.to], width: preview.width, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
+    // 画路预览按实际铺成的折线画（拐角倒圆时 path 从旧路尾端的切点开始，弧线一目了然）。
+    if (preview?.kind === "draw") { ribbons.push({ points: preview.path ?? [preview.from, preview.to], width: preview.width, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
+    if (preview?.kind === "viaduct") {
+      if (preview.points.length >= 2) ribbons.push({ points: preview.points, width: 10.5, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" });
+      markers.push({ ...preview.points[preview.points.length - 1], tone: preview.ok ? "snap" : "snap-blocked" });
+    }
+    for (const point of state.viaduct) markers.push({ ...point, tone: "start" });
     if (preview?.kind === "node") { for (const edge of preview.edges) ribbons.push({ points: edge.points, width: edge.width, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" }); markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" }); }
     if (preview?.kind === "node-hover") markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" });
     if (state.dragNode) markers.push({ x: state.dragNode.x, z: state.dragNode.z, tone: "start" });
     if (preview?.kind === "snap") markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" });
     if (drawStart) markers.push({ x: drawStart.x, z: drawStart.z, tone: "start" });
     overlay.setPreview(ribbons, markers, heightAt);
-  }, [state.candidates, state.siteTargets, state.site, state.preview, state.drawStart, state.dragNode, state.active, state.tool]);
+  }, [state.candidates, state.siteTargets, state.site, state.preview, state.drawStart, state.dragNode, state.viaduct, state.active, state.tool]);
 
   useEffect(() => () => {
     controllerRef.current?.exit();
@@ -194,7 +206,8 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     removeSelected: () => withSession((_s, controller) => controller.removeSelected()),
     eraseStranded: () => withSession((_s, controller) => controller.eraseStranded()),
     pruneStale: () => withSession((session, controller) => { if (session.pruneStale()) controller.refresh({ kind: "ok", text: "已清除失效的修改（撤销可恢复）" }); }),
-    setRoadWidth: (width: RoadWidth) => withSession((_s, controller) => controller.setRoadWidth(width)),
+    setRoadType: (type: RoadType) => withSession((_s, controller) => controller.setRoadType(type)),
+    finishViaduct: () => withSession((_s, controller) => controller.finishViaduct()),
     undo: () => withSession((session, controller) => { if (session.undo()) controller.refresh({ kind: "ok", text: "已撤销" }); }),
     redo: () => withSession((session, controller) => { if (session.redo()) controller.refresh({ kind: "ok", text: "已重做" }); }),
     reset: () => withSession((session, controller) => { session.reset(); controller.refresh({ kind: "ok", text: "已恢复生成" }); }),

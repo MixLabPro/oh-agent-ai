@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { siteLabel, type RepairTool, type RoadWidth } from "./controller";
+import { siteLabel, type RepairTool, type RoadType } from "./controller";
 import type { PlanRepairUi } from "./usePlanRepair";
 
 const RULE_LABEL: Record<string, string> = {
@@ -15,7 +15,13 @@ const TOOLS: Array<{ id: RepairTool; label: string; key: string; hint: string }>
   { id: "node", label: "路口", key: "N", hint: "点一个路口拿起来，再点一下放下：连着的路跟着走" },
   { id: "site", label: "设施", key: "S", hint: "编辑非会话建筑：公共设施、花园、地标、市政用地、背景楼——搬家或拆除" },
 ];
-const WIDTHS: Array<{ id: RoadWidth; label: string }> = [{ id: 5, label: "小路" }, { id: 8, label: "次干道" }];
+const ROAD_TYPES: Array<{ id: RoadType; label: string; hint: string }> = [
+  { id: "local", label: "小路", hint: "宽 5，街区内的支路" },
+  { id: "secondary", label: "次干道", hint: "宽 8" },
+  { id: "main", label: "主干道", hint: "宽 12，城市骨架级" },
+  { id: "waterfront", label: "滨海大道", hint: "宽 12，沿路向海一侧铺滨海景观带（步道、矮墙、路灯）" },
+  { id: "viaduct", label: "高架", hint: "逐点点击画折线，可跨河跨路，两端自动落地成匝道；回车完成" },
+];
 
 /**
  * 规划修复面板（开发预览，仅中文）。未进入修复模式时只显示一个始终可见的入口按钮——
@@ -34,7 +40,7 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
   }
 
   const counts = info.counts;
-  const total = counts ? counts.buildingMoves + counts.roadOps + counts.siteOps + counts.suppressedContext : 0;
+  const total = counts ? counts.buildingMoves + counts.roadOps + counts.highwayOps + counts.siteOps + counts.suppressedContext : 0;
   // 恢复生成两段确认（同 reseed 的 4 秒确认模式）：误点一次不会丢掉全部修改。
   const onReset = () => {
     if (!confirmReset) {
@@ -55,8 +61,12 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
         {tool.label}<kbd>{tool.key}</kbd>
       </button>)}
     </div>
-    {state.tool === "draw" && <div className="city-repair-widths" role="radiogroup" aria-label="路宽">
-      {WIDTHS.map((width) => <button key={width.id} role="radio" aria-checked={state.roadWidth === width.id} className={state.roadWidth === width.id ? "is-active" : ""} onClick={() => repair.setRoadWidth(width.id)}>{width.label}</button>)}
+    {state.tool === "draw" && <div className="city-repair-widths" role="radiogroup" aria-label="路型">
+      {ROAD_TYPES.map((type) => <button key={type.id} role="radio" aria-checked={state.roadType === type.id} title={type.hint} className={state.roadType === type.id ? "is-active" : ""} onClick={() => repair.setRoadType(type.id)}>{type.label}</button>)}
+    </div>}
+    {state.tool === "draw" && state.roadType === "viaduct" && state.viaduct.length > 0 && <div className="city-repair-site">
+      <span>高架已点 {state.viaduct.length} 个点</span>
+      <button onClick={repair.finishViaduct} disabled={state.viaduct.length < 2} title="回车">完成</button>
     </div>}
     {info.tierChanged ? <div className="city-repair-banner" role="alert">
       <p>城市已随会话数增长扩大了一档，地块和路口都重新排过——之前的 {info.staleCount} 处修改已全部失效，没有显示在地图上。</p>
@@ -80,7 +90,7 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
     </div>}
     <p className="city-repair-status">
       {total === 0 ? "尚无修改" : `${total} 处修改`}
-      {counts && total > 0 && `（${[counts.buildingMoves ? `移楼 ${counts.buildingMoves}` : "", counts.roadAdds ? `画路 ${counts.roadAdds}` : "", counts.roadDrops ? `擦路 ${counts.roadDrops}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `改路口 ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `改设施 ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}）`}
+      {counts && total > 0 && `（${[counts.buildingMoves ? `移楼 ${counts.buildingMoves}` : "", counts.roadAdds ? `画路 ${counts.roadAdds}` : "", counts.roadDrops ? `擦路 ${counts.roadDrops}` : "", counts.highwayOps ? `高架 ${counts.highwayOps}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `改路口 ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `改设施 ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}）`}
       {info.staleCount > 0 && <span className="city-repair-stale"> · {info.staleCount} 条已失效</span>}
       {total > 0 && <span> · {info.saveFailed ? "本次修改仅临时生效" : "已保存"}</span>}
     </p>

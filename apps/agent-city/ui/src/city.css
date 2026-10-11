@@ -191,3 +191,5 @@
 .city-repair-banner { display: grid; gap: 6px; padding: 8px; border-radius: 6px; border: 1px solid #ff8a7a88; background: #ff4d3d1f; color: #ffd2cb; }
 .city-repair-banner-soft { border-color: #ffd98a55; background: #ffd98a14; color: #ffd98a; }
 .city-repair-banner button { justify-self: start; }
+.city-repair-widths { flex-wrap: wrap; }
+.city-repair-widths button { min-width: 0; white-space: nowrap; padding-left: 4px; padding-right: 4px; }

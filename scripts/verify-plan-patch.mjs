@@ -16,16 +16,23 @@
 //   (m) 道路日志按顺序重放：引用当前 id（移后再移、移后再删）、拆路段后再删其中一半、画路端点吸附（路口/路段中间/新建）、失败操作不留半截改动；
 //   (n) 跨档位：整份补丁 tier-changed，布局不动；
 //   (o) 真实城市：空补丁不改布局；占地重叠不误报（曾 1600 楼 1111 条）；layoutCity pins 让移楼在落位阶段生效、
-//       空置街区随之长出路、刷新后不被新会话挤掉；pins=null / 跨档 pins 时落位与无 pins 一致。
+//       空置街区随之长出路、刷新后不被新会话挤掉；pins=null / 跨档 pins 时落位与无 pins 一致；
+//   (p) 拐角倒圆：从路尽头接着画并拐弯 → 拐点挪到弧中点、两段各带半段弧、切线连续；直行/回折/路口处不倒；
+//   (q) 滨海景观带跟着滨海路走：擦掉滨海路 → 对应岸段景观带消失；画滨海大道 → 补一条加密的景观带折线；河岸路不补；
+//   (r) 高架日志：画（含接到已有高架开口端，不多出匝道）、切（断成两条）、失效（切空处）、存档宽容读取、指纹兼容；
+//   (s) 真实城市：画一条跨河高架、一段滨海大道，补丁干净重放。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
 globalThis.window ??= globalThis;
 const {
   applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
+  appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP,
   auditLayout, buildCityModel, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
-  "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor"],
+  "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP"],
+  "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd"],
+  "engine/render/shared.ts": ["EXPRESSWAY_DECK_WIDTH", "EXPRESSWAY_RAMP"],
   "engine/planAudit.ts": ["auditLayout"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
@@ -364,11 +371,11 @@ const snap = (layout) => JSON.stringify({
   // 画路：端点落在路口 / 路段中间 / 空地。
   const add = (from, to, width = 5) => ({ t: "add", from, to, width });
   const draw = (op) => { const p = fresh(); p.roadOps = [op]; return applyPlanPatch(makeLayout(), p); };
-  const toNode = draw(add({ x: 100, z: 100 }, { x: 200, z: 0 }));
+  const toNode = draw(add({ x: 200, z: 0 }, { x: 100, z: 100 })); // 从桥头往尽头画：起点不是尽头，不倒圆（倒圆另测，见 (p)）
   assert.equal(toNode.stale.length, 0);
   assert.ok(toNode.layout.roadEdges.some((e) => e.id === "100:100/200:0" && e.points.length === 2 && e.structure === "ground-road"), "a road between two existing nodes is one new edge");
   assert.equal(toNode.layout.roadNodes.length, makeLayout().roadNodes.length, "no node is invented when both ends snap to nodes");
-  const split = draw(add({ x: 100, z: 100 }, { x: 50, z: 0 })); // 终点落在 0:0—100:0 路段中间
+  const split = draw(add({ x: 50, z: 0 }, { x: 100, z: 100 })); // 起点落在 0:0—100:0 路段中间
   assert.equal(split.stale.length, 0);
   assert.ok(!split.layout.roadEdges.some((e) => e.id === "0:0/100:0"), "the host edge is replaced by two halves");
   assert.ok(split.layout.roadEdges.some((e) => e.id === "0:0/50:0") && split.layout.roadEdges.some((e) => e.id === "100:0/50:0"), "both halves are keyed by their endpoints");
@@ -379,7 +386,7 @@ const snap = (layout) => JSON.stringify({
   assert.ok(dead.layout.roadNodes.some((n) => n.id === "260:60"), "a free end creates a node");
   assert.equal(dead.layout.roadEdges.find((e) => e.id === "200:60/260:60").kind, "arterial", "width ≥ 8 draws an arterial");
   // 拆开后再删其中一半（用拆出来的 id）——这是原始 id 方案做不到的。
-  let chained = fresh(); chained.roadOps = [add({ x: 100, z: 100 }, { x: 50, z: 0 }), { t: "drop", edge: "0:0/50:0" }];
+  let chained = fresh(); chained.roadOps = [add({ x: 50, z: 0 }, { x: 100, z: 100 }), { t: "drop", edge: "0:0/50:0" }];
   const afterHalf = applyPlanPatch(makeLayout(), chained);
   assert.equal(afterHalf.stale.length, 0, "a half created by a split can be dropped by the log");
   assert.ok(!afterHalf.layout.roadEdges.some((e) => e.id === "0:0/50:0") && afterHalf.layout.roadEdges.some((e) => e.id === "100:0/50:0"));
@@ -482,4 +489,106 @@ const snap = (layout) => JSON.stringify({
   assert.equal(slotsOf(otherTier), slotsOf(base), "pins written for another tier are ignored by layoutCity");
 }
 
-console.log("City plan patch: deterministic (building moves order-independent, road ops replayed in log order), building-move replay is a no-op, stale entries degrade honestly (missing/locked/occupied/collision/tier/context/duplicate/degenerate), node moves re-key ids/edges/cul-de-sacs, drawn roads snap to nodes/split host edges/create free ends and halves of a split can be dropped later, failed adds leave no half-done split, edge drops prune nodes and filter car paths, building-move blockers (occupied/missing/road/slope/buildable/highway/overlap) hold, storage coercion never throws, layout audit is severity-sorted and quiet on generated cities, layout pins place moved buildings before road pruning and survive refresh.");
+// (p) 拐角倒圆。E4 = 100:0 → 100:100（向 +z），100:100 是尽头。
+{
+  const turn = fresh(); turn.roadOps = [{ t: "add", from: { x: 100, z: 100 }, to: { x: 160, z: 100 }, width: 5 }]; // 右拐 90°
+  const { layout, stale } = applyPlanPatch(makeLayout(), turn);
+  assert.equal(stale.length, 0);
+  assert.ok(!layout.roadNodes.some((n) => n.id === "100:100"), "the sharp corner node is replaced");
+  const old = layout.roadEdges.find((e) => e.from === "100:0" || e.to === "100:0" ? (e.from === "100:0" ? e.to : e.from) !== "0:0" && (e.from === "100:0" ? e.to : e.from) !== "200:0" : false);
+  const fresh_ = layout.roadEdges.find((e) => e.from === "160:100" || e.to === "160:100");
+  assert.ok(old && fresh_, "both legs still meet at one junction");
+  const mid = old.from === "100:0" ? old.to : old.from;
+  assert.ok(fresh_.from === mid || fresh_.to === mid, "…the arc midpoint");
+  assert.ok(old.points.length > 2 && fresh_.points.length > 2, "each leg carries half of the arc");
+  const m = layout.roadNodes.find((n) => n.id === mid);
+  assert.ok(m.x > 100 && m.z < 100, "the midpoint lies inside the corner");
+  // 切线连续：相邻弧点之间的转角都小于 30°（不再是一个 90° 硬折）。
+  const path = [...(old.to === mid ? old.points : [...old.points].reverse()), ...(fresh_.from === mid ? fresh_.points : [...fresh_.points].reverse()).slice(1)];
+  for (let i = 2; i < path.length; i += 1) {
+    const d1 = Math.atan2(path[i - 1].z - path[i - 2].z, path[i - 1].x - path[i - 2].x); const d2 = Math.atan2(path[i].z - path[i - 1].z, path[i].x - path[i - 1].x);
+    const bend = Math.abs(Math.atan2(Math.sin(d2 - d1), Math.cos(d2 - d1)));
+    assert.ok(bend < Math.PI / 6, `bend ${(bend * 180 / Math.PI).toFixed(1)}° at point ${i} is gentle`);
+  }
+  assert.ok(path.every((q) => Math.abs(q.x - 100) < 0.01 || q.z <= 100.01), "the arc cuts the inside of the corner, never bulges outward");
+  assert.deepEqual(layout.culDeSacEnds, [], "the old dead end is gone, and the moved junction is not a dead end");
+  // 不倒的情形：直行、回折、起点在路口（度 ≥ 2）。
+  assert.equal(filletAt({ x: 0, z: 0 }, { x: 0, z: 50 }, { x: 1, z: 100 }, 5), null, "almost straight → no fillet");
+  assert.equal(filletAt({ x: 0, z: 0 }, { x: 0, z: 50 }, { x: 2, z: 0 }, 5), null, "a hairpin back → no fillet");
+  const fromJunction = fresh(); fromJunction.roadOps = [{ t: "add", from: { x: 100, z: 0 }, to: { x: 160, z: 60 }, width: 5 }];
+  assert.ok(applyPlanPatch(makeLayout(), fromJunction).layout.roadNodes.some((n) => n.id === "100:0"), "a stroke from a junction does not move the junction");
+  // 短路段上倒小圆：切点不超过路段长度的 45%。
+  const tiny = filletAt({ x: 0, z: 0 }, { x: 0, z: 10 }, { x: 40, z: 10 }, 12);
+  assert.ok(tiny && Math.hypot(tiny.before[0].x - 0, tiny.before[0].z - 10) <= 4.5 + 0.01, "the tangent point stays within 45% of a short leg");
+  // 重放与预览同源：连续画两段（第二段接在第一段尽头），两个拐角都倒圆，日志重放无失效。
+  const chain = fresh(); chain.roadOps = [{ t: "add", from: { x: 100, z: 100 }, to: { x: 160, z: 100 }, width: 5 }, { t: "add", from: { x: 160, z: 100 }, to: { x: 160, z: 40 }, width: 5 }];
+  const chained = applyPlanPatch(makeLayout(), chain);
+  assert.equal(chained.stale.length, 0);
+  assert.ok(!chained.layout.roadNodes.some((n) => n.id === "160:100"), "the second corner is rounded too");
+}
+
+// (q) 滨海景观带跟着滨海路走。底层：E3（0:0→0:100）是滨海路，coastRoads 沿它；另有一条河岸路（同标 waterfront）不在 coastRoads。
+{
+  const base = () => { const l = makeLayout(); l.coastRoads = [[{ x: 0, z: 0 }, { x: 0, z: 25 }, { x: 0, z: 50 }, { x: 0, z: 75 }, { x: 0, z: 100 }]]; l.riverRoadRuns = []; return l; };
+  const none = applyPlanPatch(base(), fresh());
+  assert.deepEqual(none.layout.coastRoads, base().coastRoads, "no road ops → coastRoads untouched");
+  const dropped = fresh(); dropped.roadOps = [{ t: "drop", edge: "0:0/0:100" }];
+  assert.deepEqual(applyPlanPatch(base(), dropped).layout.coastRoads, [], "erasing the waterfront road takes its promenade with it");
+  const drawn = fresh(); drawn.roadOps = [{ t: "add", from: { x: -100, z: -50 }, to: { x: -100, z: 50 }, width: 12, purpose: "waterfront" }];
+  const withBoulevard = applyPlanPatch(base(), drawn).layout;
+  assert.equal(withBoulevard.coastRoads.length, 2, "the existing run stays and the drawn boulevard gets its own run");
+  const run = withBoulevard.coastRoads[1];
+  assert.ok(run.length >= 13 && run.every((q) => Math.abs(q.x + 100) < 0.01), "…densified every ≤ 8 along the new road (the promenade builder needs ≥ 3 points)");
+  const edge = withBoulevard.roadEdges.find((e) => e.purpose === "waterfront" && e.points.some((q) => q.x === -100));
+  assert.ok(edge && edge.width === 12 && edge.kind === "arterial", "a waterfront boulevard is a 12-wide arterial tagged waterfront");
+  const river = base(); river.riverRoadRuns = [[{ x: 100, z: 0 }, { x: 100, z: 100 }]]; river.roadEdges = river.roadEdges.map((e) => (e.id === "100:0/100:100" ? { ...e, purpose: "waterfront" } : e));
+  const touched = fresh(); touched.roadOps = [{ t: "add", from: { x: -100, z: -50 }, to: { x: -100, z: 50 }, width: 5 }];
+  assert.equal(applyPlanPatch(river, touched).layout.coastRoads.length, 1, "a river-bank road (also tagged waterfront) does not grow a seaside promenade");
+  const coastal = base(); coastal.coast = Array.from({ length: 64 }, (_, i) => ({ x: Math.cos(i / 64 * Math.PI * 2) * 400, z: Math.sin(i / 64 * Math.PI * 2) * 400 }));
+  assert.ok(validateRoadAdd(coastal, model, { x: -100, z: -50 }, { x: -100, z: 50 }, 12, "waterfront").warnings.includes("far-from-coast"), "a waterfront boulevard far inland is flagged (not blocked)");
+  assert.ok(!validateRoadAdd(coastal, model, { x: -100, z: -50 }, { x: -100, z: 50 }, 12).warnings.includes("far-from-coast"), "…a plain main road is not");
+  assert.ok(!validateRoadAdd(coastal, model, { x: 330, z: -60 }, { x: 330, z: 60 }, 12, "waterfront").warnings.includes("far-from-coast"), "…nor a boulevard near the shore");
+  // 存档：purpose 读回，未知 purpose 丢掉。
+  const read = coercePlanPatch({ ...fresh(), roadOps: [{ t: "add", from: { x: 0, z: 0 }, to: { x: 9, z: 0 }, width: 12, purpose: "waterfront" }, { t: "add", from: { x: 0, z: 0 }, to: { x: 9, z: 0 }, width: 5, purpose: "moon" }] });
+  assert.equal(read.roadOps[0].purpose, "waterfront"); assert.equal(read.roadOps[1].purpose, undefined);
+}
+
+// (r) 高架日志。底层高架：(-50,20) → (250,20)。
+{
+  assert.equal(VIADUCT_DECK_WIDTH, EXPRESSWAY_DECK_WIDTH, "rule-side deck width matches the renderer");
+  assert.equal(VIADUCT_RAMP, EXPRESSWAY_RAMP, "rule-side ramp length matches the renderer");
+  const add = appendHighwayOp(fresh(), { t: "add", points: [{ x: -50, z: 200 }, { x: 150, z: 200 }, { x: 300, z: 250 }] }, 1);
+  const added = applyPlanPatch(makeLayout(), add);
+  assert.equal(added.stale.length, 0);
+  assert.equal(added.layout.highways.length, 2, "a new viaduct is a new run");
+  // 接到已有高架的开口端（250,20）：拼成一条，不多出两段匝道。
+  const extend = appendHighwayOp(fresh(), { t: "add", points: [{ x: 255, z: 22 }, { x: 350, z: 120 }] }, 1);
+  const extended = applyPlanPatch(makeLayout(), extend).layout;
+  assert.equal(extended.highways.length, 1, "starting at an open end extends that viaduct");
+  assert.deepEqual(extended.highways[0][0], { x: -50, z: 20 }); assert.deepEqual(extended.highways[0].at(-1), { x: 350, z: 120 });
+  // 切：在 (100,20) 切一刀 → 两条，切口各 20。
+  const cut = appendHighwayOp(fresh(), { t: "cut", at: { x: 100, z: 21 } }, 1);
+  const cutLayout = applyPlanPatch(makeLayout(), cut).layout;
+  assert.equal(cutLayout.highways.length, 2, "a cut splits the viaduct in two");
+  assert.deepEqual(cutLayout.highways[0].at(-1), { x: 80, z: 20 }); assert.deepEqual(cutLayout.highways[1][0], { x: 120, z: 20 });
+  const missed = applyPlanPatch(makeLayout(), appendHighwayOp(fresh(), { t: "cut", at: { x: 100, z: 120 } }, 1));
+  assert.deepEqual(missed.stale.map((x) => `${x.kind}:${x.reason}`), ["highway-cut:missing-highway"], "cutting where there is no viaduct goes stale");
+  const degenerate = applyPlanPatch(makeLayout(), appendHighwayOp(fresh(), { t: "add", points: [{ x: 0, z: 300 }, { x: 0.3, z: 300 }] }, 1));
+  assert.deepEqual(degenerate.stale.map((x) => x.reason), ["degenerate"]);
+  // 新高架下的地块不再能落楼（落位判定看改过的高架）。
+  const over = appendHighwayOp(fresh(), { t: "add", points: [{ x: 300, z: 200 }, { x: 300, z: 400 }] }, 1);
+  assert.ok(validateBuildingMove(applyPlanPatch(makeLayout(), over).layout, model, fresh(), "b1", "p4").blockers.includes("highway-clearance"), "a parcel under a new viaduct loses its clearance");
+  // 校验：太短 / 端点在水里 / 接上已有高架 / 压到会话楼要安置。
+  assert.deepEqual(validateHighwayAdd(makeLayout(), model, [{ x: 0, z: 300 }, { x: 10, z: 300 }]).blockers, ["viaduct-too-short"]);
+  assert.ok(validateHighwayAdd(makeLayout(), model, [{ x: 0, z: 300 }, { x: 390, z: 300 }]).blockers.includes("viaduct-end-in-water"), "a ramp cannot land in the sea");
+  assert.ok(validateHighwayAdd(makeLayout(), model, [{ x: 250, z: 20 }, { x: 250, z: 200 }]).warnings.includes("joins-viaduct"));
+  assert.ok(validateHighwayAdd(makeLayout(), model, [{ x: 0, z: -200 }, { x: 60, z: -200 }]).warnings.includes("short-viaduct"), "under 180 the deck never reaches full height");
+  assert.ok(validateHighwayAdd(makeLayout(), model, [{ x: 300, z: 150 }, { x: 300, z: 350 }]).warnings.some((w) => w.startsWith("relocate:")), "a session building under the deck is re-homed, like under a road");
+  // 存档与指纹：读回；没有高架操作时指纹与旧补丁一致。
+  const read = coercePlanPatch({ ...fresh(), highwayOps: [{ t: "add", points: [{ x: 0, z: 0 }, { x: 9, z: 0 }] }, { t: "add", points: [{ x: 0, z: 0 }] }, { t: "cut", at: { x: 1, z: 2 } }, { t: "zap" }] });
+  assert.equal(read.highwayOps.length, 2, "valid viaduct ops are read back; malformed ones are dropped");
+  const plain = fresh(); plain.roadOps = [{ t: "drop", edge: "x" }];
+  assert.equal(hashPlanPatch(plain), hashPlanPatch({ ...plain, highwayOps: [] }), "an empty viaduct log does not change the patch fingerprint");
+}
+
+console.log("City plan patch: corners are filleted when a stroke turns off a dead end, the seaside promenade follows waterfront roads, viaducts are drawn/extended/cut with honest stale entries, deterministic (building moves order-independent, road ops replayed in log order), building-move replay is a no-op, stale entries degrade honestly (missing/locked/occupied/collision/tier/context/duplicate/degenerate), node moves re-key ids/edges/cul-de-sacs, drawn roads snap to nodes/split host edges/create free ends and halves of a split can be dropped later, failed adds leave no half-done split, edge drops prune nodes and filter car paths, building-move blockers (occupied/missing/road/slope/buildable/highway/overlap) hold, storage coercion never throws, layout audit is severity-sorted and quiet on generated cities, layout pins place moved buildings before road pruning and survive refresh.");

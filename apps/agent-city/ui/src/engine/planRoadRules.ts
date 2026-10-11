@@ -14,8 +14,8 @@
  */
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
-import { buildingRect, edgeLocked, nearestOnPolyline, rectClearOfEdges, type BuildingRect } from "./planPatch";
-import { roadNodeId } from "./cityPlan";
+import { buildingRect, edgeLocked, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
+import { polygonDistance, roadNodeId } from "./cityPlan";
 import { listSites } from "./planSites";
 
 export type RoadVerdict = { blockers: string[]; warnings: string[] };
@@ -372,7 +372,7 @@ function minGap(angles: readonly number[]): number {
  * 画路的校验：from/to 是已吸附的坐标。硬阻止：太短/太长、锁定宿主、孤立（两端都没接上路网）、重复/退化、
  * 入水、穿过楼/配套/花园、与现有道路交叉（要在交叉点连接）、新引入的锐角路口。警告：新断头。
  */
-export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2, to: Vec2, width: number): RoadVerdict {
+export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2, to: Vec2, width: number, purpose?: "waterfront"): RoadVerdict {
   const blockers: string[] = []; const warnings: string[] = [];
   const a = quantize(from); const b = quantize(to);
   const length = Math.hypot(b.x - a.x, b.z - a.z);
@@ -397,6 +397,8 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
 
   // 交叉：自动生成路口（planPatch 重放时在交点处把两条路都拆开），这里只数一下告诉用户。
   if (junctions) warnings.push(`auto-junction:${junctions}`);
+  // 滨海大道离海太远：景观带仍会铺，但铺在离海近的一侧的陆地上——提示，不拦（SimCity 也不管你把海滨大道修在哪）。
+  if (purpose === "waterfront" && layout.coast?.length && Math.abs(polygonDistance({ x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 }, layout.coast)) > FAR_FROM_COAST) warnings.push("far-from-coast");
 
   // 锐角：只拦新引入的（接到的路口本来就锐角的不算新违例）。
   const dirAB = Math.atan2(b.z - a.z, b.x - a.x); const dirBA = Math.atan2(a.z - b.z, a.x - b.x);
@@ -406,4 +408,58 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
     if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
   }
   return { blockers, warnings };
+}
+
+// ── 高架（SPEC §17.2）────────────────────────────────────────────────────────
+
+/** 滨海大道中点离海岸线超过这个距离就提示。 */
+const FAR_FROM_COAST = 90;
+/** 高架最短（再短就只是一个鼓包）。 */
+const MIN_VIADUCT = 30;
+
+/** 高架折线 → 「路段」形状（宽 = 桥面宽 + 1 的净空），给压到建筑的判定与推土机用。不进路网。 */
+export function viaductEdges(points: readonly Vec2[]): RoadEdge[] {
+  const out: RoadEdge[] = [];
+  for (let i = 1; i < points.length; i += 1) out.push({ id: `viaduct:${i}`, from: "va", to: "vb", width: VIADUCT_DECK_WIDTH + 1, kind: "arterial", points: [points[i - 1], points[i]], structure: "ground-road" });
+  return out;
+}
+
+/** 高架首/尾点是否落在已有高架的开口端（会接上去，那一端没有匝道）。 */
+function viaductJoins(layout: CityLayout, end: Vec2): boolean {
+  return (layout.highways ?? []).some((run) => run.length >= 2
+    && !(run.length > 2 && Math.hypot(run[0].x - run[run.length - 1].x, run[0].z - run[run.length - 1].z) < 0.01)
+    && [run[0], run[run.length - 1]].some((q) => Math.hypot(q.x - end.x, q.z - end.z) <= VIADUCT_JOIN_RADIUS));
+}
+
+/**
+ * 画高架的校验。阻断只有物理上不成立的：少于两个不同的点、太短、单段超长、匝道落地点在水里（接到已有高架的那一端不落地，不查）。
+ * 其余提示：太短升不到全高（两端各要 90 匝道）、接上已有高架、压到的建筑（推平/安置，同画路）。
+ * 跨过地面路、河、海湾都可以——桥墩立在水里本来就是高架的画法。
+ */
+export function validateHighwayAdd(layout: CityLayout, model: CityModel, points: readonly Vec2[]): RoadVerdict {
+  const blockers: string[] = []; const warnings: string[] = [];
+  const q = points.map(quantize).filter((p, i, all) => i === 0 || Math.hypot(p.x - all[i - 1].x, p.z - all[i - 1].z) >= 1);
+  if (q.length < 2) return { blockers: ["degenerate"], warnings };
+  let total = 0;
+  for (let i = 1; i < q.length; i += 1) {
+    const length = Math.hypot(q[i].x - q[i - 1].x, q[i].z - q[i - 1].z);
+    total += length;
+    if (length > MAX_NEW_EDGE) blockers.push("edge-too-long");
+  }
+  if (total < MIN_VIADUCT) return { blockers: ["viaduct-too-short"], warnings };
+  const head = viaductJoins(layout, q[0]); const tail = viaductJoins(layout, q[q.length - 1]);
+  if ((!head && !layout.terrain.buildable(q[0].x, q[0].z)) || (!tail && !layout.terrain.buildable(q[q.length - 1].x, q[q.length - 1].z))) blockers.push("viaduct-end-in-water");
+  if (head || tail) warnings.push("joins-viaduct");
+  else if (total < VIADUCT_RAMP * 2) warnings.push("short-viaduct");
+  // 已经压在现有高架下的（生成器残余）不算这一笔的。
+  const list = obstacles(layout, model);
+  const already = new Set<number>();
+  for (const run of layout.highways ?? []) for (const edge of viaductEdges(run)) for (const index of hitsBy(edge, list)) already.add(index);
+  applyImpact(roadImpact(layout, model, viaductEdges(q), already), blockers, warnings);
+  return { blockers: [...new Set(blockers)], warnings };
+}
+
+/** 橡皮擦切高架：这里有没有高架；有就提示「断成两条、断口各自落地」。 */
+export function validateHighwayCut(layout: CityLayout, at: Vec2): RoadVerdict {
+  return highwayHit(layout.highways ?? [], at) ? { blockers: [], warnings: ["cuts-viaduct"] } : { blockers: ["missing-highway"], warnings: [] };
 }
