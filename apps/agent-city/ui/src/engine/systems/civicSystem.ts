@@ -9,6 +9,7 @@ import { paletteFor } from "../cityTextures";
 import { civicFlagLocalX, civicGroundFootprint, stationCanopyLocalZ, stationEntranceLocal, stationHallLocal } from "../models/publicSiteGeometry";
 import { BOX, CYLINDER, selfLitMaterial } from "../render/shared";
 import type { NightLights } from "../render/types";
+import { gardenFlagPosition, GARDEN_RENDER_GEOMETRY, CIVIC_RENDER_GEOMETRY } from "../models/layoutPlacementGeometry";
 
 export interface CivicSystemHost {
   model: CityModel;
@@ -274,11 +275,10 @@ export function buildPublicSites(host: CivicSystemHost): void {
 export function buildFlags(host: CivicSystemHost): void {
   const spots: Array<{ x: number; z: number; y: number; yaw: number; pole: number; cloth: number; color: string }> = [];
   for (const garden of host.layout.gardens ?? []) {
-    const c = Math.cos(garden.yaw);
-    const s = Math.sin(garden.yaw);
+    const flag = gardenFlagPosition(garden);
     spots.push({
-      x: garden.x + c * garden.width * 0.3 - s * garden.depth * 0.32,
-      z: garden.z + s * garden.width * 0.3 + c * garden.depth * 0.32,
+      x: flag.x,
+      z: flag.z,
       y: garden.y, yaw: garden.yaw, pole: 7.5, cloth: 1,
       color: paletteFor(garden.districtId).accent,
     });
@@ -293,8 +293,8 @@ export function buildFlags(host: CivicSystemHost): void {
   const poleMaterial = new THREE.MeshLambertMaterial({ color: "#8a9096" });
   const poleMesh = host.makeInstanced(poleGeometry, poleMaterial, spots.length);
   // 旗面：左缘挂在杆顶，宽度 5.2×cloth；aPhase 是实例属性（每面旗自己的风相位）。
-  const clothWidth = 5.2;
-  const clothGeometry = new THREE.PlaneGeometry(clothWidth, 3.1, 10, 5).translate(clothWidth / 2 + 0.1, -1.7, 0);
+  const clothWidth = GARDEN_RENDER_GEOMETRY.flagClothWidth;
+  const clothGeometry = new THREE.PlaneGeometry(clothWidth, 3.1, 10, 5).translate(clothWidth / 2 + GARDEN_RENDER_GEOMETRY.flagClothOffset, -1.7, 0);
   const phases = new Float32Array(spots.map((_, index) => hashSeed(`flag:${index}`) * Math.PI * 2));
   clothGeometry.setAttribute("aPhase", new THREE.InstancedBufferAttribute(phases, 1));
   const clothMaterial = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
@@ -338,8 +338,8 @@ export function buildGardens(host: CivicSystemHost): void {
     const cos = Math.cos(garden.yaw);
     const sin = Math.sin(garden.yaw);
     const at = (lx: number, lz: number) => ({ x: garden.x + lx * cos + lz * sin, z: garden.z - lx * sin + lz * cos });
-    const W = garden.width - 3;
-    const D = garden.depth - 3;
+    const W = garden.width - GARDEN_RENDER_GEOMETRY.inset;
+    const D = garden.depth - GARDEN_RENDER_GEOMETRY.inset;
     const lawn = at(0, 0);
     boxes.push({ x: lawn.x, y: base, z: lawn.z, sx: W, sy: 0.25, sz: D, yaw: garden.yaw, tilt: 0, color: "#7fae6a" });
     // 湖：偏一侧的椭圆，留出另一侧放亭子。
@@ -384,8 +384,8 @@ export function buildGardens(host: CivicSystemHost): void {
     // 环湖树。
     for (let index = 0; index < 14; index += 1) {
       const t = (index / 14) * Math.PI * 2 + r;
-      const q = at(Math.cos(t) * W * 0.44, Math.sin(t) * D * 0.42);
-      const size = 1.4 + hashSeed(`${garden.id}:tree:${index}`) * 0.9;
+      const q = at(Math.cos(t) * W * GARDEN_RENDER_GEOMETRY.treeRingX, Math.sin(t) * D * GARDEN_RENDER_GEOMETRY.treeRingZ);
+      const size = GARDEN_RENDER_GEOMETRY.treeMinimumRadius + hashSeed(`${garden.id}:tree:${index}`) * GARDEN_RENDER_GEOMETRY.treeRadiusVariation;
       trees.push({ x: q.x, y: base + 0.2, z: q.z, sx: size, sy: size * 1.2, sz: size, yaw: 0, tilt: 0, color: index % 3 === 0 ? "#5f9a55" : "#6fae63" });
     }
   }
@@ -428,8 +428,8 @@ export function buildCivics(host: CivicSystemHost): void {
     const cos = Math.cos(civic.yaw);
     const sin = Math.sin(civic.yaw);
     const base = Math.max(0.3, civic.y);
-    const W = Math.min(civic.width, 48) * 0.82;
-    const D = Math.min(civic.depth, 40) * 0.82;
+    const W = Math.min(civic.width, CIVIC_RENDER_GEOMETRY.maxWidth) * CIVIC_RENDER_GEOMETRY.scale;
+    const D = Math.min(civic.depth, CIVIC_RENDER_GEOMETRY.maxDepth) * CIVIC_RENDER_GEOMETRY.scale;
     const at = (lx: number, lz: number) => ({ x: civic.x + lx * cos + lz * sin, z: civic.z - lx * sin + lz * cos });
     const box = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: string) => {
       const q = at(lx, lz);

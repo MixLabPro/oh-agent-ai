@@ -4,7 +4,91 @@
 不能把某一小批提交、相关单测通过或截图变好替代整个目标。实施分支 `worktree-city-opt`。
 本表是未完成项台账，不修改原 SPEC 的范围和合并标准。
 
-## 2026-10-11 后增长联合落位与30岛终态（最新，整体未完成）
+## 用户编辑修复接入（2026-10-11，未实现）
+
+新增 `CITY_PLAN_REPAIR_HANDOFF.md`，登记当前阻断样本、分支未提交改动迁移边界、
+选择/预览/依赖闭包/验证/原子接受/撤销/派生合同及新增门禁。
+没有创建新worktree、提交或合并。用户参与编辑不取消A–F/J、U0–U5或已有合并要求；
+“快速收敛”目前为工作方向，不能把未实现编辑器当成已修复庄园或全目标完成的证据。
+
+### 预留后地址容量核算（2026-10-11）
+
+生产layout新增sessionCapacity，按最终实际地址、used预留和会话绑定计量，不复用规划的
+预留前capacity。输出reservedParcelIds、availableForSessions、assigned/free、unassigned及
+未表示的overflow；重复身份、未知引用、未标occupied的分配或非法aggregate count明确invalid。
+aggregate只能核算总数，缺少逐会话来源仍显式count-only；不声称物理/服务容量通过。
+类型检查、独立capacity守卫及500→780生产layout-placement session92115 exit0；
+原4花园/4地标、11→17配套及原工作预算不变。加强旧地址检查为完整位置/尺寸而非仅id。
+新守卫登记manifest63项/full/fast/planning/display；新版完整full、跨引擎和视觉尚未重跑。
+manifest coverage session81019 exit0；完整地址几何保留加强后的layout-placement session11837 exit0。
+此前冻结布局源码指纹不适用于本次新增报告字段，两个真实庄园阻断仍未解决。
+
+## 2026-10-11 真实道路围合与模型基础准入（最新，整体未完成）
+
+- 默认生产地块已改由最终接受道路围合面派生；旧网格仅保留显式诊断开关，无静默回退。
+  凹面、孔洞保留真实边界，路幅耗尽的凸面必须给出空面证书；未支持面仍在覆盖分母中。
+  铺地消费者在隔离图层裁剪真实面/孔洞，扣除道路、高架与设施圆代理。
+  block-surface命令级守卫通过，但不是像素/视觉验收；新增2048²临时RGBA图层约16MiB尚待实测。
+- 2003037141/t1默认路径所测R536.1861435942972、容量1146/540；2005445908/t1
+  同原R551.5432893255071及原港口姿态、容量1075/540。两者必需设施落位、registered约束0、
+  unmet0、派生发布ok，结果仍degraded。此前1615容量及旧半径不适用于最新默认路径。
+- 港口复用原40宿主候选层，声明shore-plot-boundary代理gate，原位置合法地面接入通过；
+  未挪owner、未扩大吸附、未新增桥。代理gate不是实体模型门/完整通道证明。
+- 车站真实外门沿局部+z，原-z穿入大厅；共享渲染参数及实际mesh方向守卫已修正并通过。
+  仍不代表整个平台、轨道、基础与车辆通道物理覆盖完成。
+- 展示裁剪现在按使用中地块的当前版本frontage宿主和有序主网路径保留接受边；失效引用显式
+  列入unresolvedParcelFrontage，不重新吸附到附近道路。布局守卫新增相应检查及全折线净距。
+- block-placement、block-lot-candidates、model-ground、villa-physical、block-surface五项
+  独立专项本轮exit0；前三者验证有界采样、累计预算/取消、失败不发布及真实包络，不宣称完整物理。
+  庄园原坏位置三处真实基础1441采样中479低于实际海面，541低于规划干地阈值；
+  ground注册目前仅villa的partial声明，未知/零占地模型仍unsupported，不能缩减15模型分母。
+- 五项新守卫纳入manifest（59项），其中road-derived-plan为生产planning门禁，其余四项另纳fast。
+  花园/配套/城区地标的实际占地消费者和基础准入正在集成；最新完整布局、planning及
+  独立四档、跨引擎、视觉、CPU/内存、U0–U5全局预算尚未完成，不符合合并条件。
+- 本轮fast session18028在connect阶段因模块循环初始化失败exit1，不能报告套件通过。
+  connect入口经cityPlan/shorePlotAccess回读未初始化CONNECTOR_CONFIG；共享40候选上限现提取
+  至无依赖connectionBudget，参数不变。新增connector-first冷启动/共享值一致守卫；
+  connect、loop、landing、shore专项及typecheck随后exit0，完整fast仍需稳定源码重跑。
+- manifest coverage独立session92222 exit0；road-derived-plan独立session18400 exit0。
+- 布局session58817终态exit0：真实host/主网路径保留及当前版本检查、逐段折线净距、
+  全落位/增量稳定/配套生长通过。该进程加载早于本轮新配套选址与ground生产准入，
+  不作为这些后续改动的集成验收证据。
+- fast session80872终态exit0，21阶段（含typecheck/harness）约52.9s；加载早于最终配套接入。
+  当前另增parcel-frontage守卫并注册manifest60项，核对当前实际宿主段、法向、路肩半宽、
+  地块前沿、版本/路径，专项exit0；仅核对冻结证据几何一致，不替代重新采样/实体门证明。
+- model-ground已接入岸边siting/solve及事务接受，Outcome增加完整实例分母与groundFailures；
+  未注册/零占地对象仍unsupported，注册失败不能只报degraded。合成“16圆采样干、真实基础入水”
+  场景能按原候选预算搬干，网络版本保持、site版本推进，独立守卫通过。
+  真实1703310796/t2 session46688仍失败：R583.410945、容量1546/1080，villa基础478点低于
+  实际海面，groundCoverage13=0partial+1violation+12unsupported，unmet0也必须failed；
+  原湿岸候选耗尽未找到合法位，不算修复。2003037141新required-placement session96110也因
+  Outcome.failed未通过，正在定位，绝不把期望改成容忍failed。
+- 酒店lotClearOfRoads原只核查首段并1.5间距采样，已替换通用旋转矩形与所有折线段精确
+  capsule净距；弯折后段穿楼、四朝向与边界专项通过。酒店入口尚未声明，所有使用中的酒店
+  单列unsupportedAuxiliaryFrontage，displayOutcome明确failed，不能从普通frontage通过推导酒店接通。
+- 配套消费者新增模型叶声明、真实包络筛查和共享layout采样预算v1（500000），不是新增route
+  搜索或snap放宽；花园最小26.55×13.13、裙楼17.02²，不靠缩小到模型不能容纳尺寸放行。
+  初500会话样本session69728：全落位、无massing、4花园/11配套/4地标、19项placed。
+  尚待计量版完整layout session43157终态；也不替代实际模型mesh全覆盖、视觉或总建城预算。
+  同地址id在道路/模型版本改变时并不保证坐标不变，旧地址重用及整面预留后会话容量仍待闭环。
+- 最终consumer完整layout session72978 exit0；加载及结束engine指纹均
+  `86a83e6acaaaaf54c84bac0fc67c6a69789b91399918721600ceca49ea91ce22`。
+  最新500→780专项session3322同版通过：4/4花园、4/4地标、11→17配套，19/25项应有对象全placed；
+  旧session地址及旧11配套完整姿态/城区均保留。共享采样49969→52367/500000。
+  actual layout-envelopes逐真实渲染顶点与旗布风极值专项通过，但仍无基础/实体门/视觉验收。
+  两项layout新守卫纳入manifest62项；最终fast session1883全部23阶段exit0，build session82546
+  exit0（存在大chunk警告，未改变阈值），diffcheck通过。历史43157不是最终版本证据。
+- required庄园根因诊断51080/57093 exit0：所有阶段名义基础始终违规，非后置yaw忘检。
+  初始原264候选被circle-wet222、circle-trunk34、owner-spacing8拒；其中32处基础采样已干。
+  solve原400候选被owner-footprint-unsafe345、road-envelope9、owner-spacing46拒，
+  其中63处基础采样已干但仍被旧代理挡住。干基础不等于路/其他owner实体安全，不能跳过硬筛。
+  可复现：`node scripts/diagnose-city-ground-stages.mjs 2003037141 1`，仅内存插桩及合成City数据。
+  下一批须统一已注册真实footprint并集/全路幅准入或联合道路重定线，未注册仍proxy/pending，
+  不扩大原候选/吸附范围。本轮未修复这两个真实庄园失败，仍不能合并main或宣称P0清零。
+- 历史完整planning session98164已终态exit0，源码2a9182804ce4723bd44baaade3c185bfadd1e4bf20a81ddbd069a219a9510653；
+  该证据早于本节默认围合/门方向/基础检查修改，不可当作最新源码完整回归。
+
+## 2026-10-11 后增长联合落位与30岛终态（历史阶段，整体未完成）
 
 - 完整planning session31247终态exit0，加载此前aec6634源码：30岛主批及五个named
   回归通过，acute/inside/far/crowded/loose均0。此结果不是后续世界桥接、候选宿主恢复及

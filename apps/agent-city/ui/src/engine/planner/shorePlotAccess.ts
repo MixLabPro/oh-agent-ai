@@ -3,10 +3,11 @@ import { DetMath as Math } from "../detMath";
 import type { Vec2 } from "../cityLayout";
 import { closestPolylineSegment } from "./footprint";
 import { keyOf, type Network } from "./network";
-import { CONNECTOR_CONFIG, runConnection, type BridgeSpan, type ConnectorWorld } from "./connect";
+import { runConnection, type BridgeSpan, type ConnectorWorld } from "./connect";
+import { CONNECTION_BUDGET } from "./connectionBudget";
 import type { SiteSpec } from "./sitespec";
 
-export const SHORE_PLOT_ACCESS_CONFIG = { version: 1, maxHostCandidates: CONNECTOR_CONFIG.bridgeCandidates, maxRouteLength: 1e4 };
+export const SHORE_PLOT_ACCESS_CONFIG = { version: 1, maxHostCandidates: CONNECTION_BUDGET.bridgeCandidates, maxRouteLength: 1e4 };
 type PlotOwner = Vec2 & { id: string; kind: string; radius: number; yaw: number; access?: unknown; shore?: unknown };
 type ShorePlotProposal = { ok: true; network: Network; gate: Vec2; bridgeSpans: BridgeSpan[];
   attempted: number; candidateLimit: number; hostId: string; entranceEvidence: "plot-proxy" }

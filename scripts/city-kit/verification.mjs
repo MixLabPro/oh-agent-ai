@@ -10,6 +10,16 @@ const groups = {
   display: ["verify-city-block-surface", "verify-city-road-report", "verify-city-active", "verify-react-city-layout", "verify-city-culdesac-bulbs", "verify-city-scene-baseline", "verify-react-city-seaside", "seaside-tier10"],
   game: ["verify-city-game-session", "verify-city-game-controller", "verify-city-game-world", "verify-city-game-flight", "verify-city-game-race", "verify-city-game-profile"],
 };
+const newGeometryStages = ["verify-city-layout-envelopes", "verify-city-parcel-frontage", "verify-city-block-placement", "verify-city-block-lot-candidates", "verify-city-villa-physical", "verify-city-model-ground"];
+synthetic.push(...newGeometryStages);
+synthetic.push("verify-city-layout-capacity");
+groups.planning.push("verify-city-layout-capacity");
+groups.display.push("verify-city-layout-capacity");
+groups.planning.push(...newGeometryStages, "verify-city-road-derived-plan");
+groups.sites.push(...newGeometryStages);
+groups.display.push("verify-city-layout-envelopes", "verify-city-layout-placement", "verify-city-parcel-frontage", "verify-city-block-placement", "verify-city-block-lot-candidates");
+groups.planning.push("verify-city-layout-placement");
+groups.sites.push("verify-city-layout-placement");
 export function selectStages(mode, group) {
   if (mode === "full") return manifest;
   if (mode === "fast") return manifest.filter((s) => synthetic.includes(s.id));

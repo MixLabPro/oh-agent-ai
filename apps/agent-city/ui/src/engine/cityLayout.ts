@@ -6,6 +6,13 @@ import { seasideHotelLots, seasideStripContains, type CoastalConfig } from "./ci
 import { preserveDemandPaths, preserveDisplayJunctions, retainBridgeLandings } from "./planner/retention";
 import { diagnoseNetwork } from "./planner/intent";
 import type { ParcelFrontageProof } from "./planner/roadBlocks";
+import { validateParcelFrontage } from "./planner/parcelFrontage";
+import { lotClearsRoads } from "./planner/lotRoadClearance";
+import { measureLayoutCapacity } from "./planner/layoutCapacity";
+import { closestPolylineSegment } from "./planner/footprint";
+import { findBlockLotCandidate, LAYOUT_PLACEMENT_WORK_CONFIG } from "./planner/blockLotCandidates";
+import { inspectBlockPlacement, type BlockPlacementInput } from "./planner/blockPlacement";
+import { civicMinimumSize, civicEnvelopeSize, GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE } from "./models/layoutPlacementGeometry";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
@@ -66,6 +73,17 @@ const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
 export type BridgeLayout = { from: Vec2; to: Vec2; angle: number; length: number };
 export type PublicSite = Vec2 & { id: string; kind: "civic" | "station" | "stadium" | "park" | "tower" | "harbor"; radius: number; yaw: number; access?: import("./planner/jointSite").PlotAccess };
 export type CityLayout = {
+  /** Full accepted plan status; display pruning is a separate projection. */
+  planningOutcome?: ReturnType<typeof import("./planner/solve").repairPlanningOutcome>;
+  derivedFinalization?: { ok: boolean; reason?: string };
+  parcelSource?: "accepted-road-faces" | "legacy-grid";
+  derivedNetworkVersion?: number;
+  displayOutcome?: { status: "partial" | "failed"; reasons: string[] };
+  placementBudget?: { limit: number; spent: number; remaining: number };
+  sessionCapacity?: ReturnType<typeof measureLayoutCapacity>;
+  placementReport?: Array<{ id: string; class: "garden" | "district-landmark" | "civic";
+    status: "placed" | "candidate-exhausted" | "budget-exhausted" | "unsupported"; reason?: string;
+    terrainSamples: number; attempted: number; scope: "sampled-rectangle-and-declared-circle-proxies" }>;
   /** G1：规模档位、生态带与城市核心点（下游取景/航拍/植被读这里，不再假设岛在原点、固定大小）。 */
   scaleTier: number; biome: Biome; core: Vec2; islandRadius: number;
   seed: number; districts: DistrictLayout[]; blocks: CityBlock[]; roadNodes: RoadNode[]; roadEdges: RoadEdge[];
@@ -168,18 +186,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   // 酒店地块在路网之后才排：环岛滨海路的接入路、被裁的主干道接回大道等都可能从地块上穿过（真机：楼压在路上）。
   // 按地块的真实朝向矩形检查——外扩半个路幅 + 0.5——压路的地块不发放。
   const lotClearOfRoads = (lot: { x: number; z: number; yaw: number; width: number; depth: number }) => {
-    const ax = Math.sin(lot.yaw); const az = Math.cos(lot.yaw); // 局部 z 轴（进深）
-    const bx = az; const bz = -ax;                               // 局部 x 轴（面宽）
-    for (const edge of plan.roadEdges) {
-      const [a, b] = edge.points; const len = Math.hypot(b.x - a.x, b.z - a.z);
-      const pad = edge.width / 2 + 0.5;
-      for (let d = 0; d <= len; d += 1.5) {
-        const t = len ? d / len : 0;
-        const dx = a.x + (b.x - a.x) * t - lot.x; const dz = a.z + (b.z - a.z) * t - lot.z;
-        if (Math.abs(dx * bx + dz * bz) < lot.width / 2 + pad && Math.abs(dx * ax + dz * az) < lot.depth / 2 + pad) return false;
-      }
-    }
-    return true;
+    return lotClearsRoads(lot, plan.roadEdges);
   };
   const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).filter(lotClearOfRoads).map((lot) => ({
     id: lot.id, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
@@ -285,15 +292,48 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   }
 
   // 小区中心花园：先于会话落楼，在本小区内离中心最近的空街区整块预留（只看规划与会话数，确定性不变）。
+  const placementReport: NonNullable<CityLayout["placementReport"]> = [];
+  const placementBudget = { limit: LAYOUT_PLACEMENT_WORK_CONFIG.terrainSampleBudget, spent: 0, remaining: LAYOUT_PLACEMENT_WORK_CONFIG.terrainSampleBudget };
+  const occupiedParcels = () => parcels.filter((parcel) => used.has(parcel.id));
+  // Protect a still-legal previous civic before newly arrived sessions compete
+  // for addresses. Release only this reservation before placeCivics consumes it.
+  const previousCivicBlocks: CityBlock[] = [];
+  if (previous?.seed === seed && previous.scaleTier === tier) for (const civic of previous.civics ?? []) {
+    const block = plan.blocks.find((candidate) => candidate.id === civic.parcelId);
+    const envelope = civicEnvelopeSize(civic.kind, civic.width, civic.depth);
+    if (!block || !envelope || !block.parcels.length || block.parcels.some((parcel) => used.has(parcel.id))) continue;
+    if (!inspectLayoutPlacement({ ...layoutPlacementEnvironment(plan, occupiedParcels()), block,
+      footprint: { ...civic, ...envelope } }, placementBudget).ok) continue;
+    previousCivicBlocks.push(block); for (const parcel of block.parcels) used.add(parcel.id);
+  }
   const gardens: GardenSite[] = [];
   for (const district of ranked) {
     const anchor = anchorOf.get(district.id)!;
-    const block = blocksOf(district.id)
-      .filter((candidate) => candidate.parcels.every((parcel) => !used.has(parcel.id)) && clearsHighways(candidate, candidate.width, candidate.depth, plan.highways))
-      .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id))[0];
-    if (!block) continue;
-    for (const parcel of block.parcels) used.add(parcel.id);
-    gardens.push({ id: `garden:${district.id}`, districtId: district.id, blockId: block.id, x: block.x, z: block.z, y: plan.terrain.height(block.x, block.z), yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, seed: hashSeed(`garden:${district.id}`) });
+    const id = `garden:${district.id}`;
+    const candidates = blocksOf(district.id).filter((candidate) => candidate.parcels.length && candidate.parcels.every((parcel) => !used.has(parcel.id)))
+      .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id));
+    let found: GardenSite | null = null, samples = 0, attempted = 0, reason = "no free real face";
+    const old = previous?.seed === seed && previous.scaleTier === tier ? previous.gardens.find((garden) => garden.id === id) : null;
+    const oldBlock = old && candidates.find((block) => block.id === old.blockId);
+    if (old && oldBlock && old.width >= GARDEN_MINIMUM_SIZE.width && old.depth >= GARDEN_MINIMUM_SIZE.depth) {
+      const evidence = inspectLayoutPlacement({ ...layoutPlacementEnvironment(plan, occupiedParcels()), block: oldBlock, footprint: old }, placementBudget);
+      samples += evidence.terrainSamples; attempted += 1;
+      if (evidence.ok) found = { ...old };
+    }
+    if (!found) for (const block of candidates) {
+      const proposal = findLayoutBlockLot(block, GARDEN_MINIMUM_SIZE, plan, occupiedParcels(), placementBudget);
+      samples += proposal.coverage.terrainSamples; attempted += proposal.coverage.attempted;
+      if (proposal.ok) { found = { id, districtId: district.id, blockId: block.id, ...proposal.footprint,
+        y: plan.terrain.height(proposal.footprint.x, proposal.footprint.z), seed: hashSeed(id) }; break; }
+      reason = proposal.reason;
+      if (reason === "terrain-sample-budget-exhausted" || reason === "cancelled") break;
+    }
+    if (found) {
+      const block = candidates.find((block) => block.id === found!.blockId)!;
+      for (const parcel of block.parcels) used.add(parcel.id);
+      gardens.push(found);
+    }
+    recordLayoutPlacement(placementReport, id, "garden", !!found, reason, samples, attempted);
   }
 
   // 城区地标（用户：地标尽量放在城区中心、与景观湖配套）：先于会话落楼，在花园（景观湖）街区旁最近的空地块占位，
@@ -303,21 +343,40 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     if (!model.buildings.some((building) => building.districtId === district.id)) continue;
     const garden = gardens.find((g) => g.districtId === district.id);
     const centre = garden ?? anchorOf.get(district.id)!;
-    const spot = plan.blocks.flatMap((block) => block.parcels)
-      .filter((parcel) => !used.has(parcel.id) && clearsHighways(parcel, 16, 16, plan.highways))
-      .sort((a, b) => Math.hypot(a.x - centre.x, a.z - centre.z) - Math.hypot(b.x - centre.x, b.z - centre.z) || a.id.localeCompare(b.id))[0];
-    if (!spot) continue;
-    used.add(spot.id);
-    districtLandmarks.push({ districtId: district.id, parcelId: spot.id, x: spot.x, z: spot.z, yaw: spot.yaw, y: plan.terrain.height(spot.x, spot.z) });
+    const candidates = plan.blocks.filter((block) => block.parcels.length && block.parcels.every((parcel) => !used.has(parcel.id)))
+      .flatMap((block) => block.parcels.map((parcel) => ({ block, parcel })))
+      .sort((a, b) => Math.hypot(a.parcel.x - centre.x, a.parcel.z - centre.z) - Math.hypot(b.parcel.x - centre.x, b.parcel.z - centre.z) || a.parcel.id.localeCompare(b.parcel.id));
+    let placed = false, samples = 0, attempted = 0, reason = "no free real face";
+    for (const { block, parcel } of candidates) {
+      const evidence = inspectLayoutPlacement({ ...layoutPlacementEnvironment(plan, occupiedParcels()), block,
+        footprint: { ...parcel, ...DISTRICT_LANDMARK_ENVELOPE } }, placementBudget);
+      samples += evidence.terrainSamples; attempted += 1;
+      if (evidence.ok) {
+        // The 17m renderer skirt is larger than one session address; preserve
+        // every neighbouring address by reserving its complete owning face.
+        for (const address of block.parcels) used.add(address.id);
+        districtLandmarks.push({ districtId: district.id, parcelId: parcel.id, x: parcel.x, z: parcel.z, yaw: parcel.yaw, y: plan.terrain.height(parcel.x, parcel.z) });
+        placed = true; break;
+      }
+      reason = evidence.reason ?? "placement-rejected";
+      if (reason === "terrain-sample-budget-exhausted" || reason === "cancelled") break;
+    }
+    recordLayoutPlacement(placementReport, `district-landmark:${district.id}`, "district-landmark", placed, reason, samples, attempted);
   }
 
   // 为商场预留整块的商业/市中心街区：会话楼现在优先占好地段，曾把这些街区都占成「部分有楼」，商场找不到整块（布局守卫）。
   // 配套仍在会话落楼之后按城区质心选址（placeCivics），落楼前锁住、选址前释放。
   const civicTotal = model.buildings.length === 0 ? 0 : Math.max(2, Math.min(30, Math.floor(model.buildings.length / CIVIC_PER_SESSIONS)));
-  const mallReserve = plan.blocks
-    .filter((block) => (block.zone === "commercial" || block.zone === "downtown") && block.parcels.length > 0 && block.parcels.every((p) => !used.has(p.id)) && clearsHighways(block, block.width, block.depth, plan.highways))
-    .sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z) || a.id.localeCompare(b.id))
-    .slice(0, Math.ceil(civicTotal / 3) + 1);
+  const mallCandidates = plan.blocks
+    .filter((block) => (block.zone === "commercial" || block.zone === "downtown") && block.parcels.length > 0 && block.parcels.every((p) => !used.has(p.id)))
+    .sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z) || a.id.localeCompare(b.id));
+  const mallReserve: CityBlock[] = [];
+  if (civicTotal) for (const block of mallCandidates) {
+    const proposal = findLayoutBlockLot(block, civicMinimumSize("mall")!, plan, occupiedParcels(), placementBudget);
+    if (proposal.ok) mallReserve.push(block);
+    else if (proposal.reason === "terrain-sample-budget-exhausted" || proposal.reason === "cancelled") break;
+    if (mallReserve.length >= Math.ceil(civicTotal / 3) + 1) break;
+  }
   for (const block of mallReserve) for (const parcel of block.parcels) used.add(parcel.id);
 
   // 落楼：每个执行环境在自己的小区里按 (startedAt, −height, id) 从花园向外取地块——回放时看得见小区从中心长出来。
@@ -362,7 +421,8 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
   for (const block of mallReserve) for (const parcel of block.parcels) used.delete(parcel.id);
-  const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
+  for (const block of previousCivicBlocks) for (const parcel of block.parcels) used.delete(parcel.id);
+  const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan, placementReport, placementBudget);
   // 海滨迈阿密是一个已经建成的城市，即使当前窗口只有少量会话也不应退化成
   // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架
   // /酒店海滨保留带；优先填充会话城区周围，再向城市核心扩散，不加入会话统计。
@@ -415,11 +475,8 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       if (sessionSlots.some((slot) => Math.hypot(slot.x - parcel.x, slot.z - parcel.z) < halfDiagonal + Math.hypot(slot.width, slot.depth) / 2 + 2)) continue;
       if (civics.some((site) => Math.hypot(site.x - parcel.x, site.z - parcel.z) < halfDiagonal + Math.hypot(site.width, site.depth) / 2 + 2)) continue;
       if (plan.roadEdges.some((edge) => {
-        const [a, b] = edge.points;
-        const dx = b.x - a.x; const dz = b.z - a.z;
-        const t = Math.max(0, Math.min(1, ((parcel.x - a.x) * dx + (parcel.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
-        const distance = Math.hypot(parcel.x - a.x - dx * t, parcel.z - a.z - dz * t);
-        return distance < halfDiagonal + edge.width / 2 + 0.5;
+        const nearest = closestPolylineSegment(edge.points, parcel);
+        return !nearest || nearest.d < halfDiagonal + edge.width / 2 + 0.5;
       })) continue;
       if (selected.some((other) => {
         const otherSeed = hashSeed(`vice-context:${seed}:${other.parcel.id}`);
@@ -461,9 +518,8 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const coreness = 1 - clamp(Math.hypot(p.x - core.x, p.z - core.z) / (plan.islandRadius * 0.8));
     let road = Infinity;
     for (const edge of primaryRoads) {
-      const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-      const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
-      road = Math.min(road, Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t));
+      const nearest = closestPolylineSegment(edge.points, p);
+      if (nearest) road = Math.min(road, nearest.d);
     }
     const shore = polygonDistance(p, plan.coast);
     return clamp(0.5 * centre + 0.2 * coreness + 0.15 * (road < 30 ? 1 - road / 30 : 0) + 0.15 * (shore < 120 ? 1 - shore / 120 : 0));
@@ -501,13 +557,16 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x + 980, z: centroid.z - 320 }, radius: 120, height: 88, seed: 71 },
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
-  const grown = growWithBuildings(plan, used, districts, civics);
+  const grown = growWithBuildings(plan, used, districts, civics, hotelBlocks.flatMap(block => block.parcels));
   // 生长剪枝（G1）会删掉空置街区的支路：计划层的回车点若所在路已被删，就不再画回车圈。
   // 只保留最终路网里仍是度 1 非桥路端的点（与 classifyEndpoints 的度口径一致）。
   const liveDegree = new Map<string, number>();
   for (const edge of grown.roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) liveDegree.set(id, (liveDegree.get(id) ?? 0) + 1);
   const culDeSacEnds = (plan.culDeSacEnds ?? []).filter((end) => liveDegree.get(`${end.x}:${end.z}`) === 1);
-  return { ...plan, ...grown, culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+  const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
+    sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
+    aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
+  return { ...plan, ...grown, culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
 }
 
 /**
@@ -517,7 +576,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
  * 连通：去掉支路后若某个仍有活动的分量与主网断开，就按 BFS 把被去掉的边一圈圈加回来直到连上；
  * 完全无活动的碎片分量整段删掉。车流只保留仍沿真实路段走的回路。
  */
-function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<string>, districts: DistrictLayout[], civics: CivicSite[]) {
+function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<string>, districts: DistrictLayout[], civics: CivicSite[], auxiliaryParcels: readonly Parcel[] = []) {
   // 配套（学校/商场/医院）占的整街区也算已建：曾不算，周围街道被生长剪枝删掉，医院门前没有路（真机截图）。
   const civicBlocks = new Set(civics.map((c) => c.parcelId));
   const active = plan.blocks.filter((block) => civicBlocks.has(block.id) || block.parcels.some((parcel) => used.has(parcel.id)));
@@ -531,12 +590,33 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
     ...seasideHotelLots(plan.seaside).map((lot) => ({ x: lot.x, z: lot.z, r: 26 })),
   ];
   const serves = (edge: RoadEdge) => {
-    const [a, b] = edge.points; const m = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
-    return anchors.some((anchor) => Math.hypot(anchor.x - m.x, anchor.z - m.z) < anchor.r);
+    return edge.points.slice(1).some((b, index) => {
+      const a = edge.points[index];
+      const m = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+      return anchors.some((anchor) => Math.hypot(anchor.x - m.x, anchor.z - m.z) < anchor.r);
+    });
   };
   // 骨架（宽 12、桥）永远保留；宽 ≤8 的街道只在服务活动区时保留。
   const selection = new Set(plan.roadEdges.filter((edge) => edge.bridge || edge.width >= 12 || serves(edge)).map((edge) => edge.id));
-  const landings = retainBridgeLandings(plan.roadEdges, selection);
+  // Retain the exact accepted frontage host and its proved route, not a new
+  // nearest-road approximation after display pruning.
+  const serviceSelection = new Set(selection);
+  const edgeById = new Map(plan.roadEdges.map((edge) => [edge.id, edge]));
+  const unresolvedParcelFrontage: string[] = [];
+  const unsupportedAuxiliaryFrontage = auxiliaryParcels.filter(parcel => used.has(parcel.id)).map(parcel => parcel.id).sort();
+  for (const block of active) for (const parcel of block.parcels) {
+    if (!civicBlocks.has(block.id) && !used.has(parcel.id)) continue;
+    const proof = parcel.frontage;
+    if (!proof) {
+      if (plan.parcelSource === "accepted-road-faces") unresolvedParcelFrontage.push(parcel.id);
+      continue;
+    }
+    const validation = validateParcelFrontage(proof, parcel, block, edgeById, plan.derivedNetworkVersion, plan.primaryAnchorNodeId);
+    if (!validation.ok) { unresolvedParcelFrontage.push(parcel.id); continue; }
+    serviceSelection.add(proof.hostEdgeId);
+    for (const id of proof.primaryEdgePath) serviceSelection.add(id);
+  }
+  const landings = retainBridgeLandings(plan.roadEdges, serviceSelection);
   const selected = landings.selected;
   const required = [
     ...plan.roadEdges.filter((edge) => selected.has(edge.id)).flatMap((edge) => [edge.from, edge.to]),
@@ -554,13 +634,83 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
   for (const district of districts) {
     district.carPaths = district.carPaths.filter((route) => route.every((p, i) => i === 0 || pairs.has([`${route[i - 1].x}:${route[i - 1].z}`, `${p.x}:${p.z}`].sort().join("/"))));
   }
-  return { blocks, roadEdges, roadNodes, retentionReport: { restored: [...keep].filter((id) => !selection.has(id)).sort(), unresolved: retention.unresolved, unresolvedPruningEnds: closure.unresolved, anchorMissing: retention.anchorMissing, missingBridgeLandings: landings.missing }, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
+  const displayReasons = [
+    ...(unresolvedParcelFrontage.length ? ["occupied parcel frontage evidence missing or stale"] : []),
+    ...(unsupportedAuxiliaryFrontage.length ? ["occupied auxiliary hotel parcels have no declared frontage proof"] : []),
+    ...(retention.unresolved.length ? ["required display paths unresolved"] : []),
+    ...(closure.unresolved.length ? ["display pruning exposes unresolved required endpoints"] : []),
+    ...(retention.anchorMissing ? ["display primary anchor missing"] : []),
+    ...(landings.missing.length ? ["accepted bridge ground landings missing"] : []),
+  ];
+  const displayOutcome: NonNullable<CityLayout["displayOutcome"]> = {
+    status: displayReasons.length ? "failed" : "partial",
+    reasons: [...displayReasons, "display topology checks do not certify model physics or visual readiness"],
+  };
+  return { blocks, roadEdges, roadNodes, displayOutcome, retentionReport: { restored: [...keep].filter((id) => !selection.has(id)).sort(), unresolved: retention.unresolved, unresolvedParcelFrontage: unresolvedParcelFrontage.sort(), unsupportedAuxiliaryFrontage, unresolvedPruningEnds: closure.unresolved, anchorMissing: retention.anchorMissing, missingBridgeLandings: landings.missing }, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。
  *  第 i 座配套属于「第 i 座落成时会话最多的城区」之外按会话数加权轮转的城区，落在该城区楼群外缘
  *  最近的空地块上，彼此至少隔 60。上一版布局里已有的配套若地块仍空着就原地保留（刷新不搬家）。 */
-function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, assigned: Map<string, Parcel>, previous: CityLayout | null, plan: ReturnType<typeof createCityPlan>): CivicSite[] {
+function layoutPlacementEnvironment(plan: ReturnType<typeof createCityPlan>, occupied: readonly Parcel[]): Omit<BlockPlacementInput, "block" | "footprint"> {
+  return { roads: plan.roadEdges, sites: [...plan.publicSites, ...plan.landmarks.filter((site) => site.radius),
+    ...occupied.map((parcel) => ({ x: parcel.x, z: parcel.z, radius: Math.hypot(parcel.width, parcel.depth) / 2 }))],
+    highways: plan.highways, buildable: plan.terrain.buildable };
+}
+
+type LayoutPlacementBudget = { limit: number; spent: number; remaining: number };
+function inspectLayoutPlacement(input: BlockPlacementInput, budget: LayoutPlacementBudget) {
+  const evidence = inspectBlockPlacement({ ...input, terrainSampleBudget: budget.remaining });
+  budget.spent += evidence.terrainSamples; budget.remaining -= evidence.terrainSamples;
+  return evidence;
+}
+function findLayoutBlockLot(block: CityBlock, minimumSize: { width: number; depth: number },
+  plan: ReturnType<typeof createCityPlan>, occupied: readonly Parcel[], budget: LayoutPlacementBudget) {
+  const proposal = findBlockLotCandidate({ block, environment: { ...layoutPlacementEnvironment(plan, occupied), terrainSampleBudget: budget.remaining }, minimumSize, candidateLimit: 30 });
+  budget.spent += proposal.coverage.terrainSamples; budget.remaining -= proposal.coverage.terrainSamples;
+  return proposal;
+}
+
+function recordLayoutPlacement(report: NonNullable<CityLayout["placementReport"]>, id: string,
+  kind: "garden" | "district-landmark" | "civic", placed: boolean, reason: string, terrainSamples: number, attempted: number): void {
+  report.push({ id, class: kind, status: placed ? "placed" : reason.includes("budget") || reason === "cancelled" ? "budget-exhausted"
+    : reason.includes("unsupported") || reason.includes("invalid") ? "unsupported" : "candidate-exhausted",
+    ...(!placed ? { reason } : {}), terrainSamples, attempted, scope: "sampled-rectangle-and-declared-circle-proxies" });
+}
+
+function orientCivicPlacement(plan: ReturnType<typeof createCityPlan>, block: CityBlock,
+  footprint: { x: number; z: number; yaw: number; width: number; depth: number }, kind: string,
+  occupied: readonly Parcel[], budget: LayoutPlacementBudget) {
+  const minimum = civicMinimumSize(kind), before = budget.spent;
+  let attempted = 0, reason = "no valid renderer orientation", best = Infinity;
+  let chosen: typeof footprint | null = null;
+  if (!minimum) return { footprint: null, attempted, terrainSamples: 0, reason: "unsupported renderer envelope" };
+  const roadGap = (q: Vec2) => Math.min(...plan.roadEdges.filter((edge) => !edge.bridge).flatMap((edge) => edge.points.slice(1).map((b, i) => {
+    const a = edge.points[i], dx = b.x - a.x, dz = b.z - a.z, t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+    return Math.hypot(q.x - a.x - dx * t, q.z - a.z - dz * t) - edge.width / 2;
+  })));
+  for (let k = 0; k < 4; k++) {
+    const yaw = footprint.yaw + k * Math.PI / 2;
+    const width = k % 2 ? footprint.depth : footprint.width, depth = k % 2 ? footprint.width : footprint.depth;
+    if (width < minimum.width || depth < minimum.depth) continue;
+    const envelope = civicEnvelopeSize(kind, width, depth)!;
+    const candidate = { x: footprint.x, z: footprint.z, yaw, width, depth };
+    const evidence = inspectLayoutPlacement({ ...layoutPlacementEnvironment(plan, occupied), block,
+      footprint: { ...candidate, ...envelope } }, budget);
+    attempted += 1;
+    if (!evidence.ok) {
+      reason = evidence.reason ?? "orientation rejected";
+      if (reason === "terrain-sample-budget-exhausted" || reason === "cancelled") return { footprint: null, attempted, terrainSamples: budget.spent - before, reason };
+      continue;
+    }
+    const gap = roadGap({ x: candidate.x + Math.sin(yaw) * (depth / 2 + 8), z: candidate.z + Math.cos(yaw) * (depth / 2 + 8) });
+    if (gap < best) { best = gap; chosen = candidate; }
+  }
+  return { footprint: chosen, attempted, terrainSamples: budget.spent - before, reason };
+}
+
+function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, assigned: Map<string, Parcel>, previous: CityLayout | null,
+  plan: ReturnType<typeof createCityPlan>, placementReport: NonNullable<CityLayout["placementReport"]>, placementBudget: LayoutPlacementBudget): CivicSite[] {
   const total = model.buildings.length;
   const count = total === 0 ? 0 : Math.max(2, Math.min(30, Math.floor(total / CIVIC_PER_SESSIONS)));
   if (!count) return [];
@@ -577,10 +727,9 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     for (const q of [...quota].sort((a, b) => b.take - a.take || (a.id < b.id ? -1 : 1))) if (round < q.take) sequence.push(q.id);
   }
   // 单个地块只有约 7×8，放不下学校/商场：配套占整个空街区（街区里没有任何会话楼）。
-  type Lot = { id: string; x: number; z: number; yaw: number; width: number; depth: number; zone: Zone };
-  const free: Lot[] = plan.blocks
-    .filter((block) => block.parcels.length > 0 && block.parcels.every((parcel) => !used.has(parcel.id)) && clearsHighways(block, block.width, block.depth, plan.highways))
-    .map((block) => ({ id: block.id, x: block.x, z: block.z, yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, zone: block.zone }));
+  type Lot = { id: string; x: number; z: number; yaw: number; width: number; depth: number; zone: Zone; block: CityBlock };
+  const freeBlocks = plan.blocks.filter((block) => block.parcels.length > 0 && block.parcels.every((parcel) => !used.has(parcel.id)));
+  const environment = () => layoutPlacementEnvironment(plan, parcels.filter((parcel) => used.has(parcel.id)));
   const taken = new Set<string>();
   const out: CivicSite[] = [];
   const old = new Map((previous?.civics ?? []).map((civic) => [civic.id, civic]));
@@ -588,52 +737,68 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
   const reservedFor = new Map<string, string>(); // blockId → civic id
   sequence.forEach((_, index) => {
     const keep = old.get(`civic:${index}`);
-    if (keep && free.some((lot) => lot.id === keep.parcelId)) reservedFor.set(keep.parcelId, `civic:${index}`);
+    const block = keep && freeBlocks.find((block) => block.id === keep.parcelId);
+    const envelope = keep && civicEnvelopeSize(keep.kind, keep.width, keep.depth);
+    if (keep && block && envelope && inspectLayoutPlacement({ ...environment(), block, footprint: { ...keep, ...envelope } }, placementBudget).ok) reservedFor.set(keep.parcelId, `civic:${index}`);
   });
   sequence.forEach((districtId, index) => {
     const id = `civic:${index}`;
     const kind = CIVIC_ORDER[index % CIVIC_ORDER.length];
     const unlockAt = times[Math.min(times.length - 1, (index + 1) * CIVIC_PER_SESSIONS - 1)] ?? times[times.length - 1];
     const keep = old.get(id);
-    let parcel: Lot | undefined = keep && reservedFor.get(keep.parcelId) === id ? free.find((p) => p.id === keep.parcelId && !taken.has(p.id)) : undefined;
+    let samples = 0, attempted = 0, reason = "no legal unoccupied real face";
+    const minimumSize = civicMinimumSize(kind);
+    if (!minimumSize) { recordLayoutPlacement(placementReport, id, "civic", false, "unsupported renderer envelope", 0, 0); return; }
+    let parcel: Lot | undefined;
+    let oriented: { x: number; z: number; yaw: number; width: number; depth: number } | null = null;
+    const oldBlock = keep && reservedFor.get(keep.parcelId) === id ? freeBlocks.find((block) => block.id === keep.parcelId && !taken.has(block.id)) : undefined;
+    const oldEnvelope = keep && civicEnvelopeSize(keep.kind, keep.width, keep.depth);
+    if (keep && oldBlock && oldEnvelope && keep.kind === kind) {
+      const evidence = inspectLayoutPlacement({ ...environment(), block: oldBlock, footprint: { ...keep, ...oldEnvelope } }, placementBudget);
+      samples += evidence.terrainSamples; attempted += 1;
+      if (evidence.ok) {
+        taken.add(oldBlock.id); for (const address of oldBlock.parcels) used.add(address.id);
+        out.push({ ...keep, unlockAt });
+        recordLayoutPlacement(placementReport, id, "civic", true, "retained actual prior renderer footprint", samples, attempted); return;
+      }
+      reason = `prior footprint cannot be retained: ${evidence.reason}`;
+    }
     // 已有配套原地保留时连同它原来的城区一起保留：总数一变，轮转里「第 i 座属于哪个城区」会变，
     // 曾因此让 civic:7 换了城区、搬去新城区找地（刷新不搬家契约被打破）。
-    const owner = parcel && keep ? keep.districtId : districtId;
+    const owner = districtId;
     if (!parcel) {
       const own = model.buildings.filter((b) => b.districtId === districtId).map((b) => assigned.get(b.id)).filter((p): p is Parcel => !!p);
-      if (!own.length) return;
+      if (!own.length) { recordLayoutPlacement(placementReport, id, "civic", false, "no assigned session anchors", samples, attempted); return; }
       const cx = own.reduce((acc, p) => acc + p.x, 0) / own.length;
       const cz = own.reduce((acc, p) => acc + p.z, 0) / own.length;
       // 按服务半径铺开（SPEC §4.4）：离已有配套越远越好（封顶 150），同时不要离本城区中心太远；
       // 学校偏居住区、商场偏商业/市中心、医院偏市中心与商业区。曾只取「离城区质心最近的空街区」，
       // 配套全挤在城区中心，一座岛上五座学校互相挨着。
       const preferred: Record<CivicKind, Zone[]> = { school: ["residential"], mall: ["downtown", "commercial", "waterfront"], hospital: ["downtown", "commercial", "residential"] };
-      parcel = free
-        .filter((p) => !taken.has(p.id) && !reservedFor.has(p.id) && out.every((c) => Math.hypot(c.x - p.x, c.z - p.z) >= 60))
-        .map((p) => {
-          const nearestCivic = Math.min(150, ...out.map((c) => Math.hypot(c.x - p.x, c.z - p.z)));
-          const rank = preferred[kind].indexOf(p.zone);
-          const zonePenalty = rank < 0 ? 60 : rank * 15;
-          return { p, d: Math.hypot(p.x - cx, p.z - cz) * 0.35 - nearestCivic * 0.7 + zonePenalty + hashSeed(`${id}:${p.id}`) * 10 };
-        })
-        .sort((a, b) => a.d - b.d || a.p.id.localeCompare(b.p.id))[0]?.p;
+      const rankedBlocks = freeBlocks.filter((block) => !taken.has(block.id) && (!reservedFor.has(block.id) || reservedFor.get(block.id) === id))
+        .map((block) => {
+          const nearestCivic = Math.min(150, ...out.map((c) => Math.hypot(c.x - block.x, c.z - block.z)));
+          const rank = preferred[kind].indexOf(block.zone), zonePenalty = rank < 0 ? 60 : rank * 15;
+          return { block, score: Math.hypot(block.x - cx, block.z - cz) * 0.35 - nearestCivic * 0.7 + zonePenalty + hashSeed(`${id}:${block.id}`) * 10 };
+        }).sort((a, b) => a.score - b.score || a.block.id.localeCompare(b.block.id));
+      for (const { block } of rankedBlocks) {
+        const proposal = findLayoutBlockLot(block, minimumSize, plan, parcels.filter((parcel) => used.has(parcel.id)), placementBudget);
+        samples += proposal.coverage.terrainSamples; attempted += proposal.coverage.attempted;
+        if (proposal.ok && out.every((c) => Math.hypot(c.x - proposal.footprint.x, c.z - proposal.footprint.z) >= 60)) {
+          const orientation = orientCivicPlacement(plan, block, proposal.footprint, kind, parcels.filter((parcel) => used.has(parcel.id)), placementBudget);
+          samples += orientation.terrainSamples; attempted += orientation.attempted;
+          if (orientation.footprint) { parcel = { id: block.id, block, zone: block.zone, ...proposal.footprint }; oriented = orientation.footprint; break; }
+          reason = orientation.reason;
+          if (reason === "terrain-sample-budget-exhausted" || reason === "cancelled") break;
+        }
+        else { reason = proposal.ok ? "civic spacing below 60" : proposal.reason; if (reason === "terrain-sample-budget-exhausted" || reason === "cancelled") break; }
+      }
     }
-    if (!parcel) return;
-    taken.add(parcel.id);
+    if (!parcel || !oriented) { recordLayoutPlacement(placementReport, id, "civic", false, reason, samples, attempted); return; }
     // 大门朝路（用户：医院门前没有路）：在街区朝向的四个方向里，选正门（局部 +z）外 8 处离道路最近的那个。
-    const roadGap = (q: Vec2) => Math.min(...plan.roadEdges.filter((e) => !e.bridge).map((e) => {
-      const [a, b] = e.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-      const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.z - a.z) * dz) / l2));
-      return Math.hypot(q.x - a.x - dx * t, q.z - a.z - dz * t) - e.width / 2;
-    }));
-    let yaw = parcel.yaw; let best = Infinity;
-    for (let k = 0; k < 4; k += 1) {
-      const y = parcel.yaw + (k * Math.PI) / 2; const half = (k % 2 ? parcel.width : parcel.depth) / 2;
-      const gap = roadGap({ x: parcel.x + Math.sin(y) * (half + 8), z: parcel.z + Math.cos(y) * (half + 8) });
-      if (gap < best) { best = gap; yaw = y; }
-    }
-    const swap = Math.round((yaw - parcel.yaw) / (Math.PI / 2)) % 2 !== 0;
-    out.push({ id, kind, districtId: owner, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw, width: swap ? parcel.depth : parcel.width, depth: swap ? parcel.width : parcel.depth, unlockAt });
+    taken.add(parcel.id); for (const address of parcel.block.parcels) used.add(address.id);
+    out.push({ id, kind, districtId: owner, parcelId: parcel.id, ...oriented, y: plan.terrain.height(oriented.x, oriented.z), unlockAt });
+    recordLayoutPlacement(placementReport, id, "civic", true, "accepted renderer rectangle", samples, attempted);
   });
   return out;
 }

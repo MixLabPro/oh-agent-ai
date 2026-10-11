@@ -2,6 +2,16 @@
 // Declared plot proxy and transaction guards, not a model-door certification.
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
+// Connector-first bundling previously exposed a top-level cycle through
+// cityPlan -> shorePlotAccess -> connect before CONNECTOR_CONFIG initialized.
+const cold = await loadCity({
+  "engine/planner/connect.ts": ["CONNECTOR_CONFIG"],
+  "engine/planner/shorePlotAccess.ts": ["SHORE_PLOT_ACCESS_CONFIG"],
+  "engine/planner/connectionBudget.ts": ["CONNECTION_BUDGET"],
+});
+assert.equal(cold.CONNECTION_BUDGET.bridgeCandidates, 40);
+assert.equal(cold.CONNECTOR_CONFIG.bridgeCandidates, cold.CONNECTION_BUDGET.bridgeCandidates);
+assert.equal(cold.SHORE_PLOT_ACCESS_CONFIG.maxHostCandidates, cold.CONNECTION_BUDGET.bridgeCandidates);
 const { emptyNetwork, addNetworkEdge, proposeShorePlotAccess, specByKind, createCityPlan, MIAMI_COASTAL,
   diagnoseNetwork, CONSTRAINTS } = await loadCity({
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],

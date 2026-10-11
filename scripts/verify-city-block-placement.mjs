@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
-const { inspectBlockPlacement } = await loadCity({ "engine/planner/blockPlacement.ts": ["inspectBlockPlacement"] });
+const { inspectBlockPlacement, lotClearsRoads } = await loadCity({
+  "engine/planner/blockPlacement.ts": ["inspectBlockPlacement"],
+  "engine/planner/lotRoadClearance.ts": ["lotClearsRoads"],
+});
 const p = (x, z) => ({ x, z });
 const base = { block: { polygon: [p(0, 0), p(80, 0), p(80, 80), p(0, 80)], holes: [] },
   footprint: { x: 40, z: 40, yaw: 0, width: 16, depth: 16 }, roads: [], sites: [], highways: [], buildable: () => true };
@@ -24,4 +27,18 @@ check({ ...base, terrainSampleBudget: 1 }, "terrain-sample-budget-exhausted");
 check({ ...base, cancelled: () => true }, "cancelled");
 check({ ...base, footprint: { ...base.footprint, width: NaN } }, "invalid-footprint-or-budget");
 const result = check(base); assert.equal(result.scope, "sampled-rectangle-and-declared-circle-proxies");
+const hotel = { x: 0, z: 0, yaw: 0, width: 20, depth: 20 };
+const bent = road([p(-100, 50), p(-50, 50), p(0, 0), p(100, 50)]);
+assert.equal(lotClearsRoads(hotel, [bent]), false, "later polyline segments cannot pass through a hotel");
+assert.equal(lotClearsRoads(hotel, [road([p(-100, 50), p(100, 50)])]), true);
+assert.equal(lotClearsRoads(hotel, [road([p(-100, 14.49), p(100, 14.49)])]), false);
+assert.equal(lotClearsRoads(hotel, [road([p(-100, 14.5), p(100, 14.5)])]), true);
+assert.equal(lotClearsRoads({ ...hotel, yaw: NaN }, []), false);
+assert.equal(lotClearsRoads(hotel, [road([p(0, NaN), p(100, 50)])]), false);
+for (const yaw of [0, 0.4, Math.PI / 2, -1.2]) {
+  const c = Math.cos(yaw), s = Math.sin(yaw), at = (x, z) => p(c * x + s * z, -s * x + c * z);
+  const long = { ...hotel, yaw, width: 40, depth: 8 };
+  assert.equal(lotClearsRoads(long, [road([at(-30, 9), at(30, 9)])]), true);
+  assert.equal(lotClearsRoads(long, [road([at(-30, 8), at(30, 8)])]), false);
+}
 console.log("City block placement: full rectangle/corner/concavity/hole, actual curved road/site/highway, sampled interior, failclosed budget/cancel and immutable proposals passed.");
