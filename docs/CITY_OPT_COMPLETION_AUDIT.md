@@ -88,6 +88,26 @@ diagnose-city-ground-stages在初始shore前私有深拷贝network实际边/宽�
 原名义邻居预留及高架清净。必须联合修改这些道路与owner并通过事务/最终网络/入口检查，
 不能删除道路或把上述counterfactual记录为已修复。操作尚未实施，完整规划验收仍失败。
 
+### 联合改线原语及曲线lineage（选址操作仍待接入）
+
+NetworkPatch新增relineEdges：仅ground-road，保留同一edge id、原两端及所有宽度/等级/
+purpose属性；非法/退化/自交/折返/重复操作或与拆边混用拒绝。预览/校验失败零副作用。
+同id但points已变现在进入paths journal，不再把保留身份误当成保留几何。
+remapRoadPath按完整旧曲线的显式有序span替换（含反向/外接前后段），丢失旧折点的局部
+引用不能靠空间猜测；冲突lineage拒绝。车流、岸路与街区边界消费同一journal。
+新增4旋转×9/12路幅、preview/stale/validator、双向曲线、含前后段、街区引用、局部缺失
+与lineage置换拒绝守卫，network-patch/connect/repair-safety及typecheck通过。
+新自交检查有16edge/patch、256point/edge输入上限，明确预算拒绝；不宣称U5全局账本完成。
+
+求解守卫揭示旧测试输入缺polygon/parcel尺寸/主网，并沿用旧“任意修改都加网络版本”断言。
+ea8750c8源码确认初始化同样直接读取block.polygon.length；现在初始化/源校验失败在候选
+枚举前返回planning-world-initialization-refused，生产不合成几何或主网。旧不完整输入保留
+为拒绝负例；正常测试明确提供测试面/尺寸/主网，容量/异常零副作用断言保持，新增site-only
+只加site域、不虚增network域验证。初始两次solve测试因旧输入终态exit1，修复后session17777
+终态exit0：28策略/10目标约束、6岛after<=before与双次确定性通过；不是完整30岛或基础
+全覆盖验收。随后新操作输入边/点上限、原路幅合法性与无曲线span时的空集合分配快路
+经network-patch专项复验。道路/owner联合搜索与两个命名样本恢复仍待。
+
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 
 - 本批已提交为8881f482（基于bb76bc87）。完整渲染XY外廓与局部ground-only声明现在分别登记；

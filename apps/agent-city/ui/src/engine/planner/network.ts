@@ -7,6 +7,7 @@
  */
 import { roadNodeId } from "../cityPlan";
 import type { RoadEdge, RoadNode, Vec2 } from "../cityLayout";
+import { classifyRoadSegments } from "./relations";
 
 export type Network = {
   nodes: Map<string, RoadNode>;
@@ -23,6 +24,9 @@ export type NetworkRemap = {
 };
 
 export const emptyNetwork = (): Network => ({ nodes: new Map(), edges: new Map() });
+/** Input guard for the new quadratic self-contact check; not the whole-plan
+ * candidate/terrain/clone/cancellation ledger required by U5. */
+export const NETWORK_RELINE_CONFIG = { version: 1, maxEdgesPerPatch: 16, maxPointsPerEdge: 256 } as const;
 
 /** 坐标取整到 0.01（路网节点的规范化键）。 */
 export const keyOf = (p: Vec2) => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
@@ -56,6 +60,9 @@ export type NetworkPatch = {
   splits: Array<{ edgeId: string; at: Vec2 }>;
   /** 联合定线后拆边：保持原端点/属性；新形状与拆分必须在同一补丁。 */
   relineSplits?: Array<{ edgeId: string; at: Vec2 }>;
+  /** Endpoint-preserving ground corridor replacement. Attributes and edge
+   * identity remain unchanged; actual old/new polylines enter the journal. */
+  relineEdges?: Array<{ edgeId: string; points: readonly Vec2[] }>;
   /** 微小近接节点合并到已在册节点，重绑全部关联边并保留折线/属性。 */
   rebindNodes?: Array<{ from: string; to: string; targetAt?: Vec2;
     /** 显式合流：只允许同端点直线 ground-road，保留最大路幅与更高等级。 */
@@ -80,6 +87,34 @@ function applyOps(draft: Network, patch: NetworkPatch, remap: NetworkRemap): Pat
     replace(id, []);
   }
   const relined = new Set<string>();
+  if ((patch.relineEdges?.length ?? 0) > NETWORK_RELINE_CONFIG.maxEdgesPerPatch)
+    return { ok: false, reason: "validation", detail: "ground corridor replacement edge budget exhausted" };
+  for (const replacement of patch.relineEdges ?? []) {
+    const host = draft.edges.get(replacement.edgeId);
+    if (!host) return { ok: false, reason: "unknown-edge", detail: replacement.edgeId };
+    if (Array.isArray(replacement.points) && replacement.points.length > NETWORK_RELINE_CONFIG.maxPointsPerEdge)
+      return { ok: false, reason: "validation", detail: "ground corridor replacement point budget exhausted" };
+    if (relined.has(host.id) || patch.splits.some(split => split.edgeId === host.id)
+      || patch.relineSplits?.some(split => split.edgeId === host.id) || host.bridge || host.structure !== "ground-road"
+      || !Number.isFinite(host.width) || host.width <= 0 || host.points.length < 2
+      || host.points.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.z))
+      || !Array.isArray(replacement.points) || replacement.points.length < 2
+      || replacement.points.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.z)))
+      return { ok: false, reason: "validation", detail: "invalid ground corridor replacement" };
+    const points = replacement.points.map(keyOf);
+    const same = (a: Vec2, b: Vec2) => a.x === b.x && a.z === b.z;
+    if (!same(points[0], host.points[0]) || !same(points[points.length - 1], host.points[host.points.length - 1])
+      || points.some((point, index) => index > 0 && same(point, points[index - 1])))
+      return { ok: false, reason: "validation", detail: "corridor replacement endpoint or zero-length mismatch" };
+    for (let i = 1; i < points.length; i++) for (let j = i + 1; j < points.length; j++) {
+      const relation = classifyRoadSegments(points[i - 1], points[i], points[j - 1], points[j], 0).kind;
+      if (relation === "invalid" || relation === "collinear-overlap" || (j > i + 1 &&
+        ["interior-crossing", "endpoint-contact", "endpoint-on-edge"].includes(relation)))
+        return { ok: false, reason: "validation", detail: "self-contacting corridor replacement" };
+    }
+    relined.add(host.id);
+    host.points = points;
+  }
   for (const s of patch.relineSplits ?? []) {
     const host = draft.edges.get(s.edgeId);
     if (!host) return { ok: false, reason: "unknown-edge", detail: s.edgeId };
@@ -202,7 +237,9 @@ export function commitNetworkPatch(
   if (!applied.ok) return applied;
   for (const [id, original] of network.edges) {
     const parts = remap.edges[id];
-    if (parts.length === 1 && parts[0] === id) continue;
+    const unchanged = draft.edges.get(id);
+    if (parts.length === 1 && parts[0] === id && unchanged?.points.length === original.points.length
+      && unchanged.points.every((point, index) => point.x === original.points[index].x && point.z === original.points[index].z)) continue;
     let cursor = remap.nodes[original.from];
     const points: Vec2[] = [];
     for (const part of parts) {

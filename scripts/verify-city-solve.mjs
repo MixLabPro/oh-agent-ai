@@ -21,10 +21,29 @@ for (const s of REPAIR_STRATEGIES) {
 }
 const targeted = [...new Set(REPAIR_STRATEGIES.map((s) => s.constraint))];
 
+// The old fixture omitted real geometry. Invalid observations must reject
+// before any candidate/strategy callback, not throw or synthesize a face.
+{
+  const malformed = { network: { nodes: new Map(), edges: new Map() }, publicSites: [], landmarks: [],
+    blocks: [{ id: "block", parcels: [{ id: "parcel", x: 0, z: 0 }] }], core: { x: 0, z: 0 },
+    geo: { terrain: { height: () => -1 }, river: null }, seaside: null, coast: [], coastRoadRuns: [], riverRoadRuns: [],
+    carPaths: [], bridges: [], connectionLog: [] };
+  const before = JSON.stringify(malformed); let called = false;
+  const result = runRepairTransaction(malformed, { constraint: "siteInWater", name: "invalid-source", candidates() {
+    called = true; throw new Error("must not enumerate invalid source");
+  }, run() { called = true; return 1; } });
+  assert.equal(result.changes, 0); assert.match(result.reason, /planning-world-initialization-refused/);
+  assert.equal(called, false); assert.equal(JSON.stringify(malformed), before);
+  assert.equal(malformed.planningWorld, undefined);
+}
+
 // 拒绝和异常都不能泄漏草稿修改，包括数组/嵌套地块与日志；容量不许靠删地块过关。
 {
-  const ctx = { network: { nodes: new Map(), edges: new Map() }, publicSites: [], landmarks: [],
-    blocks: [{ id: "block", parcels: [{ id: "parcel", x: 0, z: 0 }] }], core: { x: 0, z: 0 },
+  const a = { id: "100:20", x: 100, z: 20 }, b = { id: "120:20", x: 120, z: 20 };
+  const road = { id: "100:20/120:20", from: a.id, to: b.id, width: 5, kind: "local", structure: "ground-road", points: [a, b] };
+  const ctx = { network: { nodes: new Map([[a.id, a], [b.id, b]]), edges: new Map([[road.id, road]]) }, primaryAnchorNodeId: a.id, publicSites: [], landmarks: [],
+    blocks: [{ id: "block", x: 0, z: 0, polygon: [{ x: -4, z: -4 }, { x: 4, z: -4 }, { x: 4, z: 4 }, { x: -4, z: 4 }],
+      parcels: [{ id: "parcel", x: 0, z: 0, yaw: 0, width: 2, depth: 2 }] }], core: { x: 0, z: 0 },
     geo: { terrain: { height: () => -1 }, river: null }, seaside: null, coast: [], coastRoadRuns: [], riverRoadRuns: [],
     carPaths: [], bridges: [], connectionLog: [] };
   const snapshot = () => JSON.stringify([ctx.publicSites, ctx.blocks, ctx.connectionLog, [...ctx.network.nodes], [...ctx.network.edges]]);
@@ -51,7 +70,8 @@ const targeted = [...new Set(REPAIR_STRATEGIES.map((s) => s.constraint))];
   assert.equal(ctx.publicSites[0].x, 100);
   assert.equal(ctx.blocks, blocksRef);
   assert.equal(ctx.network.nodes, nodesRef);
-  assert.equal(ctx.network.version, 1);
+  assert.equal(ctx.network.version, 0, "site-only publication must not fabricate a network revision");
+  assert.equal(ctx.planningWorld.versions.site, 1);
 }
 
 const count = (plan, id) => CONSTRAINTS.find((c) => c.id === id).measure(plan).length;
