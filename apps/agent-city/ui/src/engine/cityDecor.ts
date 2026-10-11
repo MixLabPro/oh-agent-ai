@@ -8,7 +8,7 @@
  */
 
 import { CIVIC_LABELS, LANDMARK_LABELS } from "./models/registry";
-import { siteClassOf } from "./models/siteClasses";
+import { siteClassOf, siteClassesForMesh } from "./models/siteClasses";
 
 export type DecorInfo = { title: string; category: string; body: string };
 
@@ -25,7 +25,10 @@ export function isDecorId(id: string | null | undefined): boolean {
 }
 
 export function describeDecor(id: string): DecorInfo | null {
-  const [, kind, detail] = id.split(":");
+  if (decorDistrictId(id) !== null || id === "decor:district-landmark") return {
+    title: classTitle("district-landmark"), category: "城区地标 · 随规模出现",
+    body: "地标高度随本区会话数增长：会话越多，地标越高。" };
+  const [, kind, detail] = id.split("#")[0].split(":");
   switch (kind) {
     case "landmark":
       return { title: LANDMARK_NAMES[detail] ?? "地标", category: "致敬地标 · 装饰", body: "由岛屿种子挑选的城市地标。不代表任何会话，不随数据变化。" };
@@ -49,16 +52,18 @@ export function describeDecor(id: string): DecorInfo | null {
   }
 }
 
+/** Selection consumers accept one-version legacy district ids, preserving
+ * colons within district identities rather than splitting them into kinds. */
+export function decorDistrictId(id: string | null | undefined): string | null {
+  if (!id) return null;
+  const legacy = "decor:landmark:district:", current = "decor:district-landmark#district-landmark:";
+  const value = id.startsWith(current) ? id.slice(current.length) : id.startsWith(legacy) ? id.slice(legacy.length) : "";
+  return value || null;
+}
+
 /** 网格名 → 装饰类别（拾取时沿父级链匹配；静态城缓存复用时名字随网格一起保留）。 */
 export function decorKindForName(name: string): string | null {
-  // 海滨酒店不在这里：它们现在是会话楼（酒店地块），点击走会话详情。
-  if (name.startsWith("city-landmark-")) return `landmark:${name.slice("city-landmark-".length)}`;
-  if (name.startsWith("city-civic-")) return "civic";
-  if (name.startsWith("city-public-sites-")) return "site";
-  if (name.startsWith("city-garden-")) return "garden";
-  if (name === "city-vice-context-facades" || name === "city-vice-context-rooftops") return "backdrop";
-  if (name === "city-massing") return "massing";
-  if (name === "city-lifeguard-towers" || name === "city-yachts" || name === "city-beach-furniture" || name === "city-beach-people" || name === "city-volleyball-courts" || name === "city-promenade-props" || name === "city-marina") return "seaside";
-  if (name === "city-sea-volcano") return "volcano";
-  return null;
+  // Unknown geometry stays unpickable instead of silently inheriting a prefix.
+  const routes = [...new Set(siteClassesForMesh(name).map(item => item.decorKind))];
+  return routes.length === 1 ? routes[0] : null;
 }

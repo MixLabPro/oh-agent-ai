@@ -106,9 +106,15 @@ export function decorAt(host: UiOverlayHost, mesh: THREE.Object3D, instanceId: n
     if (!kind) continue;
     if (kind === "civic" && instanceId !== undefined) {
       const meshIndex = host.civicMeshes.indexOf(mesh as THREE.InstancedMesh);
-      const piece = host.civicPieces.find((item) => item.mesh === meshIndex && item.index === instanceId);
+      const matches = host.civicPieces.filter((item) => item.mesh === meshIndex && item.index === instanceId);
+      const piece = matches.length === 1 ? matches[0] : undefined;
       const civic = piece ? (host.layout.civics ?? [])[piece.civic] : undefined;
-      return civic ? `decor:civic:${civic.kind}` : "decor:civic";
+      return civic ? `decor:civic:${civic.kind}#${civic.id}` : "decor:civic";
+    }
+    if (kind === "district-landmark") {
+      const prefix = "city-landmark-district:", districtId = node.name.slice(prefix.length);
+      const instances = (host.layout.districtLandmarks ?? []).filter(item => item.districtId === districtId);
+      return instances.length === 1 ? `decor:district-landmark#district-landmark:${districtId}` : "decor:district-landmark";
     }
     // 公共用地是一批合并网格：按命中点找最近的用地，市政厅（civic）面板展示全城信息。
     if (kind === "site" && point) {

@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { citySrc, loadCity } from "./city-kit/index.mjs";
 const { SITE_CLASSES, siteClassOf, siteClassesForInstance, classifyLayoutSites, civicMinimumSize,
-  GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE, describeDecor, CIVIC_LABELS } = await loadCity({
-  "engine/cityDecor.ts": ["describeDecor"],
+  GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE, describeDecor, CIVIC_LABELS, decorKindForName, decorDistrictId,
+  siteClassesForMesh, decorAt, THREE } = await loadCity({
+  "pkg:three": ["* as THREE"],
+  "engine/systems/uiOverlays.ts": ["decorAt"],
+  "engine/cityDecor.ts": ["describeDecor", "decorKindForName", "decorDistrictId"],
   "engine/models/registry.ts": ["CIVIC_LABELS"],
-  "engine/models/siteClasses.ts": ["SITE_CLASSES", "siteClassOf", "siteClassesForInstance", "classifyLayoutSites"],
+  "engine/models/siteClasses.ts": ["SITE_CLASSES", "siteClassOf", "siteClassesForInstance", "classifyLayoutSites", "siteClassesForMesh"],
   "engine/models/layoutPlacementGeometry.ts": ["civicMinimumSize", "GARDEN_MINIMUM_SIZE", "DISTRICT_LANDMARK_ENVELOPE"],
 });
 const catalogSource = fs.readFileSync(new URL("../apps/agent-city/ui/src/cityCatalog.ts", import.meta.url), "utf8");
@@ -48,7 +51,39 @@ assert.equal(describeDecor("decor:site:civic").title, "市政设施", "legacy mu
 assert.equal(describeDecor("decor:site:unknown").title, "市政设施");
 assert.equal(describeDecor("decor:civic:unknown").title, "城市配套");
 assert.equal(describeDecor("decor:unknown"), null);
+for (const item of SITE_CLASSES) for (const pattern of item.meshNames) {
+  const name = pattern.endsWith("*") ? pattern.slice(0, -1) + "fixture" : pattern;
+  const matches = siteClassesForMesh(name);
+  assert(matches.length > 0, name);
+  assert.equal(new Set(matches.map(item => item.family)).size, 1, "merged mesh names may only share one family");
+  assert.equal(new Set(matches.map(item => item.decorKind)).size, 1, "merged mesh route must be unambiguous");
+  assert.equal(decorKindForName(name), item.decorKind);
+}
+assert.equal(decorKindForName("city-landmark-district:harness:zcode"), "district-landmark");
+assert.equal(decorKindForName("city-landmark-unknown"), null);
+assert.equal(decorKindForName("city-session-hotel"), null);
+for (const id of ["decor:landmark:district:harness:zcode", "decor:district-landmark#district-landmark:harness:zcode"]) {
+  assert.equal(decorDistrictId(id), "harness:zcode");
+  assert.equal(siteClassOf(id).id, "district-landmark");
+  assert.equal(describeDecor(id).title, siteClassOf("district-landmark").title);
+  assert.equal(describeDecor(id).category, "城区地标 · 随规模出现");
+}
+assert.equal(decorDistrictId("decor:landmark:district:"), null);
+assert.equal(decorDistrictId("decor:civic:school#civic:42"), null);
+assert.deepEqual(describeDecor("decor:civic:school#civic:42"), describeDecor("decor:civic:school"));
+const mesh = new THREE.Mesh(); mesh.name = "city-civic-boxes";
+const host = { layout: { civics: [{ id: "civic:42", kind: "school" }], districtLandmarks: [{ districtId: "harness:zcode" }] },
+  civicMeshes: [mesh], civicPieces: [{ civic: 0, mesh: 0, index: 4 }] };
+assert.equal(decorAt(host, mesh, 4), "decor:civic:school#civic:42");
+assert.equal(decorAt(host, mesh, 5), "decor:civic");
+assert.equal(decorAt({ ...host, civicPieces: [...host.civicPieces, ...host.civicPieces] }, mesh, 4), "decor:civic");
+const districtGroup = new THREE.Group(); districtGroup.name = "city-landmark-district:harness:zcode";
+const child = new THREE.Mesh(); districtGroup.add(child);
+assert.equal(decorAt(host, child), "decor:district-landmark#district-landmark:harness:zcode");
+assert.equal(decorAt({ ...host, layout: { ...host.layout, districtLandmarks: [] } }, child), "decor:district-landmark");
+assert.equal(decorAt({ ...host, layout: { ...host.layout, districtLandmarks: [...host.layout.districtLandmarks, ...host.layout.districtLandmarks] } }, child), "decor:district-landmark");
+mesh.geometry.dispose(); child.geometry.dispose(); mesh.material.dispose(); child.material.dispose();
 const source = fs.readFileSync(`${citySrc}/engine/models/siteClasses.ts`, "utf8");
 assert(!/from\s+["'][^"']*(?:planRepair|planSites|planSitePolicy|three)[^"']*["']/.test(source), "pure generator declarations only");
 assert(!/(?:width|depth):\s*\d/.test(source), "placement dimensions must derive from renderer declarations");
-console.log("City site registry metadata: catalog coverage/titles, unique class ids, six layout-family classifiers, declared minimums and legacy lookup passed; instance geometry/pick-height/scene/editor coverage remain pending.");
+console.log("City site registry: metadata/catalog/titles, declared minimums, merged-family routes, exact civic/district mesh identities and legacy district selection passed; instance geometry/pick-height/full-scene/editor coverage remain pending.");

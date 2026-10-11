@@ -767,7 +767,7 @@ export class CityParts {
    *  首次使用时沿场景树按网格名收集一次；它们曾不在拾取范围内，点了毫无反应。 */
   get decorTargets(): THREE.Object3D[] { return decorTargets(this as unknown as UiOverlayHost); }
 
-  /** 命中的非会话网格 → `decor:<kind>[:<detail>]`；配套按实例反查学校/商场/医院。 */
+  /** 非会话拾取；已知配套/城区地标返回class#instance，其余兼容旧decor分类。 */
   decorAt(mesh: THREE.Object3D, instanceId: number | undefined, point?: THREE.Vector3): string | null { return decorAt(this as unknown as UiOverlayHost, mesh, instanceId, point); }
 
   idAt(mesh: THREE.Object3D, instanceId: number): string | null { return idAt(this as unknown as UiOverlayHost, mesh, instanceId); }

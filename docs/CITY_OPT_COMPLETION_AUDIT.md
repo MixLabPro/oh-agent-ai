@@ -41,6 +41,23 @@ typecheck、site-registry、models（1110parts）及i18n-catalog（302entries）
 site-registry新增运行时名称派生/fallback断言；编辑器controller.SITE_LABEL仍未迁移，
 真实场景前后逐字节对照仍待，因此不是B1全项或B0–B2整批验收通过。
 
+### B2声明驱动拾取与已知实例（合并市政网格仍待）
+
+decorKindForName现查siteClasses.meshNames，精确名优先；未知地标不再静默继承宽前缀。
+同族合并网格仅返回共同decorKind，不声称已定位具体类；异路由匹配failclosed。
+civicPieces已知mesh/index现返回decor:civic:kind#civic:id，不再丢实际实例id；
+城区地标仅在layout中恰有一个district实例时返回class#instance，缺失/重复退为类级。
+describeDecor忽略实例尾部后读取类文案，城区地标修正为随规模出现，不再致敬地标。
+CityExperience城区数据面板同时接受新旧id，并保留含冒号的district身份；市政总览仍保留
+decor:site:civic。没有将市政合并网格的nearest-point/radius推测升级为精确实例id。
+新增实际THREE mesh/parent-chain专项、错误instanceIndex、缺失/重复district与旧id兼容；
+typecheck、registry、models及i18n通过，新增英文分类键；production build session25094
+exit0（254modules、3.69s），仍有大chunk警告，不作为性能预算通过证据。
+重复civicPieces拒绝及旧district类查找补齐后，build session9318再次exit0（3.54s）。
+真实380/1600全城网格归属/拾取前后对比、浏览器交互、编辑器优先消费实例与PICK_HEIGHT
+删除、未知模型外廓和稳定id迁移仍待，因此B0–B4未整体完成。UIUX检索未匹配本问题，
+采用通用一致性检查保留市政/城区功能面板、关闭和聚焦操作；不增加无关视觉/交互变化。
+
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 
 - 本批已提交为8881f482（基于bb76bc87）。完整渲染XY外廓与局部ground-only声明现在分别登记；
