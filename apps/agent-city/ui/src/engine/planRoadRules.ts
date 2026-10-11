@@ -4,16 +4,19 @@
  * 纯函数、无副作用，看的是**当前生效布局**（已套补丁）里的当前 id——与编辑器拾取到的 id 同一口径，
  * 道路日志（planPatch.RoadOp）直接引用这些 id，无需翻译。
  *
- * 原则：**只拦「这次编辑新引入」的违例**。生成器自己留下的残余（压路、锐角、近水路段）不能让无关的编辑
- * 全被拒——比较编辑前后同一对象的违例，新增才阻止。这和体检不同：体检报全部，校验只管这一次手。
+ * 原则（放权后，SPEC §15，参考 SimCity）：**只拒绝物理上做不到的**——桥面、修进水里、太短/退化、撞上已有路口、
+ * 压到锁定设施。其余（擦主干道、孤立楼、锐角、交叉、压到楼）一律放行，后果作为 warnings 告诉用户并自动处理：
+ * 交叉处自动生成路口（planPatch 重放），压到的非会话设施推平、会话楼由开发商就近安置（planBulldozer）。
+ * 只评估「这次编辑新引入」的影响：生成器自己留下的残余（压路、锐角）不算到这一笔头上。
  *
  * 近似声明（如实）：楼的「接路」按最近路段的较近端点判定，不是地块 frontage 的精确证明——
  * 足以拦住「删掉这条路让楼断网/离路太远」，但不保证与规划器的 frontage 判定逐点一致。
  */
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
-import { buildingRect, edgeLocked, nearestOnPolyline, parcelIndex, rectClearOfEdges, type BuildingRect } from "./planPatch";
+import { buildingRect, edgeLocked, nearestOnPolyline, rectClearOfEdges, type BuildingRect } from "./planPatch";
 import { roadNodeId } from "./cityPlan";
+import { listSites } from "./planSites";
 
 export type RoadVerdict = { blockers: string[]; warnings: string[] };
 
@@ -23,7 +26,7 @@ const NODE_CLEARANCE = 1;       // 目标点距任何别的路口 < 1 视为撞�
 const FAR_MOVE = 80;
 const FRONTAGE_LIMIT = 40;      // 楼离最近道路的上限（同体检 orphanedBlock）
 const SAMPLE_STEP = 4;
-const ARTERIAL_WIDTH = 12;      // 骨架边：宽 ≥ 12（SPEC §7.3「骨架边宽≥12 或桥」）
+const ARTERIAL_WIDTH = 12;      // 主干道：宽 ≥ 12（擦它只提示，不再拒绝）
 
 const quantize = (p: Vec2): Vec2 => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
 
@@ -54,44 +57,56 @@ function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boole
   return false;
 }
 
-/** 需要给路让位的矩形：会话楼、背景楼、花园、配套、地标。 */
-const rectCache = new WeakMap<CityLayout, { model: CityModel; rects: BuildingRect[] }>();
+/** 路会压到的对象：会话楼（只能被安置，不能被拆）与设施（可推平；锁定的不能动）。 */
+export type Obstacle = { kind: "session" | "site"; id: string; rect: BuildingRect; locked: boolean };
+const obstacleCache = new WeakMap<CityLayout, { model: CityModel; obstacles: Obstacle[] }>();
 
-/** 悬停预览每次鼠标移动都要校验，障碍矩形按（布局, 模型）缓存——布局不可变，缓存随布局对象一起回收。 */
-function obstacleRects(layout: CityLayout, model: CityModel): BuildingRect[] {
-  const hit = rectCache.get(layout);
-  if (hit && hit.model === model) return hit.rects;
-  const rects = buildObstacleRects(layout, model);
-  rectCache.set(layout, { model, rects });
-  return rects;
-}
-
-function buildObstacleRects(layout: CityLayout, model: CityModel): BuildingRect[] {
-  const rects: BuildingRect[] = [];
+/** 悬停预览每次鼠标移动都要评估，障碍按（布局, 模型）缓存——布局不可变，缓存随布局对象一起回收。 */
+function obstacles(layout: CityLayout, model: CityModel): Obstacle[] {
+  const hit = obstacleCache.get(layout);
+  if (hit && hit.model === model) return hit.obstacles;
+  const out: Obstacle[] = [];
   const buildings = new Map(model.buildings.map((building) => [building.id, building]));
   for (const district of layout.districts) for (const [id, slot] of district.slots) {
     const building = buildings.get(id);
-    if (building) rects.push(buildingRect(building, slot));
+    if (building) out.push({ kind: "session", id, rect: buildingRect(building, slot), locked: false });
   }
-  for (const context of layout.contextBuildings) rects.push({ x: context.x, z: context.z, yaw: context.yaw, width: context.width, depth: context.depth });
-  for (const garden of layout.gardens) rects.push({ x: garden.x, z: garden.z, yaw: garden.yaw, width: garden.width, depth: garden.depth });
-  const parcels = parcelIndex(layout);
-  for (const civic of layout.civics) rects.push({ x: civic.x, z: civic.z, yaw: civic.yaw, width: civic.width, depth: civic.depth });
-  for (const landmark of layout.districtLandmarks ?? []) {
-    const parcel = parcels.get(landmark.parcelId);
-    if (parcel) rects.push({ x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: parcel.width, depth: parcel.depth });
-  }
-  return rects;
+  for (const site of listSites(layout)) out.push({ kind: "site", id: site.id, rect: { x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth }, locked: !!site.locked });
+  obstacleCache.set(layout, { model, obstacles: out });
+  return out;
 }
 
-/** 路段碰到哪些矩形（返回下标集合）。先按距离粗筛，再用精确的朝向矩形 × 路带判定。 */
-function rectsHitBy(edge: RoadEdge, rects: readonly BuildingRect[]): Set<number> {
+/** 路段压到哪些障碍（返回下标集合）。先按距离粗筛，再用精确的朝向矩形 × 路带判定。 */
+function hitsBy(edge: RoadEdge, list: readonly Obstacle[]): Set<number> {
   const hit = new Set<number>();
-  rects.forEach((rect, index) => {
-    if (distanceToPolyline(rect, edge.points) > 40) return;
-    if (!rectClearOfEdges(rect, [edge], 0.5)) hit.add(index);
+  list.forEach((item, index) => {
+    if (distanceToPolyline(item.rect, edge.points) > 60) return;
+    if (!rectClearOfEdges(item.rect, [edge], 0.5)) hit.add(index);
   });
   return hit;
+}
+
+/** 一组新几何的路段会压到什么：要安置的会话楼、要推平的设施、压到的锁定设施（后者拒绝）。 */
+export type RoadImpact = { relocate: string[]; bulldoze: string[]; locked: string[] };
+export function roadImpact(layout: CityLayout, model: CityModel, edges: readonly RoadEdge[], exclude: ReadonlySet<number> = new Set()): RoadImpact {
+  const list = obstacles(layout, model);
+  const indices = new Set<number>();
+  for (const edge of edges) for (const index of hitsBy(edge, list)) if (!exclude.has(index)) indices.add(index);
+  const impact: RoadImpact = { relocate: [], bulldoze: [], locked: [] };
+  for (const index of [...indices].sort((x, y) => x - y)) {
+    const item = list[index];
+    if (item.kind === "session") impact.relocate.push(item.id);
+    else if (item.locked) impact.locked.push(item.id);
+    else impact.bulldoze.push(item.id);
+  }
+  return impact;
+}
+
+/** 影响 → verdict：锁定设施拒绝，其余计数作为 warnings（`relocate:N` / `bulldoze:N`，面板翻译成人话）。 */
+function applyImpact(impact: RoadImpact, blockers: string[], warnings: string[]): void {
+  if (impact.locked.length) blockers.push("hits-locked-site");
+  if (impact.bulldoze.length) warnings.push(`bulldoze:${impact.bulldoze.length}`);
+  if (impact.relocate.length) warnings.push(`relocate:${impact.relocate.length}`);
 }
 
 /** 非桥路段沿线采样，统计不可建/水面采样点数。 */
@@ -134,22 +149,23 @@ export function validateNodeMove(layout: CityLayout, model: CityModel, nodeId: s
   const badAfter = moved.reduce((sum, { after }) => sum + badSamples(layout, after), 0);
   if (badAfter > badBefore) blockers.push("road-in-water");
 
-  // 穿楼/配套/花园：只拦新碰到的矩形。
-  const rects = obstacleRects(layout, model);
-  if (moved.some(({ before, after }) => {
-    const already = rectsHitBy(before, rects);
-    return [...rectsHitBy(after, rects)].some((index) => !already.has(index));
-  })) blockers.push("road-over-building");
+  // 压到的东西：只算这一拖**新**压到的（原来就压着的是生成器残余，不算这一笔的）。
+  const list = obstacles(layout, model);
+  const already = new Set<number>();
+  for (const { before } of moved) for (const index of hitsBy(before, list)) already.add(index);
+  applyImpact(roadImpact(layout, model, moved.map(({ after }) => after), already), blockers, warnings);
 
   // 锐角：本节点与各邻居端点，编辑前没有、编辑后有。
   const afterEdges = layout.roadEdges.map((edge) => moved.find(({ before }) => before === edge)?.after ?? edge);
   const nodes = new Map<string, Vec2>(layout.roadNodes.map((candidate) => [candidate.id, candidate]));
   const neighbours = new Set(incident.map((edge) => (edge.from === nodeId ? edge.to : edge.from)));
-  if (hasAcuteAt(afterEdges, nodeId, target) && !hasAcuteAt(layout.roadEdges, nodeId, node)) blockers.push("acute-junction");
+  // 锐角只提示（SimCity 也允许难看的路口）。
+  let acute = hasAcuteAt(afterEdges, nodeId, target) && !hasAcuteAt(layout.roadEdges, nodeId, node);
   for (const id of neighbours) {
     const at = nodes.get(id);
-    if (at && hasAcuteAt(afterEdges, id, at) && !hasAcuteAt(layout.roadEdges, id, at)) { if (!blockers.includes("acute-junction")) blockers.push("acute-junction"); }
+    if (at && hasAcuteAt(afterEdges, id, at) && !hasAcuteAt(layout.roadEdges, id, at)) acute = true;
   }
+  if (acute) warnings.push("acute-junction");
   if (Math.hypot(target.x - node.x, target.z - node.z) > FAR_MOVE) warnings.push("far-move");
   return { blockers, warnings };
 }
@@ -197,7 +213,9 @@ export function validateEdgeDrop(layout: CityLayout, model: CityModel, edgeId: s
   const edge = layout.roadEdges.find((candidate) => candidate.id === edgeId);
   if (!edge) return { blockers: ["missing-edge"], warnings };
   if (edgeLocked(edge)) return { blockers: ["locked-edge"], warnings };
-  if (edge.width >= ARTERIAL_WIDTH) return { blockers: ["arterial-skeleton"], warnings };
+  if (edge.width >= ARTERIAL_WIDTH) warnings.push("erases-arterial");
+  if (edge.structure === "ground-approach") warnings.push("cuts-bridge");
+  if (edge.purpose === "waterfront") warnings.push("erases-waterfront");
 
   const remaining = layout.roadEdges.filter((candidate) => candidate !== edge);
   const slots: Vec2[] = []; const ids: string[] = [];
@@ -208,7 +226,7 @@ export function validateEdgeDrop(layout: CityLayout, model: CityModel, edgeId: s
 
   // 离路太远：原本在范围内、删后超出的楼。
   const stranded = ids.filter((_, i) => before[i].distance <= FRONTAGE_LIMIT && after[i].distance > FRONTAGE_LIMIT);
-  if (stranded.length) blockers.push("strands-buildings");
+  if (stranded.length) warnings.push("strands-buildings");
 
   // 断网：原本接在主网上的楼，删后不再与其他「接主网的楼」同一连通分量。
   const compBefore = components(layout.roadEdges); const compAfter = components(remaining);
@@ -217,7 +235,7 @@ export function validateEdgeDrop(layout: CityLayout, model: CityModel, edgeId: s
   const mainBefore = [...sizes].sort((a, b) => b[1] - a[1])[0]?.[0];
   const served = ids.map((_, i) => i).filter((i) => before[i].node !== null && compBefore.get(before[i].node!) === mainBefore);
   const afterLabels = new Set(served.map((i) => (after[i].node === null ? -1 : (compAfter.get(after[i].node!) ?? -1))));
-  if (afterLabels.size > 1 || afterLabels.has(-1)) blockers.push("disconnects-buildings");
+  if (afterLabels.size > 1 || afterLabels.has(-1)) warnings.push("disconnects-buildings");
 
   // 新断头：删后某端点度数落到 1（它连着别的路，只是少了一条）。
   const degree = new Map<string, number>();
@@ -252,7 +270,7 @@ export function nearestRoadTarget(layout: CityLayout, x: number, z: number): Roa
 
 const SNAP_NODE_UI = 8;   // 画路时鼠标离路口这么近就吸附到路口
 const SNAP_EDGE_UI = 4;   // 离路段这么近就吸附到路段上（落笔时把该路段拆开）
-const MAX_NEW_EDGE = 250;
+const MAX_NEW_EDGE = 800;
 const CROSS_EPS = 1;      // 与现有路的交点离新路端点 < 1 视为「接在端点上」，不算交叉
 
 export type SnapPoint = { x: number; z: number; kind: "node" | "edge" | "free"; nodeId?: string; edgeId?: string; locked: boolean };
@@ -286,6 +304,19 @@ export function nearestEdgeAt(layout: CityLayout, x: number, z: number): RoadEdg
     if (d <= edge.width / 2 + 4 && (!best || d < best.d)) best = { edge, d };
   }
   return best?.edge ?? null;
+}
+
+/** 新路 a→b 与现有地面路的交点（离 a/b 端点 1 以内的不算，那是「接在端点上」），按离 a 的距离排序。 */
+export function crossingPoints(layout: CityLayout, a: Vec2, b: Vec2): Vec2[] {
+  const out: Vec2[] = [];
+  for (const edge of layout.roadEdges) {
+    if (edge.bridge) continue;
+    for (let i = 1; i < edge.points.length; i += 1) {
+      const hit = segmentIntersection(a, b, edge.points[i - 1], edge.points[i]);
+      if (hit && Math.hypot(hit.x - a.x, hit.z - a.z) > CROSS_EPS && Math.hypot(hit.x - b.x, hit.z - b.z) > CROSS_EPS) out.push(hit);
+    }
+  }
+  return out.sort((p, q) => Math.hypot(p.x - a.x, p.z - a.z) - Math.hypot(q.x - a.x, q.z - a.z));
 }
 
 /** 两线段的真交点（参数都落在开区间内），无交点返回 null。 */
@@ -355,29 +386,24 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
     if (ea.id === eb.id) return { blockers: ["degenerate"], warnings };
     if (layout.roadEdges.some((edge) => edge.id === [ea.id, eb.id].sort().join("/"))) return { blockers: ["edge-exists"], warnings };
   }
-  if (ea.kind === "free" && eb.kind === "free") blockers.push("isolated-road");
+  // 两端都悬空、且路上没有交叉路口，才算孤立——交叉处会自动生成路口，那也是接上了路网。
+  const junctions = crossingPoints(layout, a, b).length;
+  if (ea.kind === "free" && eb.kind === "free" && junctions === 0) warnings.push("isolated-road");
   if (ea.kind === "free" || eb.kind === "free") warnings.push("creates-dead-end");
 
   const next: RoadEdge = { id: "new", from: "a", to: "b", width, kind: width >= 8 ? "arterial" : "local", points: [a, b], structure: "ground-road" };
   if (badSamples(layout, next) > 0 || !layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z)) blockers.push("road-in-water");
-  if (rectsHitBy(next, obstacleRects(layout, model)).size > 0) blockers.push("road-over-building");
+  applyImpact(roadImpact(layout, model, [next]), blockers, warnings);
 
-  let crosses = false;
-  for (const edge of layout.roadEdges) {
-    if (edge.bridge || crosses) continue;
-    for (let i = 1; i < edge.points.length; i += 1) {
-      const hit = segmentIntersection(a, b, edge.points[i - 1], edge.points[i]);
-      if (hit && Math.hypot(hit.x - a.x, hit.z - a.z) > CROSS_EPS && Math.hypot(hit.x - b.x, hit.z - b.z) > CROSS_EPS) { crosses = true; break; }
-    }
-  }
-  if (crosses) blockers.push("crosses-road");
+  // 交叉：自动生成路口（planPatch 重放时在交点处把两条路都拆开），这里只数一下告诉用户。
+  if (junctions) warnings.push(`auto-junction:${junctions}`);
 
   // 锐角：只拦新引入的（接到的路口本来就锐角的不算新违例）。
   const dirAB = Math.atan2(b.z - a.z, b.x - a.x); const dirBA = Math.atan2(a.z - b.z, a.x - b.x);
   for (const [end, at, dir] of [[ea, a, dirAB], [eb, b, dirBA]] as const) {
     const existing = directionsAt(layout, end, at);
     if (existing.length + 1 < 3) continue;
-    if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { blockers.push("acute-junction"); break; }
+    if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
   }
   return { blockers, warnings };
 }

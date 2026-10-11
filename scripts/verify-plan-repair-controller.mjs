@@ -65,7 +65,7 @@ function harness(overrides = {}) {
   assert.equal(controller.snapshot.active, true);
   assert.equal(controller.snapshot.message.kind, "hint");
   controller.click({ pickedId: null, ground: { x: 10, z: 0 } });
-  assert.match(controller.snapshot.message.text, /点选一栋会话楼/, "a ground click with nothing selected asks for a building first");
+  assert.match(controller.snapshot.message.text, /点选任意建筑/, "a ground click with nothing selected asks for a building first");
   assert.equal(log.moves.length, 0);
 }
 
@@ -83,7 +83,7 @@ function harness(overrides = {}) {
   assert.equal(controller.snapshot.message.kind, "warn", "no candidates is called out, not hidden");
   controller.click({ pickedId: "decor:fountain", ground: null });
   assert.equal(controller.snapshot.buildingId, "b2", "clicking a non-session object keeps the current selection");
-  assert.match(controller.snapshot.message.text, /只有会话楼/);
+  assert.match(controller.snapshot.message.text, /不是建筑/, "decoration that is not a building (beach, pier, bridge) is explained, not silently ignored");
 }
 
 // (c) 搬成功：重新选中 + 候选刷新；带 warnings → warn。
@@ -192,7 +192,7 @@ function harness(overrides = {}) {
   controller.hover({ x: 50, z: -3 }); // 命中锁定的 bridge
   preview = controller.snapshot.preview;
   assert.equal(preview.ok, false, "a locked road previews as not erasable");
-  assert.match(preview.reason, /桥、桥头引道和滨海路不可编辑/, "the reason is spelled out");
+  assert.match(preview.reason, /桥面由桥梁模型绑定，不能单独编辑/, "the reason is spelled out");
   controller.hover({ x: 50, z: 40 });
   assert.equal(controller.snapshot.preview, null, "off the road there is no preview");
   controller.hover({ x: 50, z: 1 });
@@ -222,7 +222,7 @@ function harness(overrides = {}) {
   assert.equal(controller.snapshot.preview.ok, false, "snapping onto a locked bridge is flagged");
   controller.click({ pickedId: null, ground: { x: -5, z: 10 } });
   assert.equal(controller.snapshot.drawStart, null, "a locked start point is refused");
-  assert.match(controller.snapshot.message.text, /桥、桥头引道和滨海路不可编辑/);
+  assert.match(controller.snapshot.message.text, /桥面由桥梁模型绑定，不能单独编辑/);
   controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
   assert.deepEqual({ x: controller.snapshot.drawStart.x, z: controller.snapshot.drawStart.z }, { x: 10, z: 10 }, "the first click only drops the start point");
   assert.equal(log.adds.length, 0);
@@ -364,13 +364,15 @@ function harness(overrides = {}) {
 {
   const { controller } = harness();
   controller.enter(); controller.setTool("site");
+  // 所有建筑都可以移动（用户 2026-10-11）：设施工具里点到会话楼，切到移动工具并选中它。
   controller.click({ pickedId: "b1", ground: { x: 10, z: 10 }, ray: { hit: null } });
-  assert.match(controller.snapshot.message.text, /开发商/, "a session building is the developer's — the mayor is told so");
-  assert.match(controller.snapshot.message.text, /移楼/, "…and pointed at the repair tool");
-  controller.click({ pickedId: "decor:landmark:ferris-wheel", ground: { x: 10, z: 10 }, ray: { hit: null } });
-  assert.match(controller.snapshot.message.text, /致敬地标与市政用地/); assert.equal(controller.snapshot.site, null);
+  assert.equal(controller.snapshot.tool, "build", "clicking a session building in the facility tool hands over to the move tool");
+  assert.equal(controller.snapshot.buildingId, "b1", "…with it selected");
+  controller.setTool("site");
+  controller.click({ pickedId: "decor:seaside", ground: { x: 10, z: 10 }, ray: { hit: null } });
+  assert.match(controller.snapshot.message.text, /不是建筑/); assert.equal(controller.snapshot.site, null);
   controller.click({ pickedId: null, ground: { x: 10, z: 10 }, ray: { hit: null } });
-  assert.match(controller.snapshot.message.text, /点选公共设施/, "an empty click with nothing selected repeats the hint");
+  assert.match(controller.snapshot.message.text, /点选任意非会话建筑/, "an empty click with nothing selected repeats the hint");
   // 选中后点非设施的 decor（射线先打到装饰）——仍按地面点搬家，不被「不可编辑」提示吞掉。
   controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
   assert.equal(controller.snapshot.site.id, "civic:0");
@@ -405,4 +407,66 @@ function harness(overrides = {}) {
   assert.equal(controller.snapshot.site.id, "civic:0"); assert.equal(controller.snapshot.message.text, "已撤销");
 }
 
-console.log("City plan repair controller: clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (o) 所有建筑都可以移动：移动工具点到非会话建筑 → 交给设施工具选中；锁定的说明理由。
+{
+  const { controller, log, deps } = harness();
+  controller.enter();
+  assert.equal(controller.snapshot.tool, "build");
+  controller.click({ pickedId: "decor:civic:school", ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  assert.equal(controller.snapshot.tool, "site", "the move tool hands a facility over to the facility tool");
+  assert.equal(controller.snapshot.site.id, "civic:0", "…with it selected, ready to be moved");
+  controller.click({ pickedId: null, ground: { x: 200, z: 100 }, ray: { hit: null } });
+  assert.deepEqual(log.siteMoves.at(-1), ["civic:0", "B2"], "…and the next ground click moves it");
+  // 锁定对象：说明理由，不选中。
+  deps.sites["landmark:suspension-bridge"] = { id: "landmark:suspension-bridge", kind: "landmark", landmarkKind: "suspension-bridge", x: 0, z: 0, yaw: 0, width: 30, depth: 30, height: 40, y: 0, level: "free", slotId: "", locked: "悬索桥不是建筑，是路网里的一段桥面" };
+  controller.setTool("build");
+  controller.click({ pickedId: "decor:landmark:suspension-bridge", ground: { x: 0, z: 0 }, ray: { hit: "landmark:suspension-bridge" } });
+  assert.equal(controller.snapshot.tool, "build", "a locked object does not switch tools");
+  assert.match(controller.snapshot.message.text, /悬索桥：悬索桥不是建筑/, "the lock reason is shown with the object's name");
+  controller.setTool("site");
+  controller.click({ pickedId: null, ground: { x: 0, z: 0 }, ray: { hit: "landmark:suspension-bridge" } });
+  assert.equal(controller.snapshot.site, null); assert.match(controller.snapshot.message.text, /悬索桥/);
+  // free 级（地标/市政用地）：选中后提示「点任意空地」。
+  deps.sites["landmark:ferris-wheel"] = { id: "landmark:ferris-wheel", kind: "landmark", landmarkKind: "ferris-wheel", x: 60, z: -80, yaw: 0, width: 36, depth: 36, height: 45, y: 0, level: "free", slotId: "" };
+  controller.click({ pickedId: null, ground: { x: 60, z: -80 }, ray: { hit: "landmark:ferris-wheel" } });
+  assert.equal(controller.snapshot.site.id, "landmark:ferris-wheel");
+  assert.match(controller.snapshot.message.text, /已选中摩天轮：点地面任意空地搬过去/);
+}
+
+// (p) 提示码翻译：带数量的影响（推平/安置/自动路口）与放权后的提示。
+{
+  const { controller, deps } = harness();
+  controller.enter(); controller.setTool("draw");
+  deps.addVerdict = { blockers: [], warnings: ["auto-junction:2", "bulldoze:1", "relocate:3"] };
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  controller.hover({ x: 60, z: 20 });
+  const preview = controller.snapshot.preview;
+  assert.equal(preview.ok, true, "impacts do not block");
+  assert.match(preview.warning, /将在交叉处自动生成 2 个路口/); assert.match(preview.warning, /将推平 1 座设施/); assert.match(preview.warning, /将由开发商就近安置 3 栋会话楼/);
+  deps.addResult = { ok: true, patch: {}, warnings: ["bulldozed:1", "relocated:3"] };
+  controller.click({ pickedId: null, ground: { x: 60, z: 20 } });
+  assert.match(controller.snapshot.message.text, /推平了 1 座设施/); assert.match(controller.snapshot.message.text, /开发商安置了 3 栋会话楼/);
+}
+
+// (q) 拾取体积挡住空地（浏览器实测：选中电视塔后点旁边空地，射线擦到塔的高盒子又选回塔自己）。
+{
+  const { controller, log, deps } = harness();
+  controller.enter();
+  deps.sites["landmark:tv-tower"] = { id: "landmark:tv-tower", kind: "landmark", landmarkKind: "tv-tower", x: 0, z: 300, yaw: 0, width: 20, depth: 20, height: 120, y: 0, level: "free", slotId: "" };
+  // 移动工具：网格拾取没命中细塔（pickedId 为空），退回设施拾取盒 → 交给设施工具选中。
+  controller.click({ pickedId: null, ground: { x: 2, z: 302 }, ray: { hit: "landmark:tv-tower" } });
+  assert.equal(controller.snapshot.tool, "site", "a thin tower missed by mesh picking is still found by its pick box");
+  assert.equal(controller.snapshot.site.id, "landmark:tv-tower");
+  // 点塔占地以外的空地，但射线擦到塔自己的盒子：是搬家，不是重选。
+  controller.click({ pickedId: null, ground: { x: 0, z: 250 }, ray: { hit: "landmark:tv-tower" } });
+  assert.equal(log.siteMoves.at(-1)?.[0], "landmark:tv-tower", "ground outside the selected site's own footprint moves it");
+  assert.equal(log.siteMoves.length, 1, "…exactly once");
+  // 盒子擦到另一座设施、地面在其占地外 → 也是搬家；地面在其占地内 → 改选。
+  controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  assert.equal(controller.snapshot.site.id, "civic:0", "ground inside another site's footprint selects it");
+  // 网格真命中建筑（pickedId 非空）时，即便地面点在占地外也按点建筑处理。
+  controller.click({ pickedId: "decor:context", ground: { x: 70, z: 230 }, ray: { hit: "context:pC" } });
+  assert.equal(controller.snapshot.site.id, "context:pC", "a real mesh hit selects even when the ground point falls outside the footprint");
+}
+
+console.log("City plan repair controller: every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");

@@ -12,10 +12,10 @@ assert(manifest.some((s) => s.env.CITY_SEASIDE_TIER === "10"));
 assert(manifest.some((s) => s.file === "verify-city-cross-engine.mjs" && !s.shared));
 assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // Preserve the existing stages and register the new production causeway guard.
-// 63 + 规划修复的 4 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller）。计数锁防的是悄悄增减，
+// 63 + 规划修复的 5 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller / -bulldozer）。计数锁防的是悄悄增减，
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
-assert.equal(manifest.length, 67);
-for (const id of ["verify-plan-patch", "verify-plan-road-rules", "verify-plan-sites", "verify-plan-repair-controller"]) {
+assert.equal(manifest.length, 68);
+for (const id of ["verify-plan-patch", "verify-plan-road-rules", "verify-plan-sites", "verify-plan-repair-controller", "verify-plan-bulldozer"]) {
   assert(selectStages("module", "planning").some((stage) => stage.id === id), `${id} must run in the planning group`);
 }
 for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined).some(stage => stage.id === "verify-city-layout-capacity"));

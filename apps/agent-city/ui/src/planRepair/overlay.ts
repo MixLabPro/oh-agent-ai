@@ -7,7 +7,7 @@
 import * as THREE from "three";
 
 export type OverlayParcel = { x: number; y: number; z: number; yaw: number; width: number; depth: number };
-export type OverlayRibbon = { points: ReadonlyArray<{ x: number; z: number }>; width: number; tone: "erase" | "erase-blocked" | "draw" | "draw-blocked" };
+export type OverlayRibbon = { points: ReadonlyArray<{ x: number; z: number }>; width: number; tone: "erase" | "erase-blocked" | "draw" | "draw-warn" | "draw-blocked" };
 export type OverlayMarker = { x: number; z: number; tone: "start" | "snap" | "snap-blocked" };
 /** 设施占地标记：悬停（黄）/ 选中（青），贴地方块比占地略大一圈。 */
 export type OverlaySiteMark = { x: number; y: number; z: number; yaw: number; width: number; depth: number; tone: "hover" | "selected" };
@@ -17,6 +17,7 @@ const COLORS = {
   erase: 0xff4d3d,            // 将被擦掉：红
   "erase-blocked": 0x9aa3ad,  // 不能擦：灰
   draw: 0x35d07f,             // 可画：绿
+  "draw-warn": 0xffc23d,      // 可画但有后果（会推平/安置）：琥珀
   "draw-blocked": 0xff8a3d,   // 不能画：橙红
   start: 0xffd84d,
   snap: 0x4dd2ff,

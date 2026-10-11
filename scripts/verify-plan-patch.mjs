@@ -151,23 +151,48 @@ const snap = (layout) => JSON.stringify({
   assert.deepEqual(stale.map((s) => `${s.kind}:${s.reason}`).sort(), ["building-move:missing-parcel", "building-move:unknown-building"], "stale reasons must be exact");
 }
 
-// (d) 锁定口径：桥端点、滨海端点不可移；桥/滨海边不可删；不能从桥/滨海路段中间接路。
+// (d) 锁定口径（放权后 §15）：只锁桥面——桥端点不可移、桥面不可删、不能从桥面中间接路；
+//     滨海路曾经一起锁，用户实测「很多东西都不能改」，现在可删可移。
 {
-  assert.ok(edgeLocked(E2) && edgeLocked(E3), "bridge and waterfront edges are locked by construction");
+  assert.ok(edgeLocked(E2), "a bridge deck is locked by construction");
+  assert.ok(!edgeLocked(E3), "a waterfront road is editable now");
   const patch = fresh();
   patch.roadOps = [
-    { t: "move", node: "100:0", to: { x: 120, z: 0 } },   // 100:0 连桥
-    { t: "move", node: "0:0", to: { x: 10, z: 10 } },     // 0:0 连滨海
-    { t: "drop", edge: "100:0/200:0" },
-    { t: "drop", edge: "0:0/0:100" },
-    { t: "add", from: { x: 150, z: 0 }, to: { x: 150, z: 40 }, width: 5 }, // 起点落在桥面中间
+    { t: "move", node: "100:0", to: { x: 120, z: 0 } },   // 100:0 连桥面 → 锁定
+    { t: "drop", edge: "100:0/200:0" },                     // 桥面 → 锁定
+    { t: "add", from: { x: 150, z: 0 }, to: { x: 150, z: 40 }, width: 5 }, // 起点落在桥面中间 → 锁定
   ];
   const { layout, stale } = applyPlanPatch(makeLayout(), patch);
-  assert.equal(stale.length, 5, "every locked operation must be reported");
+  assert.equal(stale.length, 3, "every bridge-deck operation must be reported");
   assert.ok(stale.every((s) => s.reason === "locked-edge"));
   const base = makeLayout();
   assert.deepEqual(layout.roadNodes, base.roadNodes, "locked operations must not mutate nodes");
   assert.deepEqual(layout.roadEdges, base.roadEdges, "locked operations must not mutate edges");
+  // 滨海路：删与移都生效。
+  const coastal = fresh();
+  coastal.roadOps = [{ t: "drop", edge: "0:0/0:100" }];
+  const dropped = applyPlanPatch(makeLayout(), coastal);
+  assert.equal(dropped.stale.length, 0); assert.ok(!dropped.layout.roadEdges.some((e) => e.id === "0:0/0:100"), "a waterfront road can be erased");
+}
+
+// (d2) 交叉自动生成路口（SimCity 式）：新路穿过一条（或多条）现有路，交点处两条路都被拆开。
+{
+  const patch = fresh();
+  patch.roadOps = [{ t: "add", from: { x: 50, z: -40 }, to: { x: 50, z: 60 }, width: 5 }]; // 穿过 0:0—100:0（z=0）
+  const { layout, stale } = applyPlanPatch(makeLayout(), patch);
+  assert.equal(stale.length, 0);
+  assert.ok(!layout.roadEdges.some((e) => e.id === "0:0/100:0"), "the crossed road is split at the crossing");
+  assert.ok(layout.roadEdges.some((e) => e.id === "0:0/50:0") && layout.roadEdges.some((e) => e.id === "100:0/50:0"), "…into two halves meeting at the junction");
+  assert.ok(layout.roadEdges.some((e) => e.id === "50:-40/50:0") && layout.roadEdges.some((e) => e.id === "50:0/50:60"), "the new road runs through the junction in two pieces");
+  const degree = layout.roadEdges.filter((e) => e.from === "50:0" || e.to === "50:0").length;
+  assert.equal(degree, 4, "the crossing is a real four-way junction");
+  // 与桥面交叉：立体交叉——新路从桥下穿过，桥面不拆、不开路口（桥上开路口才是物理上做不到的）。
+  const underBridge = fresh();
+  underBridge.roadOps = [{ t: "add", from: { x: 150, z: -40 }, to: { x: 150, z: 40 }, width: 5 }];
+  const passed = applyPlanPatch(makeLayout(), underBridge);
+  assert.equal(passed.stale.length, 0, "a road may pass under a bridge");
+  assert.ok(passed.layout.roadEdges.some((e) => e.id === "100:0/200:0" && e.bridge), "the bridge deck is left intact");
+  assert.ok(passed.layout.roadEdges.some((e) => e.id === "150:-40/150:40"), "the new road is one piece — no junction on the deck");
 }
 
 // (e) 节点移动：尽端节点 (100,100) → (120,120)，id/边引用/边 id/回车点全部跟随。

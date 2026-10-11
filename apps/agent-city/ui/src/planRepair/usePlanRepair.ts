@@ -148,7 +148,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     const ribbons: OverlayRibbon[] = []; const markers: OverlayMarker[] = [];
     const { preview, drawStart } = state;
     if (preview?.kind === "erase") ribbons.push({ points: preview.points, width: preview.width, tone: preview.ok ? "erase" : "erase-blocked" });
-    if (preview?.kind === "draw") { ribbons.push({ points: [preview.from, preview.to], width: preview.width, tone: preview.ok ? "draw" : "draw-blocked" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
+    if (preview?.kind === "draw") { ribbons.push({ points: [preview.from, preview.to], width: preview.width, tone: !preview.ok ? "draw-blocked" : preview.warning && /推平|安置/.test(preview.warning) ? "draw-warn" : "draw" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
     if (preview?.kind === "snap") markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" });
     if (drawStart) markers.push({ x: drawStart.x, z: drawStart.z, tone: "start" });
     overlay.setPreview(ribbons, markers, heightAt);

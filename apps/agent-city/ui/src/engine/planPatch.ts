@@ -206,6 +206,27 @@ export function nearestOnPolyline(p: Vec2, points: readonly Vec2[]): { distance:
   return best;
 }
 
+/** 线段 a→b 与现有地面路（非桥）的真交点，离端点 1 以内的不算；按离 a 的距离排序。与 planRoadRules.crossingPoints 同口径。 */
+function crossingsOf(edges: readonly RoadEdge[], a: Vec2, b: Vec2): Vec2[] {
+  const out: Vec2[] = [];
+  const r = { x: b.x - a.x, z: b.z - a.z };
+  for (const edge of edges) {
+    if (edge.bridge) continue;
+    for (let i = 1; i < edge.points.length; i += 1) {
+      const c = edge.points[i - 1]; const d = edge.points[i];
+      const sv = { x: d.x - c.x, z: d.z - c.z };
+      const denom = r.x * sv.z - r.z * sv.x;
+      if (Math.abs(denom) < 1e-9) continue;
+      const t = ((c.x - a.x) * sv.z - (c.z - a.z) * sv.x) / denom;
+      const u = ((c.x - a.x) * r.z - (c.z - a.z) * r.x) / denom;
+      if (t <= 0 || t >= 1 || u <= 0 || u >= 1) continue;
+      const hit = { x: a.x + r.x * t, z: a.z + r.z * t };
+      if (Math.hypot(hit.x - a.x, hit.z - a.z) > 1 && Math.hypot(hit.x - b.x, hit.z - b.z) > 1) out.push(hit);
+    }
+  }
+  return out.sort((p, q) => Math.hypot(p.x - a.x, p.z - a.z) - Math.hypot(q.x - a.x, q.z - a.z));
+}
+
 /** 把路段在 p 处拆成两半（属性完整继承；折线按最近一段切开）。p 取整到 0.01。 */
 function splitEdge(state: RoadState, edge: RoadEdge, p: Vec2, segment: number): string {
   const at = quantize(p);
@@ -284,13 +305,28 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
       const b = resolveEndpoint(trial, op.to);
       if ("error" in b) { stale.push({ kind: "road-add", id: label, reason: b.error, detail: "终点落在桥/引道/滨海段上，不能从这里接路" }); return; }
       if (a.id === b.id) { stale.push({ kind: "road-add", id: label, reason: "degenerate", detail: "起点和终点是同一个路口" }); return; }
-      const id = edgeIdOf(a.id, b.id);
-      if (trial.edges.some((edge) => edge.id === id)) { stale.push({ kind: "road-add", id: label, reason: "edge-exists", detail: `路段 ${id} 已存在` }); return; }
       const na = trial.nodes.find((node) => node.id === a.id)!; const nb = trial.nodes.find((node) => node.id === b.id)!;
-      trial.edges.push({
-        id, from: a.id, to: b.id, width: op.width, kind: op.width >= 8 ? "arterial" : "local",
-        points: [{ x: na.x, z: na.z }, { x: nb.x, z: nb.z }], structure: "ground-road",
-      });
+      // 交叉：SimCity 式自动路口——在每个交点处把被交的路拆开，新路分段经过这些路口。曾经直接拒绝交叉，
+      // 用户画路处处碰壁；交点按离起点的距离排序，拆路复用端点解析（交点离已有路口 < 1 时直接接到那个路口）。
+      const chain = [a.id];
+      for (const point of crossingsOf(trial.edges, na, nb)) {
+        const hit = resolveEndpoint(trial, point);
+        if ("error" in hit) { stale.push({ kind: "road-add", id: label, reason: hit.error, detail: "新路要穿过桥面，桥上不能开路口" }); return; }
+        if (hit.id !== chain[chain.length - 1]) chain.push(hit.id);
+      }
+      if (b.id !== chain[chain.length - 1]) chain.push(b.id);
+      let added = 0;
+      for (let i = 1; i < chain.length; i += 1) {
+        const id = edgeIdOf(chain[i - 1], chain[i]);
+        if (chain[i - 1] === chain[i] || trial.edges.some((edge) => edge.id === id)) continue; // 与已有路重合的那一段不重复铺
+        const p = trial.nodes.find((node) => node.id === chain[i - 1])!; const q = trial.nodes.find((node) => node.id === chain[i])!;
+        trial.edges.push({
+          id, from: chain[i - 1], to: chain[i], width: op.width, kind: op.width >= 8 ? "arterial" : "local",
+          points: [{ x: p.x, z: p.z }, { x: q.x, z: q.z }], structure: "ground-road",
+        });
+        added += 1;
+      }
+      if (!added) { stale.push({ kind: "road-add", id: label, reason: "edge-exists", detail: `路段 ${edgeIdOf(a.id, b.id)} 已存在` }); return; }
     }
     state = trial;
   });

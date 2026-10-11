@@ -5,8 +5,10 @@
  * 可编辑的四类，都是按街区/地块摆放、不牵连路网与海岸的：
  *   civic（学校/商场/医院，占整个空街区）、garden（城区花园，占整个街区）、
  *   district-landmark（城区地标，占一个地块）、context（背景楼，占一个地块）。
- * 不可编辑：致敬地标与市政用地（体育场、摩天轮、观景塔、港口、车站）——它们带路网接入点/海岸绑定，
- * 移动或拆除会牵连路网，不属于「简单方案」。
+ * 放权后（SPEC §15）还可编辑：致敬地标（landmark）与市政用地（public-site）——拆除、或搬到任意空地（free 级）。
+ * 它们的旧接入路会留成断头路（提示，不拒绝）。用户 2026-10-11 拍板「所有建筑都可以被移动」：
+ * 海上地标（原址堤道留下）与港口（搬到内陆就失去码头的意义，由用户自己判断）也放开；
+ * 唯一锁定的是悬索桥——它不是建筑，是路网里的一段桥面，锁定理由随对象给出，点到时原样显示。
  *
  * 操作带**位置校验**（`at`）：公共设施 id 是按序号编的（civic:0、civic:1…），数据增长后序号会变，
  * 没有校验时旧补丁会悄悄落到另一座设施上；位置对不上就判失效，不猜。
@@ -17,7 +19,7 @@ import { clearsHighways } from "./cityPlan";
 import { clearanceRoads, parcelIndex, rectClearOfEdges, reservedParcelIds } from "./planGeometry";
 import type { PatchStaleEntry } from "./planPatch";
 
-export type SiteKind = "civic" | "garden" | "district-landmark" | "context";
+export type SiteKind = "civic" | "garden" | "district-landmark" | "context" | "landmark" | "public-site";
 
 export type SiteOp =
   | { t: "remove"; id: string; at?: Vec2 }
@@ -27,9 +29,13 @@ export type SiteInfo = {
   id: string;
   kind: SiteKind;
   civicKind?: CivicKind;
+  landmarkKind?: string;
+  publicKind?: string;
   x: number; z: number; yaw: number; width: number; depth: number; height: number; y: number;
-  /** block：占整个街区（目标是街区 id）；parcel：占一个地块（目标是地块 id）。 */
-  level: "block" | "parcel";
+  /** block：占整个街区（目标是街区 id）；parcel：占一个地块（目标是地块 id）；free：圆形占地，目标是任意地面点（"@x,z"）。 */
+  level: "block" | "parcel" | "free";
+  /** 非空 = 锁定，内容是给用户看的理由（不能搬、不能拆）。 */
+  locked?: string;
   /** 当前所在的街区/地块 id。 */
   slotId: string;
 };
@@ -40,6 +46,8 @@ const PICK_HEIGHT = { civic: 28, garden: 12, "district-landmark": 45 } as const;
 const SLOPE_LIMIT = 0.55;
 
 export function siteKindOf(id: string): SiteKind | null {
+  if (id.startsWith("landmark:")) return "landmark";
+  if (id.startsWith("public:")) return "public-site";
   if (id.startsWith("civic:")) return "civic";
   if (id.startsWith("garden:")) return "garden";
   if (id.startsWith("district-landmark:")) return "district-landmark";
@@ -64,11 +72,23 @@ export function listSites(layout: CityLayout): SiteInfo[] {
   for (const context of layout.contextBuildings) {
     out.push({ id: context.id, kind: "context", x: context.x, z: context.z, yaw: context.yaw, width: context.width, depth: context.depth, height: context.height, y: context.y, level: "parcel", slotId: context.id.replace(/^context:/, "") });
   }
+  const ground = (x: number, z: number) => Math.max(0, layout.terrain.height(x, z));
+  for (const landmark of layout.landmarks ?? []) {
+    if (!landmark.radius) continue;
+    const locked = landmark.kind === "suspension-bridge" ? "悬索桥不是建筑，是路网里的一段桥面（由桥梁模型绑定），不能单独搬或拆" : undefined;
+    out.push({ id: landmark.id, kind: "landmark", landmarkKind: landmark.kind, x: landmark.x, z: landmark.z, yaw: landmark.yaw, width: landmark.radius * 2, depth: landmark.radius * 2, height: Math.max(30, landmark.radius * 2.5), y: ground(landmark.x, landmark.z), level: "free", slotId: "", ...(locked ? { locked } : {}) });
+  }
+  for (const site of layout.publicSites ?? []) {
+    if (!site.radius) continue;
+    out.push({ id: `public:${site.id}`, kind: "public-site", publicKind: site.kind, x: site.x, z: site.z, yaw: site.yaw, width: site.radius * 2, depth: site.radius * 2, height: 22, y: ground(site.x, site.z), level: "free", slotId: "" });
+  }
   return out;
 }
 
 /** 目标街区/地块能否接收这座设施；null = 可以，否则返回阻止原因码。 */
 export function siteMoveProblem(layout: CityLayout, site: SiteInfo, targetId: string, suppressedContext: Iterable<string> = []): string | null {
+  if (site.locked) return "site-locked";
+  if (site.level === "free") return freeMoveProblem(layout, site, targetId);
   if (targetId === site.slotId) return "unchanged";
   const reserved = reservedParcelIds(layout, suppressedContext);
   if (site.level === "block") {
@@ -81,7 +101,13 @@ export function siteMoveProblem(layout: CityLayout, site: SiteInfo, targetId: st
   }
   const parcel = parcelIndex(layout).get(targetId);
   if (!parcel) return "missing-target";
-  if (reserved.has(parcel.id)) return "target-occupied";
+  if (site.kind === "district-landmark") {
+    // 城区地标的 17 m 裙房占整面（与生成器一致，注册表 SPEC D1）：目标所在街区除它自己外必须全空。
+    const without = { ...layout, districtLandmarks: (layout.districtLandmarks ?? []).filter((landmark) => `district-landmark:${landmark.districtId}` !== site.id) };
+    const free = reservedParcelIds(without, suppressedContext);
+    const block = layout.blocks.find((candidate) => candidate.id === parcel.blockId);
+    if ((block?.parcels ?? [parcel]).some((member) => free.has(member.id))) return "target-occupied";
+  } else if (reserved.has(parcel.id)) return "target-occupied";
   if (!layout.terrain.buildable(parcel.x, parcel.z)) return "not-buildable";
   if (layout.terrain.slope(parcel.x, parcel.z) > SLOPE_LIMIT) return "steep-slope";
   if (!clearsHighways(parcel, 16, 16, layout.highways)) return "highway-clearance";
@@ -89,8 +115,43 @@ export function siteMoveProblem(layout: CityLayout, site: SiteInfo, targetId: st
   return null;
 }
 
+/** "@x,z" → 坐标；格式不对返回 null。 */
+export function parseFreeTarget(targetId: string): Vec2 | null {
+  const m = /^@(-?[\d.]+),(-?[\d.]+)$/.exec(targetId);
+  return m ? { x: Number(m[1]), z: Number(m[2]) } : null;
+}
+
+/** free 级（圆形占地）设施搬到任意地面点：圆内地形可建、不压地面路、不压别的楼与设施（自己除外）。 */
+function freeMoveProblem(layout: CityLayout, site: SiteInfo, targetId: string): string | null {
+  const at = parseFreeTarget(targetId);
+  if (!at) return "missing-target";
+  if (Math.hypot(at.x - site.x, at.z - site.z) < 1) return "unchanged";
+  const r = site.width / 2;
+  const samples = [at, ...Array.from({ length: 8 }, (_, i) => ({ x: at.x + Math.cos((i * Math.PI) / 4) * r * 0.8, z: at.z + Math.sin((i * Math.PI) / 4) * r * 0.8 }))];
+  if (samples.some((p) => !layout.terrain.buildable(p.x, p.z))) return "not-buildable";
+  for (const edge of clearanceRoads(layout)) {
+    for (let i = 1; i < edge.points.length; i += 1) {
+      const a = edge.points[i - 1]; const b = edge.points[i];
+      const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((at.x - a.x) * dx + (at.z - a.z) * dz) / l2));
+      if (Math.hypot(at.x - a.x - dx * t, at.z - a.z - dz * t) < r * 0.75 + edge.width / 2) return "site-over-road";
+    }
+  }
+  // 圆 × 朝向矩形：把圆心转进矩形局部坐标，夹到矩形内，距离 < r 即相交。
+  const hitsRect = (rect: { x: number; z: number; yaw: number; width: number; depth: number }) => {
+    const dx = at.x - rect.x; const dz = at.z - rect.z;
+    const lx = dx * Math.cos(rect.yaw) - dz * Math.sin(rect.yaw); const lz = dx * Math.sin(rect.yaw) + dz * Math.cos(rect.yaw);
+    const cx = Math.max(-rect.width / 2, Math.min(rect.width / 2, lx)); const cz = Math.max(-rect.depth / 2, Math.min(rect.depth / 2, lz));
+    return Math.hypot(lx - cx, lz - cz) < r;
+  };
+  for (const district of layout.districts) for (const slot of district.slots.values()) if (hitsRect({ ...slot, width: slot.width * 0.92, depth: slot.depth * 0.9 })) return "target-occupied";
+  for (const other of listSites(layout)) if (other.id !== site.id && hitsRect(other)) return "target-occupied";
+  return null;
+}
+
 /** 离该设施最近的、可以搬过去的空街区/空地块（按距离从近到远逐个校验，凑够 limit 个就停）。 */
 export function siteTargets(layout: CityLayout, site: SiteInfo, suppressedContext: Iterable<string> = [], limit = 40, maxDistance = 240): SiteTarget[] {
+  if (site.level === "free" || site.locked) return []; // free 级：点任意地面点，不预先列候选
   const candidates: SiteTarget[] = site.level === "block"
     ? layout.blocks.filter((block) => block.parcels.length > 0).map((block) => ({ id: block.id, x: block.x, z: block.z, yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, distance: 0 }))
     : layout.blocks.flatMap((block) => block.parcels).map((parcel) => ({ id: parcel.id, x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: parcel.width, depth: parcel.depth, distance: 0 }));
@@ -130,14 +191,14 @@ export function pickSite(layout: CityLayout, ray: { origin: { x: number; y: numb
   return best?.site ?? null;
 }
 
-type Arrays = Pick<CityLayout, "civics" | "gardens" | "districtLandmarks" | "contextBuildings">;
+type Arrays = Pick<CityLayout, "civics" | "gardens" | "districtLandmarks" | "contextBuildings" | "landmarks" | "publicSites">;
 
 /**
  * 重放设施操作日志（删/移，按顺序）：先于会话楼移动套用，后者看到的是设施改动后的占用。
  * 每个操作失败就进 stale、不影响后续（同 roadOps）。返回改动后的四组数组。
  */
 export function applySiteOps(layout: CityLayout, ops: readonly SiteOp[], suppressedContext: Iterable<string>, stale: PatchStaleEntry[]): Arrays {
-  let view: CityLayout = { ...layout, civics: [...layout.civics], gardens: [...layout.gardens], districtLandmarks: [...(layout.districtLandmarks ?? [])], contextBuildings: [...layout.contextBuildings] };
+  let view: CityLayout = { ...layout, civics: [...layout.civics], gardens: [...layout.gardens], districtLandmarks: [...(layout.districtLandmarks ?? [])], contextBuildings: [...layout.contextBuildings], landmarks: [...(layout.landmarks ?? [])], publicSites: [...(layout.publicSites ?? [])] };
   const suppressed = [...suppressedContext];
   ops.forEach((op, index) => {
     const label = `${index + 1}:${op.t}`;
@@ -145,6 +206,7 @@ export function applySiteOps(layout: CityLayout, ops: readonly SiteOp[], suppres
     const site = listSites(view).find((candidate) => candidate.id === op.id);
     if (!site) { stale.push({ kind, id: label, reason: "unknown-site", detail: `${op.id} 不在当前城市里（规划已重算或前序操作已改动）` }); return; }
     if (op.at && Math.hypot(site.x - op.at.x, site.z - op.at.z) > 1) { stale.push({ kind, id: label, reason: "site-changed", detail: `${op.id} 的位置已经变了（城市扩容或配套重排），为免落到另一座设施上，这条编辑作废` }); return; }
+    if (site.locked) { stale.push({ kind, id: label, reason: "site-blocked", detail: `${op.id} 已锁定：${site.locked}` }); return; }
     if (op.t === "remove") {
       view = {
         ...view,
@@ -152,6 +214,8 @@ export function applySiteOps(layout: CityLayout, ops: readonly SiteOp[], suppres
         gardens: view.gardens.filter((garden) => garden.id !== op.id),
         districtLandmarks: (view.districtLandmarks ?? []).filter((landmark) => `district-landmark:${landmark.districtId}` !== op.id),
         contextBuildings: view.contextBuildings.filter((context) => context.id !== op.id),
+        landmarks: (view.landmarks ?? []).filter((landmark) => landmark.id !== op.id),
+        publicSites: (view.publicSites ?? []).filter((public_) => `public:${public_.id}` !== op.id),
       };
       return;
     }
@@ -159,6 +223,16 @@ export function applySiteOps(layout: CityLayout, ops: readonly SiteOp[], suppres
     if (problem === "unchanged") return;
     if (problem) { stale.push({ kind, id: label, reason: problem === "missing-target" ? "missing-target" : problem === "target-occupied" ? "target-occupied" : "site-blocked", detail: `${op.id} → ${op.to}：${problem}` }); return; }
     const height = (x: number, z: number) => layout.terrain.height(x, z);
+    if (site.level === "free") {
+      // 圆形占地设施：只挪圆心（朝向不变）；旧接入路留在原地成为断头路——如实保留，不替用户删路。
+      const at = parseFreeTarget(op.to)!;
+      view = {
+        ...view,
+        landmarks: (view.landmarks ?? []).map((landmark) => (landmark.id === op.id ? { ...landmark, x: at.x, z: at.z } : landmark)),
+        publicSites: (view.publicSites ?? []).map((public_) => (`public:${public_.id}` === op.id ? { ...public_, x: at.x, z: at.z } : public_)),
+      };
+      return;
+    }
     if (site.level === "block") {
       const block = view.blocks.find((candidate) => candidate.id === op.to)!;
       const place = { x: block.x, z: block.z, y: height(block.x, block.z), yaw: block.parcels[0].yaw, width: block.width, depth: block.depth };
@@ -178,5 +252,5 @@ export function applySiteOps(layout: CityLayout, ops: readonly SiteOp[], suppres
       };
     }
   });
-  return { civics: view.civics, gardens: view.gardens, districtLandmarks: view.districtLandmarks, contextBuildings: view.contextBuildings };
+  return { civics: view.civics, gardens: view.gardens, districtLandmarks: view.districtLandmarks, contextBuildings: view.contextBuildings, landmarks: view.landmarks, publicSites: view.publicSites };
 }

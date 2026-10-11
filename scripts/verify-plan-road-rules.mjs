@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 规划修复 M2：道路编辑规则守卫（docs/CITY_PLAN_MANUAL_REPAIR_SPEC.md §7.3 / §13.3）。
-//   (a) 删路段：骨架边/桥/滨海段锁定；删后楼离路 > 40 → strands-buildings；删后接网的楼被拆开 → disconnects-buildings；
+//   (a) 删路段（放权后 §15）：只有桥面锁定；擦主干道/滨海路/孤立楼/断网只提示（warnings），不再拒绝；
 //       环路里删一条合法，只给 creates-dead-end 警告；缺失 id → missing-edge；
 //   (b) 拖路口：锁定 / 未变 / 撞车 / 边过短 / 入水 / 穿楼 / 锐角各一例，合法拖动通过；
 //   (c) 「只拦新引入」：生成器遗留的压路、近水路段不拦无关编辑；
@@ -57,24 +57,28 @@ function makeLayout(overrides = {}) {
 {
   const layout = makeLayout();
   const spur = validateEdgeDrop(layout, model, "200:0/200:60");
-  assert.ok(spur.blockers.includes("strands-buildings"), "dropping the only road to F's building strands it");
+  assert.deepEqual(spur.blockers, [], "dropping the only road to a building is allowed (SimCity lets you strand buildings)");
+  assert.ok(spur.warnings.includes("strands-buildings"), "…and the user is told");
   // A-B 正中间有楼 bX（离路 20）：删掉后最近的路是 x=0 / x=100 的竖路，都 > 40 → 楼被孤立。规则是对的。
-  assert.ok(validateEdgeDrop(layout, model, "0:0/100:0").blockers.includes("strands-buildings"), "a building mid-way along the road would be left > 40 from any road");
+  assert.ok(validateEdgeDrop(layout, model, "0:0/100:0").warnings.includes("strands-buildings"), "a building mid-way along the road would be left > 40 from any road — warned, not blocked");
   const loopEdge = validateEdgeDrop(layout, model, "0:100/100:100");
   assert.deepEqual(loopEdge.blockers, [], "a loop edge whose buildings keep another road within range is legal to drop");
   assert.ok(loopEdge.warnings.includes("creates-dead-end"), "…but it leaves D with a single road");
   assert.deepEqual(validateEdgeDrop(layout, model, "nope").blockers, ["missing-edge"]);
   const wide = makeLayout({ edges: [edge("0:0", "100:0", 12), edge("100:0", "100:100"), edge("100:100", "0:100"), edge("0:100", "0:0")] });
-  assert.deepEqual(validateEdgeDrop(wide, model, "0:0/100:0").blockers, ["arterial-skeleton"], "width ≥ 12 is the city skeleton");
+  assert.deepEqual(validateEdgeDrop(wide, model, "0:0/100:0").blockers, [], "an arterial can be erased");
+  assert.ok(validateEdgeDrop(wide, model, "0:0/100:0").warnings.includes("erases-arterial"), "…with a warning");
   const bridge = makeLayout({ edges: [edge("0:0", "100:0", 5, { bridge: true, structure: "deck" }), edge("100:0", "100:100")] });
   assert.deepEqual(validateEdgeDrop(bridge, model, "0:0/100:0").blockers, ["locked-edge"]);
   const waterfront = makeLayout({ edges: [edge("0:0", "100:0", 5, { purpose: "waterfront" }), edge("100:0", "100:100")] });
-  assert.deepEqual(validateEdgeDrop(waterfront, model, "0:0/100:0").blockers, ["locked-edge"]);
+  assert.deepEqual(validateEdgeDrop(waterfront, model, "0:0/100:0").blockers, [], "a waterfront road can be erased");
+  assert.ok(validateEdgeDrop(waterfront, model, "0:0/100:0").warnings.includes("erases-waterfront"));
   // 断网：一条桥一样的独木桥——把只有它连着的两片路网拆开，两侧都有楼。
   const chain = makeLayout({ edges: [edge("0:0", "100:0"), edge("100:0", "100:100"), edge("100:100", "0:100"), edge("200:0", "200:60"), edge("100:0", "200:0")] });
   chain.districts[0].slots.set("bF", slot("pF", 205, 5)); // F 的楼挨着 100:0-200:0
   const cut = validateEdgeDrop(chain, model, "100:0/200:0");
-  assert.ok(cut.blockers.includes("disconnects-buildings") || cut.blockers.includes("strands-buildings"), `a cut vertex between two building clusters must block — got ${cut.blockers}`);
+  assert.deepEqual(cut.blockers, [], "cutting the network is allowed");
+  assert.ok(cut.warnings.includes("disconnects-buildings") || cut.warnings.includes("strands-buildings"), `…but the split is reported — got ${cut.warnings}`);
 }
 
 // (b) 拖路口。
@@ -88,11 +92,15 @@ function makeLayout(overrides = {}) {
   assert.ok(validateNodeMove(layout, model, "100:100", { x: 100, z: 2 }).blockers.includes("edge-too-short"), "an edge squeezed below the minimum length is rejected");
   assert.ok(validateNodeMove(layout, model, "100:100", { x: 450, z: 100 }).blockers.includes("road-in-water"), "dragging a road end into the water is rejected");
   const locked = makeLayout({ edges: [edge("0:0", "100:0", 5, { structure: "ground-approach" }), edge("100:0", "100:100")] });
-  assert.deepEqual(validateNodeMove(locked, model, "100:0", { x: 100, z: 30 }).blockers, ["locked-edge"], "a node touching a bridge approach is locked");
+  assert.deepEqual(validateNodeMove(locked, model, "100:0", { x: 100, z: 30 }).blockers, [], "a node on a bridge approach can be dragged now");
+  const deck = makeLayout({ edges: [edge("0:0", "100:0", 5, { bridge: true, structure: "deck" }), edge("100:0", "100:100")] });
+  assert.deepEqual(validateNodeMove(deck, model, "100:0", { x: 100, z: 30 }).blockers, ["locked-edge"], "a node on a bridge deck stays locked");
   // 穿楼：D→(100,100) 拖到 (45,18)，路段 B-D 会从 bX(50,20) 上穿过。
-  assert.ok(validateNodeMove(layout, model, "100:100", { x: 55, z: 22 }).blockers.includes("road-over-building"), "a new route through a session building is rejected");
+  const through = validateNodeMove(layout, model, "100:100", { x: 55, z: 22 });
+  assert.deepEqual(through.blockers, [], "dragging a road through a session building is allowed");
+  assert.ok(through.warnings.includes("relocate:1"), `…the developer will re-home it — got ${through.warnings}`);
   // 锐角：B 处已有三条路（A、C、D）；把 D 拖到贴着 B→A 方向。
-  assert.ok(validateNodeMove(layout, model, "100:100", { x: 40, z: 3 }).blockers.includes("acute-junction"), "a new < 30° junction is rejected");
+  assert.ok(validateNodeMove(layout, model, "100:100", { x: 40, z: 3 }).warnings.includes("acute-junction"), "a new < 30° junction is warned, not blocked");
   assert.ok(validateNodeMove(layout, model, "100:100", { x: 100, z: 300 }).warnings.includes("far-move"), "a long drag warns");
   const again = validateNodeMove(layout, model, "100:100", { x: 55, z: 22 });
   assert.deepEqual(again, validateNodeMove(layout, model, "100:100", { x: 55, z: 22 }), "deterministic");
@@ -103,12 +111,11 @@ function makeLayout(overrides = {}) {
   // 背景楼压在 D-E 路上（遗留问题）。拖 D 沿原路线微动：关联的 D-E 仍压同一栋——不是新引入，放行。
   const layout = makeLayout({ context: [{ id: "context:c1", x: 50, z: 100, y: 2, yaw: 0, width: 9, depth: 9, height: 10, seed: 0.5, zone: "residential", appearAt: 0 }] });
   const nudge = validateNodeMove(layout, model, "100:100", { x: 100, z: 108 });
-  assert.ok(!nudge.blockers.includes("road-over-building"), "a pre-existing overlap must not block an unrelated nudge");
+  assert.ok(!nudge.warnings.some((w) => w.startsWith("bulldoze:")), "a pre-existing overlap is not this edit's impact — nothing gets bulldozed");
   // 但把别的路拖进同一栋，是新引入——拦。
   const fresh = makeLayout({ context: [{ id: "context:c2", x: 100, z: 60, y: 2, yaw: 0, width: 9, depth: 9, height: 10, seed: 0.5, zone: "residential", appearAt: 0 }] });
-  assert.ok(!validateNodeMove(fresh, model, "100:100", { x: 100, z: 130 }).blockers.includes("road-over-building") || true);
-  const hit = validateNodeMove(makeLayout({ context: [{ id: "context:c3", x: 150, z: 20, y: 2, yaw: 0, width: 9, depth: 9, height: 10, seed: 0.5, zone: "residential", appearAt: 0 }] }), model, "100:100", { x: 190, z: 30 });
-  assert.ok(hit.blockers.includes("road-over-building"), "a context building newly crossed by the dragged road blocks");
+    const hit = validateNodeMove(makeLayout({ context: [{ id: "context:c3", x: 150, z: 20, y: 2, yaw: 0, width: 9, depth: 9, height: 10, seed: 0.5, zone: "residential", appearAt: 0 }] }), model, "100:100", { x: 190, z: 30 });
+  assert.deepEqual(hit.blockers, []); assert.ok(hit.warnings.includes("bulldoze:1"), "a context building newly crossed by the dragged road will be bulldozed");
 }
 
 // (d) 点击拾取。
@@ -156,26 +163,26 @@ function makeLayout(overrides = {}) {
   const ok = validateRoadAdd(layout, model, { x: 100, z: 100 }, { x: 200, z: 0 }, 5);
   assert.deepEqual(ok.blockers, [], `a clean node-to-node road passes — got ${ok.blockers}`);
   assert.deepEqual(validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 103, z: 0 }, 5).blockers, ["edge-too-short"]);
-  assert.ok(validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 100, z: 700 }, 5).blockers.includes("edge-too-long"));
+  assert.ok(validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 100, z: 900 }, 5).blockers.includes("edge-too-long"), "only very long single strokes (> 800) are rejected");
   assert.deepEqual(validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 100.4, z: 0.3 }, 5).blockers, ["edge-too-short"], "both ends on the same node is degenerate/too short");
   assert.deepEqual(validateRoadAdd(layout, model, { x: 0, z: 0 }, { x: 100, z: 0 }, 5).blockers, ["edge-exists"], "re-drawing an existing road is rejected");
-  assert.ok(validateRoadAdd(layout, model, { x: 300, z: 50 }, { x: 330, z: 80 }, 5).blockers.includes("isolated-road"), "a road touching nothing is an island");
+  assert.ok(validateRoadAdd(layout, model, { x: 300, z: 50 }, { x: 330, z: 80 }, 5).warnings.includes("isolated-road"), "a road touching nothing is allowed but warned");
   const stub = validateRoadAdd(layout, model, { x: 200, z: 60 }, { x: 260, z: 60 }, 5);
   assert.deepEqual(stub.blockers, [], "extending from a dead end into open ground is fine");
   assert.ok(stub.warnings.includes("creates-dead-end"), "…with a dead-end warning");
   assert.ok(validateRoadAdd(layout, model, { x: 200, z: 60 }, { x: 450, z: 60 }, 5).blockers.includes("road-in-water"), "a road into the water is rejected");
-  assert.ok(validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 0, z: 40 }, 5).blockers.includes("road-over-building"), "a road straight through bX (50,20) is rejected");
-  assert.ok(!validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 40, z: 40 }, 5).blockers.includes("road-over-building"), "…while one that passes ~11 away from it is not");
-  assert.ok(validateRoadAdd(layout, model, { x: 0, z: 0 }, { x: 100, z: 100 }, 5).blockers.includes("crosses-road") || validateRoadAdd(layout, model, { x: 0, z: 0 }, { x: 100, z: 100 }, 5).blockers.includes("road-over-building"), "a diagonal across the loop crosses roads or buildings");
+  assert.ok(validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 0, z: 40 }, 5).warnings.includes("relocate:1"), "a road straight through bX (50,20) re-homes it");
+  assert.ok(!validateRoadAdd(layout, model, { x: 100, z: 0 }, { x: 40, z: 40 }, 5).warnings.some((w) => w.startsWith("relocate:")), "…while one that passes ~11 away from it does not");
+  assert.deepEqual(validateRoadAdd(layout, model, { x: 0, z: 0 }, { x: 100, z: 100 }, 5).blockers, [], "a diagonal across the loop is allowed — crossings become junctions, buildings get re-homed");
   const cross = validateRoadAdd(makeLayout({ context: [] }), { ...model, buildings: [] }, { x: 30, z: -40 }, { x: 70, z: 40 }, 5); // 穿过 A-B（z=0）中段
-  assert.ok(cross.blockers.includes("crosses-road"), `crossing an existing road mid-way must be connected explicitly — got ${cross.blockers}`);
+  assert.deepEqual(cross.blockers, []); assert.ok(cross.warnings.includes("auto-junction:1"), `crossing an existing road creates a junction — got ${cross.warnings}`);
   // 从路段中间接出（拆开宿主）合法；从锁定段/桥接出被拒。
   const tee = validateRoadAdd(layout, { ...model, buildings: [] }, { x: 50, z: 0 }, { x: 50, z: 60 }, 5);
   assert.ok(!tee.blockers.includes("locked-edge") && !tee.blockers.includes("isolated-road"), `a T-junction onto a normal road is allowed — got ${tee.blockers}`);
   const fromBridge = validateRoadAdd(lockedLayout, model, { x: 50, z: 0 }, { x: 50, z: 60 }, 5);
   assert.deepEqual(fromBridge.blockers, ["locked-edge"], "no junction may be cut into a bridge deck");
   // 锐角：B(100,0) 已有 A、C、D 三路；再接一条几乎贴着 B→C 的路。
-  assert.ok(validateRoadAdd(layout, { ...model, buildings: [] }, { x: 100, z: 0 }, { x: 190, z: 8 }, 5).blockers.includes("acute-junction"), "a new < 30° junction is rejected");
+  assert.ok(validateRoadAdd(layout, { ...model, buildings: [] }, { x: 100, z: 0 }, { x: 190, z: 8 }, 5).warnings.includes("acute-junction"), "a new < 30° junction is warned, not blocked");
   // 画出来的路套用后结构一致：吸附到路段中间的端点把宿主拆成两半。
   let patch = emptyPlanPatch(1, 1);
   patch = appendRoadOp(patch, { t: "add", from: { x: 50, z: 0 }, to: { x: 50, z: 60 }, width: 5 }, 1);
@@ -206,7 +213,7 @@ function makeLayout(overrides = {}) {
   });
   const real = buildCityModel({ rows, findings: [], windowStartMs: GENERATED_AT - 30 * 86_400_000, windowEndMs: GENERATED_AT, windowLabel: "30d", totalSessions: rows.length, truncated: false, generatedAt: GENERATED_AT });
   const layout = layoutCity(real, null, undefined, MIAMI_COASTAL);
-  const isLocked = (e) => e.bridge === true || e.structure === "deck" || e.structure === "ground-approach" || e.purpose === "waterfront";
+  const isLocked = (e) => e.bridge === true || e.structure === "deck"; // 放权后只锁桥面
   const tally = { edge: { ok: 0, blocked: 0, reasons: {} }, node: { ok: 0, blocked: 0, reasons: {} } };
   const count = (bucket, verdict) => { if (verdict.blockers.length) { bucket.blocked += 1; for (const b of verdict.blockers) bucket.reasons[b] = (bucket.reasons[b] ?? 0) + 1; } else bucket.ok += 1; };
   let slowest = 0;
@@ -235,4 +242,4 @@ function makeLayout(overrides = {}) {
   console.log(`  真实城市 380 楼：${layout.roadEdges.length} 路段 / ${layout.roadNodes.length} 路口；删路段 合法 ${tally.edge.ok} 拒绝 ${tally.edge.blocked} ${JSON.stringify(tally.edge.reasons)}；拖路口(×2 方向) 合法 ${tally.node.ok} 拒绝 ${tally.node.blocked} ${JSON.stringify(tally.node.reasons)}；单次校验最慢 ${slowest.toFixed(0)}ms`);
 }
 
-console.log("City plan road rules: edge drops block skeleton/bridge/waterfront, stranded and disconnected buildings, warn on new dead ends; node drags block lock/collision/short edges/water/building crossings/acute junctions but only for violations the edit itself introduces; picking prefers nodes then road bands; validated edits apply cleanly through original-id round trips; real-city validation is deterministic and interactive.");
+console.log("City plan road rules (relaxed, SPEC §15): only physical impossibilities block — bridge decks, water, degenerate/too-short strokes, node collisions, locked sites; erasing arterials/waterfront, stranding buildings, acute junctions and isolated roads are warned; crossings become junctions and buildings in the way are reported for bulldozing/re-homing; validated edits apply cleanly; real-city validation is deterministic and interactive.");

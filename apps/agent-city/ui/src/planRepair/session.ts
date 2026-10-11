@@ -11,6 +11,7 @@ import { auditLayout, type PlanIssue } from "../engine/planAudit";
 import { appendRoadOp, appendSiteOp, emptyPlanPatch, validateBuildingMove, type PlanPatchV1 } from "../engine/planPatch";
 import { listSites, pickSite, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import type { RepairRay } from "../engine/CityEngine";
+import { bulldozeForRoads } from "../engine/planBulldozer";
 import { nearestEdgeAt, snapPoint, validateEdgeDrop, validateNodeMove, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
 import type { Vec2 } from "../engine/cityLayout";
 import { cityPlanPatchStore, emptyPlanPatchStore, type PlanPatchStoreV1 } from "../data/planPatch";
@@ -111,9 +112,7 @@ export class PlanRepairSession {
     if (!base.ok) return base;
     const verdict = validateNodeMove(this.engine.currentLayout!, this.engine.currentModel!, nodeId, { x, z });
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
-    const patch = appendRoadOp(base.patch, { t: "move", node: nodeId, to: { x, z } });
-    this.commit(patch);
-    return { ok: true, patch, warnings: verdict.warnings };
+    return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "move", node: nodeId, to: { x, z } }), verdict.warnings);
   }
 
   /** 橡皮擦：删一段路（传当前 id）。 */
@@ -133,9 +132,7 @@ export class PlanRepairSession {
     if (!base.ok) return base;
     const verdict = validateRoadAdd(this.engine.currentLayout!, this.engine.currentModel!, from, to, width);
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
-    const patch = appendRoadOp(base.patch, { t: "add", from, to, width });
-    this.commit(patch);
-    return { ok: true, patch, warnings: verdict.warnings };
+    return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "add", from, to, width }), verdict.warnings);
   }
 
   // ── 设施（非会话建筑）：市长管公共设施，会话楼由开发商盖 ──
@@ -160,6 +157,7 @@ export class PlanRepairSession {
   siteTargetAt(site: SiteInfo, x: number, z: number): string | null {
     const layout = this.engine.currentLayout;
     if (!layout) return null;
+    if (site.level === "free") return `@${Math.round(x * 100) / 100},${Math.round(z * 100) / 100}`;
     if (site.level === "parcel") return this.nearestParcel(x, z)?.id ?? null;
     let best: { id: string; d: number } | null = null;
     for (const block of layout.blocks) {
@@ -186,6 +184,21 @@ export class PlanRepairSession {
     const patch = appendSiteOp(base.patch, { t: "remove", id: site.id, at: { x: site.x, z: site.z } });
     this.commit(patch);
     return { ok: true, patch, warnings: [] };
+  }
+
+  /** 道路改动连同推土机的后果一起提交（同一步撤销）：压到的设施推平、会话楼由开发商就近安置。
+   *  warnings 里的预估计数（bulldoze:N / relocate:N）换成实际结果（bulldozed:N / relocated:N / homeless:N）。 */
+  private commitWithBulldozer(patch: PlanPatchV1, warnings: string[]): EditResult {
+    const generated = this.engine.generatedLayout; const before = this.engine.currentLayout; const model = this.engine.currentModel;
+    const result = generated && before && model ? bulldozeForRoads(generated, model, before, patch) : { patch, bulldozed: [], relocated: [], homeless: [] };
+    this.commit(result.patch);
+    const facts = [
+      ...warnings.filter((code) => !code.startsWith("bulldoze:") && !code.startsWith("relocate:")),
+      ...(result.bulldozed.length ? [`bulldozed:${result.bulldozed.length}`] : []),
+      ...(result.relocated.length ? [`relocated:${result.relocated.length}`] : []),
+      ...(result.homeless.length ? [`homeless:${result.homeless.length}`] : []),
+    ];
+    return { ok: true, patch: result.patch, warnings: facts };
   }
 
   // ── 悬停预览用的只读包装（不写补丁）──

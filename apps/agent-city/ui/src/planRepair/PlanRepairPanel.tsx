@@ -9,10 +9,10 @@ const SEVERITY_LABEL = { error: "错误", warning: "警告", info: "提示" } as
 const MAX_ISSUE_ROWS = 8;
 
 const TOOLS: Array<{ id: RepairTool; label: string; key: string; hint: string }> = [
-  { id: "build", label: "移楼", key: "V", hint: "仅用于修复生成问题：会话楼由开发商（程序）盖，市长不指定位置。点选会话楼，再点空地块" },
+  { id: "build", label: "移动", key: "V", hint: "点选任意建筑，再点空地搬过去：会话楼搬到你选的地块，设施、地标、市政用地搬到任意空地" },
   { id: "draw", label: "画路", key: "R", hint: "点两下画一段路，可连续画" },
   { id: "erase", label: "橡皮擦", key: "E", hint: "点击红色高亮的路段擦掉" },
-  { id: "site", label: "设施", key: "S", hint: "编辑公共设施、花园、城区地标、背景楼：搬家或拆除" },
+  { id: "site", label: "设施", key: "S", hint: "编辑非会话建筑：公共设施、花园、地标、市政用地、背景楼——搬家或拆除" },
 ];
 const WIDTHS: Array<{ id: RoadWidth; label: string }> = [{ id: 5, label: "小路" }, { id: 8, label: "次干道" }];
 
@@ -45,6 +45,7 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
   };
   const preview = state.preview;
   const previewReason = preview && "reason" in preview ? preview.reason : null;
+  const previewNote = !previewReason && preview && "warning" in preview ? preview.warning : null;
 
   return <section className="city-repair" aria-label="规划修复">
     <header><h2>修复规划 <small>开发预览</small></h2><button onClick={repair.exit} aria-label="退出修复规划">退出</button></header>
@@ -58,6 +59,7 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
     </div>}
     {state.message && <p className={`city-repair-msg city-repair-${state.message.kind}`} role={state.message.kind === "error" ? "alert" : "status"}>{state.message.text}</p>}
     {previewReason && <p className="city-repair-reason">不可行：{previewReason}</p>}
+    {previewNote && <p className="city-repair-note">注意：{previewNote}</p>}
     {state.buildingId && state.tool === "build" && <p className="city-repair-sel">选中：<code>{state.buildingId}</code></p>}
     {state.tool === "site" && state.site && <div className="city-repair-site">
       <span>选中：<b>{siteLabel(state.site)}</b></span>
@@ -85,6 +87,6 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
         </li>)}</ul>
       </>}
     </div>}
-    <p className="city-repair-help">V 移楼 · R 画路 · E 橡皮擦 · S 设施 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
+    <p className="city-repair-help">V 移动 · R 画路 · E 橡皮擦 · S 设施 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
   </section>;
 }

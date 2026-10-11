@@ -185,3 +185,4 @@
 .city-repair-reason { color: #ffb4a8; }
 .city-repair-site { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .city-app .city-repair-site button { border-color: #ff8a7a; color: #ffd2cb; }
+.city-repair-note { color: #ffd98a; }

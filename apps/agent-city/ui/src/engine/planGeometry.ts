@@ -7,10 +7,11 @@ import type { CityLayout, Parcel, RoadEdge, Vec2 } from "./cityLayout";
 
 export const quantize = (p: Vec2): Vec2 => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
 
-/** M1 锁定口径（SPEC §7.2）：桥面、桥头引道、滨海段不可编辑——它们的几何由海滨带/桥锚定，
- *  拖动会连锁破坏 seaside/桥塔语义。 */
+/** 锁定口径（放权后，SPEC §15）：只锁**桥面**——它的几何由桥梁模型（桥塔/桁架）绑定，单独擦或拖会留下悬空的桥。
+ *  曾经连桥头引道、滨海路一起锁（M1 求稳），用户实测「很多东西都不能改」：滨海路占全城道路总长的大头，
+ *  一锁就把最显眼的路全锁了。现在它们可编辑，改动的影响以提示呈现（擦掉引道桥会断开），不再拒绝。 */
 export function edgeLocked(edge: RoadEdge): boolean {
-  return edge.bridge === true || edge.structure === "deck" || edge.structure === "ground-approach" || edge.purpose === "waterfront";
+  return edge.bridge === true || edge.structure === "deck";
 }
 
 /** 楼的净空要避开的路：地面路（非桥）。体检与编辑校验共用这一个口径——
@@ -27,7 +28,7 @@ export function parcelIndex(layout: CityLayout): Map<string, Parcel> {
   return index;
 }
 
-/** 被占用/预留的地块：会话楼、配套整街区、小区花园街区、城区地标、未压制的背景楼。
+/** 被占用/预留的地块：会话楼、配套整街区、小区花园街区、城区地标整街区、致敬地标与市政用地圆内、未压制的背景楼。
  *  编辑校验与套用共用——套用曾只看会话楼，刷新后目标地块冒出背景楼时照套不误，两楼叠在一起。 */
 export function reservedParcelIds(layout: CityLayout, suppressedContext: Iterable<string> = []): Set<string> {
   const parcels = parcelIndex(layout);
@@ -39,7 +40,18 @@ export function reservedParcelIds(layout: CityLayout, suppressedContext: Iterabl
   for (const district of layout.districts) for (const parcel of district.slots.values()) reserved.add(parcel.id);
   for (const civic of layout.civics) for (const parcelId of blockOf.get(civic.parcelId) ?? [civic.parcelId]) reserved.add(parcelId);
   for (const garden of layout.gardens) for (const parcelId of blockOf.get(garden.blockId) ?? []) reserved.add(parcelId);
-  for (const landmark of layout.districtLandmarks ?? []) reserved.add(landmark.parcelId);
+  // 城区地标的 17 m 裙房比一个地址大：生成器把它所在的**整个街区**都预留了（cityLayout 注释：保住相邻地址）。
+  // 编辑器曾只预留它那一个地块（注册表 SPEC D1）——会话楼可能被搬进地标旁边、压到裙房。与生成器对齐。
+  for (const landmark of layout.districtLandmarks ?? []) {
+    const parcel = parcels.get(landmark.parcelId);
+    for (const parcelId of (parcel && blockOf.get(parcel.blockId)) || [landmark.parcelId]) reserved.add(parcelId);
+  }
+  // 致敬地标与市政用地按圆形占地：生成器先于街区为它们留地，所以底图里圆内本无地块；
+  // 但它们现在可以被搬家（§15），搬到有地块的地方后，圆内的地块必须算占用，否则会话楼会被搬进去。
+  const roundSites = [...(layout.landmarks ?? []), ...(layout.publicSites ?? [])];
+  if (roundSites.length) for (const parcel of parcels.values()) {
+    if (roundSites.some((site) => Math.hypot(parcel.x - site.x, parcel.z - site.z) < site.radius + 4)) reserved.add(parcel.id);
+  }
   const suppressed = new Set(suppressedContext);
   for (const context of layout.contextBuildings) {
     const parcelId = context.id.replace(/^context:/, "");

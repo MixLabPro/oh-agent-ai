@@ -25,8 +25,8 @@ export type RepairMessage = { kind: "hint" | "ok" | "warn" | "error"; text: stri
 
 /** 悬停预览（叠加层据此画色带/标记）。reason 非空时面板在消息下方显示。 */
 export type RepairPreview =
-  | { kind: "erase"; points: Vec2[]; width: number; ok: boolean; reason: string | null }
-  | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; snap: SnapPoint }
+  | { kind: "erase"; points: Vec2[]; width: number; ok: boolean; reason: string | null; warning: string | null }
+  | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; warning: string | null; snap: SnapPoint }
   | { kind: "snap"; at: Vec2; ok: boolean; snap: SnapPoint }
   | { kind: "site"; rect: { x: number; z: number; yaw: number; width: number; depth: number }; label: string }
   | null;
@@ -80,7 +80,9 @@ const BLOCKER_TEXT: Record<string, string> = {
   "missing-parcel": "地块不存在（城市已重排）",
   "unknown-building": "这栋楼不在当前城市里",
   // 道路
-  "locked-edge": "桥、桥头引道和滨海路不可编辑",
+  "locked-edge": "桥面由桥梁模型绑定，不能单独编辑",
+  "hits-locked-site": "会压到锁定的设施（悬索桥、海上地标或港口）",
+  "site-locked": "这座设施已锁定",
   "arterial-skeleton": "主干道是城市骨架，不能擦",
   "strands-buildings": "擦掉后有楼离最近的路超过 40",
   "disconnects-buildings": "擦掉后有楼会和路网断开",
@@ -106,23 +108,57 @@ const WARNING_TEXT: Record<string, string> = {
   "cross-district": "已搬出它所属的小区",
   "creates-dead-end": "会留下一个断头路",
   "far-move": "移动距离很远",
+  // 放权后（SPEC §15）由拒绝改为提示的
+  "erases-arterial": "擦掉的是主干道",
+  "erases-waterfront": "擦掉的是滨海路",
+  "cuts-bridge": "擦掉桥头引道后，桥会和路网断开",
+  "strands-buildings": "有楼会离最近的路超过 40（楼还在，只是没有路通到）",
+  "disconnects-buildings": "有楼会和主路网断开",
+  "isolated-road": "这段路两端都没接上路网",
+  "acute-junction": "会形成夹角小于 30° 的路口",
+};
+/** 带数量的提示码（`code:N`）。 */
+const COUNTED_TEXT: Record<string, (n: number) => string> = {
+  "auto-junction": (n) => `将在交叉处自动生成 ${n} 个路口`,
+  bulldoze: (n) => `将推平 ${n} 座设施`,
+  relocate: (n) => `将由开发商就近安置 ${n} 栋会话楼`,
+  bulldozed: (n) => `推平了 ${n} 座设施`,
+  relocated: (n) => `开发商安置了 ${n} 栋会话楼`,
+  homeless: (n) => `${n} 栋会话楼附近没有空地块，仍压在路上`,
 };
 
 export const blockerText = (code: string): string => BLOCKER_TEXT[code] ?? code;
-export const warningText = (code: string): string => WARNING_TEXT[code] ?? code;
-
-const reasonOf = (blockers: readonly string[]) => (blockers.length ? blockers.map(blockerText).join("；") : null);
-
-const HINT: Record<RepairTool, RepairMessage> = {
-  build: { kind: "hint", text: "点选一栋会话楼，再点要搬去的空地块" },
-  draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，Esc 结束" },
-  erase: { kind: "hint", text: "把橡皮擦移到道路上，红色高亮的路段点击即擦掉" },
-  site: { kind: "hint", text: "点选公共设施、花园、城区地标或背景楼；再点空地搬家，或点「拆除」" },
+export const warningText = (code: string): string => {
+  const [key, count] = code.split(":");
+  return count !== undefined && COUNTED_TEXT[key] ? COUNTED_TEXT[key](Number(count)) : WARNING_TEXT[code] ?? code;
 };
 
+const reasonOf = (blockers: readonly string[]) => (blockers.length ? blockers.map(blockerText).join("；") : null);
+const noteOf = (warnings: readonly string[]) => (warnings.length ? warnings.map(warningText).join("；") : null);
+
+const HINT: Record<RepairTool, RepairMessage> = {
+  build: { kind: "hint", text: "点选任意建筑（会话楼、设施、地标、市政用地），再点要搬去的空地" },
+  draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，Esc 结束" },
+  erase: { kind: "hint", text: "把橡皮擦移到道路上，红色高亮的路段点击即擦掉" },
+  site: { kind: "hint", text: "点选任意非会话建筑（公共设施、花园、地标、市政用地、背景楼）；再点空地搬家，或点「拆除」" },
+};
+
+// 名称表暂在这里（注册表 SPEC CITY_SITE_REGISTRY_SPEC.md B1 会把它们收进 siteClasses 单一来源）。
 const SITE_LABEL: Record<string, string> = { school: "学校", mall: "商场", hospital: "医院", garden: "城区花园与景观湖", "district-landmark": "城区地标", context: "背景楼" };
-export const siteLabel = (site: Pick<SiteInfo, "kind" | "civicKind">): string => (site.kind === "civic" ? SITE_LABEL[site.civicKind ?? ""] ?? "公共设施" : SITE_LABEL[site.kind] ?? site.kind);
+const LANDMARK_LABEL: Record<string, string> = { "tv-tower": "电视塔", "sail-opera": "帆形歌剧院", arch: "凯旋拱门", pagoda: "宝塔", lighthouse: "灯塔", "ferris-wheel": "摩天轮", "suspension-bridge": "悬索桥", "twin-towers": "双子塔", "twist-tower": "扭转塔", "villa-complex": "地中海庄园" };
+const PUBLIC_LABEL: Record<string, string> = { civic: "市政厅", station: "车站", stadium: "体育场", park: "城市公园", tower: "观景塔", harbor: "港口与码头" };
+export const siteLabel = (site: Pick<SiteInfo, "kind" | "civicKind" | "landmarkKind" | "publicKind">): string =>
+  site.kind === "civic" ? SITE_LABEL[site.civicKind ?? ""] ?? "公共设施"
+    : site.kind === "landmark" ? LANDMARK_LABEL[site.landmarkKind ?? ""] ?? "地标"
+      : site.kind === "public-site" ? PUBLIC_LABEL[site.publicKind ?? ""] ?? "市政用地"
+        : SITE_LABEL[site.kind] ?? site.kind;
 const siteRect = (site: SiteInfo) => ({ x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth });
+/** 地面点是否落在设施占地内（朝向矩形；free 级是外接正方形，宽松一点无妨）。 */
+const footprintContains = (site: SiteInfo, p: Vec2) => {
+  const dx = p.x - site.x; const dz = p.z - site.z;
+  const lx = dx * Math.cos(site.yaw) - dz * Math.sin(site.yaw); const lz = dx * Math.sin(site.yaw) + dz * Math.cos(site.yaw);
+  return Math.abs(lx) <= site.width / 2 && Math.abs(lz) <= site.depth / 2;
+};
 
 const HOVER_EPS = 0.75; // 地面点移动不到这么多就不重算预览（鼠标抖动）
 
@@ -228,7 +264,7 @@ export class RepairController {
       const edge = this.deps.edgeAt(ground.x, ground.z);
       if (!edge) { this.set({ preview: null }); return; }
       const verdict = this.deps.validateDrop(edge.id);
-      this.set({ preview: { kind: "erase", points: edge.points, width: edge.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers) } });
+      this.set({ preview: { kind: "erase", points: edge.points, width: edge.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings) } });
       return;
     }
     const snap = this.deps.snap(ground.x, ground.z);
@@ -238,7 +274,7 @@ export class RepairController {
       return;
     }
     const verdict = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, roadWidth);
-    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: roadWidth, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), snap } });
+    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: roadWidth, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), snap } });
   }
 
   // ── 点击 ────────────────────────────────────────────────────────────────
@@ -252,14 +288,23 @@ export class RepairController {
     this.clickBuild(click);
   }
 
-  private clickBuild({ pickedId, ground }: { pickedId: string | null; ground: Vec2 | null }): void {
+  private clickBuild({ pickedId, ground, ray }: { pickedId: string | null; ground: Vec2 | null; ray?: RepairRay | null }): void {
     if (pickedId !== null) {
       if (this.deps.isSessionBuilding(pickedId)) { this.select(pickedId); return; }
-      this.set({ message: { kind: "warn", text: "只有会话楼可以移动；背景楼、配套和地标不可编辑" } });
+      // 所有建筑都可以移动（用户 2026-10-11）：点到非会话建筑，交给设施工具选中它，接着点空地即可搬家。
+      const hit = ray ? this.deps.pickSite(ray) : null;
+      if (hit) { this.handOverToSite(hit); return; }
+      this.set({ message: { kind: "warn", text: "这里是海滨或基础设施装饰（沙滩、码头、桥），不是建筑，不能移动" } });
       return;
     }
     const buildingId = this.state.buildingId;
-    if (!buildingId) { this.set({ message: HINT.build }); return; }
+    if (!buildingId) {
+      // 网格拾取没打中（细长的塔身、射线擦边）：用设施的占地体积再拾一次——它更宽容，地标点得中。
+      const hit = ray ? this.deps.pickSite(ray) : null;
+      if (hit) { this.handOverToSite(hit); return; }
+      this.set({ message: HINT.build });
+      return;
+    }
     if (!ground) { this.deselect(HINT.build); return; } // 点到天空：取消选中
     const parcel = this.deps.nearestParcel(ground.x, ground.z);
     if (!parcel) { this.set({ message: { kind: "warn", text: "这里没有可落位的地块" } }); return; }
@@ -307,6 +352,15 @@ export class RepairController {
 
   // ── 设施 ────────────────────────────────────────────────────────────────
 
+  /** 移动工具点到非会话建筑：切到设施工具并选中它（两种建筑的搬家规则不同，界面上无缝衔接）。 */
+  private handOverToSite(site: SiteInfo): void {
+    if (site.locked) { this.set({ message: { kind: "warn", text: `${siteLabel(site)}：${site.locked}` } }); return; }
+    this.deps.setSelected(null);
+    this.lastGround = null;
+    this.set({ tool: "site", buildingId: null, candidates: [], drawStart: null, preview: null });
+    this.selectSite(site);
+  }
+
   private clearSite(message: RepairMessage | null): void {
     this.set({ site: null, siteTargets: [], message });
   }
@@ -315,21 +369,32 @@ export class RepairController {
     const siteTargets = this.deps.siteTargets(site);
     this.set({
       site, siteTargets,
-      message: message ?? (siteTargets.length
+      message: message ?? (site.level === "free"
+        ? { kind: "hint", text: `已选中${siteLabel(site)}：点地面任意空地搬过去（会检查地形、道路和建筑），或点「拆除」；原址的接入路${site.kind === "landmark" ? "或堤道" : ""}会留下` }
+        : siteTargets.length
         ? { kind: "hint", text: `已选中${siteLabel(site)}，附近有 ${siteTargets.length} 个可搬去的${site.level === "block" ? "空街区" : "空地块"}（绿色）；点任一处搬过去，或点「拆除」` }
         : { kind: "warn", text: `已选中${siteLabel(site)}，但附近没有可搬去的${site.level === "block" ? "空街区" : "空地块"}；可以拆除` }),
     });
   }
 
   private clickSite({ pickedId, ground, ray }: { pickedId: string | null; ground: Vec2 | null; ray?: RepairRay | null }): void {
-    const hit = ray ? this.deps.pickSite(ray) : null;
-    if (hit) { this.selectSite(hit); return; }
     const site = this.state.site;
+    let hit = ray ? this.deps.pickSite(ray) : null;
+    // 已选中一座设施后，这一下是「搬到这里」还是「改选另一座」？拾取体积是个高盒子，从斜上方看会挡住旁边的空地
+    // （实测点空地先后改选了观景塔、又选回电视塔自己）。判据：引擎的网格拾取没打中任何东西（pickedId 为空）、
+    // 且地面点在被盒子擦到的那座设施占地以外 → 用户点的是地面，按搬家处理。真点在建筑上时网格会命中。
+    if (hit && site && ground && pickedId === null && !footprintContains(hit, ground)) hit = null;
+    if (hit?.locked) { this.set({ message: { kind: "warn", text: `${siteLabel(hit)}：${hit.locked}` } }); return; }
+    if (hit) { this.selectSite(hit); return; }
     // 点到的是不可编辑的东西：会话楼归开发商，致敬地标/市政用地与路网海岸绑定。
     if (pickedId !== null && !(site && ground)) {
-      this.set({ message: this.deps.isSessionBuilding(pickedId)
-        ? { kind: "warn", text: "会话楼由开发商（程序）按规划来盖，市长不指定位置；生成有误时用「移楼」修复" }
-        : { kind: "warn", text: "致敬地标与市政用地（体育场、摩天轮、观景塔、港口、车站）由岛屿规划决定，与路网和海岸绑定，不可编辑" } });
+      // 点到会话楼：切到移动工具并选中它（所有建筑都可以移动）。
+      if (this.deps.isSessionBuilding(pickedId)) {
+        this.set({ tool: "build", site: null, siteTargets: [], preview: null });
+        this.select(pickedId);
+        return;
+      }
+      this.set({ message: { kind: "warn", text: "这里是海滨或基础设施装饰（沙滩、码头、桥），不是建筑，不能移动" } });
       return;
     }
     if (!site) { this.set({ message: HINT.site }); return; }

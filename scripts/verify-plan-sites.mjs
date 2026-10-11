@@ -33,8 +33,10 @@ const B2 = block("B2", 200, 100, 40, 40, [parcel("p2a", "B2", 190, 90), parcel("
 const BG = block("BG", -100, 100, 36, 36, [parcel("pg1", "BG", -100, 100)]);
 const B3 = block("B3", 300, 100, 40, 40, [parcel("p3a", "B3", 300, 100)]);   // 有一个会话楼 → 不是空街区
 const B4 = block("B4", 500, 100, 40, 40, [parcel("p4a", "B4", 500, 100)]);   // 不可建（x ≥ 400）
+// 城区地标独占一个街区（生成器只把它放进空街区并预留整面，见注册表 SPEC D1）。
+const BL = block("BL", 50, 200, 10, 10, [parcel("pL", "BL", 50, 200)]);
 const BA = block("BA", 80, 225, 200, 60, [
-  parcel("pL", "BA", 50, 200), parcel("pC", "BA", 70, 200), parcel("pF1", "BA", 90, 200), parcel("pF2", "BA", 110, 200),
+  parcel("pC", "BA", 70, 200), parcel("pF1", "BA", 90, 200), parcel("pF2", "BA", 110, 200),
   parcel("pS", "BA", 130, 200), parcel("pRoad", "BA", 60, 250), parcel("pHwy", "BA", 160, 300), parcel("pSlope", "BA", 330, 200),
 ]);
 const edge = (from, to, width = 5) => {
@@ -50,7 +52,7 @@ function makeLayout() {
   const slots = new Map([["b1", parcel("pS", "BA", 130, 200)], ["b2", parcel("p3a", "B3", 300, 100)]]);
   return {
     seed: 1, scaleTier: 1, activityKey: "k", terrain,
-    blocks: [B1, B2, BG, B3, B4, BA],
+    blocks: [B1, B2, BG, B3, B4, BA, BL],
     roadNodes: [{ id: "0:250", x: 0, z: 250 }, { id: "300:250", x: 300, z: 250 }], roadEdges: [edge("0:250", "300:250")], culDeSacEnds: [],
     civics: [{ id: "civic:0", kind: "school", districtId: "d0", parcelId: "B1", x: 100, z: 100, y: 2, yaw: 0, width: 40, depth: 40, unlockAt: 0 }],
     gardens: [{ id: "garden:d0", districtId: "d0", blockId: "BG", x: -100, z: 100, y: 2, yaw: 0, width: 36, depth: 36, seed: 1 }],
@@ -92,13 +94,16 @@ const centre = (layout, id) => { const site = listSites(layout).find((s) => s.id
   assert.equal(siteMoveProblem(base, civic, "nope"), "missing-target");
   assert.equal(siteMoveProblem(base, civic, "B1"), "unchanged");
   assert.equal(siteMoveProblem(base, garden, "B2"), null);
-  assert.equal(siteMoveProblem(base, lm, "pF1"), null, "a free parcel accepts a district landmark");
-  assert.equal(siteMoveProblem(base, lm, "pC"), "target-occupied", "a parcel holding a context building is occupied");
+  // 城区地标占整面（与生成器一致，注册表 SPEC D1）：目标街区除它自己外必须全空。
+  assert.equal(siteMoveProblem(base, lm, "p2a"), null, "an empty block accepts a district landmark");
+  assert.equal(siteMoveProblem(base, lm, "pF1"), "target-occupied", "a parcel whose block also holds a session building and a context building is not enough for the 17 m skirt");
   assert.equal(siteMoveProblem(base, lm, "pS"), "target-occupied", "a session parcel is occupied");
-  assert.equal(siteMoveProblem(base, lm, "pRoad"), "site-over-road");
-  assert.equal(siteMoveProblem(base, lm, "pHwy"), "highway-clearance");
-  assert.equal(siteMoveProblem(base, lm, "pSlope"), "steep-slope");
-  assert.equal(siteMoveProblem(base, lm, "p4a"), "not-buildable");
+  // 地块级规则（压路/高架/陡坡/不可建）用背景楼来测。
+  assert.equal(siteMoveProblem(base, ctx, "pRoad"), "site-over-road");
+  assert.equal(siteMoveProblem(base, ctx, "pHwy"), "highway-clearance");
+  assert.equal(siteMoveProblem(base, ctx, "pSlope"), "steep-slope");
+  assert.equal(siteMoveProblem(base, ctx, "p4a"), "not-buildable");
+  assert.equal(siteMoveProblem(base, ctx, "pS"), "target-occupied", "a session parcel is occupied for a context building too");
   assert.equal(siteMoveProblem(base, ctx, "pF2"), null);
 
   const moved = apply({ t: "move", id: "civic:0", at: { x: 100, z: 100 }, to: "B2" });
@@ -109,8 +114,9 @@ const centre = (layout, id) => { const site = listSites(layout).find((s) => s.id
   const ctxMoved = apply({ t: "move", id: "context:pC", at: { x: 70, z: 200 }, to: "pF2" });
   assert.deepEqual(ctxMoved.layout.contextBuildings.map((c) => [c.id, c.x]), [["context:pF2", 110]], "a context building's id follows its parcel");
   assert.ok(reservedParcelIds(ctxMoved.layout).has("pF2") && !reservedParcelIds(ctxMoved.layout).has("pC"), "…so occupancy is recognised at the new parcel");
-  const lmMoved = apply({ t: "move", id: "district-landmark:d0", at: { x: 50, z: 200 }, to: "pF1" });
-  assert.deepEqual([lmMoved.layout.districtLandmarks[0].parcelId, lmMoved.layout.districtLandmarks[0].x], ["pF1", 90]);
+  const lmMoved = apply({ t: "move", id: "district-landmark:d0", at: { x: 50, z: 200 }, to: "p2a" });
+  assert.deepEqual([lmMoved.layout.districtLandmarks[0].parcelId, lmMoved.layout.districtLandmarks[0].x], ["p2a", 190]);
+  assert.ok(reservedParcelIds(lmMoved.layout).has("p2d") && !reservedParcelIds(lmMoved.layout).has("pL"), "the whole new block is reserved and the old address is freed");
   // 失败的移动：进 stale，设施原地不动。
   for (const [to, reason] of [["BG", "target-occupied"], ["nope", "missing-target"], ["B4", "site-blocked"]]) {
     const failed = apply({ t: "move", id: "civic:0", at: { x: 100, z: 100 }, to });
