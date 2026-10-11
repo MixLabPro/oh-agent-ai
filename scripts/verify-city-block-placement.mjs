@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
-const { inspectBlockPlacement, lotClearsRoads } = await loadCity({
+const { inspectBlockPlacement, lotClearsRoads, checkSitePlacement } = await loadCity({
+  "engine/cityLayout.ts": ["checkSitePlacement"],
   "engine/planner/blockPlacement.ts": ["inspectBlockPlacement"],
   "engine/planner/lotRoadClearance.ts": ["lotClearsRoads"],
 });
@@ -27,6 +28,23 @@ check({ ...base, terrainSampleBudget: 1 }, "terrain-sample-budget-exhausted");
 check({ ...base, cancelled: () => true }, "cancelled");
 check({ ...base, footprint: { ...base.footprint, width: NaN } }, "invalid-footprint-or-budget");
 const result = check(base); assert.equal(result.scope, "sampled-rectangle-and-declared-circle-proxies");
+// Public boundary must reuse the generator's environment, including occupied
+// address circles and complete curved roads, without mutating the layout.
+const host = { ...base.block, id: "host" };
+const layout = { blocks: [host], roadEdges: [], publicSites: [], landmarks: [], highways: [], terrain: { buildable: base.buildable } };
+const footprint = { ...base.footprint, blockId: host.id };
+assert.deepEqual(checkSitePlacement(layout, footprint, []), result);
+const beforeLayout = JSON.stringify(layout);
+assert.equal(checkSitePlacement(layout, { ...footprint, blockId: "absent" }, []).reason, "unknown-host-block");
+assert.equal(checkSitePlacement({ ...layout, blocks: [host, host] }, footprint, []).reason, "ambiguous-host-block");
+assert.equal(checkSitePlacement({ ...layout, blocks: [{ ...host, holes: [[p(39, 39), p(41, 39), p(41, 41), p(39, 41)]] }] }, footprint, []).reason, "rectangle-crosses-hole");
+assert.equal(checkSitePlacement({ ...layout, roadEdges: [road([p(0, 70), p(40, 40), p(80, 70)])] }, footprint, []).reason, "actual-road-capsule-conflict");
+assert.equal(checkSitePlacement(layout, footprint, [{ x: 48, z: 40, width: 2, depth: 2 }]).reason, "declared-site-circle-conflict");
+assert.equal(checkSitePlacement({ ...layout, landmarks: [{ x: 48, z: 40, radius: 1 }] }, footprint, []).reason, "declared-site-circle-conflict");
+assert.equal(checkSitePlacement({ ...layout, highways: [[p(0, 40), p(80, 40)]] }, footprint, []).reason, "highway-capsule-conflict");
+assert.equal(checkSitePlacement(layout, footprint, [], { terrainSampleBudget: 1 }).reason, "terrain-sample-budget-exhausted");
+assert.equal(checkSitePlacement(layout, footprint, [], { cancelled: () => true }).reason, "cancelled");
+assert.equal(JSON.stringify(layout), beforeLayout);
 const hotel = { x: 0, z: 0, yaw: 0, width: 20, depth: 20 };
 const bent = road([p(-100, 50), p(-50, 50), p(0, 0), p(100, 50)]);
 assert.equal(lotClearsRoads(hotel, [bent]), false, "later polyline segments cannot pass through a hotel");

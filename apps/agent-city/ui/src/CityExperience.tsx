@@ -10,7 +10,7 @@ import { invokeHost, embedded, pluginLocale } from "./host";
 import type { PluginResponseV1 } from "@agent-vitals/app-sdk";
 import { runFilmJob, supportsBackgroundFilm } from "./export/filmJob";
 import { cinematicCopy } from "./engine/cinematicCopy";
-import { describeDecor, isDecorId } from "./engine/cityDecor";
+import { describeDecor, isDecorId, decorDistrictId } from "./engine/cityDecor";
 import { CATALOG_GROUPS, CATALOG_KIND_LABEL, CITY_CATALOG } from "./cityCatalog";
 import { scaleTierFor } from "./engine/cityPlan";
 import { PlanRepairPanel } from "./planRepair/PlanRepairPanel";
@@ -361,9 +361,9 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {decorCamera}
       </aside>;
     })()}
-    {ui.selected && ui.selected.startsWith("decor:landmark:district:") && !cinema && !gameActive && (() => {
+    {ui.selected && decorDistrictId(ui.selected) !== null && !cinema && !gameActive && (() => {
       // 城区地标 = 城区的功能性标志：面板展示该执行环境城区的数据（用户：把城区信息放到「城区地标」说明上）。
-      const districtId = ui.selected.slice("decor:landmark:district:".length);
+      const districtId = decorDistrictId(ui.selected);
       const district = model?.districts.find((d) => d.id === districtId);
       if (!district) return null;
       return <aside className="city-detail-panel" aria-label="建筑详情">
@@ -376,7 +376,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {decorCamera}
       </aside>;
     })()}
-    {ui.selected && isDecorId(ui.selected) && !ui.selected.startsWith("decor:landmark:district:") && ui.selected !== "decor:site:civic" && !cinema && !gameActive && (() => {
+    {ui.selected && isDecorId(ui.selected) && decorDistrictId(ui.selected) === null && ui.selected !== "decor:site:civic" && !cinema && !gameActive && (() => {
       const info = describeDecor(ui.selected);
       if (!info) return null;
       return <aside className="city-detail-panel" aria-label="建筑详情">

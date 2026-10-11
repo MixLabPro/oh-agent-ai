@@ -2,14 +2,14 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { emptyNetwork, addNetworkEdge, runRepairTransaction, groundJunctionFindings, snapNearEdgeJunctions,
+const { emptyNetwork, addNetworkEdge, runRepairTransaction, groundJunctionFindings, snapNearEdgeJunctions, endpointRelineCandidates, relineLooseEndpoint,
   assignConnectedSite, specByKind, SITE_SPECS, canRelocateGroundSite, resolvePlanarAccess, planarAccessPose, stationEntranceLocal, settleShoreSitesOnCoast,
   trimLeafBeforeUnsafeCrossing, connectGroundJunctions, corridorViolation, validateCandidate, bridgeheadContinuity, roadReport, CONSTRAINTS, classifyRoadSegments, crowdedPolylinePair, commitNetworkPatch, diagnoseNetwork, componentOf, retainRepairDemands, remapDemandNode, REPAIR_STRATEGIES, resiteArchesOnAcceptedRoads, groundFrontageSegments, rerouteUnsafeGroundCrossings, jointJunctionSiteCandidates, moveJunctionSite, groundJunctionCorridorFailure, groundJunctionCorridorViolation, screenTrunkRoute, connectDisconnectedComponent, connectLooseEnd, pruneShortSpurs, extendLooseEnds, endpointClear } = await loadCity({
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge", "commitNetworkPatch"],
   "engine/planner/solve.ts": ["runRepairTransaction", "REPAIR_STRATEGIES", "resiteArchesOnAcceptedRoads"],
   "engine/planner/access.ts": ["groundFrontageSegments"],
   "engine/planner/report.ts": ["groundJunctionFindings", "roadReport"],
-  "engine/planner/snapJunctions.ts": ["trimLeafBeforeUnsafeCrossing", "rerouteUnsafeGroundCrossings", "jointJunctionSiteCandidates", "moveJunctionSite", "snapNearEdgeJunctions"],
+  "engine/planner/snapJunctions.ts": ["trimLeafBeforeUnsafeCrossing", "rerouteUnsafeGroundCrossings", "jointJunctionSiteCandidates", "moveJunctionSite", "snapNearEdgeJunctions", "endpointRelineCandidates", "relineLooseEndpoint"],
   "engine/planner/junctions.ts": ["connectGroundJunctions"],
   "engine/planner/validation.ts": ["corridorViolation", "validateCandidate"],
   "engine/planner/constraints.ts": ["bridgeheadContinuity", "CONSTRAINTS"],
@@ -40,6 +40,62 @@ const intentView = (ctx) => ({ roadNodes: [...ctx.network.nodes.values()], roadE
   publicSites: ctx.publicSites, landmarks: ctx.landmarks, core: ctx.core, coast: ctx.coast, river: null,
   coastRoads: ctx.coastRoadRuns, riverRoadRuns: ctx.riverRoadRuns, seaside: ctx.seaside,
   primaryAnchorNodeId: ctx.primaryAnchorNodeId, siteObligations: ctx.siteObligations, demandCatalogue: ctx.demandCatalogue });
+// A split child can duplicate the incoming leg after a sub-unit projection.
+// Coalesce exact physical ground shapes, preserve the wider host and rewrite
+// both traffic references. This is not permission to discard a road branch.
+{
+  const ctx = context(); ctx.primaryAnchorNodeId = "0:0";
+  addNetworkEdge(ctx.network, p(0, 0), p(100, 0), true, false, true);
+  addNetworkEdge(ctx.network, p(0, 0), p(50, 0.2), true);
+  addNetworkEdge(ctx.network, p(50, 0.2), p(50, 40), true);
+  ctx.carPaths.push([p(0, 0), p(50, 0.2), p(50, 40)]);
+  ctx.coastRoadRuns.push([p(0, 0), p(100, 0)]);
+  assert.ok(groundJunctionFindings([...ctx.network.edges.values()]).length);
+  assert.equal(snapNearEdgeJunctions(ctx), 1);
+  assert.equal(groundJunctionFindings([...ctx.network.edges.values()]).length, 0);
+  assert.equal(ctx.network.edges.get("0:0/50:0").width, 12);
+  assert.equal(ctx.network.edges.get("100:0/50:0").width, 12);
+  assert.equal(ctx.network.edges.get("50:0/50:40").width, 8);
+  assert.deepEqual(ctx.carPaths[0], [p(0, 0), p(50, 0), p(50, 40)]);
+  assert.deepEqual(ctx.coastRoadRuns[0], [p(0, 0), p(50, 0), p(100, 0)]);
+  assert.equal(ctx.network.edges.size, 3);
+}
+// Shared stems realign to an existing junction using the original 24-unit/16
+// candidate bound. Rotation cannot change graph ownership or the result.
+for (const turns of [0, 1, 2, 3]) {
+  const rotate = (x, z) => { for (let k = 0; k < turns; k++) [x, z] = [-z, x]; return p(x || 0, z || 0); };
+  const id = point => `${point.x}:${point.z}`;
+  const fixture = () => {
+    const ctx = context(), a = rotate(0, 0), target = rotate(20, 0), source = rotate(10, 0.2), far = rotate(24, -5);
+    ctx.primaryAnchorNodeId = id(a);
+    addNetworkEdge(ctx.network, a, target, true, false, true);
+    addNetworkEdge(ctx.network, target, rotate(40, 0), true, false, true);
+    addNetworkEdge(ctx.network, a, source, true);
+    addNetworkEdge(ctx.network, source, far, true);
+    addNetworkEdge(ctx.network, far, rotate(34, -15), true);
+    ctx.carPaths.push([a, source, far]);
+    return { ctx, a, target, source, far, hostId: [id(a), id(target)].sort().join("/") };
+  };
+  const { ctx, a, target, source, far, hostId } = fixture(), before = snapshot(ctx);
+  const candidate = endpointRelineCandidates(ctx, id(source)).find(candidate => candidate.hostId === hostId);
+  assert(candidate); assert.deepEqual(candidate.at, target); assert.equal(snapshot(ctx), before);
+  assert(endpointRelineCandidates(ctx, id(source)).length <= 16);
+  assert.equal(relineLooseEndpoint(ctx, id(source), hostId, target), 1);
+  assert.equal(groundJunctionFindings([...ctx.network.edges.values()]).length, 0);
+  assert.equal(ctx.network.edges.get(hostId).width, 12);
+  assert.equal(ctx.network.edges.get([id(target), id(far)].sort().join("/")).width, 8);
+  assert.deepEqual(ctx.carPaths[0], [a, target, far]);
+  for (const denial of ["bound", "narrow-host", "incompatible-purpose", "bridge"]) {
+    const test = fixture();
+    if (denial === "bound") test.ctx.landmarks.push({ id: "bound", kind: "tower", radius: 0, x: 0, z: 0, yaw: 0, access: { nodeId: id(test.source) } });
+    if (denial === "narrow-host") test.ctx.network.edges.get(test.hostId).width = 5;
+    if (denial === "incompatible-purpose") test.ctx.network.edges.get(test.hostId).purpose = "waterfront";
+    if (denial === "bridge") [...test.ctx.network.edges.values()].find(edge => edge.from === id(test.source) || edge.to === id(test.source)).bridge = true;
+    const original = snapshot(test.ctx);
+    assert(!endpointRelineCandidates(test.ctx, id(test.source)).some(candidate => candidate.hostId === test.hostId), denial);
+    assert.equal(snapshot(test.ctx), original);
+  }
+}
 // An explicitly requested joint relocation must handle a dry coastal blocker,
 // not only a wet model. Extra spacing is owner data, never a building-name test.
 {

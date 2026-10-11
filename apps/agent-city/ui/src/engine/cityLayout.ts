@@ -11,7 +11,7 @@ import { lotClearsRoads } from "./planner/lotRoadClearance";
 import { measureLayoutCapacity } from "./planner/layoutCapacity";
 import { closestPolylineSegment } from "./planner/footprint";
 import { findBlockLotCandidate, LAYOUT_PLACEMENT_WORK_CONFIG } from "./planner/blockLotCandidates";
-import { inspectBlockPlacement, type BlockPlacementInput } from "./planner/blockPlacement";
+import { inspectBlockPlacement, type BlockPlacementInput, type BlockPlacementResult } from "./planner/blockPlacement";
 import { civicMinimumSize, civicEnvelopeSize, GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE } from "./models/layoutPlacementGeometry";
 
 export type Vec2 = { x: number; z: number };
@@ -652,10 +652,25 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。
  *  第 i 座配套属于「第 i 座落成时会话最多的城区」之外按会话数加权轮转的城区，落在该城区楼群外缘
  *  最近的空地块上，彼此至少隔 60。上一版布局里已有的配套若地块仍空着就原地保留（刷新不搬家）。 */
-function layoutPlacementEnvironment(plan: ReturnType<typeof createCityPlan>, occupied: readonly Parcel[]): Omit<BlockPlacementInput, "block" | "footprint"> {
+type SitePlacementEnvironment = Pick<CityLayout, "roadEdges" | "publicSites" | "landmarks" | "highways" | "terrain">;
+function layoutPlacementEnvironment(plan: SitePlacementEnvironment, occupied: readonly Parcel[]): Omit<BlockPlacementInput, "block" | "footprint"> {
   return { roads: plan.roadEdges, sites: [...plan.publicSites, ...plan.landmarks.filter((site) => site.radius),
     ...occupied.map((parcel) => ({ x: parcel.x, z: parcel.z, radius: Math.hypot(parcel.width, parcel.depth) / 2 }))],
     highways: plan.highways, buildable: plan.terrain.buildable };
+}
+
+/** Generator/editor boundary: callers supply the renderer envelope and its real
+ * host face, not a bounding-box surrogate. Occupancy excludes the moving owner.
+ * This is sampled geometry admission, not full model/entrance certification. */
+export type SitePlacementFootprint = BlockPlacementInput["footprint"] & { blockId: string };
+export function checkSitePlacement(layout: CityLayout, footprint: SitePlacementFootprint, occupied: readonly Parcel[],
+  options: Pick<BlockPlacementInput, "terrainSampleBudget" | "cancelled"> = {}): BlockPlacementResult {
+  const hosts = layout.blocks.filter(block => block.id === footprint.blockId);
+  // Missing/ambiguous identities fail closed; never guess a nearby or larger face.
+  if (hosts.length !== 1) return { ok: false, reason: hosts.length ? "ambiguous-host-block" : "unknown-host-block",
+    polygon: [], terrainSamples: 0, scope: "sampled-rectangle-and-declared-circle-proxies", terrainCoverage: "at-most-one-unit-grid" };
+  return inspectBlockPlacement({ ...layoutPlacementEnvironment(layout, occupied), block: hosts[0], footprint,
+    cancelled: options.cancelled, terrainSampleBudget: options.terrainSampleBudget ?? LAYOUT_PLACEMENT_WORK_CONFIG.terrainSampleBudget });
 }
 
 type LayoutPlacementBudget = { limit: number; spent: number; remaining: number };

@@ -12,6 +12,7 @@ import { ferrisWheelModel } from "./landmarks/ferrisWheel";
 import { pagodaModel } from "./landmarks/pagoda";
 import { drawVillaComplex } from "./landmarks/villaComplex";
 import { drawSuspensionBridge } from "./landmarks/suspensionBridge";
+import { SITE_CLASSES } from "./siteClasses";
 
 /** 已声明化（BuildingModel）的建筑；其余 kind 仍走下面的手写 drawX（批 1 逐个迁）。守卫 verify-city-models 按这张表驱动。 */
 export const BUILDING_MODELS: BuildingModel[] = [tvTowerModel, pagodaModel, archModel, sailOperaModel, lighthouseModel, ferrisWheelModel];
@@ -66,4 +67,5 @@ export const LANDMARK_LABELS: Record<string, string> = {
   "villa-complex": "地中海庄园", // cityLandmarkVilla.ts 建造
   ...Object.fromEntries(BUILDING_MODELS.map((m) => [m.id, m.title])), // 已声明化的建筑：名称由 model.title 派生
 };
-export const CIVIC_LABELS: Record<string, string> = { school: "学校", mall: "商场", hospital: "医院" };
+export const CIVIC_LABELS: Record<string, string> = Object.fromEntries(SITE_CLASSES
+  .filter(item => item.family === "civic").map(item => [item.id.slice("civic:".length), item.title]));

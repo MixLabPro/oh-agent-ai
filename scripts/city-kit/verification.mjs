@@ -14,6 +14,9 @@ const newGeometryStages = ["verify-city-layout-envelopes", "verify-city-parcel-f
 synthetic.push(...newGeometryStages);
 synthetic.push("verify-city-layout-capacity");
 synthetic.push("verify-city-model-envelope");
+synthetic.push("verify-city-site-registry");
+groups.planning.push("verify-city-site-registry");
+groups.sites.push("verify-city-site-registry");
 groups.planning.push("verify-city-model-envelope");
 groups.sites.push("verify-city-model-envelope");
 groups.planning.push("verify-city-villa-placement");

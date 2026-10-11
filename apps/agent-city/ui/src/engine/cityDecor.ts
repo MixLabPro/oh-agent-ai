@@ -8,51 +8,62 @@
  */
 
 import { CIVIC_LABELS, LANDMARK_LABELS } from "./models/registry";
+import { siteClassOf, siteClassesForMesh } from "./models/siteClasses";
 
 export type DecorInfo = { title: string; category: string; body: string };
 
 const LANDMARK_NAMES = LANDMARK_LABELS; // 名称表在 models/registry.ts（单一来源）
 const CIVIC_NAMES = CIVIC_LABELS;
+const classTitle = (classId: string): string => {
+  const declaration = siteClassOf(classId);
+  if (!declaration) throw new Error(`missing decor class declaration: ${classId}`);
+  return declaration.title;
+};
 
 export function isDecorId(id: string | null | undefined): boolean {
   return typeof id === "string" && id.startsWith("decor:");
 }
 
 export function describeDecor(id: string): DecorInfo | null {
-  const [, kind, detail] = id.split(":");
+  if (decorDistrictId(id) !== null || id === "decor:district-landmark") return {
+    title: classTitle("district-landmark"), category: "城区地标 · 随规模出现",
+    body: "地标高度随本区会话数增长：会话越多，地标越高。" };
+  const [, kind, detail] = id.split("#")[0].split(":");
   switch (kind) {
     case "landmark":
       return { title: LANDMARK_NAMES[detail] ?? "地标", category: "致敬地标 · 装饰", body: "由岛屿种子挑选的城市地标。不代表任何会话，不随数据变化。" };
     case "civic":
       return { title: CIVIC_NAMES[detail] ?? "城市配套", category: "城市配套 · 随规模增长", body: "会话越多，城市配套越多（约每 45 个会话一座）。它反映城市规模，不代表单个会话。" };
     case "site":
-      if (detail && detail !== "civic") { const names: Record<string, string> = { station: "车站", stadium: "体育场", tower: "观景塔", park: "城市公园", harbor: "港口与码头" }; return { title: names[detail] ?? "市政设施", category: "公共用地 · 装饰", body: "随岛屿规划生成的公共设施，不代表任何会话。" }; }
+      if (detail && detail !== "civic") { return { title: siteClassOf(`public:${detail}`)?.title ?? "市政设施", category: "公共用地 · 装饰", body: "随岛屿规划生成的公共设施，不代表任何会话。" }; }
       return { title: "市政设施", category: "公共用地 · 装饰", body: "市政广场、车站、体育场、观景塔或港口。随岛屿规划生成，不代表任何会话。" };
     case "backdrop":
-      return { title: "背景楼", category: "城市氛围 · 不计入会话", body: "填充城市天际线的灰调背景楼，数量随会话数缩放。不可钻取，可在「城市设置」里关闭。" };
+      return { title: classTitle("context"), category: "城市氛围 · 不计入会话", body: "填充城市天际线的灰调背景楼，数量随会话数缩放。不可钻取，可在「城市设置」里关闭。" };
     case "massing":
-      return { title: "聚合楼群", category: "超出容量的会话", body: "会话数超过城市容量（4000 栋）时，多出来的会话合并成低细节楼群显示。" };
+      return { title: classTitle("scenery:massing"), category: "超出容量的会话", body: "会话数超过城市容量（4000 栋）时，多出来的会话合并成低细节楼群显示。" };
     case "seaside":
-      return { title: "海滨设施", category: "城市风貌 · 装饰", body: "沙滩、遮阳伞、躺椅、沙排场、游客、救生塔、码头与游艇等海滨装饰。不代表任何会话。" };
+      return { title: classTitle("scenery:seaside"), category: "城市风貌 · 装饰", body: "沙滩、遮阳伞、躺椅、沙排场、游客、救生塔、码头与游艇等海滨装饰。不代表任何会话。" };
     case "garden":
-      return { title: "城区花园与景观湖", category: "城区中心 · 随规模出现", body: "每个执行环境城区中心的花园与景观湖，城区地标立在它旁边；城区的会话楼从这里向外生长。" };
+      return { title: classTitle("garden"), category: "城区中心 · 随规模出现", body: "每个执行环境城区中心的花园与景观湖，城区地标立在它旁边；城区的会话楼从这里向外生长。" };
     case "volcano":
-      return { title: "火山", category: "远景 · 装饰", body: "海平线上的远景火山。不代表任何会话。" };
+      return { title: classTitle("scenery:volcano"), category: "远景 · 装饰", body: "海平线上的远景火山。不代表任何会话。" };
     default:
       return null;
   }
 }
 
+/** Selection consumers accept one-version legacy district ids, preserving
+ * colons within district identities rather than splitting them into kinds. */
+export function decorDistrictId(id: string | null | undefined): string | null {
+  if (!id) return null;
+  const legacy = "decor:landmark:district:", current = "decor:district-landmark#district-landmark:";
+  const value = id.startsWith(current) ? id.slice(current.length) : id.startsWith(legacy) ? id.slice(legacy.length) : "";
+  return value || null;
+}
+
 /** 网格名 → 装饰类别（拾取时沿父级链匹配；静态城缓存复用时名字随网格一起保留）。 */
 export function decorKindForName(name: string): string | null {
-  // 海滨酒店不在这里：它们现在是会话楼（酒店地块），点击走会话详情。
-  if (name.startsWith("city-landmark-")) return `landmark:${name.slice("city-landmark-".length)}`;
-  if (name.startsWith("city-civic-")) return "civic";
-  if (name.startsWith("city-public-sites-")) return "site";
-  if (name.startsWith("city-garden-")) return "garden";
-  if (name === "city-vice-context-facades" || name === "city-vice-context-rooftops") return "backdrop";
-  if (name === "city-massing") return "massing";
-  if (name === "city-lifeguard-towers" || name === "city-yachts" || name === "city-beach-furniture" || name === "city-beach-people" || name === "city-volleyball-courts" || name === "city-promenade-props" || name === "city-marina") return "seaside";
-  if (name === "city-sea-volcano") return "volcano";
-  return null;
+  // Unknown geometry stays unpickable instead of silently inheriting a prefix.
+  const routes = [...new Set(siteClassesForMesh(name).map(item => item.decorKind))];
+  return routes.length === 1 ? routes[0] : null;
 }

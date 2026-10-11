@@ -3,6 +3,7 @@ import { observeLocale, pluginLocale } from "./host";
 
 // Plugin-owned presentation catalog. Business DTOs and user excerpts are not translated.
 const english: Record<string, string> = {
+  "城区地标 · 随规模出现": "District landmark · Grows with scale",
   "解除视角锁定": "Unlock view",
   "锁定视角": "Lock view",
   "已锁定目标：左键拖动环绕，滚轮缩放。": "Target locked: left-drag to orbit, wheel to zoom.",

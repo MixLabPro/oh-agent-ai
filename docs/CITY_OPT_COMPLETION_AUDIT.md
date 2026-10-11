@@ -4,6 +4,60 @@
 不能把某一小批提交、相关单测通过或截图变好替代整个目标。实施分支 `worktree-city-opt`。
 本表是未完成项台账，不修改原 SPEC 的范围和合并标准。
 
+## 2026-10-12 对象注册表协作接口（B3前置，非整批完成）
+
+生成器现导出cityLayout.checkSitePlacement(layout, footprint, occupied, options?)。
+footprint须带真实blockId，缺失或重复宿主拒绝，不猜最近街区；尺寸由消费者提供实际renderer
+外廓，occupied须排除移动对象自身。生成器与接口共用同一layoutPlacementEnvironment，
+检查真实面/洞、完整道路、高架及原site/occupied圆代理，显式返回原partial scope。
+默认采样上限沿用500000，支持调用者剩余采样预算和取消；不是全城全操作预算完成。
+专项验证纯函数、真实洞、后段弯路、occupied/site、高架、未知/重复宿主及预算/取消；
+typecheck通过。生成器选择逻辑未改，编辑器尚未消费这个接口，不能记作B3完成。
+B0完整siteClasses、B1全部名称派生、B2实例拾取及B4配套稳定id/旧补丁映射均仍未完成；
+学校/商场/医院仍civic:index，不因市政用地已有固定id而记作B4完成。
+
+### B0准备层：类别/目录与布局来源登记
+
+新增纯siteClasses模块，登记8个族、30个类；31个目录条目恰有一个类归属，五个会话目录
+共享data:session。六个布局数组按kind/来源分类；致敬模型标题引用原纯模型叶声明。
+face-lot/face-reserve/parcel模式及minimumSize引用既有renderer声明，未硬写宽深常量。
+未知类保持unknown；支持class#instance与旧decor:site:kind查询，不改既有生产拾取返回值。
+实际实例包络/高度尚缺，pendingCapabilities显式保留，不把plot圆或旧PICK_HEIGHT冒充实体。
+合并city-civic-*及city-public-sites-*在同族多个类共享：目前只登记元数据，不能将此当作
+唯一网格实例归属证明；B2须根据piece/实例映射区分类别，仍待接入。
+守卫验证目录/标题、唯一类id、合成六数组分类、未知类、原minimumSize及生成器依赖方向，
+登记manifest66项、fast/planning/sites。typecheck与专项通过；真实380/1600全实例唯一id、
+renderer外廓/拾取高度、场景逐字节前后对照、全场景网格归属及编辑器跨层守卫尚未执行/实现。
+该准备层检查点a67dbfe6没有生产消费者导入siteClasses，未改生产规划/渲染逻辑；
+仍不记作B0完整验收通过。
+
+### B1生成器名称消费者接入（编辑器部分仍待）
+
+registry.CIVIC_LABELS改从SITE_CLASSES派生；cityDecor的市政设施、背景楼、花园、海滨、
+聚合与火山标题读取注册类，正文/通用fallback与市政厅原总览语义保持。
+相对a67dbfe6的33个完整describeDecor输出（含未知/通用id）JSON逐字节一致，
+未改生产选址、场景几何、decorKindForName或uiOverlays返回id。
+typecheck、site-registry、models（1110parts）及i18n-catalog（302entries）通过。
+site-registry新增运行时名称派生/fallback断言；编辑器controller.SITE_LABEL仍未迁移，
+真实场景前后逐字节对照仍待，因此不是B1全项或B0–B2整批验收通过。
+
+### B2声明驱动拾取与已知实例（合并市政网格仍待）
+
+decorKindForName现查siteClasses.meshNames，精确名优先；未知地标不再静默继承宽前缀。
+同族合并网格仅返回共同decorKind，不声称已定位具体类；异路由匹配failclosed。
+civicPieces已知mesh/index现返回decor:civic:kind#civic:id，不再丢实际实例id；
+城区地标仅在layout中恰有一个district实例时返回class#instance，缺失/重复退为类级。
+describeDecor忽略实例尾部后读取类文案，城区地标修正为随规模出现，不再致敬地标。
+CityExperience城区数据面板同时接受新旧id，并保留含冒号的district身份；市政总览仍保留
+decor:site:civic。没有将市政合并网格的nearest-point/radius推测升级为精确实例id。
+新增实际THREE mesh/parent-chain专项、错误instanceIndex、缺失/重复district与旧id兼容；
+typecheck、registry、models及i18n通过，新增英文分类键；production build session25094
+exit0（254modules、3.69s），仍有大chunk警告，不作为性能预算通过证据。
+重复civicPieces拒绝及旧district类查找补齐后，build session9318再次exit0（3.54s）。
+真实380/1600全城网格归属/拾取前后对比、浏览器交互、编辑器优先消费实例与PICK_HEIGHT
+删除、未知模型外廓和稳定id迁移仍待，因此B0–B4未整体完成。UIUX检索未匹配本问题，
+采用通用一致性检查保留市政/城区功能面板、关闭和聚焦操作；不增加无关视觉/交互变化。
+
 ## 2026-10-12 声明驱动实际走廊准入：一个庄园阻断恢复（最新，整体未完成）
 
 - 本批已提交为8881f482（基于bb76bc87）。完整渲染XY外廓与局部ground-only声明现在分别登记；
@@ -35,7 +89,41 @@
 9道路、46邻接拒绝，仍无预筛通过；1703310796/t2 session97550 exit0：347占地/岸线、
 5道路、31邻接、17高架拒绝，仍无预筛通过。第二样本已修复的旧朝向候选不能被
 更差的自动朝向替代；没有据此接入生产yaw改写，也不能声称穷尽所有可行姿态。
-完整planning session17602已启动，加载已提交生产源码；尚待终态，不能算通过。
+完整planning session17602终态exit1，止于2000000000/t1的1处未接近接关系，未执行30岛主批。
+同源码仅禁用新XY capability对照session10872：R390、293边及同一关系完全一致，
+证明该失败不是8881f482的庄园走廊权限造成。不得把旧30岛通过代替当前默认围合版本。
+
+### 共享走廊节点联合定线（2026-10-12）
+
+近接拆边后的exact straight-ground重复子段原未启用严格coalescing，现调用既有权限：
+同形状/结构/purpose、保留双lineage和较宽等级；不删独立支路。新增已知答案验证12宽宿主、
+8宽支路、车流与宿主折线引用均保留。只有开启该权限仍不能解决生产样本的锐角，未放宽35度。
+endpointRelineCandidates现覆盖与更宽宿主共享stem的degree2弯点：仅原0.5近接范围识别，
+在原24定线范围/16候选上限接向既有宿主路口；固定/绑定入口、桥、结构或purpose不兼容拒绝。
+四旋转合成成功/拒绝、网络补丁、connect、repair-safety及typecheck通过。
+2000000000/t1 session78908：未接关系1→0，联合定线与锐角修复有归因，R390不变；
+体育场仍未满足，Outcome.failed保持，不称全岛完成。较早13941仅开启coalescing仍exit1。
+本批已提交为6a86232b。新版完整planning session20252终态exit1：通过全部10个t1样本，
+随后在1703350391/t2因villa-complex的foundation-gap、foundation-water、foundation-relief
+失败；不是30岛通过，尚未完成t2/t5主批。保持原基础准入断言，不以已修命名样本替代主批。
+
+### 冻结源码游戏回归终态及新增基础阻断
+
+6a86232b源码的game模块session95642终态exit0：8/8阶段通过（含typecheck与harness），
+总时383951ms；race生成80、fallback0、unavailable0，world覆盖12布局2013障碍盒。
+这是游戏模块证据，不证明完整planning、无缓存full、物理模型全覆盖或跨引擎验收通过。
+
+新增1703350391/t2诊断session17220 exit0：R551.5432893255071，原400位置预筛拒绝
+299占地、39道路、62邻接。实际XY暂清的5个位置均仍与observation-tower及working-harbor
+名义预留重叠；其中仅3个主网距离满足原54上限。其岸线满足原104.205853界限，
+高架实际外廓清净，但邻居尚无实际实体声明，不能直接忽略其plot保护。
+同位置局部岸线yaw反事实未改善预筛分布；未改生产yaw、候选数、岸线或邻居保护。
+6a86232b重新诊断session62642 exit0确认同一画像：26项required unmet0，但solve前后
+庄园位置不变，实际海面下250个基础样点、maxGap4.9334435514642685，Outcome.failed。
+初始岸线264候选有63个基础可行位置被旧圆道路筛拒绝，另6个被owner-spacing拒绝；
+这只证明阶段合同不一致的排查方向，不证明63个位置满足完整实际路幅或其它约束。
+后续修复须统一初始选址/后置迁移/最终约束的已声明实体净距合同，并完成未知邻居的
+真实声明或联合预留修复；不能将这些暂清候选标作合法落位或把基础失败改为容忍。
 
 ## 2026-10-12 全折线消费者与实体外廓检查（最新，整体未完成）
 
