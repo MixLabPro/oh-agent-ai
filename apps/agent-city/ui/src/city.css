@@ -177,9 +177,11 @@
 .city-repair-help { color: var(--city-muted); font-size: 11px; }
 .city-repair-entry { position: absolute; right: 24px; top: 64px; z-index: 5; }
 .city-repair-tools { display: flex; gap: 6px; }
-.city-repair-tools button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; }
-.city-repair-tools kbd { font-size: 10px; opacity: 0.7; border: 1px solid var(--city-border); border-radius: 3px; padding: 0 3px; line-height: 14px; }
+.city-repair-tools button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 3px; white-space: nowrap; padding-left: 4px; padding-right: 4px; }
+.city-repair-tools kbd { font-size: 9px; opacity: 0.7; border: 1px solid var(--city-border); border-radius: 3px; padding: 0 3px; line-height: 14px; }
 .city-repair-widths { display: flex; gap: 6px; }
 .city-repair-widths button { flex: 1; }
 .city-app .city-repair button.is-active { background: #2f6fd8; border-color: #8ab4ff; }
 .city-repair-reason { color: #ffb4a8; }
+.city-repair-site { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.city-app .city-repair-site button { border-color: #ff8a7a; color: #ffd2cb; }

@@ -26,7 +26,11 @@
  */
 import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { clearsHighways, roadNodeId } from "./cityPlan";
-import type { CityLayout, Parcel, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
+import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
+import { applySiteOps, type SiteOp } from "./planSites";
+import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectsOverlap, reservedParcelIds } from "./planGeometry";
+
+export type { SiteOp } from "./planSites";
 
 export const PLAN_PATCH_VERSION = 1;
 
@@ -45,6 +49,8 @@ export type PlanPatchV1 = {
   updatedAt: number;
   /** 道路操作日志，按顺序重放。 */
   roadOps: RoadOp[];
+  /** 设施（公共设施/花园/城区地标/背景楼）操作日志，按顺序重放，带位置校验（docs/…SPEC §14）。 */
+  siteOps: SiteOp[];
   /** 会话楼 id（session_ref）→ 新地块 id（Parcel.id）。 */
   buildingMoves: Record<string, string>;
   /** 压制的背景楼 id（"context:<parcelId>"，M3）。 */
@@ -53,16 +59,16 @@ export type PlanPatchV1 = {
 
 /** 条目无法套用的原因——诚实降级：丢弃 + 上报，绝不猜测替代目标。 */
 export type PatchStaleEntry = {
-  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "context-suppress";
+  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "site-remove" | "site-move" | "context-suppress";
   id: string;
-  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate";
+  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked";
   detail: string;
 };
 
 export type PatchedLayout = { layout: CityLayout; stale: PatchStaleEntry[]; patchHash: string };
 
 export function emptyPlanPatch(seed: number, scaleTier: number): PlanPatchV1 {
-  return { version: PLAN_PATCH_VERSION, seed, scaleTier, updatedAt: 0, roadOps: [], buildingMoves: {}, suppressedContext: [] };
+  return { version: PLAN_PATCH_VERSION, seed, scaleTier, updatedAt: 0, roadOps: [], siteOps: [], buildingMoves: {}, suppressedContext: [] };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -88,6 +94,13 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     else if (op.t === "move" && typeof op.node === "string") { const to = point(op.to); if (to) roadOps.push({ t: "move", node: op.node, to }); }
     else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); if (from && to) roadOps.push({ t: "add", from, to, width: op.width }); }
   }
+  const siteOps: SiteOp[] = [];
+  if (Array.isArray(raw.siteOps)) for (const op of raw.siteOps) {
+    if (!isRecord(op) || typeof op.id !== "string") continue;
+    const at = point(op.at) ?? undefined;
+    if (op.t === "remove") siteOps.push({ t: "remove", id: op.id, ...(at ? { at } : {}) });
+    else if (op.t === "move" && typeof op.to === "string") siteOps.push({ t: "move", id: op.id, to: op.to, ...(at ? { at } : {}) });
+  }
   const buildingMoves: Record<string, string> = {};
   if (isRecord(raw.buildingMoves)) for (const [id, parcelId] of Object.entries(raw.buildingMoves)) {
     if (typeof parcelId === "string") buildingMoves[id] = parcelId;
@@ -96,7 +109,7 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
   return {
     version: PLAN_PATCH_VERSION, seed: raw.seed, scaleTier: raw.scaleTier,
     updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : 0,
-    roadOps, buildingMoves, suppressedContext: strings(raw.suppressedContext),
+    roadOps, siteOps, buildingMoves, suppressedContext: strings(raw.suppressedContext),
   };
 }
 
@@ -106,102 +119,15 @@ export function hashPlanPatch(patch: PlanPatchV1): string {
     version: patch.version,
     scaleTier: patch.scaleTier,
     roadOps: patch.roadOps,
+    siteOps: patch.siteOps,
     buildingMoves: Object.keys(patch.buildingMoves).sort().map((id) => [id, patch.buildingMoves[id]]),
     suppressedContext: [...patch.suppressedContext].sort(),
   });
   return String(Math.round(hashSeed(canonical) * 1e9));
 }
 
-const quantize = (p: Vec2): Vec2 => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
 
-/** M1 锁定口径（SPEC §7.2）：桥面、桥头引道、滨海段不可编辑——它们的几何由海滨带/桥锚定，
- *  拖动会连锁破坏 seaside/桥塔语义。 */
-export function edgeLocked(edge: RoadEdge): boolean {
-  return edge.bridge === true || edge.structure === "deck" || edge.structure === "ground-approach" || edge.purpose === "waterfront";
-}
-
-/** 楼的净空要避开的路：地面路（非桥）。体检与编辑校验共用这一个口径——
- *  曾经校验查全部路段、体检只查地面路，编辑器会拦下体检根本不报的落位（「三者同源」被破坏）。 */
-export function clearanceRoads(layout: CityLayout): RoadEdge[] {
-  return layout.roadEdges.filter((edge) => !edge.bridge);
-}
-
-/** 全城地块索引：街区地块 + 已落楼地块（酒店地块不进 layout.blocks，只存在于 slots 里）。 */
-export function parcelIndex(layout: CityLayout): Map<string, Parcel> {
-  const index = new Map<string, Parcel>();
-  for (const block of layout.blocks) for (const parcel of block.parcels) index.set(parcel.id, parcel);
-  for (const district of layout.districts) for (const parcel of district.slots.values()) if (!index.has(parcel.id)) index.set(parcel.id, parcel);
-  return index;
-}
-
-/** 被占用/预留的地块：会话楼、配套整街区、小区花园街区、城区地标、未压制的背景楼。
- *  编辑校验与套用共用——套用曾只看会话楼，刷新后目标地块冒出背景楼时照套不误，两楼叠在一起。 */
-export function reservedParcelIds(layout: CityLayout, patch: PlanPatchV1): Set<string> {
-  const parcels = parcelIndex(layout);
-  const blockOf = new Map<string, string[]>();
-  for (const block of layout.blocks) for (const parcel of block.parcels) {
-    const list = blockOf.get(parcel.blockId); if (list) list.push(parcel.id); else blockOf.set(parcel.blockId, [parcel.id]);
-  }
-  const reserved = new Set<string>();
-  for (const district of layout.districts) for (const parcel of district.slots.values()) reserved.add(parcel.id);
-  for (const civic of layout.civics) for (const parcelId of blockOf.get(civic.parcelId) ?? [civic.parcelId]) reserved.add(parcelId);
-  for (const garden of layout.gardens) for (const parcelId of blockOf.get(garden.blockId) ?? []) reserved.add(parcelId);
-  for (const landmark of layout.districtLandmarks ?? []) reserved.add(landmark.parcelId);
-  const suppressed = new Set(patch.suppressedContext);
-  for (const context of layout.contextBuildings) {
-    const parcelId = context.id.replace(/^context:/, "");
-    if (parcels.has(parcelId) && !suppressed.has(context.id)) reserved.add(parcelId);
-  }
-  return reserved;
-}
-
-/** 朝向矩形与路段带是否相交（口径同 cityLayout 的 lotClearOfRoads：局部轴投影 + 路幅半宽外扩）。 */
-export function rectClearOfEdges(rect: { x: number; z: number; yaw: number; width: number; depth: number }, edges: readonly RoadEdge[], pad = 0.5): boolean {
-  const ax = Math.sin(rect.yaw); const az = Math.cos(rect.yaw); // 局部 z 轴（进深）
-  const bx = az; const bz = -ax;                                // 局部 x 轴（面宽）
-  for (const edge of edges) {
-    const half = edge.width / 2 + pad;
-    for (let i = 1; i < edge.points.length; i += 1) {
-      const a = edge.points[i - 1]; const b = edge.points[i];
-      const len = Math.hypot(b.x - a.x, b.z - a.z);
-      for (let d = 0; d <= len; d += 1.5) {
-        const t = len ? d / len : 0;
-        const dx = a.x + (b.x - a.x) * t - rect.x; const dz = a.z + (b.z - a.z) * t - rect.z;
-        if (Math.abs(dx * bx + dz * bz) < rect.width / 2 + half && Math.abs(dx * ax + dz * az) < rect.depth / 2 + half) return false;
-      }
-    }
-  }
-  return true;
-}
-
-export type BuildingRect = { x: number; z: number; yaw: number; width: number; depth: number };
-
-/**
- * 楼的实际占地矩形（朝向随地块）：非塔楼取地块面宽/进深的 0.92/0.9（同 FlightWorld 的 long 口径），
- * 塔楼/地标取 footprint 方形。**不能**用 FlightWorld 的保守 AABB（地块对角线方形，半宽 ≈ 4.7）：
- * 同街区地块间距 ≈ 7.2，相邻两楼必然「相交」——真实城市 380 楼报 253 条、1600 楼报 1111 条
- * buildingOverlap error，体检被噪声淹没。碰撞要保守，重叠判定要贴身，两件事不能共用一个包络。
- */
-export function buildingRect(building: Pick<CityBuilding, "footprint" | "archetype">, slot: Parcel): BuildingRect {
-  if (building.archetype === "tower" || building.archetype === "landmark") {
-    return { x: slot.x, z: slot.z, yaw: slot.yaw, width: building.footprint, depth: building.footprint };
-  }
-  return { x: slot.x, z: slot.z, yaw: slot.yaw, width: slot.width * 0.92, depth: slot.depth * 0.9 };
-}
-
-/** 两个朝向矩形是否相交（分离轴定理，四根轴）。贴边（间隙 ≤ 1e-6）不算相交。 */
-export function rectsOverlap(a: BuildingRect, b: BuildingRect): boolean {
-  const axesOf = (r: BuildingRect) => [{ x: Math.cos(r.yaw), z: -Math.sin(r.yaw) }, { x: Math.sin(r.yaw), z: Math.cos(r.yaw) }];
-  const extent = (r: BuildingRect, axis: Vec2) => {
-    const [u, v] = axesOf(r);
-    return Math.abs(u.x * axis.x + u.z * axis.z) * r.width / 2 + Math.abs(v.x * axis.x + v.z * axis.z) * r.depth / 2;
-  };
-  for (const axis of [...axesOf(a), ...axesOf(b)]) {
-    const gap = Math.abs((b.x - a.x) * axis.x + (b.z - a.z) * axis.z);
-    if (gap >= extent(a, axis) + extent(b, axis) - 1e-6) return false;
-  }
-  return true;
-}
+export { edgeLocked, clearanceRoads, parcelIndex, reservedParcelIds, rectClearOfEdges, buildingRect, rectsOverlap, quantize, type BuildingRect } from "./planGeometry";
 
 /** 编辑前校验（SPEC §7.3）：blockers 非空必须拒绝提交；warnings 只提示。
  *  `layout` 是当前 effective 布局（已套补丁），校验看的是用户眼前的城市。 */
@@ -215,7 +141,7 @@ export function validateBuildingMove(layout: CityLayout, model: CityModel, patch
   const target = parcels.get(targetParcelId);
   if (!target) return { blockers: ["missing-parcel"], warnings };
   const ownParcelId = home.slots.get(buildingId)?.id;
-  const reserved = reservedParcelIds(layout, patch);
+  const reserved = reservedParcelIds(layout, patch.suppressedContext);
   // 自己当前所在地块不算被占（原地重放、换过去再换回来都合法）。
   const occupied = (reserved.has(targetParcelId) && ownParcelId !== targetParcelId)
     // 补丁里已有别的楼要搬去同一地块 → 冲突。
@@ -251,6 +177,11 @@ export function layoutPinsFor(patch: PlanPatchV1 | null | undefined): { scaleTie
 /** 编辑器写补丁：追加一个道路操作（引用生效布局里的当前 id）。 */
 export function appendRoadOp(patch: PlanPatchV1, op: RoadOp, now = Date.now()): PlanPatchV1 {
   return { ...patch, updatedAt: now, roadOps: [...patch.roadOps, op] };
+}
+
+/** 编辑器写补丁：追加一个设施操作（at = 设施当前位置，用来在重放时校验「还是同一座」）。 */
+export function appendSiteOp(patch: PlanPatchV1, op: SiteOp, now = Date.now()): PlanPatchV1 {
+  return { ...patch, updatedAt: now, siteOps: [...patch.siteOps, op] };
 }
 
 /** 端点离已有路口这么近就接到路口上。 */
@@ -366,7 +297,7 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
   return { nodes: state.nodes, edges: state.edges, endMap };
 }
 
-/** 套用补丁（SPEC §5；顺序 道路日志 → buildingMoves → 派生重算 → suppressedContext）。
+/** 套用补丁（SPEC §5；顺序 道路日志 → 设施日志 → buildingMoves → 派生重算 → suppressedContext）。
  *  不改入参；失效条目进 stale。 */
 export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedLayout {
   const stale: PatchStaleEntry[] = [];
@@ -377,6 +308,7 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     const detail = `补丁写于第 ${patch.scaleTier} 档，城市已扩容到第 ${layout.scaleTier} 档`;
     for (const id of Object.keys(patch.buildingMoves).sort()) stale.push({ kind: "building-move", id, reason: "tier-changed", detail });
     patch.roadOps.forEach((op, index) => stale.push({ kind: op.t === "drop" ? "road-drop" : op.t === "move" ? "road-move" : "road-add", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
+    patch.siteOps.forEach((op, index) => stale.push({ kind: op.t === "remove" ? "site-remove" : "site-move", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
     for (const id of [...patch.suppressedContext].sort()) stale.push({ kind: "context-suppress", id, reason: "tier-changed", detail });
     return { layout, stale, patchHash };
   }
@@ -386,11 +318,15 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   const roadNodes = replayed ? replayed.nodes : layout.roadNodes;
   const roadEdges = replayed ? replayed.edges : layout.roadEdges;
 
+  // ── 2. 设施操作日志（删/移）：先于会话楼移动套用，后者看到的是设施改动后的占用 ──
+  const sites = patch.siteOps.length ? applySiteOps(layout, patch.siteOps, patch.suppressedContext, stale) : null;
+  const view: CityLayout = sites ? { ...layout, ...sites } : layout;
+
   // ── 3. buildingMoves：目标缺失/被占（按套用顺序先到先得）→ stale；否则换 slot 重算地面高度 ──
   const districts = layout.districts.map((district) => ({ ...district, slots: new Map(district.slots), grounds: new Map(district.grounds), carPaths: district.carPaths }));
   if (Object.keys(patch.buildingMoves).length) {
-    const parcels = parcelIndex(layout);
-    const taken = reservedParcelIds(layout, patch);
+    const parcels = parcelIndex(view);
+    const taken = reservedParcelIds(view, patch.suppressedContext);
     for (const buildingId of Object.keys(patch.buildingMoves).sort()) {
       const targetId = patch.buildingMoves[buildingId];
       const home = districts.find((district) => district.slots.has(buildingId));
@@ -428,11 +364,11 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   }
 
   // ── 5. suppressedContext（M3 透传）──
-  let { contextBuildings } = layout;
+  let { contextBuildings } = view;
   const suppressed = new Set(patch.suppressedContext);
   if (suppressed.size) {
     // 按原始集合逐条比对：曾以「总数没变」为前提，只要有一条压制生效，其余不存在的 id 就不再上报。
-    const existing = new Set(layout.contextBuildings.map((context) => context.id));
+    const existing = new Set(view.contextBuildings.map((context) => context.id));
     for (const id of [...suppressed].sort()) if (!existing.has(id)) stale.push({ kind: "context-suppress", id, reason: "missing-context", detail: "背景楼不存在（布局重算后未生成）" });
     contextBuildings = contextBuildings.filter((context) => !suppressed.has(context.id));
   }
@@ -442,5 +378,5 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     ? layout.activityKey // 叠套时不重复追加指纹
     : `${layout.activityKey ?? ""}${suffix}`;
 
-  return { layout: { ...layout, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey }, stale, patchHash };
+  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey }, stale, patchHash };
 }

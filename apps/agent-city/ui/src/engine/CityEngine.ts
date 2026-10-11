@@ -52,9 +52,11 @@ export type PhotoView = { position: number[]; target: number[]; fov: number; ela
 export type CameraOwner = "orbit" | "cinematic" | "game";
 
 /** 规划修复模式的点击钩子：引擎把一次选取手势翻成「点中的会话楼/非楼物体 id + 点到的地面坐标」交给它，自己不再选楼/飞镜头。 */
-export type RepairClick = { pickedId: string | null; ground: { x: number; z: number } | null };
+/** 选取手势的射线（世界坐标）：设施拾取按占地盒求交，不能只靠射线与地形的交点（高楼会把交点推到楼后面）。 */
+export type RepairRay = { origin: { x: number; y: number; z: number }; direction: { x: number; y: number; z: number } };
+export type RepairClick = { pickedId: string | null; ground: { x: number; z: number } | null; ray: RepairRay };
 /** onMove：指针移动时的地面点（离开画布/朝天为 null）——画路/橡皮擦的悬停预览用。 */
-export type RepairHook = { onClick(click: RepairClick): void; onMove?(ground: { x: number; z: number } | null): void };
+export type RepairHook = { onClick(click: RepairClick): void; onMove?(ground: { x: number; z: number } | null, ray: RepairRay | null): void };
 
 export type CityEngineOptions = {
   canvas: RenderCanvas;
@@ -242,7 +244,7 @@ export class CityEngine {
       const rect = interactiveCanvas.getBoundingClientRect();
       this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
       this.pointerMoved = true;
-      this.repairHook?.onMove?.(this.groundPointAtPointer());
+      if (this.repairHook?.onMove) { const ground = this.groundPointAtPointer(); this.repairHook.onMove(ground, this.currentRay()); }
       this.noteActivity();
     };
     const onPointerDown = (event: PointerEvent) => {
@@ -275,7 +277,7 @@ export class CityEngine {
     };
     const onPointerCancel = () => { this.pointerDown = null; };
     const onPointerLeave = () => {
-      this.repairHook?.onMove?.(null);
+      this.repairHook?.onMove?.(null, null);
       this.pointerClient = null;
       this.hoveredId = null;
       this.parts?.setHovered(null);
@@ -1109,6 +1111,12 @@ export class CityEngine {
     return Number.isFinite(x) && Number.isFinite(z) ? { x, z } : null;
   }
 
+  /** 指针射线（世界坐标），取自最近一次 setFromCamera。 */
+  private currentRay(): RepairRay {
+    const { origin, direction } = this.raycaster.ray;
+    return { origin: { x: origin.x, y: origin.y, z: origin.z }, direction: { x: direction.x, y: direction.y, z: direction.z } };
+  }
+
   /** 把相机飞到地面一点（体检「定位」用）。 */
   focusPoint(x: number, z: number): void {
     this.releaseOrbitLock();
@@ -1121,7 +1129,8 @@ export class CityEngine {
     if (!this.parts) return;
     if (this.repairHook) {
       const picked = this.pick();
-      this.repairHook.onClick({ pickedId: picked, ground: this.groundPointAtPointer() });
+      const ground = this.groundPointAtPointer();
+      this.repairHook.onClick({ pickedId: picked, ground, ray: this.currentRay() });
       return;
     }
     const id = this.pick();

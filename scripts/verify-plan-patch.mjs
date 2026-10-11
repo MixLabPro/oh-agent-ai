@@ -306,7 +306,7 @@ const snap = (layout) => JSON.stringify({
 // (l) 存档宽容读取：曾 `{...c, 默认, ...c}`，`edgeDrops: null` 直接让套用抛异常；旧开发版两张表转日志。
 {
   const coerced = coercePlanPatch({ version: 1, seed: 74031, scaleTier: 1, nodeMoves: { a: { x: 1, z: 2 }, bad: { x: "1" } }, edgeDrops: null, buildingMoves: { b1: "p3", b2: 9 }, suppressedContext: ["context:x", 3] });
-  assert.deepEqual(coerced, { version: 1, seed: 74031, scaleTier: 1, updatedAt: 0, roadOps: [{ t: "move", node: "a", to: { x: 1, z: 2 } }], buildingMoves: { b1: "p3" }, suppressedContext: ["context:x"] });
+  assert.deepEqual(coerced, { version: 1, seed: 74031, scaleTier: 1, updatedAt: 0, roadOps: [{ t: "move", node: "a", to: { x: 1, z: 2 } }], siteOps: [], buildingMoves: { b1: "p3" }, suppressedContext: ["context:x"] });
   assert.doesNotThrow(() => applyPlanPatch(makeLayout(), coerced));
   const legacy = coercePlanPatch({ version: 1, seed: 1, scaleTier: 1, edgeDrops: ["0:0/100:0"], nodeMoves: { "100:100": { x: 110, z: 110 } } });
   assert.deepEqual(legacy.roadOps, [{ t: "drop", edge: "0:0/100:0" }, { t: "move", node: "100:100", to: { x: 110, z: 110 } }], "legacy tables become a log: drops first, then moves");

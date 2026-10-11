@@ -9,18 +9,18 @@ import type { CityModel } from "../cityModel";
 import type { CityEngine } from "../engine/CityEngine";
 import type { PlanIssue } from "../engine/planAudit";
 import { RepairController, type RepairState, type RepairTool, type RoadWidth } from "./controller";
-import { ParcelOverlay, type OverlayMarker, type OverlayRibbon } from "./overlay";
+import { ParcelOverlay, type OverlayMarker, type OverlayRibbon, type OverlaySiteMark } from "./overlay";
 import { installPlanRepairDebug, planDevEnabled, type PlanRepairSession } from "./session";
 
 export type RepairInfo = {
-  counts: { buildingMoves: number; roadOps: number; roadAdds: number; roadDrops: number; suppressedContext: number } | null;
+  counts: { buildingMoves: number; roadOps: number; roadAdds: number; roadDrops: number; siteOps: number; suppressedContext: number } | null;
   staleCount: number;
   canUndo: boolean;
   canRedo: boolean;
   saveFailed: boolean;
 };
 
-const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], drawStart: null, roadWidth: 5, preview: null, message: null };
+const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, roadWidth: 5, preview: null, message: null };
 const NO_INFO: RepairInfo = { counts: null, staleCount: 0, canUndo: false, canRedo: false, saveFailed: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
@@ -62,6 +62,12 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         addRoad: (from, to, width) => session.addRoad(from, to, width),
         validateDrop: (id) => session.validateDrop(id),
         dropEdge: (id) => session.dropEdge(id),
+        pickSite: (ray) => session.pickSite(ray),
+        siteById: (id) => session.siteById(id),
+        siteTargets: (site) => session.siteTargets(site),
+        siteTargetAt: (site, x, z) => session.siteTargetAt(site, x, z),
+        moveSite: (site, targetId) => session.moveSite(site, targetId),
+        removeSite: (site) => session.removeSite(site),
       });
       controller.subscribe((next) => { setState(next); syncInfo(); }); // 点击触发的编辑也要同步补丁计数/撤销态
       controllerRef.current = controller;
@@ -93,7 +99,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     if (!current || !controller) return;
     const overlay = new ParcelOverlay();
     current.addOverlay(overlay.group);
-    current.setRepairHook({ onClick: (click) => controller.click(click), onMove: (ground) => controller.hover(ground) });
+    current.setRepairHook({ onClick: (click) => controller.click(click), onMove: (ground, ray) => controller.hover(ground, ray) });
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
@@ -105,7 +111,8 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase" };
+      if ((event.key === "Delete" || event.key === "Backspace") && controller.snapshot.tool === "site" && controller.snapshot.site) { event.preventDefault(); controller.removeSelected(); syncInfo(); return; }
+      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase", s: "site" };
       if (tool[event.key.toLowerCase()]) { event.preventDefault(); controller.setTool(tool[event.key.toLowerCase()]); }
     };
     window.addEventListener("keydown", onKey);
@@ -128,10 +135,16 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     const overlay = overlayRef.current; const layout = engine.current?.currentLayout;
     if (!overlay || !layout) return;
     const heightAt = (x: number, z: number) => layout.terrain.height(x, z);
-    overlay.setParcels(state.candidates.map((candidate) => ({
-      x: candidate.x, z: candidate.z, y: Math.max(0, heightAt(candidate.x, candidate.z)),
-      yaw: candidate.yaw, width: candidate.width, depth: candidate.depth,
+    // 绿色目标：移楼工具看候选地块，设施工具看合法的空街区/空地块。
+    const targets = state.tool === "site" ? state.siteTargets : state.candidates.map((candidate) => ({ x: candidate.x, z: candidate.z, yaw: candidate.yaw, width: candidate.width, depth: candidate.depth }));
+    overlay.setParcels(targets.map((target) => ({
+      x: target.x, z: target.z, y: Math.max(0, heightAt(target.x, target.z)),
+      yaw: target.yaw, width: target.width, depth: target.depth,
     })));
+    const marks: OverlaySiteMark[] = [];
+    if (state.preview?.kind === "site") marks.push({ ...state.preview.rect, y: Math.max(0, heightAt(state.preview.rect.x, state.preview.rect.z)), tone: "hover" });
+    if (state.site) marks.push({ x: state.site.x, z: state.site.z, yaw: state.site.yaw, width: state.site.width, depth: state.site.depth, y: Math.max(0, heightAt(state.site.x, state.site.z)), tone: "selected" });
+    overlay.setSiteMarks(marks);
     const ribbons: OverlayRibbon[] = []; const markers: OverlayMarker[] = [];
     const { preview, drawStart } = state;
     if (preview?.kind === "erase") ribbons.push({ points: preview.points, width: preview.width, tone: preview.ok ? "erase" : "erase-blocked" });
@@ -139,7 +152,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     if (preview?.kind === "snap") markers.push({ ...preview.at, tone: preview.ok ? "snap" : "snap-blocked" });
     if (drawStart) markers.push({ x: drawStart.x, z: drawStart.z, tone: "start" });
     overlay.setPreview(ribbons, markers, heightAt);
-  }, [state.candidates, state.preview, state.drawStart, state.active]);
+  }, [state.candidates, state.siteTargets, state.site, state.preview, state.drawStart, state.active, state.tool]);
 
   useEffect(() => () => {
     controllerRef.current?.exit();
@@ -157,6 +170,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     enter: () => { if (options.blocked || !options.model) return; withSession((_s, controller) => controller.enter()); },
     exit: () => { auditOpen.current = false; setIssues(null); controllerRef.current?.exit(); },
     setTool: (tool: RepairTool) => withSession((_s, controller) => controller.setTool(tool)),
+    removeSelected: () => withSession((_s, controller) => controller.removeSelected()),
     setRoadWidth: (width: RoadWidth) => withSession((_s, controller) => controller.setRoadWidth(width)),
     undo: () => withSession((session, controller) => { if (session.undo()) controller.refresh({ kind: "ok", text: "已撤销" }); }),
     redo: () => withSession((session, controller) => { if (session.redo()) controller.refresh({ kind: "ok", text: "已重做" }); }),

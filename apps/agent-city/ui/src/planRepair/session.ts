@@ -8,7 +8,9 @@
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, type PlanIssue } from "../engine/planAudit";
-import { appendRoadOp, emptyPlanPatch, validateBuildingMove, type PlanPatchV1 } from "../engine/planPatch";
+import { appendRoadOp, appendSiteOp, emptyPlanPatch, validateBuildingMove, type PlanPatchV1 } from "../engine/planPatch";
+import { listSites, pickSite, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
+import type { RepairRay } from "../engine/CityEngine";
 import { nearestEdgeAt, snapPoint, validateEdgeDrop, validateNodeMove, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
 import type { Vec2 } from "../engine/cityLayout";
 import { cityPlanPatchStore, emptyPlanPatchStore, type PlanPatchStoreV1 } from "../data/planPatch";
@@ -22,6 +24,8 @@ export function planDevEnabled(): boolean {
 export type RepairCandidate = { parcelId: string; x: number; z: number; yaw: number; width: number; depth: number; distance: number; warnings: string[] };
 
 export type EditResult = { ok: true; patch: PlanPatchV1; warnings: string[] } | { ok: false; reason: string; blockers?: string[] };
+/** 设施搬家后 id 可能变（背景楼的 id 由地块决定），成功时带回新 id 供编辑器重新选中。 */
+export type SiteEditResult = EditResult & { siteId?: string };
 
 const UNDO_LIMIT = 100;
 const SAVE_DEBOUNCE_MS = 400;
@@ -72,7 +76,7 @@ export class PlanRepairSession {
   }
 
   private apply(next: PlanPatchV1 | null): void {
-    const empty = !next || (!Object.keys(next.buildingMoves).length && !next.roadOps.length && !next.suppressedContext.length);
+    const empty = !next || (!Object.keys(next.buildingMoves).length && !next.roadOps.length && !next.siteOps.length && !next.suppressedContext.length);
     const patch = empty ? null : next;
     this.engine.setPlanPatch(patch);
     const seed = this.seed;
@@ -132,6 +136,56 @@ export class PlanRepairSession {
     const patch = appendRoadOp(base.patch, { t: "add", from, to, width });
     this.commit(patch);
     return { ok: true, patch, warnings: verdict.warnings };
+  }
+
+  // ── 设施（非会话建筑）：市长管公共设施，会话楼由开发商盖 ──
+
+  /** 射线下最近的可编辑设施（实例级拾取）。 */
+  pickSite(ray: RepairRay): SiteInfo | null {
+    const layout = this.engine.currentLayout;
+    return layout ? pickSite(layout, ray) : null;
+  }
+
+  siteById(id: string): SiteInfo | null {
+    const layout = this.engine.currentLayout;
+    return layout ? listSites(layout).find((site) => site.id === id) ?? null : null;
+  }
+
+  siteTargets(site: SiteInfo, limit = 40): SiteTarget[] {
+    const layout = this.engine.currentLayout;
+    return layout ? siteTargets(layout, site, this.engine.planPatch?.suppressedContext ?? [], limit) : [];
+  }
+
+  /** 地面点落在哪个可接收的目标上：街区级设施取包含该点（或最近）的街区，地块级取最近地块。 */
+  siteTargetAt(site: SiteInfo, x: number, z: number): string | null {
+    const layout = this.engine.currentLayout;
+    if (!layout) return null;
+    if (site.level === "parcel") return this.nearestParcel(x, z)?.id ?? null;
+    let best: { id: string; d: number } | null = null;
+    for (const block of layout.blocks) {
+      if (!block.parcels.length) continue;
+      const d = Math.hypot(block.x - x, block.z - z);
+      if (d <= Math.max(block.width, block.depth) / 2 + 4 && (!best || d < best.d)) best = { id: block.id, d };
+    }
+    return best?.id ?? null;
+  }
+
+  moveSite(site: SiteInfo, targetId: string): SiteEditResult {
+    const base = this.working();
+    if (!base.ok) return base;
+    const problem = siteMoveProblem(this.engine.currentLayout!, site, targetId, base.patch.suppressedContext);
+    if (problem) return { ok: false, reason: "blocked", blockers: [problem] };
+    const patch = appendSiteOp(base.patch, { t: "move", id: site.id, at: { x: site.x, z: site.z }, to: targetId });
+    this.commit(patch);
+    return { ok: true, patch, warnings: [], siteId: site.kind === "context" ? `context:${targetId}` : site.id };
+  }
+
+  removeSite(site: SiteInfo): EditResult {
+    const base = this.working();
+    if (!base.ok) return base;
+    const patch = appendSiteOp(base.patch, { t: "remove", id: site.id, at: { x: site.x, z: site.z } });
+    this.commit(patch);
+    return { ok: true, patch, warnings: [] };
   }
 
   // ── 悬停预览用的只读包装（不写补丁）──
@@ -229,7 +283,7 @@ export class PlanRepairSession {
       ready: !!layout, seed: layout?.seed ?? null, cityTier: layout?.scaleTier ?? null, patchTier: patch?.scaleTier ?? null,
       patch, stale: this.engine.planPatched?.stale ?? [], saveFailed: this.saveFailed,
       canUndo: this.undoStack.length > 0, canRedo: this.redoStack.length > 0,
-      counts: patch ? { buildingMoves: Object.keys(patch.buildingMoves).length, roadOps: patch.roadOps.length, roadAdds: patch.roadOps.filter((op) => op.t === "add").length, roadDrops: patch.roadOps.filter((op) => op.t === "drop").length, suppressedContext: patch.suppressedContext.length } : null,
+      counts: patch ? { buildingMoves: Object.keys(patch.buildingMoves).length, roadOps: patch.roadOps.length, roadAdds: patch.roadOps.filter((op) => op.t === "add").length, roadDrops: patch.roadOps.filter((op) => op.t === "drop").length, siteOps: patch.siteOps.length, suppressedContext: patch.suppressedContext.length } : null,
     };
   }
 

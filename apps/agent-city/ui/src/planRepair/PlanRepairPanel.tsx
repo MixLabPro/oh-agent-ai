@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { RepairTool, RoadWidth } from "./controller";
+import { siteLabel, type RepairTool, type RoadWidth } from "./controller";
 import type { PlanRepairUi } from "./usePlanRepair";
 
 const RULE_LABEL: Record<string, string> = {
@@ -9,9 +9,10 @@ const SEVERITY_LABEL = { error: "错误", warning: "警告", info: "提示" } as
 const MAX_ISSUE_ROWS = 8;
 
 const TOOLS: Array<{ id: RepairTool; label: string; key: string; hint: string }> = [
-  { id: "build", label: "移楼", key: "V", hint: "点选会话楼，再点空地块搬过去" },
+  { id: "build", label: "移楼", key: "V", hint: "仅用于修复生成问题：会话楼由开发商（程序）盖，市长不指定位置。点选会话楼，再点空地块" },
   { id: "draw", label: "画路", key: "R", hint: "点两下画一段路，可连续画" },
   { id: "erase", label: "橡皮擦", key: "E", hint: "点击红色高亮的路段擦掉" },
+  { id: "site", label: "设施", key: "S", hint: "编辑公共设施、花园、城区地标、背景楼：搬家或拆除" },
 ];
 const WIDTHS: Array<{ id: RoadWidth; label: string }> = [{ id: 5, label: "小路" }, { id: 8, label: "次干道" }];
 
@@ -32,7 +33,7 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
   }
 
   const counts = info.counts;
-  const total = counts ? counts.buildingMoves + counts.roadOps + counts.suppressedContext : 0;
+  const total = counts ? counts.buildingMoves + counts.roadOps + counts.siteOps + counts.suppressedContext : 0;
   // 恢复生成两段确认（同 reseed 的 4 秒确认模式）：误点一次不会丢掉全部修改。
   const onReset = () => {
     if (!confirmReset) {
@@ -58,9 +59,14 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
     {state.message && <p className={`city-repair-msg city-repair-${state.message.kind}`} role={state.message.kind === "error" ? "alert" : "status"}>{state.message.text}</p>}
     {previewReason && <p className="city-repair-reason">不可行：{previewReason}</p>}
     {state.buildingId && state.tool === "build" && <p className="city-repair-sel">选中：<code>{state.buildingId}</code></p>}
+    {state.tool === "site" && state.site && <div className="city-repair-site">
+      <span>选中：<b>{siteLabel(state.site)}</b></span>
+      <button onClick={repair.removeSelected} title="拆除选中的设施（Delete）">拆除</button>
+    </div>}
+    {state.tool === "site" && !state.site && state.preview?.kind === "site" && <p className="city-repair-sel">指向：{state.preview.label}（点击选中）</p>}
     <p className="city-repair-status">
       {total === 0 ? "尚无修改" : `${total} 处修改`}
-      {counts && total > 0 && `（${[counts.buildingMoves ? `移楼 ${counts.buildingMoves}` : "", counts.roadAdds ? `画路 ${counts.roadAdds}` : "", counts.roadDrops ? `擦路 ${counts.roadDrops}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `改路口 ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : ""].filter(Boolean).join(" · ")}）`}
+      {counts && total > 0 && `（${[counts.buildingMoves ? `移楼 ${counts.buildingMoves}` : "", counts.roadAdds ? `画路 ${counts.roadAdds}` : "", counts.roadDrops ? `擦路 ${counts.roadDrops}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `改路口 ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `改设施 ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}）`}
       {info.staleCount > 0 && <span className="city-repair-stale"> · {info.staleCount} 条已失效</span>}
       {total > 0 && <span> · {info.saveFailed ? "本次修改仅临时生效" : "已保存"}</span>}
     </p>
@@ -79,6 +85,6 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
         </li>)}</ul>
       </>}
     </div>}
-    <p className="city-repair-help">V 移楼 · R 画路 · E 橡皮擦 · Esc 逐级取消 · ⌘Z 撤销 · ⇧⌘Z 重做</p>
+    <p className="city-repair-help">V 移楼 · R 画路 · E 橡皮擦 · S 设施 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
   </section>;
 }

@@ -12,14 +12,16 @@
 //   (j) 画路：吸附预览、先落起点再落笔、预览红绿、成功后以终点接着画、失败保留起点并说明原因、锁定吸附点被拒；
 //   (k) Esc 层级：画路放弃起点 → 回到选择工具 → 取消选中 → 退出；
 //   (l) 工具切换清空选中/起点/预览；路宽切换重算预览；画路/橡皮擦忽略射线先命中的建筑；
-//   (m) 悬停抖动（< 0.75）不重算，鼠标离开清预览。
+//   (m) 悬停抖动（< 0.75）不重算，鼠标离开清预览；
+//   (n) 设施工具：射线悬停高亮实例、点选后列合法目标、点目标搬家（背景楼 id 变了也能重新选中）、阻止原因逐条翻译、
+//       点会话楼/致敬地标给分工说明、拆除（按钮/Delete）、Esc 先取消选中再回到移楼工具。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
 const { RepairController, blockerText } = await loadCity({ "planRepair/controller.ts": ["RepairController", "blockerText"] });
 
 function harness(overrides = {}) {
-  const log = { moves: [], selected: [], candidateCalls: [], adds: [], drops: [] };
+  const log = { moves: [], selected: [], candidateCalls: [], adds: [], drops: [], siteMoves: [], siteRemoves: [] };
   const buildings = new Set(["b1", "b2"]);
   const parcelOf = { b1: "p1", b2: "p2" };
   const cand = (parcelId, x) => ({ parcelId, x, z: 0, yaw: 0, width: 8, depth: 8, distance: 5, warnings: [] });
@@ -37,6 +39,17 @@ function harness(overrides = {}) {
     addRoad: (from, to, width) => { log.adds.push([from, to, width]); return deps.addResult ?? { ok: true, patch: {}, warnings: [] }; },
     validateDrop: (id) => (id === "bridge" ? { blockers: ["locked-edge"], warnings: [] } : (deps.dropVerdict ?? { blockers: [], warnings: [] })),
     dropEdge: (id) => { log.drops.push(id); return deps.dropResult ?? { ok: true, patch: {}, warnings: [] }; },
+    // 设施：ray.hit 为设施 id（或 null）；目标/搬家/拆除记日志。
+    pickSite: (ray) => (ray && ray.hit ? deps.sites[ray.hit] ?? null : null),
+    siteById: (id) => deps.sites[id] ?? null,
+    siteTargets: (site) => (site.level === "block" ? [{ id: "B2", x: 200, z: 100, yaw: 0, width: 40, depth: 40, distance: 100 }] : [{ id: "pF1", x: 90, z: 200, yaw: 0, width: 8, depth: 8, distance: 20 }, { id: "pF2", x: 110, z: 200, yaw: 0, width: 8, depth: 8, distance: 40 }]),
+    siteTargetAt: (site, x) => (x < 0 ? null : site.level === "block" ? "B2" : "pF1"),
+    moveSite: (site, targetId) => { log.siteMoves.push([site.id, targetId]); return deps.siteMoveResult ?? { ok: true, patch: {}, warnings: [], siteId: site.kind === "context" ? `context:${targetId}` : site.id }; },
+    removeSite: (site) => { log.siteRemoves.push(site.id); return deps.siteRemoveResult ?? { ok: true, patch: {}, warnings: [] }; },
+    sites: { "civic:0": { id: "civic:0", kind: "civic", civicKind: "school", x: 100, z: 100, yaw: 0, width: 40, depth: 40, height: 28, y: 2, level: "block", slotId: "B1" },
+      "context:pC": { id: "context:pC", kind: "context", x: 70, z: 200, yaw: 0, width: 8, depth: 8, height: 15, y: 2, level: "parcel", slotId: "pC" },
+      "context:pF1": { id: "context:pF1", kind: "context", x: 90, z: 200, yaw: 0, width: 8, depth: 8, height: 15, y: 2, level: "parcel", slotId: "pF1" } },
+    siteMoveResult: undefined, siteRemoveResult: undefined,
     candidateList: undefined, moveResult: undefined, addVerdict: undefined, addResult: undefined, dropVerdict: undefined, dropResult: undefined, ...overrides,
   };
   return { deps, log, controller: new RepairController(deps), buildings, parcelOf };
@@ -302,6 +315,94 @@ function harness(overrides = {}) {
   inner.controller.hover(null);
   assert.equal(inner.controller.snapshot.preview, null, "leaving the canvas clears the preview");
   void controller; void log;
+}
+
+// (n) 设施工具。
+{
+  const { controller, log, deps } = harness();
+  controller.enter(); controller.setTool("site");
+  assert.equal(controller.snapshot.tool, "site"); assert.match(controller.snapshot.message.text, /公共设施/);
+  controller.hover({ x: 100, z: 100 }, { hit: "civic:0" });
+  assert.equal(controller.snapshot.preview.kind, "site"); assert.equal(controller.snapshot.preview.label, "学校", "hover highlights the instance under the ray and names it");
+  controller.hover({ x: 300, z: 300 }, { hit: null });
+  assert.equal(controller.snapshot.preview, null, "off any site there is no highlight");
+  controller.click({ pickedId: "decor:civic:school", ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  assert.equal(controller.snapshot.site.id, "civic:0", "clicking selects the instance the ray hit, not the decor category");
+  assert.match(controller.snapshot.message.text, /已选中学校，附近有 1 个可搬去的空街区/);
+  assert.equal(controller.snapshot.siteTargets.length, 1);
+  // 搬家：点地面 → 目标街区。
+  controller.click({ pickedId: null, ground: { x: 200, z: 100 }, ray: { hit: null } });
+  assert.deepEqual(log.siteMoves, [["civic:0", "B2"]]);
+  assert.equal(controller.snapshot.message.kind, "ok"); assert.match(controller.snapshot.message.text, /已把学校搬过去/);
+  assert.equal(controller.snapshot.site.id, "civic:0", "the civic stays selected after the move");
+  // 被占 / unchanged。
+  deps.siteMoveResult = { ok: false, reason: "blocked", blockers: ["target-occupied"] };
+  controller.click({ pickedId: null, ground: { x: 200, z: 100 }, ray: { hit: null } });
+  assert.equal(controller.snapshot.message.kind, "error"); assert.match(controller.snapshot.message.text, /目标已被占用/);
+  assert.ok(!/target-occupied/.test(controller.snapshot.message.text), "no raw codes");
+  deps.siteMoveResult = { ok: false, reason: "blocked", blockers: ["unchanged"] };
+  controller.click({ pickedId: null, ground: { x: 200, z: 100 }, ray: { hit: null } });
+  assert.match(controller.snapshot.message.text, /已经在这里了/);
+  deps.siteMoveResult = undefined;
+  controller.click({ pickedId: null, ground: { x: -5, z: 100 }, ray: { hit: null } });
+  assert.match(controller.snapshot.message.text, /没有可落位的街区/);
+  // 背景楼搬家后 id 变了（context:<parcelId>）：控制器按返回的新 id 重新选中。
+  controller.click({ pickedId: null, ground: { x: 70, z: 200 }, ray: { hit: "context:pC" } });
+  assert.equal(controller.snapshot.site.id, "context:pC"); assert.match(controller.snapshot.message.text, /空地块/);
+  controller.click({ pickedId: null, ground: { x: 90, z: 200 }, ray: { hit: null } });
+  assert.deepEqual(log.siteMoves.at(-1), ["context:pC", "pF1"]);
+  assert.equal(controller.snapshot.site.id, "context:pF1", "the selection follows the renamed building");
+  // 拆除。
+  controller.removeSelected();
+  assert.deepEqual(log.siteRemoves, ["context:pF1"]);
+  assert.equal(controller.snapshot.site, null); assert.match(controller.snapshot.message.text, /已拆除背景楼（撤销可恢复）/);
+  controller.removeSelected();
+  assert.equal(log.siteRemoves.length, 1, "nothing selected → nothing removed");
+}
+
+// (n2) 设施工具：不可编辑对象与分工说明。
+{
+  const { controller } = harness();
+  controller.enter(); controller.setTool("site");
+  controller.click({ pickedId: "b1", ground: { x: 10, z: 10 }, ray: { hit: null } });
+  assert.match(controller.snapshot.message.text, /开发商/, "a session building is the developer's — the mayor is told so");
+  assert.match(controller.snapshot.message.text, /移楼/, "…and pointed at the repair tool");
+  controller.click({ pickedId: "decor:landmark:ferris-wheel", ground: { x: 10, z: 10 }, ray: { hit: null } });
+  assert.match(controller.snapshot.message.text, /致敬地标与市政用地/); assert.equal(controller.snapshot.site, null);
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 }, ray: { hit: null } });
+  assert.match(controller.snapshot.message.text, /点选公共设施/, "an empty click with nothing selected repeats the hint");
+  // 选中后点非设施的 decor（射线先打到装饰）——仍按地面点搬家，不被「不可编辑」提示吞掉。
+  controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  assert.equal(controller.snapshot.site.id, "civic:0");
+  const moved = harness();
+  moved.controller.enter(); moved.controller.setTool("site");
+  moved.controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  moved.controller.click({ pickedId: "decor:garden", ground: { x: 200, z: 100 }, ray: { hit: null } });
+  assert.deepEqual(moved.log.siteMoves, [["civic:0", "B2"]], "with a site selected, a ground click moves it even if the ray first grazed a decoration");
+}
+
+// (n3) Esc 与工具切换。
+{
+  const { controller } = harness();
+  controller.enter(); controller.setTool("site");
+  controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  controller.cancel();
+  assert.equal(controller.snapshot.site, null); assert.equal(controller.snapshot.tool, "site", "first Esc only deselects");
+  controller.cancel();
+  assert.equal(controller.snapshot.tool, "build", "second Esc returns to the select tool");
+  controller.setTool("site");
+  controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  controller.setTool("draw");
+  assert.equal(controller.snapshot.site, null); assert.deepEqual(controller.snapshot.siteTargets, [], "switching tools clears the site selection and targets");
+  // 点天空取消选中。
+  controller.setTool("site");
+  controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  controller.click({ pickedId: null, ground: null, ray: { hit: null } });
+  assert.equal(controller.snapshot.site, null, "clicking the sky deselects");
+  // refresh：设施没了 → 取消选中；还在 → 重算目标。
+  controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  controller.refresh({ kind: "ok", text: "已撤销" });
+  assert.equal(controller.snapshot.site.id, "civic:0"); assert.equal(controller.snapshot.message.text, "已撤销");
 }
 
 console.log("City plan repair controller: clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
