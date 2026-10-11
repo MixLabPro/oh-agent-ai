@@ -35,6 +35,16 @@ function validate(layout, input) {
   assert(new Set(blockSideLengths).size > 12, "seeded street junction offsets prevent a mechanically repeated grid");
   assert.equal(new Set(all.map(([, p]) => p.id)).size, all.length, "addresses are unique");
   const nodes = new Map(layout.roadNodes.map((node) => [node.id, node]));
+  assert.deepEqual(layout.retentionReport.unresolvedParcelFrontage, [], "occupied parcel frontage must remain current");
+  const hotelAddresses = all.map(([, parcel]) => parcel.id).filter(id => id.startsWith("hotel:")).sort();
+  assert.deepEqual(layout.retentionReport.unsupportedAuxiliaryFrontage, hotelAddresses, "unproved auxiliary hotel access remains in the display denominator");
+  if (hotelAddresses.length) assert.equal(layout.displayOutcome.status, "failed", "missing hotel service proof cannot become implicit success");
+  const liveEdges = new Set(layout.roadEdges.map((edge) => edge.id));
+  for (const [, parcel] of all) if (parcel.frontage) {
+    assert.equal(parcel.frontage.networkVersion, layout.derivedNetworkVersion);
+    assert(liveEdges.has(parcel.frontage.hostEdgeId), `${parcel.id}: display pruning removed its real frontage host`);
+    for (const id of parcel.frontage.primaryEdgePath) assert(liveEdges.has(id), `${parcel.id}: display pruning removed its primary service route`);
+  }
   const adjacency = new Map([...nodes.keys()].map((id) => [id, []]));
   for (const edge of layout.roadEdges) {
     assert(nodes.has(edge.from) && nodes.has(edge.to));
@@ -61,8 +71,8 @@ function validate(layout, input) {
     // Parcel footprint (half-diagonal of width × depth) must clear every street + sidewalk, in any direction.
     // 曾只检查水平/竖直路段：街网一旦斜向（warp 后已是斜的，G2 起各片区朝向不同）这条断言就形同虚设。
     const halfDiagonal = Math.hypot(parcel.width, parcel.depth) / 2;
-    for (const edge of layout.roadEdges) {
-      const [a, b] = edge.points;
+    for (const edge of layout.roadEdges) for (let segment = 1; segment < edge.points.length; segment += 1) {
+      const a = edge.points[segment - 1], b = edge.points[segment];
       const dx = b.x - a.x; const dz = b.z - a.z;
       const t = Math.max(0, Math.min(1, ((parcel.x - a.x) * dx + (parcel.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
       const gap = Math.hypot(parcel.x - a.x - dx * t, parcel.z - a.z - dz * t);
@@ -70,10 +80,10 @@ function validate(layout, input) {
     }
   }
   // 海滨酒店地块（无论是否已有楼）按真实朝向矩形不得压路：曾 17% 的酒店地块压在后加的接入路/环岛路上（真机：楼占在路上）。
-  for (const parcel of layout.blocks.filter((block) => block.id.startsWith("hotel:")).flatMap((block) => block.parcels)) {
+  for (const parcel of all.map(([, parcel]) => parcel).filter(parcel => parcel.id.startsWith("hotel:"))) {
     const ax = Math.sin(parcel.yaw); const az = Math.cos(parcel.yaw); const bx = az; const bz = -ax;
-    for (const edge of layout.roadEdges) {
-      const [a, b] = edge.points; const len = Math.hypot(b.x - a.x, b.z - a.z);
+    for (const edge of layout.roadEdges) for (let segment = 1; segment < edge.points.length; segment += 1) {
+      const a = edge.points[segment - 1], b = edge.points[segment], len = Math.hypot(b.x - a.x, b.z - a.z);
       for (let d = 0; d <= len; d += 1.5) {
         const t = len ? d / len : 0;
         const dx = a.x + (b.x - a.x) * t - parcel.x; const dz = a.z + (b.z - a.z) * t - parcel.z;
@@ -168,8 +178,8 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
           : [8, 22];
     assert(building.height >= expectedHeight[0] && building.height <= expectedHeight[1], `${building.zone} gets a readable city-height band`);
     const halfDiagonal = Math.hypot(building.width, building.depth) / 2;
-    for (const edge of layout.roadEdges) {
-      const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z;
+    for (const edge of layout.roadEdges) for (let segment = 1; segment < edge.points.length; segment += 1) {
+      const a = edge.points[segment - 1], b = edge.points[segment], dx = b.x - a.x, dz = b.z - a.z;
       const t = Math.max(0, Math.min(1, ((building.x - a.x) * dx + (building.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
       const distance = Math.hypot(building.x - a.x - dx * t, building.z - a.z - dz * t);
       assert(distance >= halfDiagonal + edge.width / 2 + 0.5, `${building.id} footprint stays clear of road ${edge.id}`);
@@ -233,7 +243,7 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   // 大门朝路（用户：医院门前没有路）：配套正门（局部 +z）外 8 处离最近路面 ≤ 15。
   for (const civic of civics) {
     const q = { x: civic.x + Math.sin(civic.yaw) * (civic.depth / 2 + 8), z: civic.z + Math.cos(civic.yaw) * (civic.depth / 2 + 8) };
-    const gap = Math.min(...layout.roadEdges.filter((e) => !e.bridge).map((e) => { const [a, b] = e.points; const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.z - a.z) * dz) / l2)); return Math.hypot(q.x - a.x - dx * t, q.z - a.z - dz * t) - e.width / 2; }));
+    const gap = Math.min(...layout.roadEdges.filter((e) => !e.bridge).flatMap((e) => e.points.slice(1).map((b, index) => { const a = e.points[index]; const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.z - a.z) * dz) / l2)); return Math.hypot(q.x - a.x - dx * t, q.z - a.z - dz * t) - e.width / 2; })));
     assert(gap <= 15, `${civic.id} (${civic.kind}) entrance faces a road (gap ${gap.toFixed(1)})`);
   }
   const zoneOf = (civic) => layout.blocks.find((block) => block.id === civic.parcelId)?.zone;

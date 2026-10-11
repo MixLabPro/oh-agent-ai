@@ -24,6 +24,7 @@ import { crosses, closestPolylineSegment } from "./footprint";
 import type { Geography } from "./geography";
 import { corridorFailure, validateCandidate, VALIDATION_CONFIG, type CorridorPolicy, type RouteCandidate, type RouteSegment } from "./validation";
 import { ROAD_RELATION_CONFIG, classifyRoadSegments } from "./relations";
+import { CONNECTION_BUDGET } from "./connectionBudget";
 
 export { corridorFailure, VALIDATION_CONFIG } from "./validation";
 export type { CorridorPolicy, RouteCandidate, RouteSegment, CandidateValidation, CandidateViolation } from "./validation";
@@ -62,7 +63,7 @@ export const CONNECTOR_CONFIG = {
   aStarGoals: 8,                // A* 目标节点数（离 source 最近的目标节点子集）
   bridgeSampleSpacing: 6,       // 显式桥候选的连线采样步长（入口路历史口径）
   bridgeMaxSpanSamples: 14,     // 连续水段 ≤ 14 采样 ≈ 84 单位才可成桥（入口路历史口径）
-  bridgeCandidates: 40,         // 桥候选按距离取前 N 个投影点（入口路历史口径；界限是候选数不是半径）
+  bridgeCandidates: CONNECTION_BUDGET.bridgeCandidates, // 原40宿主候选数，不是半径
   // mini-roundabout 策略档（半径 10–14 的交叉口环，4–6 段弧边；见 proposeMiniRoundabout）
   roundaboutRadii: [10, 12, 14],       // 半径尝试档（确定性顺序，区间 10–14）
   roundaboutMaxPairAngleDeg: 50,       // 策略带宽：路口相邻边最小夹角 < 50° 才建环（30–50° 灰区；<30° 对按阈值放宽 (b) 接纳）

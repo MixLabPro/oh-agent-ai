@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
 const { emptyNetwork, addNetworkEdge, runRepairTransaction, groundJunctionFindings, snapNearEdgeJunctions,
-  assignConnectedSite, specByKind, canRelocateGroundSite, resolvePlanarAccess, planarAccessPose, stationEntranceLocal, settleShoreSitesOnCoast,
+  assignConnectedSite, specByKind, SITE_SPECS, canRelocateGroundSite, resolvePlanarAccess, planarAccessPose, stationEntranceLocal, settleShoreSitesOnCoast,
   trimLeafBeforeUnsafeCrossing, connectGroundJunctions, corridorViolation, validateCandidate, bridgeheadContinuity, roadReport, CONSTRAINTS, classifyRoadSegments, crowdedPolylinePair, commitNetworkPatch, diagnoseNetwork, componentOf, retainRepairDemands, remapDemandNode, REPAIR_STRATEGIES, resiteArchesOnAcceptedRoads, groundFrontageSegments, rerouteUnsafeGroundCrossings, jointJunctionSiteCandidates, moveJunctionSite, groundJunctionCorridorFailure, groundJunctionCorridorViolation, screenTrunkRoute, connectDisconnectedComponent, connectLooseEnd, pruneShortSpurs, extendLooseEnds, endpointClear } = await loadCity({
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge", "commitNetworkPatch"],
   "engine/planner/solve.ts": ["runRepairTransaction", "REPAIR_STRATEGIES", "resiteArchesOnAcceptedRoads"],
@@ -21,7 +21,7 @@ const { emptyNetwork, addNetworkEdge, runRepairTransaction, groundJunctionFindin
   "engine/planner/civicClearance.ts": ["groundJunctionCorridorFailure", "groundJunctionCorridorViolation"],
   "engine/planner/skeleton.ts": ["screenTrunkRoute"],
   "engine/planner/jointSite.ts": ["assignConnectedSite"],
-  "engine/planner/sitespec.ts": ["specByKind", "canRelocateGroundSite"],
+  "engine/planner/sitespec.ts": ["specByKind", "SITE_SPECS", "canRelocateGroundSite"],
   "engine/models/siteAccess.ts": ["resolvePlanarAccess", "planarAccessPose"],
   "engine/models/publicSiteGeometry.ts": ["stationEntranceLocal"],
   "engine/planner/siting.ts": ["settleShoreSitesOnCoast"],
@@ -313,18 +313,37 @@ const intentView = (ctx) => ({ roadNodes: [...ctx.network.nodes.values()], roadE
 // Coastal reassignment consumes only declared existing slots; a far optional
 // owner move and exposed-end access must remain one transaction.
 {
-  const ctx = context(); ctx.coast = [p(100, -100)]; ctx.primaryAnchorNodeId = "-20:0";
-  ctx.SHORE_SITE_KINDS.add("villa-complex"); ctx.geo.coastDistance = () => 1000;
-  addNetworkEdge(ctx.network, p(-20, 0), p(20, 0), true);
-  addNetworkEdge(ctx.network, p(0, -0.16), p(0, -20), true, false, true);
-  addNetworkEdge(ctx.network, p(20, 0), p(80, -75), true);
-  addNetworkEdge(ctx.network, p(80, -75), p(120, -75), true);
-  ctx.landmarks.push({ id: "coastal-villa", kind: "villa-complex", x: 0, z: -39.9, radius: 11, yaw: 0 });
+  const fixture = (kind, radius) => {
+    const ctx = context(); ctx.coast = [p(100, -100)]; ctx.primaryAnchorNodeId = "-20:0";
+    ctx.SHORE_SITE_KINDS.add(kind); ctx.geo.coastDistance = () => 1000;
+    addNetworkEdge(ctx.network, p(-20, 0), p(20, 0), true);
+    addNetworkEdge(ctx.network, p(0, -0.16), p(0, -20), true, false, true);
+    addNetworkEdge(ctx.network, p(20, 0), p(80, -75), true);
+    addNetworkEdge(ctx.network, p(80, -75), p(120, -75), true);
+    ctx.landmarks.push({ id: "coastal-owner", kind, x: 0, z: -39.9, radius, yaw: 0 });
+    return ctx;
+  };
+  const strategy = REPAIR_STRATEGIES.find((entry) => entry.name === "jointJunctionSite");
+  const real = fixture("villa-complex", 34), realBytes = snapshot(real);
+  assert.equal(strategy.candidates(real).find((entry) => entry.name.endsWith(":shore")), undefined,
+    "the actual large villa cannot fit this old tiny-slot fixture; do not widen budgets or invent a resize");
+  assert.equal(snapshot(real), realBytes);
+  const tiny = fixture("villa-complex", 11), tinyBytes = snapshot(tiny);
+  const tinyCandidate = strategy.candidates(tiny).find((entry) => entry.name.endsWith(":shore"));
+  assert.ok(tinyCandidate);
+  const tinyResult = runRepairTransaction(tiny, tinyCandidate);
+  assert.equal(tinyResult.changes, 0); assert.match(tinyResult.reason, /registered-model-ground-unsupported-parameters/);
+  assert.equal(snapshot(tiny), tinyBytes, "unsupported villa radius11 cannot publish a false physical success");
+  // Explicitly test only the preexisting proxy layer here. This alias has no
+  // ground model declaration and must never be counted as villa physical coverage.
+  const proxyKind = "unregistered-shore-proxy";
+  SITE_SPECS.push({ ...specByKind("villa-complex"), kind: proxyKind, radius: 11 });
+  try {
+  const ctx = fixture(proxyKind, 11);
   const before = snapshot(ctx), finding = groundJunctionFindings([...ctx.network.edges.values()])[0];
   const invalid = runRepairTransaction(ctx, { name: "undeclared-shore-slot", constraint: "unjoinedGroundJunctions",
-    run: (draft) => moveJunctionSite(draft, finding.id, "coastal-villa", p(999, 999), true) });
+    run: (draft) => moveJunctionSite(draft, finding.id, "coastal-owner", p(999, 999), true) });
   assert.equal(invalid.changes, 0); assert.equal(snapshot(ctx), before);
-  const strategy = REPAIR_STRATEGIES.find((entry) => entry.name === "jointJunctionSite");
   const candidate = strategy.candidates(ctx).find((entry) => entry.name.endsWith(":shore"));
   assert.ok(candidate, "valid coastal slot must survive full-width pre-screening");
   assert.equal(snapshot(ctx), before, "enumeration cannot publish an owner or road change");
@@ -334,6 +353,7 @@ const intentView = (ctx) => ({ roadNodes: [...ctx.network.nodes.values()], roadE
   assert.ok(ctx.landmarks[0].x > 80);
   assert.ok([...ctx.network.edges.values()].filter((road) => road.from === "0:-20" || road.to === "0:-20").length >= 2,
     "newly exposed terminal must stay present and actually connect");
+  } finally { SITE_SPECS.pop(); }
 }
 // Short collinear graph edges remain one real frontage, while bends,
 // intersections, bridges and incompatible road roles never become chords.

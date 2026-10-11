@@ -12,6 +12,7 @@ import { LANDMARK_BUILDERS } from "../models/registry";
 import type { LandmarkHost } from "../models/landmarkContext";
 import { createMaterialFactory } from "../models/landmarkMaterials";
 import type { NightLights } from "../render/types";
+import { DISTRICT_LANDMARK_RENDER_GEOMETRY } from "../models/layoutPlacementGeometry";
 
 export interface LandmarkSystemHost {
   model: CityModel;
@@ -127,7 +128,7 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
       const mesh = new THREE.Mesh(geometry, material); mesh.position.y = y; mesh.castShadow = true; mesh.receiveShadow = true;
       group.add(mesh); host.disposables.push(geometry);
     };
-    add(new THREE.BoxGeometry(17, 4, 17).translate(0, 2, 0), trim, 0);                          // 裙楼
+    add(new THREE.BoxGeometry(DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtWidth, 4, DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth).translate(0, 2, 0), trim, 0); // 裙楼
     let y = 4;
     for (const [w, share] of [[12, 0.55], [9.5, 0.27], [7, 0.18]] as Array<[number, number]>) {
       const height = (h - 4) * share;

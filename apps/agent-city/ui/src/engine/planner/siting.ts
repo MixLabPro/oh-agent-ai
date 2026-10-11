@@ -4,6 +4,7 @@ import type { PublicSite, Vec2 } from "../cityLayout";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount } from "./footprint";
 import { coastalSitingKinds, canRelocateGroundSite } from "./sitespec";
 import type { RepairContext } from "./context";
+import { registeredModelGroundFailure } from "./modelGround";
 
 // 选址后置（CITY_ARCHITECTURE §6 步）：候选表 + 路网后落位。
 //
@@ -15,7 +16,7 @@ import type { RepairContext } from "./context";
 //   选择                          —— 第一个满足全部条件的候选（即离原位置最近的合法位置）。
 // 只对仍然违例的用地启用（入水、重叠），所以对本来就合法的岛零影响。判据与 constraints.ts 的 measure 同口径。
 
-type S = { x: number; z: number; radius: number; kind: string; shore?: Vec2; access?: unknown };
+type S = { id: string; x: number; z: number; yaw: number; radius: number; kind: string; shore?: Vec2; access?: unknown };
 
 export function* localResiteCandidates(site: Vec2): Iterable<Vec2> {
   for (let radius = 6; radius <= 120; radius += 6) for (let k = 0; k < 20; k += 1) {
@@ -34,9 +35,11 @@ export function resiteViolatingSites(ctx: RepairContext, opts: { skipWetShore?: 
     if (!canRelocateGroundSite(s)) return false;
     // 与 constraints.ts siteInWater / sitesOverlap 同口径（此处只看地形高度，不含 inRiver，免得把没违例的岛也动了）
     const wet = wetCount(geo, s, s.radius);
+    const groundFailure = registeredModelGroundFailure(s, geo);
     // The joint wet-shore path already spent this owner's original local tier;
     // do not repeat it through an overlap fallback with weaker admission.
-    if (opts.skipWetShore && ctx.SHORE_SITE_KINDS.has(s.kind) && wet > 4) return false;
+    if (opts.skipWetShore && ctx.SHORE_SITE_KINDS.has(s.kind) && (wet > 4 || groundFailure)) return false;
+    if (groundFailure) return true;
     if (wet > (ctx.SHORE_SITE_KINDS.has(s.kind) ? 4 : 0)) return true;
     // 重叠：与 sitesOverlap 同判据（kind 字典序较小的一方被标记）；对方是不能挪的（港口、广场、凯旋门、岛上地标）时，不论字典序都由这一方让开。
     const fixed = (o: S) => !canRelocateGroundSite(o);
@@ -48,7 +51,7 @@ export function resiteViolatingSites(ctx: RepairContext, opts: { skipWetShore?: 
     if (!clearsHighways({ x, z }, s.radius * 2, s.radius * 2, ctx.ringRuns)) return false;
     if (polylineDistance(ctx.trunkRuns, { x, z }) < s.radius * 0.7 || nearBridgeEnd(ctx.bridges, x, z, s.radius)) return false;
     const road = nearestRoad(x, z);
-    return road >= s.radius * 0.85 && road <= s.radius + 20;
+    return road >= s.radius * 0.85 && road <= s.radius + 20 && !registeredModelGroundFailure({ ...s, x, z }, geo);
   };
   let moved = 0;
   for (const s of all) {
@@ -107,11 +110,14 @@ export function retreatShoreSitesToDryLand(ctx: ShoreMoveContext): void {
     const wetCountAt = (c: Vec2) => wetCount(footprintGeo, c, site.radius); // 内移判据：只看地形水位（不含河道），与原实现同口径
     const dx = core.x - site.x; const dz = core.z - site.z; const len = Math.hypot(dx, dz) || 1;
     // 每步都要求中心仍在陆上、不在河里：直线朝核心走可能跨过河道（geography 守卫 seed 3668352332 抓到摩天轮进河）。
-    for (let step = 0; step < 20 && wetCountAt(site) > 3; step += 1) {
-      const nx = site.x + (dx / len) * 3; const nz = site.z + (dz / len) * 3;
+    let candidate = { x: site.x, z: site.z }, admitted: Vec2 | null = null;
+    for (let step = 0; step < 20 && (wetCountAt(candidate) > 3 || registeredModelGroundFailure({ ...site, ...candidate }, footprintGeo)); step += 1) {
+      const nx = candidate.x + (dx / len) * 3; const nz = candidate.z + (dz / len) * 3;
       if (height(nx, nz) <= 0.5 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || nearBridgeEnd(bridges, nx, nz, site.radius)) break; // 也不推到主干道/桥头上
-      site.x = nx; site.z = nz;
+      candidate = { x: nx, z: nz };
+      if (!registeredModelGroundFailure({ ...site, ...candidate }, footprintGeo)) admitted = candidate;
     }
+    if (admitted) { site.x = admitted.x; site.z = admitted.z; }
   }
 }
 
@@ -156,20 +162,22 @@ export function settleShoreSitesOnCoast(ctx: ShoreMoveContext): void {
       for (let step = 0; step < 100 && coastDistance(x, z) > site.radius * 0.7; step += 1) {
         const dx = target.x - x; const dz = target.z - z; const len = Math.hypot(dx, dz) || 1;
         const nx = x + (dx / len) * 3; const nz = z + (dz / len) * 3;
-        if (wet(nx, nz) > 3 || inRiver(nx, nz) || nearBridgeEnd(bridges, nx, nz, site.radius) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || !clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) break; // 不滑到主干道上
+        if (wet(nx, nz) > 3 || inRiver(nx, nz) || nearBridgeEnd(bridges, nx, nz, site.radius) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || !clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)
+          || registeredModelGroundFailure({ ...site, x: nx, z: nz }, footprintGeo)) break; // 不滑到主干道上
         x = nx; z = nz;
       }
       const d = coastDistance(x, z);
       if (d < best.d) best = { x, z, d };
     }
-    if (wet(best.x, best.z) <= 3 && (distanceToTrunks(best) >= site.radius * 0.7 || distanceToTrunks(site) < site.radius * 0.7)) { site.x = best.x; site.z = best.z; } // 落点压到主干道上就留在原位
+    if (wet(best.x, best.z) <= 3 && (distanceToTrunks(best) >= site.radius * 0.7 || distanceToTrunks(site) < site.radius * 0.7)
+      && !registeredModelGroundFailure({ ...site, x: best.x, z: best.z }, footprintGeo)) { site.x = best.x; site.z = best.z; } // 落点压到主干道上就留在原位
     // A dry, already coastal nominal position can still block a joint owner.
     // Explicitly scoped relocation reuses the existing local search tier;
     // otherwise this remains the historical wet-site fallback.
     const separation = (other: typeof others[number]) => other.radius + site.radius + (ctx.neighbourMargins?.get(other.id) ?? 0);
     const forced = ctx.relocateSiteIds?.has(site.id) && canRelocateGroundSite(site)
       && others.some((other) => Math.hypot(other.x - site.x, other.z - site.z) < separation(other));
-    if (wet(site.x, site.z) > 3 || forced) {
+    if (wet(site.x, site.z) > 3 || forced || registeredModelGroundFailure(site, footprintGeo)) {
       let found: Vec2 | null = null;
       for (let rr = 6; rr <= 70 && !found; rr += 6) {
         for (let k = 0; k < 24 && !found; k += 1) {
@@ -179,6 +187,7 @@ export function settleShoreSitesOnCoast(ctx: ShoreMoveContext): void {
           if (forced && coastDistance(nx, nz) > Math.max(site.radius * 2, coastDistance(site.x, site.z))) continue;
           if (forced && ctx.roadEnvelopes?.some((edge) => polylineDistance([edge.points], { x: nx, z: nz })
             < site.radius + edge.width / 2 + 3)) continue;
+          if (registeredModelGroundFailure({ ...site, x: nx, z: nz }, footprintGeo)) continue;
           found = { x: nx, z: nz };
         }
       }

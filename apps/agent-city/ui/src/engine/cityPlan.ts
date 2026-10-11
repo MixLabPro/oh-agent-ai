@@ -1508,7 +1508,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     connections: connectionLog, primaryAnchorNodeId: repairCtx.primaryAnchorNodeId ?? null, junctionReport, solveReport, siteObligations,
     demandCatalogue: repairCtx.demandCatalogue?.map((demand) => ({ ...demand })),
     planningOutcome: derivedFinalization.outcome,
-    parcelSource: legacyGridParcels ? "legacy-grid" : "accepted-road-faces", roadBlockReport,
+    parcelSource: legacyGridParcels ? "legacy-grid" as const : "accepted-road-faces" as const, roadBlockReport,
     derivedFinalization: { ok: derivedFinalization.ok, ...(derivedFinalization.reason ? { reason: derivedFinalization.reason } : {}) },
     derivedNetworkVersion: (network as Network & { version?: number }).version ?? 0, skeletonDiagnostics, skeletonReservationIds, roadGenerationDiagnostics,
     parcelGeneration: { generated: generatedParcels, roadClearanceRejected: generatedParcels - blocks.reduce((sum, block) => sum + block.parcels.length, 0) } };

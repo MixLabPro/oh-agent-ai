@@ -18,6 +18,8 @@ import { canRelocateGroundSite, specByKind } from "./sitespec";
 import { planarAccessPose, resolvePlanarAccess } from "../models/siteAccess";
 import { applyWorldPatch, createPlanningWorld } from "./world";
 import type { PlanningWorld, Reservation, WorldDemand, WorldOperation, WorldVersionDomain, WorldVersions } from "./world";
+import { inspectModelGround, registeredModelGroundFailure } from "./modelGround";
+import { GROUND_MODEL_FACTORIES } from "../models/groundRegistry";
 
 /**
  * 规划求解循环（CITY_ARCHITECTURE §2 迁移步 5b）：把 buildPlan 尾部内联的修复遍登记成「约束 id → 修复策略」的表。
@@ -34,7 +36,7 @@ import type { PlanningWorld, Reservation, WorldDemand, WorldOperation, WorldVers
  */
 export type RepairResult = number | { changes: number; reason?: string };
 export type RepairStrategy = { constraint: string; name: string; run: (ctx: RepairContext) => RepairResult;
-  candidates?: (ctx: RepairContext) => RepairStrategy[] };
+  candidates?: (ctx: RepairContext) => RepairStrategy[]; emptyReason?: (ctx: RepairContext) => string | undefined };
 export const ARCH_RESITE_CONFIG = { version: 1, probes: [0.5, 0.25, 0.75] as readonly number[] };
 
 /** A nominal arch is not a valid fallback. Once streets exist, retry only
@@ -120,9 +122,11 @@ function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoo
   const unmet = new Set(diagnostics?.demands.filter((entry) => entry.demand.required && !entry.satisfied
     && entry.demand.class === "site-access").map((entry) => entry.demand.anchor) ?? []);
   const wetFindings = constraint === "siteInWater" ? CONSTRAINTS.find((entry) => entry.id === "siteInWater")!.measure(plan) : [];
-  const isWetOwner = (owner: { kind: string; x: number; z: number }) => wetFindings.some((finding) =>
+  const groundGeo = { height: ctx.height, inRiver: ctx.inRiver };
+  const groundFailed = new Set([...ctx.publicSites, ...ctx.landmarks].filter(owner => registeredModelGroundFailure(owner, groundGeo)).map(owner => owner.id));
+  const isWetOwner = (owner: { id: string; kind: string; x: number; z: number }) => groundFailed.has(owner.id) || wetFindings.some((finding) =>
     finding.site === owner.kind && finding.at?.x === owner.x && finding.at?.z === owner.z);
-  if (constraint === "siteInWater" ? !wetFindings.length : !unmet.size) return [];
+  if (constraint === "siteInWater" ? !wetFindings.length && !groundFailed.size : !unmet.size) return [];
   const comp = componentOf(plan), primary = primaryComponentId(plan, comp);
   const primaryRoads = plan.roadEdges.filter((edge) => !edge.bridge && comp.get(edge.from) === primary).map((edge) => edge.points);
   const sites = [...ctx.publicSites, ...ctx.landmarks];
@@ -137,10 +141,12 @@ function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoo
       if (relocatedSitePositionFailure(ctx, owner, at, true) || polylineDistance(primaryRoads, at) > owner.radius + 20) continue;
       if (ctx.blocks.some((block) => block.parcels.some((parcel) => Math.hypot(parcel.x - at.x, parcel.z - at.z)
         < owner.radius + 9 + Math.hypot(parcel.width, parcel.depth) / 2))) continue;
+      if (registeredModelGroundFailure({ ...owner, ...at }, groundGeo)) continue;
       candidates.push({ constraint, name: `${constraint === "siteInWater" ? "resiteWetShore" : "resiteUnservedShore"}:${owner.id}:${at.x}:${at.z}`, run: (draft) => {
         const site = [...draft.publicSites, ...draft.landmarks].find((entry) => entry.id === owner.id);
-        const missing = constraint === "siteInWater" ? !!site && CONSTRAINTS.find((entry) => entry.id === "siteInWater")!
-          .measure(planView(draft)).some((finding) => finding.site === site.kind && finding.at?.x === site.x && finding.at?.z === site.z)
+        const missing = constraint === "siteInWater" ? !!site && (registeredModelGroundFailure(site, { height: draft.height, inRiver: draft.inRiver })
+          || CONSTRAINTS.find((entry) => entry.id === "siteInWater")!.measure(planView(draft))
+            .some((finding) => finding.site === site.kind && finding.at?.x === site.x && finding.at?.z === site.z))
           : diagnoseNetwork(planView(draft))?.demands.some((entry) => entry.demand.anchor === owner.id
             && entry.demand.class === "site-access" && !entry.satisfied);
         if (!missing || !site || !canRelocateGroundSite(site)) return 0;
@@ -148,6 +154,8 @@ function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoo
         if (failure) return { changes: 0, reason: failure };
         if (draft.blocks.some((block) => block.parcels.some((parcel) => Math.hypot(parcel.x - at.x, parcel.z - at.z)
           < site.radius + 9 + Math.hypot(parcel.width, parcel.depth) / 2))) return { changes: 0, reason: "owner-parcel-envelope" };
+        const groundFailure = registeredModelGroundFailure({ ...site, ...at }, { height: draft.height, inRiver: draft.inRiver });
+        if (groundFailure) return { changes: 0, reason: groundFailure };
         const previousLoose = new Set(CONSTRAINTS.find((constraint) => constraint.id === "looseInlandRoadEnds")!
           .measure(planView(draft)).map((violation) => `${violation.at!.x}:${violation.at!.z}`));
         site.x = at.x; site.z = at.z;
@@ -247,7 +255,10 @@ export const REPAIR_STRATEGIES: RepairStrategy[] = [
         }))) },
   { constraint: "looseInlandRoadEnds", name: "pruneShortSpurs", run: pruneShortSpurs },
   // 选址后置（siting.ts）：路网定型后，对仍然入水/重叠的用地在候选表里重新落位。放在表尾，不动点循环会让前面的策略对新位置再跑一遍。
-  { constraint: "siteInWater", name: "resiteWetShoreSites", run: () => 0, candidates: (ctx) => unservedShoreCandidates(ctx, "siteInWater") },
+  { constraint: "siteInWater", name: "resiteWetShoreSites", run: () => 0, candidates: (ctx) => unservedShoreCandidates(ctx, "siteInWater"),
+    emptyReason: (ctx) => [...ctx.publicSites, ...ctx.landmarks].some(owner => canRelocateGroundSite(owner) && ctx.SHORE_SITE_KINDS.has(owner.kind)
+      && registeredModelGroundFailure(owner, { height: ctx.height, inRiver: ctx.inRiver }))
+      ? "registered ground placement unsupported or original wet-shore candidate budget exhausted; no expanded search or fabricated water support" : undefined },
   { constraint: "siteInWater", name: "resiteViolatingSites", run: (ctx) => resiteViolatingSites(ctx, { skipWetShore: true }) },
 ];
 
@@ -388,17 +399,27 @@ function updatedRepairWorld(base: RepairWorldState, draft: RepairContext): { sta
 export function repairPlanningOutcome(ctx: RepairContext): {
   status: "degraded" | "failed"; versions?: WorldVersions; reasons: string[];
   requiredDemands: number; unmetDemandIds: string[]; pendingPhysicalReservations: number; unsupportedPhysicalReservations: number;
+  groundCoverage: { total: number; partial: number; violations: number; unsupported: number };
+  groundFailures: Array<{ ownerId: string; reason: string }>;
 } {
   const state = repairWorldStates.get(ctx), diagnostics = diagnoseNetwork(planView(ctx));
   const unmetDemandIds = diagnostics?.unmet.map(d => d.demandId) ?? [];
   const stale = state ? worldBaseFailure(ctx, state) : "production world is not initialized";
   const reservations = state?.world.reservations.filter(r => r.state !== "released") ?? [];
+  const groundInspections = [...ctx.publicSites, ...ctx.landmarks].map(owner => ({ owner, inspection: inspectModelGround(owner, { height: ctx.height, inRiver: ctx.inRiver }) }));
+  const groundFailures = groundInspections.flatMap(({ owner, inspection }) => inspection.status === "violation"
+    ? [{ ownerId: owner.id, reason: inspection.findings.map(finding => finding.code).join(",") }]
+    : inspection.status === "unsupported" && Object.hasOwn(GROUND_MODEL_FACTORIES, owner.kind) ? [{ ownerId: owner.id, reason: inspection.reason }] : []);
   const reasons = ["full model/foundation/entrance policy coverage is pending", "whole-plan operation budget/cancellation is not registered", ...(stale ? [stale] : []),
-    ...(!diagnostics ? ["required primary network evidence missing"] : []), ...(unmetDemandIds.length ? ["required connection demands remain unmet"] : [])];
-  return { status: stale || !diagnostics || unmetDemandIds.length ? "failed" : "degraded", versions: state?.world.versions,
+    ...(!diagnostics ? ["required primary network evidence missing"] : []), ...(unmetDemandIds.length ? ["required connection demands remain unmet"] : []),
+    ...(groundFailures.length ? ["registered model ground admission remains failed or unsupported"] : [])];
+  return { status: stale || !diagnostics || unmetDemandIds.length || groundFailures.length ? "failed" : "degraded", versions: state?.world.versions,
     reasons, requiredDemands: diagnostics?.demands.filter(d => d.demand.required).length ?? 0, unmetDemandIds,
     pendingPhysicalReservations: reservations.filter(r => r.physical.status === "pending").length,
-    unsupportedPhysicalReservations: reservations.filter(r => r.physical.status === "unsupported").length };
+    unsupportedPhysicalReservations: reservations.filter(r => r.physical.status === "unsupported").length,
+    groundCoverage: { total: groundInspections.length, partial: groundInspections.filter(entry => entry.inspection.status === "partial").length,
+      violations: groundInspections.filter(entry => entry.inspection.status === "violation").length,
+      unsupported: groundInspections.filter(entry => entry.inspection.status === "unsupported").length }, groundFailures };
 }
 
 /** Explicit last derived producer: never call after independently mutating the authority arrays.
@@ -532,6 +553,18 @@ export function repairAcceptance(before: RepairContext, after: RepairContext, re
     const existing = new Set(old.map((v) => identity(v, before)));
     if (next.some((v) => !existing.has(identity(v, after)))) return `${constraint.id} introduced at a new object`;
   }
+  const oldOwners = [...before.publicSites, ...before.landmarks], newOwners = [...after.publicSites, ...after.landmarks];
+  for (const owner of newOwners) {
+    const old = oldOwners.find(previous => previous.id === owner.id);
+    if (old && Object.hasOwn(GROUND_MODEL_FACTORIES, old.kind) && !Object.hasOwn(GROUND_MODEL_FACTORIES, owner.kind))
+      return `repair removed registered ground contract: ${owner.id}`;
+    const changed = !old || owner.x !== old.x || owner.z !== old.z || owner.yaw !== old.yaw || owner.radius !== old.radius || owner.kind !== old.kind;
+    if (!changed) continue;
+    const failure = registeredModelGroundFailure(owner, { height: after.height, inRiver: after.inRiver });
+    if (failure) return `${owner.id}: ${failure}`;
+    if (old && registeredModelGroundFailure(old, { height: before.height, inRiver: before.inRiver })
+      && Object.hasOwn(GROUND_MODEL_FACTORIES, owner.kind)) improved = true;
+  }
   const previousDemands = diagnoseNetwork(planView(before))?.demands ?? [];
   const satisfied = previousDemands.filter((d) => d.demand.required && d.satisfied);
   const next = new Map(retained.demands.map((d) => [d.demand.id, d.satisfied]));
@@ -580,7 +613,12 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
   }
   if (strategy.candidates) {
     let changes = 0; const reasons: string[] = [];
-    for (const candidate of strategy.candidates(ctx)) {
+    const candidates = strategy.candidates(ctx);
+    if (!candidates.length) {
+      const reason = strategy.emptyReason?.(ctx);
+      return { changes: 0, ...(reason ? { reason } : {}) };
+    }
+    for (const candidate of candidates) {
       const outcome = runRepairTransaction(ctx, candidate);
       changes += outcome.changes;
       if (outcome.reason) reasons.push(`${candidate.name}: ${outcome.reason}`);
@@ -636,7 +674,8 @@ export function solvePlan(ctx: RepairContext, maxRounds = MAX_SOLVE_ROUNDS): Sol
   const report: SolveReport = REPAIR_STRATEGIES.map((s) => ({ constraint: s.constraint, name: s.name, changes: 0, declined: 0, reasons: [] }));
   // 保留跨约束候选生成；每个候选都独立接受，不再原地运行后补救。
   const ids = new Set(REPAIR_STRATEGIES.map((s) => s.constraint));
-  const anyViolation = CONSTRAINTS.some((c) => ids.has(c.id) && c.measure(planView(ctx)).length > 0);
+  const anyViolation = CONSTRAINTS.some((c) => ids.has(c.id) && c.measure(planView(ctx)).length > 0)
+    || [...ctx.publicSites, ...ctx.landmarks].some(owner => registeredModelGroundFailure(owner, { height: ctx.height, inRiver: ctx.inRiver }));
   if (anyViolation) {
     for (let round = 0; round < maxRounds; round += 1) {
       let changed = 0;

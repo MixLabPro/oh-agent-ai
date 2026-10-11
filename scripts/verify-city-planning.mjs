@@ -49,6 +49,10 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
   assert.equal(plan.radiusHistory.at(-1).radius, plan.islandRadius);
   assert.ok(plan.parcelGeneration.generated >= capacity, "raw/final capacity must not invert");
   const contacts = byId.unjoinedGroundJunctions.measure(plan);
+  const ground = plan.planningOutcome.groundCoverage;
+  assert.equal(ground.total, plan.publicSites.length + plan.landmarks.length, "ground coverage retains all model instances");
+  assert.equal(ground.partial + ground.violations + ground.unsupported, ground.total);
+  assert.deepEqual(plan.planningOutcome.groundFailures, [], `seed ${seed} tier ${tier}: registered model foundation must be admitted`);
   const intent = diagnoseNetwork(plan);
   assert.ok(Array.isArray(plan.demandCatalogue), "production must publish its retained demand catalogue");
   assert.equal(new Set(plan.demandCatalogue.map((demand) => demand.id)).size, plan.demandCatalogue.length, "retained demand IDs are unique");
