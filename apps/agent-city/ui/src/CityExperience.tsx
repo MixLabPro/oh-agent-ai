@@ -13,6 +13,7 @@ import { cinematicCopy } from "./engine/cinematicCopy";
 import { describeDecor, isDecorId } from "./engine/cityDecor";
 import { CATALOG_GROUPS, CATALOG_KIND_LABEL, CITY_CATALOG } from "./cityCatalog";
 import { scaleTierFor } from "./engine/cityPlan";
+import { installPlanRepairDebug, planDevEnabled } from "./planRepair/session";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { GameHud } from "./game/GameHud";
 import { gameText } from "./game/gameCopy";
@@ -57,6 +58,18 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     try { localStorage.setItem("city.backdrop", mode); } catch { /* 存储不可用：本次会话内仍生效 */ }
   };
   useEffect(() => { engine.current?.setBackdrop(backdrop); }, [backdrop]);
+  // 规划修复（开发开关 ?cityPlan / localStorage cityPlanDev=1 才启用，见 planRepair/session.ts）：
+  // 种子或引擎就绪变化时读该种子的补丁交给引擎；未开启时不读存档、不挂 window、引擎行为不变。
+  const planSession = useRef<ReturnType<typeof installPlanRepairDebug> | null>(null);
+  const planLoadedSeed = useRef<number | null>(null);
+  useEffect(() => {
+    if (!planDevEnabled()) return;
+    const current = engine.current; if (!current) return;
+    if (!planSession.current) planSession.current = installPlanRepairDebug(current);
+    if (planLoadedSeed.current !== seed) { planLoadedSeed.current = seed; void planSession.current.session.load(seed); }
+  }, [seed, model]);
+  // 清理必须连「已加载种子」一起重置：StrictMode 的 挂载→卸载→再挂载 会销毁会话，标记还留着就会跳过重新加载。
+  useEffect(() => () => { planSession.current?.dispose(); planSession.current = null; planLoadedSeed.current = null; }, []);
   const [film, setFilm] = useState<{ frame: number; total: number; width?: number; height?: number; software?: boolean } | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

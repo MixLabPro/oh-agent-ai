@@ -27,6 +27,7 @@ import { drawFilmOverlay, type FilmCardText } from "./cityFilmOverlay";
 import { Mp4Writer } from "./mp4Muxer";
 import { WebmFilmWriter, type WebmCodec } from "./webmMuxer";
 import { layoutCity, type CityLayout, type BackdropMode } from "./cityLayout";
+import { applyPlanPatch, layoutPinsFor, type PatchedLayout, type PlanPatchV1 } from "./planPatch";
 import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { MIAMI_COASTAL } from "./citySeaside";
@@ -79,7 +80,12 @@ export class CityEngine {
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private parts: CityParts | null = null;
+  /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
+  /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
+  private baseLayout: CityLayout | null = null;
+  private planPatchValue: PlanPatchV1 | null = null;
+  private planResult: PatchedLayout | null = null;
   private model: CityModel | null = null;
   private frame = 0;
   private raf = 0;
@@ -480,6 +486,29 @@ export class CityEngine {
     return this.layout;
   }
 
+  /** 规划修复（CITY_PLAN_MANUAL_REPAIR_SPEC §13）：当前种子生效的补丁、套用结果（失效清单/id 对照）与未打补丁的底层布局。 */
+  get planPatch(): PlanPatchV1 | null {
+    return this.planPatchValue && this.planPatchValue.seed === this.seed ? this.planPatchValue : null;
+  }
+
+  get planPatched(): PatchedLayout | null {
+    return this.planResult;
+  }
+
+  get generatedLayout(): CityLayout | null {
+    return this.baseLayout;
+  }
+
+  /** 设置/清除补丁并重建城市。补丁只对自己的种子生效；移除某条移楼时全量重排一次——
+   *  「刷新不搬家」会把那栋楼留在被钉住的地块，不重排就无法回到生成位置。 */
+  setPlanPatch(patch: PlanPatchV1 | null): void {
+    const previous = this.planPatch;
+    this.planPatchValue = patch;
+    if (!this.model || this.seed === null) return;
+    const removed = !!previous && Object.keys(previous.buildingMoves).some((id) => patch?.seed !== this.seed || !(id in patch.buildingMoves));
+    this.applyModel(this.model, !removed);
+  }
+
   get currentModel(): CityModel | null {
     return this.model;
   }
@@ -577,6 +606,8 @@ export class CityEngine {
     const first = this.seed === null;
     this.seed = seed;
     this.layout = null;
+    this.baseLayout = null;
+    this.planResult = null;
     if (this.model) this.applyModel(this.model, false);
     if (!first) this.resetView();
   }
@@ -592,7 +623,11 @@ export class CityEngine {
       this.parts.dispose();
       this.parts = null;
     }
-    const layout = layoutCity(model, reuse ? this.layout : null, this.seed, MIAMI_COASTAL, this.backdrop);
+    const patch = this.planPatch;
+    const base = layoutCity(model, reuse ? this.baseLayout : null, this.seed, MIAMI_COASTAL, this.backdrop, layoutPinsFor(patch));
+    this.baseLayout = base;
+    this.planResult = patch ? applyPlanPatch(base, patch) : null;
+    const layout = this.planResult ? this.planResult.layout : base;
     this.layout = layout;
     this.parts = new CityParts(model, layout, previousDisplays);
     if (this.assets) this.parts.applyAssets(this.assets);

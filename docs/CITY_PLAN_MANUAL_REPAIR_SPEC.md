@@ -295,4 +295,14 @@ ui 包无单测框架（仅 `tsc --noEmit`），沿用 verify 脚本模式：
 - **派生重算**：carPaths 同时认 from/to 节点对与折线中间点对；`landValue` 不在后处理里重算——移楼走 pins 后由 layoutCity 原生计算。
 - **路段 id 稳定性**（更正此前评审判断）：city-opt 上路段 id 由端点坐标派生（`addNetworkEdge`/split 的 `from/to`），不是自增序号——「旧补丁改到别的路」风险低；代价是求解器微调坐标即整体失效，如实报 stale。
 
-**仍待做**：CityEngine 接入（`layoutCity(..., layoutPinsFor(patch))` → `applyPlanPatch`）、编辑器/面板 UI、M2 的 `validateNodeMove`/`validateEdgeDrop`（锐角、并行间距、断网）、plan 级体检（等 city-opt `constraints.ts` 稳定）。
+**仍待做**：编辑器/面板 UI（拾取、拖拽、ghost、问题面板）、M2 的 `validateNodeMove`/`validateEdgeDrop`（锐角、并行间距、断网）、plan 级体检（等 city-opt `constraints.ts` 稳定）。CityEngine 接入已完成，见 §13.1。
+
+### 13.1 引擎接入与调试入口（2026-10-11）
+
+- `CityEngine` 分开持有 `baseLayout`（layoutCity 原始产物，下一轮 `previous` 只读它）与 `layout`（已套补丁，GameSession/FlightWorld/拾取读的就是它）；
+  `setPlanPatch(patch|null)` 重建城市。补丁只对自己的种子生效；**移除某条移楼时全量重排一次**——「刷新不搬家」会把楼留在被钉住的地块，不重排回不到生成位置。
+- `planRepair/session.ts`：加载/保存（400ms 防抖）、`moveBuilding`（带硬阻止）、`moveNode`/`dropEdge`（M1 无几何校验，只有套用层锁定/撞车保护）、撤销/重做、恢复生成、`candidates`、`audit`。
+  档位对不上时拒绝新编辑并提示 `reset()`，不静默覆盖旧补丁。load 带序号守卫（初始种子与存档种子两次异步读乱序返回）。
+- 开关：`?cityPlan` 或 localStorage `cityPlanDev=1`，开启后 `window.__cityPlan` 可用。**未开启时不读存档、不挂 window、引擎里 planPatch 恒 null**。
+- 真实引擎实测（浏览器，夹具数据）：移楼生效且飞行世界读同一份 `currentLayout`；非法移动被拒（missing-parcel / parcel-occupied+building-overlap）；
+  刷新后补丁自动恢复无 stale；reset 回到原地块、undo 恢复；节点拖到相邻节点 → node-collision；再拖已拖过的节点只留一条原始 id。
