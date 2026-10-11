@@ -3,6 +3,8 @@
  * 一个 model = 身份 + geometry()（seed → Part[] 纯数据）+ 生命周期声明 + 拾取信息；
  * 造型由 render/buildingCompiler.ts 编译成 THREE.Group。
  */
+import type { PhysicalDeclaration } from "./physical";
+
 export type BuildingSemantics = "data" | "scale" | "decor"; // = CatalogKind
 
 export const PART_ROLES = ["wall", "trim", "roof", "glass", "structure", "water", "lit", "beam"] as const;
@@ -34,6 +36,12 @@ export interface BuildingModel {
   };
   /** ⑤ 拾取：decorId 沿用现命名，describe 直出 DecorInfo 正文。 */
   picking: { decorId: string; category: string; describe: string };
+  /**
+   * ⑥ 物理声明（CITY_MODEL_PHYSICAL_INVARIANTS_SPEC §3，批 A+）：占地/基础/入口/运动包络的模型自身事实，
+   * 由 declarePhysical 工厂构造（自洽验证 + 深只读）。场景关系（不落水、不压路、入口可达）仍由守卫验证；
+   * 未声明的模型登记在 registry 的 PHYSICAL_PENDING（禁止静默）。
+   */
+  physical?: PhysicalDeclaration;
 }
 
 export type GeometryInput = {

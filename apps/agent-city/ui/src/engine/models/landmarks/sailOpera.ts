@@ -1,4 +1,5 @@
 import type { BuildingModel, Part } from "../model";
+import { declarePhysical } from "../physical";
 
 /**
  * 地标「sail-opera」：声明式 BuildingModel（批 1）。几何与旧 drawSailOpera 逐位一致（golden/city-landmark-baseline.json 钉住）。
@@ -13,6 +14,27 @@ export const sailOperaModel: BuildingModel = {
   title: "帆形歌剧院",
   body: "白色壳体的文化建筑，立在海岸上。由岛屿种子挑选，不代表会话。",
   sitingKey: "landmark:sail-opera",
+  /** 物理声明（批 A，陆侧变体）：台基 46×26 + 南向大台阶（18 宽，z 至 15.4）；帆壳是上层悬挑（y≥3），
+   *  XY 超出台基 ≤2 由悬挑余量覆盖。岸型（siting.shore 填海平台）留批 D：贴岸分侧基础与允许介质。 */
+  physical: declarePhysical({
+    modelId: "sail-opera",
+    modelRevision: "A1",
+    footprint: { parts: [
+      { shape: "rect", center: { x: 0, z: 0 }, width: 46, depth: 26 },
+      { shape: "rect", center: { x: 0, z: 11.1 }, width: 18, depth: 8.8 },
+    ] },
+    /** 上层悬挑：帆壳（y≥3）XY 超出台基至 x≈±24.8；后栏杆 z 至 −13.1。 */
+    overhang: { parts: [{ shape: "rect", center: { x: 0, z: 0 }, width: 50, depth: 27 }] },
+    foundation: { kind: "ground", support: { parts: [
+      { shape: "rect", center: { x: 0, z: 0 }, width: 46, depth: 26 },
+      { shape: "rect", center: { x: 0, z: 11.1 }, width: 18, depth: 8.8 },
+    ] }, maxRelief: 1.0, maxGap: 0.2, maxEmbed: 0.6, baseOffset: 0 },
+    entrances: [
+      { id: "main-south", local: { x: 0, z: 13 }, outward: { x: 0, z: 1 }, width: 18, mode: "pedestrian", required: true,
+        approach: { parts: [{ shape: "rect", center: { x: 0, z: 21 }, width: 18, depth: 12 }] } },
+    ],
+    notes: "陆侧变体；帆壳/幕墙棂条为上层或贴面件，台阶直面（+z）为主入口。",
+  }),
   geometry: ({ radius = 30, sizing, siting }) => {
     const parts: Part[] = [];
     if (siting?.shore) {

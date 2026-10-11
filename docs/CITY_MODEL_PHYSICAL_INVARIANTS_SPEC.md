@@ -1,10 +1,10 @@
 # City 模型物理声明与场景不变量 SPEC
 
-> 状态：修订设计，尚未完整实现（2026-10-08）。
+> 状态：修订设计，批 A 实施中（2026-10-09）。
 > 上位文档：`CITY_NETWORK_FIRST_CODE_DESIGN.md`（连接、占地、入口与最终展示图）、
-> `CITY_BUILDING_MODEL_SPEC.md`（模型数据与编译器契约）。
-> 原调研基线：`99155ff3`；本轮复核 HEAD：`2bec62a9`。
-> 工作区另有连接器及守卫修改，不属于本次文档修订；实施批须记录实际 commit 和 diff 指纹。
+> `CITY_BUILDING_MODEL_SPEC.md`（模型数据与编译器契约）、`CITY_ARCHITECTURE.md`（L0–L5 分层）。
+> 原调研基线：`99155ff3`；前轮复核 HEAD：`2bec62a9`；本轮复核 HEAD：`b0d75b35`（main）。
+> 2026-10-09 修订：变换唯一实现（§4.5）、与 planner v2 / SceneSpec 的对接（§4.6）、事故→声明追溯表（§9）、批 A 选型按实际模型修正（§6）。
 
 ## 1. 目标与边界
 
@@ -143,7 +143,7 @@ crownFinMesh.count 等错误与地块适配是两类问题。实例批次独立�
 
 工厂仅作轻量自洽验证：有效数值、形状、版本、入口引用、基础规则和参数域。
 工厂复制并建立深只读数据；Object.freeze 是浅冻结，使用冻结需覆盖嵌套对象与数组。
-版本不依赖 nextVersion 自增、Date 或加载顺序。
+版本不依赖自增计数、Date 或加载顺序（main 上并无 nextVersion 一类机制，该表述泛指此类做法）。
 
 较昂贵的“声明 ↔ 渲染几何”比对在构建/测试期执行：
 
@@ -157,6 +157,32 @@ crownFinMesh.count 等错误与地块适配是两类问题。实例批次独立�
 schemaVersion 表达字段协议；modelRevision/内容指纹与形态参数共同用于缓存失效。
 不影响物理的颜色修改无需强制改变 footprint。几何与声明分别记录并验证兼容性，
 不能用“两个 golden 同时变化”代替包含关系检查。
+
+### 4.5 变换唯一实现（2026-10-09 修订，批 A 门禁）
+
+“与编译器相同顺序累积变换”不允许以**第二份实现**满足：同序复刻仍是两份代码，必然漂移，
+而 yaw 双重应用正是本 spec 要拦截的事故类。硬性规则：
+
+- `render/buildingCompiler.ts` 导出件几何构造（preShift → bake → anchor → shift）与
+  件位姿（at/rot/parent 链）的唯一实现，并提供编译回调（onPart）让检查方拿到
+  part ↔ 编译产物 的对应关系。
+- 检查器消费编译产物（世界矩阵/包围盒）或编译器导出的同一函数；
+  **在守卫或规划器里自写变换累积视为门禁失败**。
+- 编译器改为消费导出函数属等价重构，由场景图基线守卫（verify-city-landmark-baseline /
+  verify-city-scene-baseline）证明零视觉变化。
+
+### 4.6 与 planner v2 / SceneSpec 的对接（2026-10-09 修订）
+
+三份文档两条流，对接点在此钉死，避免占地事实出现第二来源：
+
+- **planner v2（已落地）**：constraints/solve 的 measure 共享谓词在 `planner/footprint.ts`
+  （地形侧）与 `models/physical.ts`（模型侧）延续同一模式；批 B 的接入点是 siting 候选
+  试算与 solve measure，不新建第三套谓词。
+- **CITY_ARCHITECTURE 分层**：PhysicalDeclaration 属 L1 输入（模型注册项携带，纯数据无 three）；
+  SceneSpec（L3）只引用 modelId + input，不复制宽深事实；L4 渲染不消费声明
+  （编译器导出的位姿纯函数除外，见 §4.5）；L5 运行时读运动包络只用于镜头/拾取避让，不改声明。
+- **守卫**：verify-city-physical 按注册表驱动（同 verify-city-models 模式），
+  未声明模型登记待声明清单（PHYSICAL_PENDING），条数只减不增、每批复核。
 
 ## 5. 守卫职责调整
 
@@ -184,7 +210,7 @@ schemaVersion 表达字段协议；modelRevision/内容指纹与形态参数共�
 
 | 批 | 可验收交付 | 前置与边界 |
 | --- | --- | --- |
-| A | 局部形状、基础、入口协议，自洽检查及模型参数/变换测试 | 先选车站/体育场；纯新增未接线时基线不变 |
+| A | 局部形状、基础、入口协议，自洽检查及模型参数/变换测试 | 首选 **arch**（并集占地带合法空洞：两墩之间是路面，凸包会误判）、**sail-opera**（+z 台阶入口 + 地面基础）、**ferris-wheel**（旋转运动包络）。车站/体育场尚为 cityPlan PublicSite + 手写造型（不在 BUILDING_MODELS），待其模型声明化后随批 B 接入；纯新增未接线时基线不变 |
 | B | 两类设施占地与入口联合落位接入生产，共享生成/修复检查 | 最小安全连接器和预留，不等待 A* 或完整立体图 |
 | C | 地块/普通楼型适配、实例容量契约和统计 | 按真实失败样本实施，保留全部数据映射 |
 | D | 岸边/多体/动态模型，完整规划图与展示图复核 | 介质、共享入口、裁路和回放验证 |
@@ -222,3 +248,22 @@ schemaVersion 表达字段协议；modelRevision/内容指纹与形态参数共�
 完成意味着：生产消费共享物理声明，模型事实与几何一致，入口与落位联合接受，
 完整规划图和展示图关系验证有效，实例批次/容量正确，错误有显式处理与可复现证据。
 声明新增、工厂断言或测试通过中的任何一项，不能单独证明整套不变量已实现。
+
+## 9. 事故 → 声明追溯表（2026-10-09 增补）
+
+本表回答“为什么值得做”与“批 A 先做谁”：每行是本仓库真实发生过的事故及其拦截点。
+新事故入表时必须登记日期/提交与拦截条款，防止声明范围凭感觉扩张。
+
+| 事故 | 证据 | 拦截点 | 批次 |
+| --- | --- | --- | --- |
+| 地标压会话楼：siting 只给 RESITED 地标清地块，补丁 radius+9 | fcf7a28a（fix） | §5 候选/终筛按声明占地复核（补丁只修一个调用点，契约拦整个类） | B |
+| crownFinMesh 实例容量/写入事故 | cityParts.ts/buildingSystem.ts | §3.5 的 0 ≤ visible ≤ written ≤ capacity 不变量 | C |
+| 雨棚埋进墙：放置偏移 0.8，墙深 9——放置数学与渲染几何各信一套尺寸 | 海滨批 2 | §4 声明↔几何比对（构建期） | A |
+| promenade 跨无效采样段架桥（segments 已改，守卫留） | 海滨 T1 | §3.4/§5 关系守卫按最终网络复核 | A（守卫模式） |
+| wetCount 抄 8 份、阈值口径漂移（measure 合格/修复不合格） | planner/footprint.ts 头注 | §2 共享谓词（地形侧已落地，本 spec 推广到模型侧） | A |
+| 拱门占地若按凸包判定，会把两墩之间的路面算进实体 | arch.ts 几何事实 | §3.1 并集规则 + 批 A 反例（凸包误判测试） | A |
+| 灯塔光束（role:"beam"）不应扩大实体占地 | PartRole 语义 | §4.3 物理/视觉分类分离，光束排除并记录 | A |
+
+复核记录：本轮按 main `b0d75b35` 重核——§5 所列 11 个守卫全部仍在 planner/，
+`BuildingModel.geometry(GeometryInput)`、Part 字母表与变换链（parent/bake/preShift/anchor/rot/shift）
+与 `models/model.ts`、`render/buildingCompiler.ts` 一致；车站/体育场为 PublicSite（见 §6 批 A 修订）。
