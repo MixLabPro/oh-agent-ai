@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { citySrc, loadCity } from "./city-kit/index.mjs";
 const { declaredOwnerDetour, prepareJointSiteRoadRelocation, relocateSiteWithGroundRoads, runRepairTransaction,
+  createCityPlan, MIAMI_COASTAL,
   emptyNetwork, addNetworkEdge, localResiteCandidates, inspectModelGround, footprintPolylineDistance, resolveModelEnvelope,
   declaredGroundRoadClear, roadThroughSite, nudgeSitesOffRoads, polylineDistance } = await loadCity({
   "engine/planner/constraints.ts": ["roadThroughSite"], "engine/planner/repairs.ts": ["nudgeSitesOffRoads"], "engine/planner/footprint.ts": ["polylineDistance"],
   "engine/planner/jointSiteRoad.ts": ["declaredOwnerDetour", "prepareJointSiteRoadRelocation", "relocateSiteWithGroundRoads"],
   "engine/planner/solve.ts": ["runRepairTransaction"], "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
   "engine/planner/siting.ts": ["localResiteCandidates"], "engine/planner/modelGround.ts": ["inspectModelGround"],
+  "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/modelEnvelope.ts": ["footprintPolylineDistance", "resolveModelEnvelope", "declaredGroundRoadClear"],
 });
 const footprint = { parts: [{ shape: "rect", center: { x: 0, z: 0 }, width: 20, depth: 20 }] };
@@ -81,4 +83,11 @@ for (const failure of ["bound", "bridge", "endpoint", "parcel", "unknown", "unde
   assert.equal(result.changes, 0, failure); assert(result.reason, failure); assert.equal(snapshot(ctx), before, failure);
 }
 assert(!fs.readFileSync(`${citySrc}/engine/planner/jointSiteRoad.ts`, "utf8").includes("villa-complex"), "generic operation must not branch on model names");
-console.log("City joint site-road: actual union opening, original widths/endpoints, declared candidate, real registered ground recovery, atomic late refusal/publication, car/trunk lineage and protected/unknown failures passed; full plan/model/budget coverage pending.");
+for (const [seed, tier, cfg] of [[1703350391, 2, MIAMI_COASTAL], [2003037141, 1, MIAMI_COASTAL]]) {
+  const plan = createCityPlan(seed, tier, cfg);
+  assert.equal(plan.planningOutcome.groundCoverage.violations, 0, `seed ${seed}: declared ground violations`);
+  assert.equal(plan.planningOutcome.groundFailures.length, 0, `seed ${seed}: ground placement failures`);
+  assert.notEqual(plan.planningOutcome.status, "failed", `seed ${seed}: planning still failed`);
+  assert(plan.planningOutcome.versions.network > 0 && plan.planningOutcome.versions.site > 0, `seed ${seed}: joint network/site revision missing`);
+}
+console.log("City joint site-road: synthetic safety, real registered ground recovery, atomic publication/refusal, car/trunk lineage and both named endpoint-blocked seeds passed; full model/budget coverage pending.");
