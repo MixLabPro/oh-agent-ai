@@ -24,6 +24,7 @@ import type { EditResult, ImpactPreview, NodeHandle, PlacementGhost, PlanRect, R
 export type RepairTool = "build" | "draw" | "erase" | "restyle" | "site" | "node";
 /** 画路的路型：地面路三档宽度 + 滨海大道 + 高架。 */
 export type RoadType = "local" | "secondary" | "main" | "waterfront" | "viaduct";
+export type DrawMode = "straight" | "curve";
 export const ROAD_SPEC: Record<Exclude<RoadType, "viaduct">, { width: number; purpose?: RoadPurpose }> = {
   local: { width: 5 }, secondary: { width: 8 }, main: { width: 12 }, waterfront: { width: 12, purpose: "waterfront" },
 };
@@ -66,6 +67,10 @@ export type RepairState = {
   roadType: RoadType;
   /** 高架：已点下、还没完成的折线点。 */
   viaduct: Vec2[];
+  /** 地面路的画法：直线（两点）/ 弧线（起点 → 经过点 → 终点）。 */
+  drawMode: DrawMode;
+  /** 弧线：已点下的经过点（起点之后、终点之前）。 */
+  drawVia: Vec2 | null;
   /** 自由级设施落位时用户额外转的 90° 次数（[ / ] 键）；自动朝向是「正门朝最近的路」。 */
   siteTurn: number;
   preview: RepairPreview;
@@ -83,8 +88,8 @@ export type RepairDeps = {
   // 道路
   snap(x: number, z: number): SnapPoint | null;
   edgeAt(x: number, z: number): { id: string; points: Vec2[]; width: number; locked: boolean } | null;
-  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, exact?: boolean): RoadPreview;
-  addRoad(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose): EditResult;
+  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, exact?: boolean, via?: Vec2): RoadPreview;
+  addRoad(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, via?: Vec2): EditResult;
   // 高架
   validateHighway(points: readonly Vec2[], exact?: boolean): RoadPreview;
   addHighway(points: readonly Vec2[]): EditResult;
@@ -138,6 +143,8 @@ const BLOCKER_TEXT: Record<string, string> = {
   "edge-too-short": "太短了（至少 6）",
   "edge-too-long": "太长了（最多 800）",
   "isolated-road": "新路必须接到现有道路上",
+  "curve-too-tight": "弯太急：小路最小转弯半径 15、次干道 24、主干道 36——把经过点挪得离起终点连线近一些",
+  "curve-over-water": "弧线不能过水——过河请切回直线画（会自动架桥）",
   "road-in-water": "不能修到水面或岩岸上（起点或终点在水里，或一笔要跨两段水——地面桥一笔只跨一段水面）",
   "bridge-too-long": "水面太宽，地面桥最长 160——请改用高架",
   "junction-on-bridge": "桥上不能有路口：新路会在水面上和别的路交叉",
@@ -236,6 +243,8 @@ const footprintContains = (site: SiteInfo, p: Vec2) => {
   return Math.abs(lx) <= box.width / 2 && Math.abs(lz) <= box.depth / 2;
 };
 
+const CURVE_HINT: RepairMessage = { kind: "hint", text: "弧线：点起点，再点路要经过的点，最后点终点；可连续画，Esc 撤回上一步，C 切回直线" };
+const CURVE_START_HINT: RepairMessage = { kind: "hint", text: "起点已落下：点一下路要经过的地方（弧线会穿过它）" };
 const VIADUCT_HINT: RepairMessage = { kind: "hint", text: "高架：逐点点击画折线（可跨河、跨路），回车或在最后一点上再点一下完成；Esc 撤回上一个点" };
 
 const ghostPreview = (ghost: PlacementGhost | null): RepairPreview =>
@@ -252,7 +261,7 @@ const HOVER_SETTLE_MS = 150;
 const ESTIMATE_NOTE = "（预估，鼠标停住后给出确切结果）"; // 地面点移动不到这么多就不重算预览（鼠标抖动）
 
 export class RepairController {
-  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], siteTurn: 0, preview: null, message: null };
+  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], drawVia: null, drawMode: "straight", siteTurn: 0, preview: null, message: null };
   private readonly listeners = new Set<(state: RepairState) => void>();
   private lastGround: Vec2 | null = null;
   private lastRay: RepairRay | null = null;
@@ -279,7 +288,7 @@ export class RepairController {
   enter(): void {
     if (this.state.active) return;
     this.lastGround = null;
-    this.set({ active: true, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], preview: null, message: HINT.build });
+    this.set({ active: true, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], drawVia: null, preview: null, message: HINT.build });
   }
 
   exit(): void {
@@ -287,14 +296,14 @@ export class RepairController {
     this.cancelSettle?.(); this.cancelSettle = null; this.settled = true;
     this.deps.setSelected(null);
     this.lastGround = null;
-    this.set({ active: false, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], preview: null, message: null });
+    this.set({ active: false, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], drawVia: null, preview: null, message: null });
   }
 
   setTool(tool: RepairTool): void {
     if (!this.state.active || this.state.tool === tool) return;
     this.deps.setSelected(null);
     this.lastGround = null;
-    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], preview: null, message: tool === "draw" && this.state.roadType === "viaduct" ? VIADUCT_HINT : HINT[tool] });
+    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], drawVia: null, preview: null, message: tool === "draw" && this.state.roadType === "viaduct" ? VIADUCT_HINT : HINT[tool] });
   }
 
   /** 换路型。地面路之间互换保留起点（接着画、只换宽度）；进出高架清掉进行中的笔画（两种画法不一样）。 */
@@ -302,6 +311,13 @@ export class RepairController {
     if (!this.state.active || this.state.roadType === roadType) return;
     const crossing = (roadType === "viaduct") !== (this.state.roadType === "viaduct");
     this.set({ roadType, ...(crossing ? { drawStart: null, viaduct: [], message: this.state.tool === "draw" ? (roadType === "viaduct" ? VIADUCT_HINT : HINT.draw) : this.state.message } : {}) });
+    this.recomputePreview();
+  }
+
+  /** 切换地面路画法（直线 / 弧线，C 键）。保留起点，丢掉弧线经过点。 */
+  setDrawMode(drawMode: DrawMode): void {
+    if (!this.state.active || this.state.drawMode === drawMode) return;
+    this.set({ drawMode, drawVia: null, ...(this.state.tool === "draw" && this.state.roadType !== "viaduct" ? { message: drawMode === "curve" ? (this.state.drawStart ? CURVE_START_HINT : CURVE_HINT) : HINT.draw } : {}) });
     this.recomputePreview();
   }
 
@@ -326,6 +342,7 @@ export class RepairController {
       this.set({ viaduct, message: viaduct.length ? { kind: "hint", text: `已撤回一个点（还有 ${viaduct.length} 个）` } : VIADUCT_HINT });
       this.recomputePreview(); return;
     }
+    if (tool === "draw" && this.state.drawVia) { this.set({ drawVia: null, message: CURVE_START_HINT }); this.recomputePreview(); return; }
     if (tool === "draw" && drawStart) { this.set({ drawStart: null, preview: null, message: HINT.draw }); this.recomputePreview(); return; }
     if (tool === "node" && this.state.dragNode) { this.set({ dragNode: null, preview: null, message: HINT.node }); this.recomputePreview(); return; }
     if (tool === "site" && this.state.site) { this.clearSite(HINT.site); return; }
@@ -432,7 +449,13 @@ export class RepairController {
       return;
     }
     const spec = ROAD_SPEC[roadType];
-    const verdict: RoadPreview = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, spec.width, spec.purpose, this.settled);
+    if (this.state.drawMode === "curve" && !this.state.drawVia) {
+      // 弧线第二点（经过点）还没定：先画一条起点到鼠标的细引导线，不校验。
+      this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: ground, width: spec.width, ok: true, reason: null, warning: null, snap, impact: null, path: null, waterfront: spec.purpose === "waterfront" } });
+      return;
+    }
+    const via = this.state.drawMode === "curve" ? this.state.drawVia ?? undefined : undefined;
+    const verdict: RoadPreview = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, spec.width, spec.purpose, this.settled, via);
     this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: spec.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOfVerdict(verdict), snap, impact: verdict.impact ?? null, path: verdict.path ?? null, waterfront: spec.purpose === "waterfront" } });
   }
 
@@ -499,13 +522,20 @@ export class RepairController {
     if (!snap) return;
     if (snap.locked) { this.set({ message: { kind: "error", text: `不能从这里接路：${blockerText("locked-edge")}` } }); return; }
     const start = this.state.drawStart;
+    const curve = this.state.drawMode === "curve";
     if (!start) {
-      this.set({ drawStart: snap, message: { kind: "hint", text: "起点已落下，移动鼠标预览，再点一下落笔；Esc 放弃这个起点" } });
+      this.set({ drawStart: snap, message: curve ? CURVE_START_HINT : { kind: "hint", text: "起点已落下，移动鼠标预览，再点一下落笔；Esc 放弃这个起点" } });
+      this.recomputePreview();
+      return;
+    }
+    if (curve && !this.state.drawVia) {
+      // 经过点不吸附：它是弧线要穿过的位置，不是路口。
+      this.set({ drawVia: { x: ground.x, z: ground.z }, message: { kind: "hint", text: "经过点已定：移动鼠标预览弧线，点终点落笔；Esc 重新选经过点" } });
       this.recomputePreview();
       return;
     }
     const spec = ROAD_SPEC[this.state.roadType as Exclude<RoadType, "viaduct">];
-    const result = this.deps.addRoad(start, snap, spec.width, spec.purpose);
+    const result = this.deps.addRoad(start, snap, spec.width, spec.purpose, curve ? this.state.drawVia ?? undefined : undefined);
     if (!result.ok) {
       this.set({ message: { kind: "error", text: failText("不能这样画", result) } });
       return;
@@ -515,6 +545,7 @@ export class RepairController {
     const warnings = result.warnings.map(warningText);
     this.set({
       drawStart: { ...snap, kind: "node", locked: false }, // 落笔后终点已是路口（拆开或新建）
+      drawVia: null,
       message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已画一段（${warnings.join("；")}），接着点下一个点` : "已画一段，接着点下一个点；Esc 结束" },
     });
     this.recomputePreview();

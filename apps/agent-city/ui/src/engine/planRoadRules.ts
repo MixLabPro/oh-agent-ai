@@ -15,7 +15,7 @@
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
 import { buildingRect, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
-import { wetSpan } from "./planGeometry";
+import { curvePoints, minCurveRadius, polylineLength, polylineMinRadius, wetSpan } from "./planGeometry";
 import { polygonDistance, roadNodeId } from "./cityPlan";
 import { listSites, siteBox } from "./planSites";
 import { frontEntrance, segmentPolygonDistance, worldOverhead, type Polygon } from "./planFootprint";
@@ -424,7 +424,8 @@ function minGap(angles: readonly number[]): number {
  * 画路的校验：from/to 是已吸附的坐标。硬阻止：太短/太长、锁定宿主、孤立（两端都没接上路网）、重复/退化、
  * 入水、穿过楼/配套/花园、与现有道路交叉（要在交叉点连接）、新引入的锐角路口。警告：新断头。
  */
-export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2, to: Vec2, width: number, purpose?: "waterfront", ignoreSites: readonly string[] = []): RoadVerdict {
+export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2, to: Vec2, width: number, purpose?: "waterfront", ignoreSites: readonly string[] = [], via?: Vec2): RoadVerdict {
+  if (via) return validateCurveAdd(layout, model, from, via, to, width, purpose);
   const blockers: string[] = []; const warnings: string[] = [];
   const a = quantize(from); const b = quantize(to);
   const length = Math.hypot(b.x - a.x, b.z - a.z);
@@ -469,6 +470,45 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
   // 锐角：只拦新引入的（接到的路口本来就锐角的不算新违例）。
   const dirAB = Math.atan2(b.z - a.z, b.x - a.x); const dirBA = Math.atan2(a.z - b.z, a.x - b.x);
   for (const [end, at, dir] of [[ea, a, dirAB], [eb, b, dirBA]] as const) {
+    const existing = directionsAt(layout, end, at);
+    if (existing.length + 1 < 3) continue;
+    if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
+  }
+  return { blockers, warnings };
+}
+
+/**
+ * 弧线的校验（与 planPatch 重放同一条 curvePoints 折线）：长度、最小转弯半径（按路型，curve-too-tight）、
+ * 不过水（过河用直线架桥）、压楼走推土机、交叉自动路口、两端的锐角按弧线端点切线算。
+ */
+function validateCurveAdd(layout: CityLayout, model: CityModel, from: Vec2, via: Vec2, to: Vec2, width: number, purpose?: "waterfront"): RoadVerdict {
+  const blockers: string[] = []; const warnings: string[] = [];
+  const a = quantize(from); const b = quantize(to);
+  const pts = curvePoints(a, quantize(via), b);
+  const length = polylineLength(pts);
+  if (Math.hypot(b.x - a.x, b.z - a.z) < MIN_EDGE_LENGTH) return { blockers: ["edge-too-short"], warnings };
+  if (length > MAX_NEW_EDGE) blockers.push("edge-too-long");
+  if (polylineMinRadius(pts) < minCurveRadius(width) - 1e-6) blockers.push("curve-too-tight");
+  const ea = attach(layout, a); const eb = attach(layout, b);
+  const lockedNode = (end: Attach) => end.kind === "node" && layout.roadEdges.some((edge) => (edge.from === end.id || edge.to === end.id) && edgeLocked(edge));
+  if ((ea.kind === "edge" && edgeLocked(ea.edge)) || (eb.kind === "edge" && edgeLocked(eb.edge)) || lockedNode(ea) || lockedNode(eb)) return { blockers: ["locked-edge"], warnings };
+  if (ea.kind === "node" && eb.kind === "node" && ea.id === eb.id) return { blockers: ["degenerate"], warnings };
+  let junctions = 0;
+  for (let i = 1; i < pts.length; i += 1) {
+    junctions += crossingPoints(layout, pts[i - 1], pts[i]).length;
+    // 采样点正好落在现有路上（与重放同口径：交点检测看不见端点处的交叉，按「路上的点」补数）。
+    if (i < pts.length - 1 && layout.roadEdges.some((edge) => !edge.bridge && nearestOnPolyline(pts[i], edge.points).distance < 1)) junctions += 1;
+    if (wetSpan(layout, pts[i - 1], pts[i]).kind !== "dry" && !blockers.includes("curve-over-water")) blockers.push("curve-over-water");
+  }
+  if (ea.kind === "free" && eb.kind === "free" && junctions === 0) warnings.push("isolated-road");
+  if (ea.kind === "free" || eb.kind === "free") warnings.push("creates-dead-end");
+  const next: RoadEdge = { id: "new", from: "a", to: "b", width, kind: width >= 8 ? "arterial" : "local", points: pts, structure: "ground-road" };
+  applyImpact(roadImpact(layout, model, [next]), blockers, warnings);
+  if (junctions) warnings.push(`auto-junction:${junctions}`);
+  if (purpose === "waterfront" && layout.coast?.length && Math.abs(polygonDistance(pts[Math.floor(pts.length / 2)], layout.coast)) > FAR_FROM_COAST) warnings.push("far-from-coast");
+  const dirA = Math.atan2(pts[1].z - a.z, pts[1].x - a.x); const n = pts.length;
+  const dirB = Math.atan2(pts[n - 2].z - b.z, pts[n - 2].x - b.x);
+  for (const [end, at, dir] of [[ea, a, dirA], [eb, b, dirB]] as const) {
     const existing = directionsAt(layout, end, at);
     if (existing.length + 1 < 3) continue;
     if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }

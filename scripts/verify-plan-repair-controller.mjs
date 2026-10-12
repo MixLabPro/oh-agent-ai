@@ -732,4 +732,35 @@ function harness(overrides = {}) {
   assert.match(controller.snapshot.message.text, /高架不是地面路的路型/);
 }
 
-console.log("City plan repair controller: the restyle tool changes a whole run to the chosen road type (target-width preview, bulldozer note, unchanged/locked explained, no viaduct); free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (z) 弧线画法：C / 面板切换；起点 → 经过点（不吸附，引导线不校验）→ 终点（带 via 校验与落笔）；Esc 先撤经过点、再撤起点；
+//     落笔后终点成新起点、经过点清空，可连续画；高架不提供弧线。
+{
+  const { controller, deps, log } = harness();
+  const validated = [];
+  deps.validateAdd = (from, to, width, purpose, exact, via) => { validated.push(via ?? null); return { blockers: [], warnings: [], path: via ? [from, via, to] : null }; };
+  deps.addRoad = (from, to, width, purpose, via) => { log.adds.push([from, to, width, purpose, via]); return { ok: true, patch: {}, warnings: [] }; };
+  controller.enter(); controller.setTool("draw");
+  controller.setDrawMode("curve");
+  assert.match(controller.snapshot.message.text, /弧线：点起点/);
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  assert.match(controller.snapshot.message.text, /路要经过的地方/);
+  controller.hover({ x: 30, z: 30 });
+  assert.equal(controller.snapshot.preview.kind, "draw"); assert.equal(validated.length, 0, "the guide line before the bend point is not validated");
+  controller.click({ pickedId: null, ground: { x: 30, z: 30 } });
+  assert.deepEqual(controller.snapshot.drawVia, { x: 30, z: 30 });
+  controller.hover({ x: 50, z: 10 });
+  assert.deepEqual(validated.at(-1), { x: 30, z: 30 }, "the preview validates the arc through the bend point");
+  assert.equal(controller.snapshot.preview.path.length, 3, "…and draws its path");
+  controller.cancel();
+  assert.equal(controller.snapshot.drawVia, null, "Esc drops the bend point first");
+  assert.ok(controller.snapshot.drawStart, "…keeping the start");
+  controller.click({ pickedId: null, ground: { x: 30, z: 30 } });
+  controller.click({ pickedId: null, ground: { x: 50, z: 10 } });
+  assert.deepEqual(log.adds.at(-1)[4], { x: 30, z: 30 }, "the third click lays the arc with its bend point");
+  assert.equal(controller.snapshot.drawVia, null); assert.deepEqual([controller.snapshot.drawStart.x, controller.snapshot.drawStart.z], [50, 10], "the end becomes the next start");
+  controller.setDrawMode("straight");
+  controller.click({ pickedId: null, ground: { x: 80, z: 10 } });
+  assert.equal(log.adds.at(-1)[4], undefined, "back in straight mode a click lays a straight road");
+}
+
+console.log("City plan repair controller: arcs are drawn start → bend point → end (C toggles, Esc peels the bend point first, chains); the restyle tool changes a whole run to the chosen road type (target-width preview, bulldozer note, unchanged/locked explained, no viaduct); free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");

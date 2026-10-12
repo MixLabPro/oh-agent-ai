@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { siteLabel, type RepairTool, type RoadType } from "./controller";
+import { siteLabel, type DrawMode, type RepairTool, type RoadType } from "./controller";
 import type { PlanRepairUi } from "./usePlanRepair";
 
 const RULE_LABEL: Record<string, string> = {
@@ -22,6 +22,11 @@ const ROAD_TYPES: Array<{ id: RoadType; label: string; hint: string }> = [
   { id: "main", label: "主干道", hint: "宽 12，城市骨架级" },
   { id: "waterfront", label: "滨海大道", hint: "宽 12，沿路向海一侧铺滨海景观带（步道、矮墙、路灯）" },
   { id: "viaduct", label: "高架", hint: "逐点点击画折线，可跨河跨路，两端自动落地成匝道；回车完成" },
+];
+
+const DRAW_MODES: Array<{ id: DrawMode; label: string; hint: string }> = [
+  { id: "straight", label: "直线", hint: "点两下画一段直路；从路尽头拐弯自动倒圆，过河自动架桥" },
+  { id: "curve", label: "弧线", hint: "点起点、路要经过的点、终点，画一段弧线路；弯的急缓有下限（按路型）" },
 ];
 
 /**
@@ -64,6 +69,9 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
     </div>
     {(state.tool === "draw" || state.tool === "restyle") && <div className="city-repair-widths" role="radiogroup" aria-label="路型">
       {ROAD_TYPES.filter((type) => state.tool === "draw" || type.id !== "viaduct").map((type) => <button key={type.id} role="radio" aria-checked={state.roadType === type.id} title={type.hint} className={state.roadType === type.id ? "is-active" : ""} onClick={() => repair.setRoadType(type.id)}>{type.label}</button>)}
+    </div>}
+    {state.tool === "draw" && state.roadType !== "viaduct" && <div className="city-repair-widths" role="radiogroup" aria-label="画法">
+      {DRAW_MODES.map((mode) => <button key={mode.id} role="radio" aria-checked={state.drawMode === mode.id} title={`${mode.hint}（C 切换）`} className={state.drawMode === mode.id ? "is-active" : ""} onClick={() => repair.setDrawMode(mode.id)}>{mode.label}</button>)}
     </div>}
     {state.tool === "draw" && state.roadType === "viaduct" && state.viaduct.length > 0 && <div className="city-repair-site">
       <span>高架已点 {state.viaduct.length} 个点</span>
@@ -120,6 +128,6 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
         </li>)}</ul>
       </>}
     </div>}
-    <p className="city-repair-help">V 移动 · R 画路 · E 橡皮擦 · N 路口 · S 设施 · [ ] 转向 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
+    <p className="city-repair-help">V 移动 · R 画路（C 直线/弧线）· E 橡皮擦 · T 改路 · N 路口 · S 设施 · [ ] 转向 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
   </section>;
 }

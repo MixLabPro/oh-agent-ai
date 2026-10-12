@@ -26,6 +26,43 @@ export function edgeLocked(edge: RoadEdge): boolean {
   return edge.bridge === true || edge.structure === "deck";
 }
 
+// ── 弧线路（游戏式曲线工具）──
+
+/** 弧线的最小转弯半径：与拐角倒圆同一口径——路宽 3 倍，夹在 12–36（小路能拐急弯，主干道要缓弯）。 */
+export const minCurveRadius = (width: number): number => Math.max(12, Math.min(36, width * 3));
+
+/**
+ * 弧线：起点 a、经过点 via、终点 b 的二次贝塞尔（控制点取 2·via − (a+b)/2，曲线在 t=0.5 正好过 via——
+ * 用户点的是「路要经过的地方」，不是看不见的控制点）。按约 6 一段采样成折线，点已量化，首尾就是 a、b。
+ * 校验与重放共用：两边铺出的折线逐点一致。
+ */
+export function curvePoints(a: Vec2, via: Vec2, b: Vec2): Vec2[] {
+  const c = { x: 2 * via.x - (a.x + b.x) / 2, z: 2 * via.z - (a.z + b.z) / 2 };
+  const rough = Math.hypot(c.x - a.x, c.z - a.z) + Math.hypot(b.x - c.x, b.z - c.z);
+  // 段数取偶数：t=0.5 的采样点就是经过点本身——用户点下的位置路一定压过去（奇数段时中点落在两个采样之间，弦会抄近道）。
+  const n = Math.max(4, Math.min(48, Math.ceil(rough / 6))) & ~1;
+  const out: Vec2[] = [];
+  for (let i = 0; i <= n; i += 1) {
+    const t = i / n; const u = 1 - t;
+    out.push(i === 0 ? { x: a.x, z: a.z } : i === n ? { x: b.x, z: b.z } : quantize({ x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, z: u * u * a.z + 2 * u * t * c.z + t * t * b.z }));
+  }
+  return out;
+}
+
+/** 折线最急处的转弯半径（相邻三点外接圆半径的最小值；直线返回 Infinity）。 */
+export function polylineMinRadius(points: readonly Vec2[]): number {
+  let best = Infinity;
+  for (let i = 2; i < points.length; i += 1) {
+    const [p, q, r] = [points[i - 2], points[i - 1], points[i]];
+    const a = Math.hypot(q.x - p.x, q.z - p.z); const b = Math.hypot(r.x - q.x, r.z - q.z); const c = Math.hypot(r.x - p.x, r.z - p.z);
+    const area2 = Math.abs((q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x));
+    if (area2 > 1e-9) best = Math.min(best, (a * b * c) / (2 * area2));
+  }
+  return best;
+}
+
+export const polylineLength = (points: readonly Vec2[]): number => points.reduce((sum, p, i) => (i ? sum + Math.hypot(p.x - points[i - 1].x, p.z - points[i - 1].z) : 0), 0);
+
 // ── 地面桥（路线图 P1-5）──
 
 /** 地面桥最长（与渲染层桁架装饰的上限、生成器跨河桥同量级）。 */

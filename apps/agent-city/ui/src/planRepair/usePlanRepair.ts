@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { CityModel } from "../cityModel";
 import type { CityEngine } from "../engine/CityEngine";
 import type { PlanIssue } from "../engine/planAudit";
-import { RepairController, type RepairState, type RepairTool, type RoadType } from "./controller";
+import { RepairController, type DrawMode, type RepairState, type RepairTool, type RoadType } from "./controller";
 import { ParcelOverlay, type OverlayMarker, type OverlayRibbon, type OverlaySiteMark } from "./overlay";
 import { installPlanRepairDebug, planDevEnabled, siteMarkRect, type PlanRect, type PlanRepairSession } from "./session";
 import type { RemapReport } from "../engine/planRemap";
@@ -25,7 +25,7 @@ export type RepairInfo = {
   saveFailed: boolean;
 };
 
-const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], siteTurn: 0, preview: null, message: null };
+const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], drawMode: "straight", drawVia: null, siteTurn: 0, preview: null, message: null };
 const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
@@ -65,8 +65,8 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         setSelected: (id) => current.setSelected(id),
         snap: (x, z) => session.snap(x, z),
         edgeAt: (x, z) => session.edgeAt(x, z),
-        validateAdd: (from, to, width, purpose, exact) => session.validateAdd(from, to, width, purpose, exact),
-        addRoad: (from, to, width, purpose) => session.addRoad(from, to, width, purpose),
+        validateAdd: (from, to, width, purpose, exact, via) => session.validateAdd(from, to, width, purpose, exact, via),
+        addRoad: (from, to, width, purpose, via) => session.addRoad(from, to, width, purpose, via),
         validateHighway: (points, exact) => session.validateHighway(points, exact),
         addHighway: (points) => session.addHighway(points),
         highwayAt: (x, z) => session.highwayAt(x, z),
@@ -126,6 +126,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
       if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
       if (event.key === "Escape") { event.preventDefault(); controller.cancel(); return; }
       if (event.key === "Enter" && controller.snapshot.viaduct.length) { event.preventDefault(); controller.finishViaduct(); syncInfo(); return; }
+      if ((event.key === "c" || event.key === "C") && !event.metaKey && !event.ctrlKey && controller.snapshot.tool === "draw" && controller.snapshot.roadType !== "viaduct") { event.preventDefault(); controller.setDrawMode(controller.snapshot.drawMode === "curve" ? "straight" : "curve"); return; }
       if ((event.key === "[" || event.key === "]") && controller.snapshot.site?.level === "free") { event.preventDefault(); controller.rotateSite(event.key === "]" ? 1 : -1); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
@@ -214,6 +215,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     exit: () => { auditOpen.current = false; setIssues(null); controllerRef.current?.exit(); },
     setTool: (tool: RepairTool) => withSession((_s, controller) => controller.setTool(tool)),
     removeSelected: () => withSession((_s, controller) => controller.removeSelected()),
+    setDrawMode: (mode: DrawMode) => withSession((_s, controller) => controller.setDrawMode(mode)),
     rotateSite: (direction: 1 | -1) => withSession((_s, controller) => controller.rotateSite(direction)),
     eraseStranded: () => withSession((_s, controller) => controller.eraseStranded()),
     dismissRemap: () => withSession((session) => session.dismissRemap()),
