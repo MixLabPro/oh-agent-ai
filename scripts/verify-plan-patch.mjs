@@ -22,7 +22,9 @@
 //   (r) 高架日志：画（含接到已有高架开口端，不多出匝道）、切（断成两条）、失效（切空处）、存档宽容读取、指纹兼容；
 //   (s) 真实城市：画一条跨河高架、一段滨海大道，补丁干净重放；
 //   (t) 改路型（路线图 P1-4）：目标状态幂等、id 不变、kind 随宽度、滨海景观带随 purpose 增撤、桥面/缺失如实失效、存档读回、
-//       「一整段」沿度 2 路口走、遇岔路/换路型停；校验 unchanged/locked/提示码。
+//       「一整段」沿度 2 路口走、遇岔路/换路型停；校验 unchanged/locked/提示码；
+//   (u) 地面桥（路线图 P1-5）：一笔跨一段河 → 引道 + 桥面（bridge/deck）+ 引道，桥登记进 bridges；端点在水里/连跨两河 → road-in-water；
+//       水面太宽 → bridge-too-long；桥上不能有路口；桥面锁定；校验与重放同一个判定。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
@@ -587,6 +589,36 @@ const snap = (layout) => JSON.stringify({
   assert.deepEqual(validateRestyle(street, model, ["300:200/350:200"], 8).blockers, ["unchanged"]);
   assert.deepEqual(validateRestyle(street, model, ["100:0/200:0"], 5).blockers, ["locked-edge"]);
   assert.deepEqual(validateRestyle(street, model, ["0:0/0:100"], 5).warnings, ["drops-waterfront", "narrows-arterial"], "turning the waterfront arterial into a lane says what is lost");
+}
+
+// (u) 地面桥。在合成城市里挖一条南北向的河：x∈(200,240)（另一条在 x∈(300,320)，再远处一条 260 宽的海峡 x∈(-380,-120)）。
+{
+  const wet = (x) => (x > 200 && x < 240) || (x > 300 && x < 320) || (x > -380 && x < -120);
+  const river = () => { const l = makeLayout(); l.terrain = { ...l.terrain, buildable: (x, z) => Math.hypot(x, z) < 380 && !wet(x) }; l.bridges = []; return l; };
+  const add = (from, to, width = 8) => { const patch = fresh(); patch.roadOps = [{ t: "add", from, to, width }]; return applyPlanPatch(river(), patch); };
+  const crossed = add({ x: 150, z: -100 }, { x: 280, z: -100 });
+  assert.equal(crossed.stale.length, 0, `a stroke over one river replays cleanly — ${JSON.stringify(crossed.stale)}`);
+  const fresh3 = crossed.layout.roadEdges.filter((e) => e.points.every((q) => q.z === -100));
+  assert.deepEqual(fresh3.map((e) => [e.structure, !!e.bridge]), [["ground-approach", false], ["deck", true], ["ground-approach", false]], "…as approach + bridge deck + approach (same shape as the generator's bridges)");
+  const deck = fresh3[1];
+  assert.ok(deck.points[0].x < 200 && deck.points[0].x > 195 && deck.points[1].x > 240 && deck.points[1].x < 245, `the deck spans the water plus a 3-unit abutment on each bank: ${JSON.stringify(deck.points)}`);
+  assert.equal(edgeLocked(deck), true, "the new deck is locked like any bridge");
+  assert.equal(crossed.layout.bridges.length, 1, "the bridge is registered for the truss decoration");
+  assert.ok(Math.abs(crossed.layout.bridges[0].length - 44) < 1, `water x∈(200,240) sampled per unit = 201..239, plus 3 each side: ${crossed.layout.bridges[0].length}`);
+  const verdict = validateRoadAdd(river(), model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8);
+  assert.deepEqual(verdict.blockers, [], `validation agrees: a bridge, not road-in-water — ${verdict.blockers}`);
+  assert.ok(verdict.warnings.includes("bridge:44"), `…and says so — ${verdict.warnings}`);
+  assert.deepEqual(validateRoadAdd(river(), model, { x: 150, z: -100 }, { x: 220, z: -100 }, 8).blockers, ["road-in-water"], "an end in the river is still refused");
+  assert.deepEqual(validateRoadAdd(river(), model, { x: 150, z: -100 }, { x: 340, z: -100 }, 8).blockers, ["road-in-water"], "two rivers in one stroke are refused (draw two strokes)");
+  assert.deepEqual(validateRoadAdd(river(), model, { x: -100, z: -60 }, { x: -390 + 5, z: -60 }, 8).blockers.length > 0, true);
+  assert.deepEqual(validateRoadAdd(river(), model, { x: -100, z: -60 }, { x: -110, z: -60 }, 8).blockers, [], "a short dry stroke is fine");
+  const strait = river(); strait.terrain = { ...strait.terrain, buildable: (x, z) => Math.hypot(x, z) < 380 && !(x > -300 && x < -120) };
+  assert.deepEqual(validateRoadAdd(strait, model, { x: -100, z: -60 }, { x: -320, z: -60 }, 8).blockers, ["bridge-too-long"], "water wider than 160 asks for a viaduct");
+  const forked = river(); forked.roadNodes = [...forked.roadNodes, { id: "220:-150", x: 220, z: -150 }, { id: "220:-50", x: 220, z: -50 }];
+  forked.roadEdges = [...forked.roadEdges, { id: "220:-150/220:-50", from: "220:-150", to: "220:-50", width: 5, kind: "local", points: [{ x: 220, z: -150 }, { x: 220, z: -50 }], structure: "ground-road" }];
+  assert.ok(validateRoadAdd(forked, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers.includes("junction-on-bridge"), "no junctions on a bridge");
+  const dropDeck = fresh(); dropDeck.roadOps = [{ t: "add", from: { x: 150, z: -100 }, to: { x: 280, z: -100 }, width: 8 }, { t: "drop", edge: deck.id }];
+  assert.deepEqual(applyPlanPatch(river(), dropDeck).stale.map((x) => x.reason), ["locked-edge"], "the new deck cannot be erased");
 }
 
 // (r) 高架日志。底层高架：(-50,20) → (250,20)。

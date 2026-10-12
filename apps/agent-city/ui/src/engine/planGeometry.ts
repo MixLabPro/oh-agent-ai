@@ -26,6 +26,47 @@ export function edgeLocked(edge: RoadEdge): boolean {
   return edge.bridge === true || edge.structure === "deck";
 }
 
+// ── 地面桥（路线图 P1-5）──
+
+/** 地面桥最长（与渲染层桁架装饰的上限、生成器跨河桥同量级）。 */
+export const MAX_GROUND_BRIDGE = 160;
+/** 桥台伸上岸的长度：桥面两端落在陆地上，不在水线上。 */
+export const BRIDGE_ABUTMENT = 3;
+/** 沿线采样水面的步长。 */
+const WET_STEP = 1;
+
+export type WetSpan =
+  | { kind: "dry" }
+  | { kind: "bridge"; from: Vec2; to: Vec2; length: number }
+  | { kind: "invalid"; reason: "end-in-water" | "multi-water" | "bridge-too-long" };
+
+/**
+ * 一段直路 a→b 跨不跨水：全程可建 → dry；中间恰好一段不可建、两端在陆地上、水面段（含两端桥台）≤ MAX_GROUND_BRIDGE
+ * → bridge（桥面起止点，已量化）；其余（端点在水里、过两次水、太长）→ invalid。
+ * 画路校验与补丁重放共用这一个判定——两边对「哪段是桥」必须一致。
+ */
+export function wetSpan(layout: CityLayout, a: Vec2, b: Vec2): WetSpan {
+  const len = Math.hypot(b.x - a.x, b.z - a.z);
+  const steps = Math.max(1, Math.ceil(len / WET_STEP));
+  const wet: boolean[] = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps;
+    wet.push(!layout.terrain.buildable(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t));
+  }
+  const first = wet.indexOf(true);
+  if (first < 0) return { kind: "dry" };
+  if (wet[0] || wet[steps]) return { kind: "invalid", reason: "end-in-water" };
+  const last = wet.lastIndexOf(true);
+  for (let i = first; i <= last; i += 1) if (!wet[i]) return { kind: "invalid", reason: "multi-water" };
+  const at = (d: number) => quantize({ x: a.x + (b.x - a.x) * (d / len), z: a.z + (b.z - a.z) * (d / len) });
+  const start = Math.max(0, (first / steps) * len - BRIDGE_ABUTMENT);
+  const end = Math.min(len, (last / steps) * len + BRIDGE_ABUTMENT);
+  const from = at(start); const to = at(end);
+  const length = Math.hypot(to.x - from.x, to.z - from.z);
+  if (length > MAX_GROUND_BRIDGE) return { kind: "invalid", reason: "bridge-too-long" };
+  return { kind: "bridge", from, to, length };
+}
+
 /** 楼的净空要避开的路：地面路（非桥）。体检与编辑校验共用这一个口径——
  *  曾经校验查全部路段、体检只查地面路，编辑器会拦下体检根本不报的落位（「三者同源」被破坏）。 */
 export function clearanceRoads(layout: CityLayout): RoadEdge[] {

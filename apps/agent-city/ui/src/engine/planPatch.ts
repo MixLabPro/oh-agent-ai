@@ -28,7 +28,7 @@ import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { clearsHighways, roadNodeId } from "./cityPlan";
 import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 import { applySiteOps, type SiteOp } from "./planSites";
-import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH } from "./planGeometry";
+import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
 
@@ -82,7 +82,7 @@ export type PlanPatchV1 = {
 export type PatchStaleEntry = {
   kind: "building-move" | "road-drop" | "road-move" | "road-add" | "road-restyle" | "site-remove" | "site-move" | "context-suppress" | "highway-add" | "highway-cut";
   id: string;
-  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway";
+  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway" | "road-in-water";
   detail: string;
 };
 
@@ -466,12 +466,32 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
       }
       if (b.id !== chain[chain.length - 1]) chain.push(b.id);
       let added = 0;
+      const kind = op.width >= 8 ? "arterial" as const : "local" as const;
+      const nodeAt = (p: Vec2): string => { const id = roadNodeId(p); if (!trial.nodes.some((node) => node.id === id)) trial.nodes.push({ id, x: p.x, z: p.z }); return id; };
       for (let i = 1; i < chain.length; i += 1) {
         const id = edgeIdOf(chain[i - 1], chain[i]);
         if (chain[i - 1] === chain[i] || trial.edges.some((edge) => edge.id === id)) continue; // 与已有路重合的那一段不重复铺
         const p = trial.nodes.find((node) => node.id === chain[i - 1])!; const q = trial.nodes.find((node) => node.id === chain[i])!;
+        // 地面桥（路线图 P1-5）：这一段跨一段水 → 拆成 引道 + 桥面 + 引道，与生成器的桥同构（deck 段 bridge:true，
+        // 挨着它的地面段 ground-approach）。倒圆弧段（lead）不在水上判——拐角在路尽头的陆地上。
+        const span = i === 1 && lead.length ? { kind: "dry" as const } : wetSpan(layout, p, q);
+        if (span.kind === "invalid") { stale.push({ kind: "road-add", id: label, reason: "road-in-water", detail: `新路要过的水面不能修桥（${span.reason}）` }); return; }
+        if (span.kind === "bridge") {
+          const s = Math.hypot(span.from.x - p.x, span.from.z - p.z) < 0.5 ? p.id : nodeAt(span.from);
+          const e = Math.hypot(span.to.x - q.x, span.to.z - q.z) < 0.5 ? q.id : nodeAt(span.to);
+          const at = (nodeId: string) => trial.nodes.find((node) => node.id === nodeId)!;
+          const piece = (from: string, to: string, extra: Partial<RoadEdge>) => {
+            const a = at(from); const b = at(to);
+            trial.edges.push({ id: edgeIdOf(from, to), from, to, width: op.width, kind, points: [{ x: a.x, z: a.z }, { x: b.x, z: b.z }], ...extra } as RoadEdge);
+          };
+          if (s !== p.id) piece(p.id, s, { structure: "ground-approach", ...(op.purpose ? { purpose: op.purpose } : {}) });
+          piece(s, e, { bridge: true, structure: "deck" });
+          if (e !== q.id) piece(e, q.id, { structure: "ground-approach", ...(op.purpose ? { purpose: op.purpose } : {}) });
+          added += 1;
+          continue;
+        }
         trial.edges.push({
-          id, from: chain[i - 1], to: chain[i], width: op.width, kind: op.width >= 8 ? "arterial" : "local",
+          id, from: chain[i - 1], to: chain[i], width: op.width, kind,
           points: [{ x: p.x, z: p.z }, ...(i === 1 ? lead : []), { x: q.x, z: q.z }], structure: "ground-road",
           ...(op.purpose ? { purpose: op.purpose } : {}),
         });
@@ -626,6 +646,13 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   const roadEdges = replayed ? replayed.edges : layout.roadEdges;
   const highways = patch.highwayOps?.length ? replayHighwayOps(layout.highways ?? [], patch.highwayOps, stale) : layout.highways;
   const coastRoads = replayed ? deriveCoastRoads(layout, roadEdges) : layout.coastRoads;
+  // 画路生成的地面桥登记进 bridges（渲染层的桁架装饰读它，与生成器的跨河桥同构；桥面锁定、不会被删）。
+  const baseIds = new Set(layout.roadEdges.map((edge) => edge.id));
+  const newDecks = replayed ? roadEdges.filter((edge) => edge.bridge && !baseIds.has(edge.id)) : [];
+  const bridges = newDecks.length ? [...(layout.bridges ?? []), ...newDecks.map((edge) => {
+    const [from, to] = [edge.points[0], edge.points[edge.points.length - 1]];
+    return { from, to, angle: Math.atan2(to.z - from.z, to.x - from.x), length: Math.hypot(to.x - from.x, to.z - from.z) };
+  })] : layout.bridges;
 
   // ── 2. 设施操作日志（删/移）：先于会话楼移动套用，后者看到的是设施改动后的占用 ──
   // 设施与会话楼的落位判定要看到改过的高架（新高架下不能落楼）。
@@ -689,5 +716,5 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     ? layout.activityKey // 叠套时不重复追加指纹
     : `${layout.activityKey ?? ""}${suffix}`;
 
-  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}) }, stale, patchHash };
+  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}), ...(bridges !== layout.bridges ? { bridges } : {}) }, stale, patchHash };
 }

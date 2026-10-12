@@ -15,6 +15,7 @@
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
 import { buildingRect, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
+import { wetSpan } from "./planGeometry";
 import { polygonDistance, roadNodeId } from "./cityPlan";
 import { listSites, siteBox } from "./planSites";
 import { frontEntrance, segmentPolygonDistance, worldOverhead, type Polygon } from "./planFootprint";
@@ -443,7 +444,18 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
   if (ea.kind === "free" || eb.kind === "free") warnings.push("creates-dead-end");
 
   const next: RoadEdge = { id: "new", from: "a", to: "b", width, kind: width >= 8 ? "arterial" : "local", points: [a, b], structure: "ground-road" };
-  if (badSamples(layout, next) > 0 || !layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z)) blockers.push("road-in-water");
+  // 地面桥（路线图 P1-5）：一笔恰好跨一段水、两端在陆地上、桥长 ≤ MAX_GROUND_BRIDGE → 水面段架成桥（重放时拆成 引道 + 桥面 + 引道，
+  // 同一个 wetSpan 判定）；端点在水里、连跨两段水 → 仍是 road-in-water；水面太宽 → bridge-too-long（请用高架）。
+  const span = wetSpan(layout, a, b);
+  if (!layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z)) blockers.push("road-in-water");
+  else if (span.kind === "invalid") blockers.push(span.reason === "bridge-too-long" ? "bridge-too-long" : "road-in-water");
+  else if (span.kind === "bridge") {
+    warnings.push(`bridge:${Math.round(span.length)}`);
+    // 桥上不能有路口（生成器同口径）：交点落在桥面段内就拦。
+    if (crossingPoints(layout, a, b).some((p) => nearestOnPolyline(p, [span.from, span.to]).distance < 0.5)) blockers.push("junction-on-bridge");
+    // 桥上方有高架：本期不算净空，提示用户自己看。
+    if ((layout.highways ?? []).some((run) => run.some((q, i) => i > 0 && !!segmentIntersection(run[i - 1], q, span.from, span.to)))) warnings.push("bridge-under-viaduct");
+  } else if (badSamples(layout, next) > 0) blockers.push("road-in-water");
   // ignoreSites：接入路从设施自己的门口起笔，路带必然擦到它自己——不算「压到设施」。
   const ignored = new Set<number>();
   if (ignoreSites.length) obstacles(layout, model).forEach((item, index) => { if (item.kind === "site" && ignoreSites.includes(item.id)) ignored.add(index); });

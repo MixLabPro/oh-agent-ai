@@ -428,7 +428,8 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
     assert.equal(JSON.stringify(again.roadEdges.map((e) => e.id)), JSON.stringify(layout.roadEdges.map((e) => e.id)), "…and the same road network");
   }
 
-  // 跨河高架：找一段两端在陆地、中间过水的直线（岛中间有河），画成高架——地面路过不了河，高架可以。
+  // 跨河高架：找一段两端在陆地、中间过水的直线（岛中间有河），画成高架。曾要求「地面路过不去」——P1-5 起窄河地面路也能架桥，
+  //   这条河地面桥就能过（下面另测），高架照样可以跨。
   let crossing = null;
   const isWater = (p) => !layout.terrain.buildable(p.x, p.z);
   for (let i = 0; i < slots.length && !crossing; i += 5) {
@@ -437,12 +438,11 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
       const a = { x: c.x - Math.cos(ang) * half, z: c.z - Math.sin(ang) * half }; const b = { x: c.x + Math.cos(ang) * half, z: c.z + Math.sin(ang) * half };
       const samples = Array.from({ length: 33 }, (_, t) => ({ x: a.x + (b.x - a.x) * t / 32, z: a.z + (b.z - a.z) * t / 32 }));
       if (isWater(a) || isWater(b) || !samples.some(isWater)) continue;
-      if (validateRoadAdd(layout, real, a, b, 5).blockers.includes("road-in-water") === false) continue; // 要的是地面路过不去的地方
       const verdict = validateHighwayAdd(layout, real, [a, b]);
       if (!verdict.blockers.length) crossing = { a, b, verdict };
     }
   }
-  assert.ok(crossing, "somewhere a ground road is blocked by water but a viaduct can span it");
+  assert.ok(crossing, "somewhere a viaduct can span the river");
   const viaductPatch = appendHighwayOp(emptyPlanPatch(layout.seed, layout.scaleTier), { t: "add", points: [crossing.a, crossing.b] }, 1);
   const vResult = bulldozeForRoads(layout, real, layout, viaductPatch);
   const vApplied = applyPlanPatch(layout, vResult.patch);
@@ -452,6 +452,28 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   const stillUnder = vApplied.layout.districts.flatMap((d) => [...d.slots]).filter(([id, slot]) => !vResult.homeless.includes(id) && !rectClearOfEdges(buildingRect(buildings.get(id), slot), deck, 0.5));
   assert.deepEqual(stillUnder.map(([id]) => id), [], "no session building is left under the new deck");
   console.log(`  真实城市：跨河高架 ${Math.round(Math.hypot(crossing.b.x - crossing.a.x, crossing.b.z - crossing.a.z))} 长 ${crossing.verdict.warnings.join("、") || "无提示"} → 推平 ${vResult.bulldozed.length}、安置 ${vResult.relocated.length}`);
+
+  // 地面桥（路线图 P1-5）：找一笔恰好跨一段河的直路——校验给 bridge 提示、不拦；套用后多一座锁定的桥面、桥登记进 bridges、补丁干净重放。
+  let groundBridge = null;
+  for (let i = 0; i < slots.length && !groundBridge; i += 3) {
+    for (let k = 0; k < 8 && !groundBridge; k += 1) {
+      const ang = (k * Math.PI) / 8; const c = slots[i];
+      for (const half of [60, 90, 120]) {
+        const a = { x: c.x - Math.cos(ang) * half, z: c.z - Math.sin(ang) * half }; const b = { x: c.x + Math.cos(ang) * half, z: c.z + Math.sin(ang) * half };
+        const verdict = validateRoadAdd(layout, real, a, b, 8);
+        if (!verdict.blockers.length && verdict.warnings.some((code) => code.startsWith("bridge:"))) { groundBridge = { a, b, verdict }; break; }
+      }
+    }
+  }
+  if (groundBridge) {
+    const gb = bulldozeForRoads(layout, real, layout, appendRoadOp(emptyPlanPatch(layout.seed, layout.scaleTier), { t: "add", from: groundBridge.a, to: groundBridge.b, width: 8 }, 1));
+    const gbApplied = applyPlanPatch(layout, gb.patch);
+    assert.equal(gbApplied.stale.length, 0, `a ground bridge over the river replays cleanly — ${JSON.stringify(gbApplied.stale.slice(0, 3))}`);
+    const decks = gbApplied.layout.roadEdges.filter((e) => e.bridge && !layout.roadEdges.some((o) => o.id === e.id));
+    assert.equal(decks.length, 1, "…with exactly one new locked deck");
+    assert.equal(gbApplied.layout.bridges.length, (layout.bridges ?? []).length + 1, "…registered as a bridge");
+    console.log(`  真实城市：地面桥 ${groundBridge.verdict.warnings.join("、")} → 推平 ${gb.bulldozed.length}、安置 ${gb.relocated.length}`);
+  } else console.log("  真实城市：没找到一笔只跨一段河的直路（跳过地面桥）");
 
   // 滨海大道：沿一段生成器滨海路外侧平行画一段，景观带折线随之增加，补丁干净重放。
   const run = (layout.coastRoads ?? []).find((r) => r.length >= 6);

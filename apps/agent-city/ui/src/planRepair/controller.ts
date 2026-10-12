@@ -138,7 +138,9 @@ const BLOCKER_TEXT: Record<string, string> = {
   "edge-too-short": "太短了（至少 6）",
   "edge-too-long": "太长了（最多 800）",
   "isolated-road": "新路必须接到现有道路上",
-  "road-in-water": "不能修到水面或岩岸上",
+  "road-in-water": "不能修到水面或岩岸上（起点或终点在水里，或一笔要跨两段水——地面桥一笔只跨一段水面）",
+  "bridge-too-long": "水面太宽，地面桥最长 160——请改用高架",
+  "junction-on-bridge": "桥上不能有路口：新路会在水面上和别的路交叉",
   "road-over-building": "会穿过建筑、配套或花园",
   "crosses-road": "与现有道路交叉——请在交叉点连接",
   "acute-junction": "路口夹角太小（小于 30°）",
@@ -178,6 +180,7 @@ const WARNING_TEXT: Record<string, string> = {
   "far-from-coast": "离海岸较远——滨海景观带会铺在离海近的一侧",
   "drops-waterfront": "改掉的是滨海路——沿路的滨海景观带会撤掉",
   "narrows-arterial": "主干道会变窄",
+  "bridge-under-viaduct": "桥的上方有高架（净空请自己看一眼）",
 };
 /** 带数量的提示码（`code:N`）。 */
 const COUNTED_TEXT: Record<string, (n: number) => string> = {
@@ -189,6 +192,7 @@ const COUNTED_TEXT: Record<string, (n: number) => string> = {
   homeless: (n) => `${n} 栋会话楼附近没有空地块，仍压在路上`,
   "homeless-risk": (n) => `${n} 栋会话楼附近没有空地块，会留在路上`,
   "access-road": (n) => `在新位置补了一条 ${n} 长的接入路`,
+  bridge: (n) => `水面段将架成一座 ${n} 长的桥`,
 };
 
 export const blockerText = (code: string): string => (code.startsWith("patch-tier-") ? BLOCKER_TEXT["tier-changed"] : BLOCKER_TEXT[code] ?? code);
