@@ -25,7 +25,7 @@ const {
   validateRoadAdd, rectClearOfEdges, buildingRect, buildCityModel, layoutCity, MIAMI_COASTAL,
   accessRoadFor, strandedAccessEdges, pruneStalePatch, appendHighwayOp, validateHighwayAdd, freshViaductGeometry,
   rectClearOfRoads, edgesNear, clearanceRoads, rectClearOfEdgesRaw, nearestOnPolyline,
-  autoPlaceFree, formatFreeTarget, siteTouchesRoad, frontEntrance, worldParts, segmentPolygonDistance, ROAD_SETBACK, siteFootprint,
+  validateRestyle, autoPlaceFree, formatFreeTarget, siteTouchesRoad, frontEntrance, worldParts, segmentPolygonDistance, ROAD_SETBACK, siteFootprint,
 } = await loadCity({
   "engine/planFootprint.ts": ["frontEntrance", "worldParts", "segmentPolygonDistance", "ROAD_SETBACK", "siteFootprint"],
   "engine/planGeometry.ts": ["rectClearOfRoads", "edgesNear", "clearanceRoads", "rectClearOfEdges as rectClearOfEdgesRaw"],
@@ -33,7 +33,7 @@ const {
   "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry", "freshViaductGeometry"],
   "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch", "appendHighwayOp", "nearestOnPolyline"],
   "engine/planSites.ts": ["listSites", "siteMoveProblem", "autoPlaceFree", "formatFreeTarget"],
-  "engine/planRoadRules.ts": ["validateRoadAdd", "validateHighwayAdd"],
+  "engine/planRoadRules.ts": ["validateRoadAdd", "validateHighwayAdd", "validateRestyle"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
@@ -286,6 +286,24 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   const crossVerdict = validateRoadAdd(farLayout, model, { x: 70, z: -110 }, { x: 130, z: -110 }, 5);
   assert.ok(crossVerdict.warnings.includes("bulldoze:1"), `a road straight through the station still hits it — ${crossVerdict.warnings}`);
   void through;
+}
+
+// (l) 改路型加宽（路线图 P1-4）：一条 z=21 的小路（宽 5，离会话楼 b1 (110,30)、背景楼 (170,30) 都够远）改成主干道（宽 12）——
+//     路带扫过的新地面上的楼照画路一样处理：设施推平、会话楼由开发商安置；变窄不推任何东西。
+{
+  const base = makeLayout();
+  base.roadNodes.push({ id: "0:21", x: 0, z: 21 }, { id: "300:21", x: 300, z: 21 });
+  base.roadEdges.push(edge("0:21", "300:21"));
+  const lane = applyPlanPatch(base, fresh()).layout;
+  assert.deepEqual(bulldozeForRoads(base, model, lane, appendRoadOp(fresh(), { t: "restyle", edge: "0:21/300:21", width: 5 }, 1)).relocated, [], "a 5-wide lane at z=21 clears both buildings");
+  const verdict = validateRestyle(lane, model, ["0:21/300:21"], 12);
+  assert.ok(verdict.warnings.includes("bulldoze:1") && verdict.warnings.includes("relocate:1"), `widening announces what it will hit — ${verdict.warnings}`);
+  const widen = appendRoadOp(fresh(), { t: "restyle", edge: "0:21/300:21", width: 12 }, 1);
+  const result = bulldozeForRoads(base, model, lane, widen);
+  assert.deepEqual(result.bulldozed, ["context:a5"], "widening to 12 bulldozes the backdrop building in the new band");
+  assert.deepEqual(result.relocated.map((r) => r.id), ["b1"], "…and the developer re-homes the session building");
+  const narrowed = applyPlanPatch(base, appendRoadOp(fresh(), { t: "restyle", edge: "0:0/300:0", width: 5 }, 1)).layout;
+  assert.deepEqual(bulldozeForRoads(base, model, narrowed, appendRoadOp(fresh(), { t: "restyle", edge: "0:0/300:0", width: 5 }, 1)).bulldozed, [], "narrowing never bulldozes");
 }
 
 // (k) 两层投影。

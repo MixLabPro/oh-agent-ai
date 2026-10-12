@@ -73,6 +73,8 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         cutHighway: (x, z) => session.cutHighway(x, z),
         highwayEndAt: (x, z) => session.highwayEndAt(x, z),
         validateDrop: (id) => session.validateDrop(id),
+        restyleAt: (x, z, width, purpose, exact) => session.restyleAt(x, z, width, purpose, exact),
+        restyleRoad: (id, width, purpose) => session.restyleRoad(id, width, purpose),
         dropEdge: (id) => session.dropEdge(id),
         dropEdges: (ids) => session.dropEdges(ids),
         nodeAt: (x, z) => session.nodeAt(x, z),
@@ -133,7 +135,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if ((event.key === "Delete" || event.key === "Backspace") && controller.snapshot.tool === "site" && controller.snapshot.site) { event.preventDefault(); controller.removeSelected(); syncInfo(); return; }
-      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase", s: "site", n: "node" };
+      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase", t: "restyle", s: "site", n: "node" };
       if (tool[event.key.toLowerCase()]) { event.preventDefault(); controller.setTool(tool[event.key.toLowerCase()]); }
     };
     window.addEventListener("keydown", onKey);
@@ -170,7 +172,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     if (preview?.kind === "ghost") marks.push(mark(preview.rect, preview.ok ? "ghost-ok" : "ghost-bad"));
     const ribbons: OverlayRibbon[] = []; const markers: OverlayMarker[] = [];
     // 道路编辑的后果（推土机试算）：推平红、安置琥珀（原址 → 新家连线）、无处安置深红。
-    const impact = preview?.kind === "draw" || preview?.kind === "node" || preview?.kind === "viaduct" ? preview.impact : null;
+    const impact = preview?.kind === "draw" || preview?.kind === "node" || preview?.kind === "viaduct" || preview?.kind === "restyle" ? preview.impact : null;
     if (impact && preview && "ok" in preview && preview.ok) {
       for (const rect of impact.bulldozed) marks.push(mark(rect, "doomed"));
       for (const { from, to } of impact.relocated) { marks.push(mark(from, "relocate-from"), mark(to, "relocate-to")); ribbons.push({ points: [from, to], width: 0.8, tone: "link" }); }
@@ -179,6 +181,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     overlay.setSiteMarks(marks);
     const hasImpact = !!impact && (impact.bulldozed.length > 0 || impact.relocated.length > 0 || impact.homeless.length > 0);
     if (preview?.kind === "erase") ribbons.push({ points: preview.points, width: preview.width, tone: preview.ok ? "erase" : "erase-blocked" });
+    if (preview?.kind === "restyle") for (const edge of preview.edges) ribbons.push({ points: edge.points, width: edge.width, tone: !preview.ok ? "draw-blocked" : preview.warning ? "draw-warn" : "draw" });
     // 画路预览按实际铺成的折线画（拐角倒圆时 path 从旧路尾端的切点开始，弧线一目了然）。
     if (preview?.kind === "draw") { ribbons.push({ points: preview.path ?? [preview.from, preview.to], width: preview.width, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
     if (preview?.kind === "viaduct") {

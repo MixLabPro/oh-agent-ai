@@ -15,7 +15,7 @@ import { worldBox, worldOverhead, worldParts } from "../engine/planFootprint";
 import { remapPlanPatch, type RemapReport } from "../engine/planRemap";
 import type { RepairRay } from "../engine/CityEngine";
 import { bulldozeForRoads } from "../engine/planBulldozer";
-import { nearestEdgeAt, snapPoint, validateEdgeDrop, validateHighwayAdd, validateHighwayCut, validateNodeMove, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
+import { nearestEdgeAt, roadRun, snapPoint, validateEdgeDrop, validateHighwayAdd, validateHighwayCut, validateNodeMove, validateRestyle, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
 import type { CityLayout, Parcel, Vec2 } from "../engine/cityLayout";
 import { cityPlanPatchStore, emptyPlanPatchStore, type PlanPatchStoreV1 } from "../data/planPatch";
 
@@ -155,6 +155,35 @@ export class PlanRepairSession {
     const patch = appendRoadOp(base.patch, { t: "drop", edge: edgeId, ...this.edgeAnchor(edgeId) });
     this.commit(patch);
     return { ok: true, patch, warnings: verdict.warnings };
+  }
+
+  /** 改路型（路线图 P1-4）：一整段路（roadRun）改成目标路型，一步写入、一步撤销；变宽压到的楼走推土机。 */
+  restyleRoad(edgeId: string, width: number, purpose?: RoadPurpose): EditResult {
+    const base = this.working();
+    if (!base.ok) return base;
+    const layout = this.engine.currentLayout!;
+    const run = roadRun(layout, edgeId);
+    const verdict = validateRestyle(layout, this.engine.currentModel!, run, width, purpose);
+    if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
+    return this.commitWithBulldozer(this.restyleOps(base.patch, run, width, purpose), verdict.warnings);
+  }
+
+  /** 改路型的悬停预览：整段路的折线 + 校验（变宽时停住后跑推土机试算）。 */
+  restyleAt(x: number, z: number, width: number, purpose?: RoadPurpose, exact = true): { edges: Array<{ points: Vec2[]; width: number }>; verdict: RoadPreview } | null {
+    const layout = this.engine.currentLayout; const model = this.engine.currentModel;
+    const hit = this.edgeAt(x, z);
+    if (!layout || !model || !hit) return null;
+    const run = roadRun(layout, hit.id);
+    const byId = new Map(layout.roadEdges.map((edge) => [edge.id, edge]));
+    const edges = run.map((id) => byId.get(id)!).map((edge) => ({ points: edge.points, width: Math.max(edge.width, width) }));
+    if (hit.locked) return { edges: [{ points: hit.points, width: hit.width }], verdict: { blockers: ["locked-edge"], warnings: [] } };
+    const verdict = validateRestyle(layout, model, run, width, purpose);
+    const widens = run.some((id) => (byId.get(id)?.width ?? width) < width);
+    return { edges, verdict: widens ? this.dryRun(`restyle:${run.join(",")}:${width}:${purpose ?? ""}`, (patch) => this.restyleOps(patch, run, width, purpose), verdict, exact) : verdict };
+  }
+
+  private restyleOps(patch: PlanPatchV1, run: readonly string[], width: number, purpose?: RoadPurpose): PlanPatchV1 {
+    return run.reduce((next, edge) => appendRoadOp(next, { t: "restyle", edge, width, ...(purpose ? { purpose } : {}), ...this.edgeAnchor(edge) }), patch);
   }
 
   /** 画路：from/to 是已吸附的坐标（snap() 的结果）。端点落在路段中间会把该路段拆成两半。purpose=waterfront 为滨海大道。 */

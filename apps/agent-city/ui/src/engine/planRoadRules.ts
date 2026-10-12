@@ -464,6 +464,65 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
   return { blockers, warnings };
 }
 
+// ── 改路型（路线图 P1-4）──────────────────────────────────────────────────────
+
+/** 一条路的「一整段」上限（防御：环形路沿度 2 路口能一直走下去）。 */
+const MAX_RUN = 400;
+
+/**
+ * 从一段路出发，沿**度为 2** 的路口向两头走：下一段与它同宽、同用途、不是桥面就连上。走到岔路口、断头、换路型或桥为止。
+ * 用户改路型说的是「这条街」，不是两个路口之间的一小截——画路时一笔经过的自动路口、倒圆的拐点都是度 2 路口，会把一条街切成很多段。
+ * 返回路段 id，按沿路顺序；起点段不存在返回 []。
+ */
+export function roadRun(layout: CityLayout, edgeId: string): string[] {
+  const start = layout.roadEdges.find((edge) => edge.id === edgeId);
+  if (!start) return [];
+  const incident = new Map<string, RoadEdge[]>();
+  for (const edge of layout.roadEdges) for (const node of [edge.from, edge.to]) {
+    const list = incident.get(node); if (list) list.push(edge); else incident.set(node, [edge]);
+  }
+  const same = (edge: RoadEdge) => !edgeLocked(edge) && edge.width === start.width && edge.purpose === start.purpose;
+  const seen = new Set([start.id]);
+  const walk = (node: string, from: RoadEdge): string[] => {
+    const out: string[] = [];
+    let at = node; let prev = from;
+    while (out.length < MAX_RUN) {
+      const around = incident.get(at) ?? [];
+      if (around.length !== 2) break;
+      const next = around[0] === prev ? around[1] : around[0];
+      if (seen.has(next.id) || !same(next)) break;
+      seen.add(next.id); out.push(next.id);
+      at = next.from === at ? next.to : next.from; prev = next;
+    }
+    return out;
+  };
+  const back = walk(start.from, start); const ahead = walk(start.to, start);
+  return [...back.reverse(), start.id, ...ahead];
+}
+
+/**
+ * 改路型的校验：桥面拒绝；已经是这个路型拒绝（unchanged）；变宽压到的楼走推土机提示（与画路同一套）；
+ * 滨海大道离海远提示；把滨海路/主干道改成普通路提示（景观带随之撤掉 / 骨架变窄）——提示不拦。
+ */
+export function validateRestyle(layout: CityLayout, model: CityModel, edgeIds: readonly string[], width: number, purpose?: "waterfront"): RoadVerdict {
+  const blockers: string[] = []; const warnings: string[] = [];
+  const byId = new Map(layout.roadEdges.map((edge) => [edge.id, edge]));
+  const edges = edgeIds.map((id) => byId.get(id)).filter((edge): edge is RoadEdge => !!edge);
+  if (!edges.length) return { blockers: ["missing-edge"], warnings };
+  if (edges.some(edgeLocked)) return { blockers: ["locked-edge"], warnings };
+  const changing = edges.filter((edge) => edge.width !== width || edge.purpose !== purpose);
+  if (!changing.length) return { blockers: ["unchanged"], warnings };
+  const wider = changing.filter((edge) => width > edge.width).map((edge) => ({ ...edge, width }));
+  if (wider.length) applyImpact(roadImpact(layout, model, wider), blockers, warnings);
+  if (changing.some((edge) => edge.purpose === "waterfront") && purpose !== "waterfront") warnings.push("drops-waterfront");
+  if (changing.some((edge) => edge.width >= 8) && width < 8) warnings.push("narrows-arterial");
+  if (purpose === "waterfront" && layout.coast?.length) {
+    const mids = changing.map((edge) => edge.points[Math.floor(edge.points.length / 2)]);
+    if (mids.every((p) => Math.abs(polygonDistance(p, layout.coast!)) > FAR_FROM_COAST)) warnings.push("far-from-coast");
+  }
+  return { blockers, warnings };
+}
+
 // ── 高架（SPEC §17.2）────────────────────────────────────────────────────────
 
 /** 滨海大道中点离海岸线超过这个距离就提示。 */

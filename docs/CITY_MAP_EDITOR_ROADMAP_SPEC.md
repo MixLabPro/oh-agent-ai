@@ -206,6 +206,16 @@ D2（不规则街区里设施出界）。既有补丁里原本「合法」的少
 - 滨海景观带随 `purpose` 自动派生（§17.1 的 `deriveCoastRoads` 已支持）。
 - 不能改：桥面（`edgeLocked`）。
 
+**实施记录（2026-10-13）**：
+- 操作定为 `{ t: "restyle"; edge; width; purpose?: "waterfront"; anchor? }`——记**目标状态**（宽度必填，purpose 缺省 = 普通路），重放幂等；
+  已是目标路型是无操作；桥面 / 缺失路段如实 stale（`road-restyle`）。kind 随宽度（≥ 8 为 arterial），id 不变。
+- 「整条路」用 `planRoadRules.roadRun`：沿**度 2 路口**走、同宽同用途、遇岔路/换路型/桥面停——不用 `roadPaintPlan` 的 run
+  （那是画线的视觉分组，跨路口）。编辑器一次把一整段写成多条 restyle、同一步撤销。
+- 工具「改路」（T）：先选路型（无高架），悬停按目标宽度画整段；变宽时停住后跑推土机试算（`freshRoadGeometry` 把同 id 变宽的路段当新几何）。
+  提示：`drops-waterfront`（景观带随之撤掉）、`narrows-arterial`、`far-from-coast`；滨海景观带随 purpose 自动增撤。
+- 扩档：与 drop 同法按锚点找新档对应路段，路型原样带过去。
+- 测试：`verify-plan-patch` (t)、`verify-plan-bulldozer` (l)、`verify-plan-repair-controller` (y)、`verify-plan-remap` (a2)。
+
 ## P1-5 地面桥
 
 地面路过河仍是 `road-in-water`；高架能过河但不通车。设计：画路时线段穿过水面，若两岸都是陆地、水面段长度 ≤ 160，

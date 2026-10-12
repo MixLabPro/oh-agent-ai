@@ -42,7 +42,10 @@ export type RoadOp =
   /** 新增一段直路。端点吸附规则见 resolveEndpoint：靠近路口 → 接到路口；落在路段中间 → 把该路段拆成两半；否则新建路口。
    *  purpose=waterfront：滨海大道（与生成器的环岛滨海路同级，沿它铺滨海景观带）。
    *  起点是一条路的尽头且新路拐弯时，重放会在拐角处自动倒圆（filletAt，SPEC §17.3）。 */
-  | { t: "add"; from: Vec2; to: Vec2; width: number; purpose?: "waterfront" };
+  | { t: "add"; from: Vec2; to: Vec2; width: number; purpose?: "waterfront" }
+  /** 改已有路段的路型（路线图 P1-4）：宽度 5/8/12 与用途（purpose 缺省 = 普通路，写了 waterfront = 滨海大道）。
+   *  记的是**目标状态**不是增量，重放幂等；同一条路的一整段（run）在编辑器里一步写成几条、同一步撤销。桥面不能改。 */
+  | { t: "restyle"; edge: string; width: number; purpose?: "waterfront"; anchor?: Vec2 };
 
 /**
  * 高架操作日志（SPEC §17.2）。高架（layout.highways）是独立于地面路网的折线：渲染层两端各 90 平滑落地成匝道、
@@ -77,7 +80,7 @@ export type PlanPatchV1 = {
 
 /** 条目无法套用的原因——诚实降级：丢弃 + 上报，绝不猜测替代目标。 */
 export type PatchStaleEntry = {
-  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "site-remove" | "site-move" | "context-suppress" | "highway-add" | "highway-cut";
+  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "road-restyle" | "site-remove" | "site-move" | "context-suppress" | "highway-add" | "highway-cut";
   id: string;
   reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway";
   detail: string;
@@ -111,6 +114,7 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     const anchor = point(op.anchor);
     if (op.t === "drop" && typeof op.edge === "string") roadOps.push({ t: "drop", edge: op.edge, ...(anchor ? { anchor } : {}) });
     else if (op.t === "move" && typeof op.node === "string") { const to = point(op.to); if (to) roadOps.push({ t: "move", node: op.node, to, ...(anchor ? { anchor } : {}) }); }
+    else if (op.t === "restyle" && typeof op.edge === "string" && isFiniteNumber(op.width) && op.width > 0) roadOps.push({ t: "restyle", edge: op.edge, width: op.width, ...(op.purpose === "waterfront" ? { purpose: "waterfront" as const } : {}), ...(anchor ? { anchor } : {}) });
     else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); if (from && to) roadOps.push({ t: "add", from, to, width: op.width, ...(op.purpose === "waterfront" ? { purpose: "waterfront" as const } : {}) }); }
   }
   const highwayOps: HighwayOp[] = [];
@@ -223,6 +227,10 @@ export function layoutPinsFor(patch: PlanPatchV1 | null | undefined): { scaleTie
 }
 
 /** 编辑器写补丁：追加一个道路操作（引用生效布局里的当前 id）。 */
+/** 道路操作 → 失效条目的种类。 */
+export const roadStaleKind = (op: RoadOp): PatchStaleEntry["kind"] =>
+  op.t === "drop" ? "road-drop" : op.t === "move" ? "road-move" : op.t === "restyle" ? "road-restyle" : "road-add";
+
 export function appendRoadOp(patch: PlanPatchV1, op: RoadOp, now = Date.now()): PlanPatchV1 {
   return { ...patch, updatedAt: now, roadOps: [...patch.roadOps, op] };
 }
@@ -390,6 +398,15 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
       trial.edges = trial.edges.filter((candidate) => candidate !== edge);
       const kept = new Set(trial.edges.flatMap((candidate) => [candidate.from, candidate.to]));
       trial.nodes = trial.nodes.filter((node) => kept.has(node.id) || (node.id !== edge.from && node.id !== edge.to));
+    } else if (op.t === "restyle") {
+      const edge = trial.edges.find((candidate) => candidate.id === op.edge);
+      if (!edge) { stale.push({ kind: "road-restyle", id: label, reason: "missing-edge", detail: `路段 ${op.edge} 不存在（规划已重算或前序操作已改动）` }); return; }
+      if (edgeLocked(edge)) { stale.push({ kind: "road-restyle", id: label, reason: "locked-edge", detail: "桥面由桥梁模型绑定，不能改路型" }); return; }
+      if (edge.width === op.width && edge.purpose === op.purpose) return; // 已是目标路型：无操作，不算失效
+      const { purpose: _old, ...rest } = edge;
+      void _old;
+      trial.edges = trial.edges.map((candidate) => (candidate !== edge ? candidate
+        : { ...rest, width: op.width, kind: op.width >= 8 ? "arterial" as const : "local" as const, ...(op.purpose ? { purpose: op.purpose } : {}) }));
     } else if (op.t === "move") {
       const node = trial.nodes.find((candidate) => candidate.id === op.node);
       if (!node) { stale.push({ kind: "road-move", id: label, reason: "missing-node", detail: `路口 ${op.node} 不存在` }); return; }
@@ -596,7 +613,7 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   if (patch.scaleTier !== layout.scaleTier) {
     const detail = `补丁写于第 ${patch.scaleTier} 档，城市已扩容到第 ${layout.scaleTier} 档`;
     for (const id of Object.keys(patch.buildingMoves).sort()) stale.push({ kind: "building-move", id, reason: "tier-changed", detail });
-    patch.roadOps.forEach((op, index) => stale.push({ kind: op.t === "drop" ? "road-drop" : op.t === "move" ? "road-move" : "road-add", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
+    patch.roadOps.forEach((op, index) => stale.push({ kind: roadStaleKind(op), id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
     patch.siteOps.forEach((op, index) => stale.push({ kind: op.t === "remove" ? "site-remove" : "site-move", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
     (patch.highwayOps ?? []).forEach((op, index) => stale.push({ kind: op.t === "add" ? "highway-add" : "highway-cut", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
     for (const id of [...patch.suppressedContext].sort()) stale.push({ kind: "context-suppress", id, reason: "tier-changed", detail });
