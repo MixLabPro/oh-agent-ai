@@ -10,6 +10,7 @@
 //       搬一座地标并补接入路，干净重放（SPEC §16.3）；
 //   (f) 接入路：新位置离路远就补一条最短的、不推平不安置的接入路；挨着路不补；原址断头接入路沿单行链列出，到岔路口为止；
 //   (g) 清除失效修改：只删失效条目，其余重放结果不变；跨档整份失效 → 空补丁；
+//   (i) 提速不改结果（路线图 SPEC P0-1）：网格版净空 = 逐条版；网格邻域不漏路；钉子不变时重排 = 缓存的底层布局；
 //   (h) 高架下不能有楼：新高架压到的设施推平、会话楼安置；切高架不算新几何；真实城市跨河高架 + 滨海大道干净重放（SPEC §17）。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
@@ -19,10 +20,12 @@ const {
   bulldozeForRoads, freshRoadGeometry, applyPlanPatch, emptyPlanPatch, appendRoadOp, appendSiteOp, listSites, siteMoveProblem, reservedParcelIds,
   validateRoadAdd, rectClearOfEdges, buildingRect, buildCityModel, layoutCity, MIAMI_COASTAL,
   accessRoadFor, strandedAccessEdges, pruneStalePatch, appendHighwayOp, validateHighwayAdd, freshViaductGeometry,
+  rectClearOfRoads, edgesNear, clearanceRoads, rectClearOfEdgesRaw, nearestOnPolyline,
 } = await loadCity({
+  "engine/planGeometry.ts": ["rectClearOfRoads", "edgesNear", "clearanceRoads", "rectClearOfEdges as rectClearOfEdgesRaw"],
   "engine/planAccess.ts": ["accessRoadFor", "strandedAccessEdges"],
   "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry", "freshViaductGeometry"],
-  "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch", "appendHighwayOp"],
+  "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch", "appendHighwayOp", "nearestOnPolyline"],
   "engine/planSites.ts": ["listSites", "siteMoveProblem"],
   "engine/planRoadRules.ts": ["validateRoadAdd", "validateHighwayAdd"],
   "cityModel.ts": ["buildCityModel"],
@@ -294,6 +297,27 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
     if (movedOne) break;
   }
   assert.ok(movedOne, "some landmark can be moved and given an access road in the real city");
+
+  // (i) 提速不改结果。
+  {
+    let seedR = 99; const rr = () => { seedR = (seedR * 1103515245 + 12345) & 0x7fffffff; return seedR / 0x7fffffff; };
+    const roads = clearanceRoads(layout);
+    const span = layout.islandRadius ?? 600;
+    let hits = 0;
+    for (let i = 0; i < 400; i += 1) {
+      const rect = { x: (rr() * 2 - 1) * span, z: (rr() * 2 - 1) * span, yaw: rr() * Math.PI, width: 4 + rr() * 30, depth: 4 + rr() * 30 };
+      const fast = rectClearOfRoads(layout, rect, 0.5); const slow = rectClearOfEdgesRaw(rect, roads, 0.5);
+      assert.equal(fast, slow, `grid clearance equals brute force at ${JSON.stringify(rect)}`);
+      if (!slow) hits += 1;
+      const r = 5 + rr() * 120; const near = new Set(edgesNear(layout, rect.x, rect.z, r));
+      for (const edge of roads) if (nearestOnPolyline(rect, edge.points).distance <= r) assert.ok(near.has(edge), "edgesNear never misses a road within the radius");
+    }
+    assert.ok(hits > 20, `the sample exercises both outcomes (${hits} rects touch roads)`);
+    const again = layoutCity(real, layout, undefined, MIAMI_COASTAL);
+    const slotsOf = (l) => JSON.stringify(l.districts.map((d) => [...d.slots].map(([id, p]) => [id, p.id])));
+    assert.equal(slotsOf(again), slotsOf(layout), "with unchanged pins a relayout keeps every address — so road-only commits may skip it");
+    assert.equal(JSON.stringify(again.roadEdges.map((e) => e.id)), JSON.stringify(layout.roadEdges.map((e) => e.id)), "…and the same road network");
+  }
 
   // 跨河高架：找一段两端在陆地、中间过水的直线（岛中间有河），画成高架——地面路过不了河，高架可以。
   let crossing = null;

@@ -28,7 +28,7 @@ import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { clearsHighways, roadNodeId } from "./cityPlan";
 import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 import { applySiteOps, type SiteOp } from "./planSites";
-import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectsOverlap, reservedParcelIds, VIADUCT_DECK_WIDTH } from "./planGeometry";
+import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
 
@@ -148,42 +148,57 @@ export function hashPlanPatch(patch: PlanPatchV1): string {
 }
 
 
-export { edgeLocked, clearanceRoads, parcelIndex, reservedParcelIds, rectClearOfEdges, buildingRect, rectsOverlap, quantize, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, type BuildingRect } from "./planGeometry";
+export { edgeLocked, clearanceRoads, parcelIndex, reservedParcelIds, reservedParcelIdsShared, slotIndex, rectClearOfEdges, rectClearOfRoads, edgesNear, buildingRect, rectsOverlap, quantize, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, type BuildingRect } from "./planGeometry";
 
 /** 编辑前校验（SPEC §7.3）：blockers 非空必须拒绝提交；warnings 只提示。
  *  `layout` 是当前 effective 布局（已套补丁），校验看的是用户眼前的城市。 */
 export function validateBuildingMove(layout: CityLayout, model: CityModel, patch: PlanPatchV1, buildingId: string, targetParcelId: string): { blockers: string[]; warnings: string[] } {
   const blockers: string[] = [];
   const warnings: string[] = [];
-  const home = layout.districts.find((district) => district.slots.has(buildingId));
-  const building = model.buildings.find((candidate) => candidate.id === buildingId);
+  const homeId = slotIndex(layout).homeOf.get(buildingId);
+  const home = homeId === undefined ? undefined : layout.districts.find((district) => district.id === homeId);
+  const building = buildingIndex(model).get(buildingId);
   if (!home || !building) return { blockers: ["unknown-building"], warnings };
   const parcels = parcelIndex(layout);
   const target = parcels.get(targetParcelId);
   if (!target) return { blockers: ["missing-parcel"], warnings };
   const ownParcelId = home.slots.get(buildingId)?.id;
-  const reserved = reservedParcelIds(layout, patch.suppressedContext);
+  const reserved = reservedParcelIdsShared(layout, patch.suppressedContext);
   // 自己当前所在地块不算被占（原地重放、换过去再换回来都合法）。
   const occupied = (reserved.has(targetParcelId) && ownParcelId !== targetParcelId)
     // 补丁里已有别的楼要搬去同一地块 → 冲突。
     || Object.entries(patch.buildingMoves).some(([id, parcelId]) => id !== buildingId && parcelId === targetParcelId);
   if (occupied) blockers.push("parcel-occupied");
-  if (!rectClearOfEdges(target, clearanceRoads(layout), 0.5)) blockers.push("building-over-road");
+  if (!rectClearOfRoads(layout, target, 0.5)) blockers.push("building-over-road");
   if (!layout.terrain.buildable(target.x, target.z)) blockers.push("not-buildable");
   else if (layout.terrain.slope(target.x, target.z) > 0.55) blockers.push("steep-slope");
   if (!clearsHighways(target, target.width, target.depth, layout.highways)) blockers.push("highway-clearance");
   // buildingOverlap（SPEC §7.3 硬阻止）：新位置的占地矩形与任何别的会话楼相交。
-  const buildingsById = new Map(model.buildings.map((candidate) => [candidate.id, candidate]));
+  // 全城落位表与楼索引按布局/模型缓存（P0-1）：曾每次调用重建 4000 栋的 Map 并逐城区展开 slots。
+  const buildingsById = buildingIndex(model);
   const rect = buildingRect(building, target);
-  const overlaps = layout.districts.some((district) => [...district.slots].some(([id, slot]) => {
+  const { slots, districtOfBlock } = slotIndex(layout);
+  const overlaps = slots.some(([id, slot]) => {
+    if (id === buildingId || Math.abs(slot.x - target.x) >= 60 || Math.abs(slot.z - target.z) >= 60 || Math.hypot(slot.x - target.x, slot.z - target.z) >= 60) return false;
     const other = buildingsById.get(id);
-    return id !== buildingId && !!other && Math.hypot(slot.x - target.x, slot.z - target.z) < 60 && rectsOverlap(rect, buildingRect(other, slot));
-  }));
+    return !!other && rectsOverlap(rect, buildingRect(other, slot));
+  });
   if (overlaps) blockers.push("building-overlap");
   // 软警告：跨小区（目标地块的街区被别的城区占用）——楼仍属原城区，只是搬出了自己的小区。
-  const owner = layout.districts.find((district) => [...district.slots.values()].some((parcel) => parcel.blockId === target.blockId));
-  if (owner && owner.id !== home.id) warnings.push("cross-district");
+  const owner = districtOfBlock.get(target.blockId);
+  if (owner && owner !== home.id) warnings.push("cross-district");
   return { blockers, warnings };
+}
+
+const buildingIndexCache = new WeakMap<CityModel, { list: CityModel["buildings"]; index: Map<string, CityBuilding> }>();
+/** 模型里的楼按 id 索引（按模型缓存；模型对象不可变）。重复 id 取第一个，与 Array.find 一致。 */
+export function buildingIndex(model: CityModel): ReadonlyMap<string, CityBuilding> {
+  const hit = buildingIndexCache.get(model);
+  if (hit && hit.list === model.buildings) return hit.index;
+  const index = new Map<string, CityBuilding>();
+  for (const building of model.buildings) if (!index.has(building.id)) index.set(building.id, building);
+  buildingIndexCache.set(model, { list: model.buildings, index });
+  return index;
 }
 
 /** layoutCity 的落位钉子（SPEC §5 / §12.4）：补丁里的移楼在**落位阶段**生效，而不是只做后处理。

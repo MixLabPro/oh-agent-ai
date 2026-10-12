@@ -34,7 +34,7 @@ export type PlanRect = { x: number; z: number; yaw: number; width: number; depth
 /** 道路编辑的确切后果（推土机试算，和确认后实际发生的一致）。 */
 export type ImpactPreview = { bulldozed: PlanRect[]; relocated: Array<{ from: PlanRect; to: PlanRect }>; homeless: PlanRect[] };
 /** path：这一笔实际会铺成的折线（起点是路尽头且拐弯时带倒圆弧，SPEC §17.3）；预览按它画。 */
-export type RoadPreview = RoadVerdict & { impact?: ImpactPreview; path?: Vec2[] };
+export type RoadPreview = RoadVerdict & { impact?: ImpactPreview; path?: Vec2[]; /** 推平/安置计数是估计（未跑推土机试算）。 */ estimate?: boolean };
 export type RoadPurpose = "waterfront";
 /** 选中建筑后悬停的落位试算：目标占地 + 能不能放。 */
 export type PlacementGhost = { targetId: string; rect: PlanRect; blockers: string[]; warnings: string[] };
@@ -159,11 +159,11 @@ export class PlanRepairSession {
     return this.commitWithBulldozer(appendHighwayOp(base.patch, { t: "add", points: [...points] }), verdict.warnings);
   }
 
-  validateHighway(points: readonly Vec2[]): RoadPreview {
+  validateHighway(points: readonly Vec2[], exact = true): RoadPreview {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
     if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
     const verdict = validateHighwayAdd(layout, model, points);
-    return this.dryRun(`viaduct:${JSON.stringify(points)}`, (patch) => appendHighwayOp(patch, { t: "add", points: [...points] }), verdict);
+    return this.dryRun(`viaduct:${JSON.stringify(points)}`, (patch) => appendHighwayOp(patch, { t: "add", points: [...points] }), verdict, exact);
   }
 
   /** 橡皮擦下的高架：切掉的那一截（两端点）与桥面宽。 */
@@ -301,11 +301,11 @@ export class PlanRepairSession {
     return layout && model ? validateEdgeDrop(layout, model, edgeId) : { blockers: ["city-not-ready"], warnings: [] };
   }
 
-  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose): RoadPreview {
+  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, exact = true): RoadPreview {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
     if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
     const op = { t: "add" as const, from, to, width, ...(purpose ? { purpose } : {}) };
-    const preview = this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateRoadAdd(layout, model, from, to, width, purpose));
+    const preview = this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateRoadAdd(layout, model, from, to, width, purpose), exact);
     const path = this.bendPath(from, to, width);
     return path ? { ...preview, path } : preview;
   }
@@ -324,8 +324,9 @@ export class PlanRepairSession {
   }
 
   /** 推土机试算：把这一笔道路操作连同推平/安置算一遍但不提交。悬停每动一下都会调用，按（补丁, 操作）记住上一次结果。 */
-  private dryRun(opKey: string, next: (patch: PlanPatchV1) => PlanPatchV1, verdict: RoadVerdict): RoadPreview {
+  private dryRun(opKey: string, next: (patch: PlanPatchV1) => PlanPatchV1, verdict: RoadVerdict, exact = true): RoadPreview {
     if (verdict.blockers.length || !verdict.warnings.some((code) => code.startsWith("bulldoze:") || code.startsWith("relocate:"))) return verdict;
+    if (!exact) return { ...verdict, estimate: true }; // 悬停移动中：先给 roadImpact 的估计，停住后控制器再要确切的（P0-1）
     const generated = this.engine.generatedLayout; const before = this.engine.currentLayout; const model = this.engine.currentModel;
     const base = this.working();
     if (!generated || !before || !model || !base.ok) return verdict;
@@ -356,11 +357,11 @@ export class PlanRepairSession {
   }
 
   /** 拖路口的悬停校验（含推土机试算）。 */
-  validateMove(nodeId: string, x: number, z: number): RoadPreview {
+  validateMove(nodeId: string, x: number, z: number, exact = true): RoadPreview {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
     if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
     const op = { t: "move" as const, node: nodeId, to: { x, z } };
-    return this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateNodeMove(layout, model, nodeId, { x, z }));
+    return this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateNodeMove(layout, model, nodeId, { x, z }), exact);
   }
 
   /** 地面点附近（radius 内）最近的路口。 */

@@ -22,11 +22,30 @@ export function edgeLocked(edge: RoadEdge): boolean {
 /** 楼的净空要避开的路：地面路（非桥）。体检与编辑校验共用这一个口径——
  *  曾经校验查全部路段、体检只查地面路，编辑器会拦下体检根本不报的落位（「三者同源」被破坏）。 */
 export function clearanceRoads(layout: CityLayout): RoadEdge[] {
-  return layout.roadEdges.filter((edge) => !edge.bridge);
+  return cached(layout, "clearanceRoads", layoutDeps(layout), () => layout.roadEdges.filter((edge) => !edge.bridge));
 }
 
-/** 全城地块索引：街区地块 + 已落楼地块（酒店地块不进 layout.blocks，只存在于 slots 里）。 */
+/**
+ * 布局对象不可变（补丁每次产出新布局），按布局缓存派生结果（路线图 SPEC P0-1）。曾在每次 validateBuildingMove 里
+ * 重建全城地块索引与占用集合——推土机安置一栋楼要校验上百块地，4000 楼时一笔路的试算 8.9 秒。
+ * 测试会改合成布局的字段，所以缓存命中还要核对来源数组仍是同一个引用、以及各集合的元素数（就地 push 也能察觉）。
+ */
+const derivedCache = new WeakMap<CityLayout, { deps: readonly unknown[]; values: Map<string, unknown> }>();
+function cached<T>(layout: CityLayout, key: string, deps: readonly unknown[], build: () => T): T {
+  let entry = derivedCache.get(layout);
+  if (!entry || entry.deps.length !== deps.length || entry.deps.some((dep, i) => dep !== deps[i])) { entry = { deps, values: new Map() }; derivedCache.set(layout, entry); }
+  if (!entry.values.has(key)) entry.values.set(key, build());
+  return entry.values.get(key) as T;
+}
+// 计数也进依赖：测试会往已用过的合成布局里就地 push 地块（verify-plan-patch (g) 占地重叠），只核对数组引用会读到旧索引。
+const layoutDeps = (layout: CityLayout): unknown[] => [layout.blocks, layout.districts, layout.civics, layout.gardens, layout.districtLandmarks, layout.landmarks, layout.publicSites, layout.contextBuildings, layout.roadEdges,
+  layout.blocks.reduce((n, block) => n + block.parcels.length, 0), layout.districts.reduce((n, district) => n + district.slots.size, 0), layout.contextBuildings.length, layout.roadEdges.length];
+
+/** 全城地块索引：街区地块 + 已落楼地块（酒店地块不进 layout.blocks，只存在于 slots 里）。按布局缓存，调用方不得修改返回值。 */
 export function parcelIndex(layout: CityLayout): Map<string, Parcel> {
+  return cached(layout, "parcelIndex", layoutDeps(layout), () => buildParcelIndex(layout));
+}
+function buildParcelIndex(layout: CityLayout): Map<string, Parcel> {
   const index = new Map<string, Parcel>();
   for (const block of layout.blocks) for (const parcel of block.parcels) index.set(parcel.id, parcel);
   for (const district of layout.districts) for (const parcel of district.slots.values()) if (!index.has(parcel.id)) index.set(parcel.id, parcel);
@@ -36,6 +55,29 @@ export function parcelIndex(layout: CityLayout): Map<string, Parcel> {
 /** 被占用/预留的地块：会话楼、配套整街区、小区花园街区、城区地标整街区、致敬地标与市政用地圆内、未压制的背景楼。
  *  编辑校验与套用共用——套用曾只看会话楼，刷新后目标地块冒出背景楼时照套不误，两楼叠在一起。 */
 export function reservedParcelIds(layout: CityLayout, suppressedContext: Iterable<string> = []): Set<string> {
+  // 返回副本：调用方（applyPlanPatch 的移楼循环）会就地增删占用。只读的调用方用 reservedParcelIdsShared。
+  return new Set(reservedParcelIdsShared(layout, suppressedContext));
+}
+
+/** 同 reservedParcelIds，返回按布局缓存的同一个集合——只读，不得修改。 */
+export function reservedParcelIdsShared(layout: CityLayout, suppressedContext: Iterable<string> = []): ReadonlySet<string> {
+  const suppressedList = [...suppressedContext];
+  return cached(layout, `reserved|${[...suppressedList].sort().join(",")}`, layoutDeps(layout), () => buildReserved(layout, suppressedList));
+}
+
+/** 全城会话楼落位（id → 地块）的扁平表与「街区 → 第一个在其中落楼的城区」（validateBuildingMove 每次都要扫）。 */
+export function slotIndex(layout: CityLayout): { slots: ReadonlyArray<readonly [string, Parcel]>; districtOfBlock: ReadonlyMap<string, string>; homeOf: ReadonlyMap<string, string> } {
+  return cached(layout, "slotIndex", layoutDeps(layout), () => {
+    const slots: Array<readonly [string, Parcel]> = []; const districtOfBlock = new Map<string, string>(); const homeOf = new Map<string, string>();
+    for (const district of layout.districts) for (const [id, slot] of district.slots) {
+      slots.push([id, slot]);
+      if (!homeOf.has(id)) homeOf.set(id, district.id);
+      if (!districtOfBlock.has(slot.blockId)) districtOfBlock.set(slot.blockId, district.id);
+    }
+    return { slots, districtOfBlock, homeOf };
+  });
+}
+function buildReserved(layout: CityLayout, suppressedContext: readonly string[]): Set<string> {
   const parcels = parcelIndex(layout);
   const blockOf = new Map<string, string[]>();
   for (const block of layout.blocks) for (const parcel of block.parcels) {
@@ -65,14 +107,63 @@ export function reservedParcelIds(layout: CityLayout, suppressedContext: Iterabl
   return reserved;
 }
 
+/** 地面路网格索引的格子边长。 */
+const GRID = 40;
+
+/**
+ * 地面路（clearanceRoads）的网格索引：每个线段按包围盒登记到格子里。按布局缓存。
+ * edgesNear 返回「可能离 (x,z) 不超过 radius 的路段」，**按 clearanceRoads 的原顺序**、不重复——
+ * 调用方的「取最小、并列取先出现」口径因此不变（路线图 SPEC P0-1：结果逐字不变的提速）。
+ */
+function edgeGrid(layout: CityLayout): { cells: Map<string, number[]>; edges: RoadEdge[]; maxHalf: number } {
+  return cached(layout, "edgeGrid", layoutDeps(layout), () => {
+    const edges = clearanceRoads(layout); const cells = new Map<string, number[]>(); let maxHalf = 0;
+    edges.forEach((edge, index) => {
+      maxHalf = Math.max(maxHalf, edge.width / 2);
+      const seen = new Set<string>();
+      for (let i = 1; i < edge.points.length; i += 1) {
+        const a = edge.points[i - 1]; const b = edge.points[i];
+        for (let gx = Math.floor(Math.min(a.x, b.x) / GRID); gx <= Math.floor(Math.max(a.x, b.x) / GRID); gx += 1)
+          for (let gz = Math.floor(Math.min(a.z, b.z) / GRID); gz <= Math.floor(Math.max(a.z, b.z) / GRID); gz += 1) {
+            const key = `${gx}:${gz}`;
+            if (seen.has(key)) continue; seen.add(key);
+            const list = cells.get(key); if (list) list.push(index); else cells.set(key, [index]);
+          }
+      }
+    });
+    return { cells, edges, maxHalf };
+  });
+}
+
+/** 中心线离 (x,z) 可能 ≤ radius 的地面路段（原顺序、不重复）。任何一点在半径内的线段，其包围盒必与查询方框共用格子。 */
+export function edgesNear(layout: CityLayout, x: number, z: number, radius: number): RoadEdge[] {
+  const { cells, edges } = edgeGrid(layout);
+  const hits = new Set<number>();
+  for (let gx = Math.floor((x - radius) / GRID); gx <= Math.floor((x + radius) / GRID); gx += 1)
+    for (let gz = Math.floor((z - radius) / GRID); gz <= Math.floor((z + radius) / GRID); gz += 1)
+      for (const index of cells.get(`${gx}:${gz}`) ?? []) hits.add(index);
+  return [...hits].sort((a, b) => a - b).map((index) => edges[index]);
+}
+
+/** 同 rectClearOfEdges(rect, clearanceRoads(layout), pad)，只查附近的路（结果相同）。 */
+export function rectClearOfRoads(layout: CityLayout, rect: { x: number; z: number; yaw: number; width: number; depth: number }, pad = 0.5): boolean {
+  const half = edgeGrid(layout).maxHalf + pad; // 与 rectClearOfEdges 粗筛同一个可达半径（取最宽的路），再留 1 的余量
+  const reach = Math.hypot(rect.width / 2 + half, rect.depth / 2 + half) + 1;
+  return rectClearOfEdges(rect, edgesNear(layout, rect.x, rect.z, reach), pad);
+}
+
 /** 朝向矩形与路段带是否相交（口径同 cityLayout 的 lotClearOfRoads：局部轴投影 + 路幅半宽外扩）。 */
 export function rectClearOfEdges(rect: { x: number; z: number; yaw: number; width: number; depth: number }, edges: readonly RoadEdge[], pad = 0.5): boolean {
   const ax = Math.sin(rect.yaw); const az = Math.cos(rect.yaw); // 局部 z 轴（进深）
   const bx = az; const bz = -ax;                                // 局部 x 轴（面宽）
   for (const edge of edges) {
     const half = edge.width / 2 + pad;
+    // 粗筛（结果逐字不变）：采样点要命中，离矩形中心不能超过 hypot(半面宽+half, 半进深+half)；
+    // 线段外扩这个半径的包围盒不含中心，整段都不可能命中。曾逐段按 1.5 步长采样全城路——体检 3.6 秒的 90%。
+    const reach = Math.hypot(rect.width / 2 + half, rect.depth / 2 + half);
     for (let i = 1; i < edge.points.length; i += 1) {
       const a = edge.points[i - 1]; const b = edge.points[i];
+      if (rect.x < Math.min(a.x, b.x) - reach || rect.x > Math.max(a.x, b.x) + reach || rect.z < Math.min(a.z, b.z) - reach || rect.z > Math.max(a.z, b.z) + reach) continue;
       const len = Math.hypot(b.x - a.x, b.z - a.z);
       for (let d = 0; d <= len; d += 1.5) {
         const t = len ? d / len : 0;

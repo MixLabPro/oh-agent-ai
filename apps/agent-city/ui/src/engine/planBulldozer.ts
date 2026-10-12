@@ -10,7 +10,7 @@
  */
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge } from "./cityLayout";
-import { applyPlanPatch, appendSiteOp, buildingRect, clearanceRoads, nearestOnPolyline, rectClearOfEdges, validateBuildingMove, type PlanPatchV1 } from "./planPatch";
+import { applyPlanPatch, appendSiteOp, buildingRect, clearanceRoads, nearestOnPolyline, rectClearOfEdges, reservedParcelIdsShared, validateBuildingMove, type PlanPatchV1 } from "./planPatch";
 import { roadImpact, viaductEdges } from "./planRoadRules";
 import { listSites } from "./planSites";
 
@@ -91,7 +91,10 @@ export function bulldozeForRoads(generated: CityLayout, model: CityModel, before
       .map((parcel) => ({ parcel, d: Math.hypot(parcel.x - home.x, parcel.z - home.z) }))
       .filter(({ parcel, d }) => d <= SEARCH_RADIUS && parcel.id !== home.id)
       .sort((x, y) => x.d - y.d || (x.parcel.id < y.parcel.id ? -1 : 1));
-    const target = candidates.find(({ parcel }) => validateBuildingMove(after, model, next, id, parcel.id).blockers.length === 0)?.parcel;
+    // 先用 O(1) 的占用集合筛（被占的地块完整校验必然报 parcel-occupied，结果不变），再对剩下的做完整校验。
+    const taken = reservedParcelIdsShared(after, next.suppressedContext);
+    const pending = new Set(Object.entries(next.buildingMoves).filter(([other]) => other !== id).map(([, parcelId]) => parcelId));
+    const target = candidates.find(({ parcel }) => !taken.has(parcel.id) && !pending.has(parcel.id) && validateBuildingMove(after, model, next, id, parcel.id).blockers.length === 0)?.parcel;
     if (!target) { result.homeless.push(id); continue; }
     next = { ...next, buildingMoves: { ...next.buildingMoves, [id]: target.id } };
     after = applyPlanPatch(generated, next).layout;

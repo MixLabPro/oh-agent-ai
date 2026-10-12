@@ -651,4 +651,25 @@ function harness(overrides = {}) {
   assert.match(controller.snapshot.message.text, /切掉一截高架/);
 }
 
-console.log("City plan repair controller: road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (w) 悬停降级（路线图 SPEC P0-1）：提供 defer 时，鼠标移动中只要估计（exact=false），停住后再要确切的推土机试算。
+{
+  const { controller, deps } = harness();
+  const timers = []; const exactFlags = [];
+  deps.defer = (run, ms) => { const timer = { run, ms, cancelled: false }; timers.push(timer); return () => { timer.cancelled = true; }; };
+  deps.validateAdd = (from, to, width, purpose, exact) => { exactFlags.push(exact); return exact ? { blockers: [], warnings: ["bulldoze:1"] } : { blockers: [], warnings: ["bulldoze:2"], estimate: true }; };
+  controller.enter(); controller.setTool("draw");
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  controller.hover({ x: 40, z: 10 });
+  controller.hover({ x: 60, z: 10 });
+  assert.equal(exactFlags.at(-1), false, "while the mouse moves, the preview asks for an estimate");
+  assert.match(controller.snapshot.preview.warning, /将推平 2 座设施（预估/, "…and says it is an estimate");
+  assert.ok(timers.slice(0, -1).every((t) => t.cancelled), "each move cancels the previous settle timer");
+  const last = timers.at(-1); assert.equal(last.ms, 150);
+  last.run();
+  assert.equal(exactFlags.at(-1), true, "once settled, the exact dry run is asked for");
+  assert.match(controller.snapshot.preview.warning, /将推平 1 座设施$/, "…and the exact count replaces the estimate");
+  controller.exit();
+  assert.ok(timers.at(-1).cancelled || timers.at(-1) === last, "exit cancels a pending settle");
+}
+
+console.log("City plan repair controller: hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");

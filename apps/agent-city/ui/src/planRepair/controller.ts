@@ -77,10 +77,10 @@ export type RepairDeps = {
   // 道路
   snap(x: number, z: number): SnapPoint | null;
   edgeAt(x: number, z: number): { id: string; points: Vec2[]; width: number; locked: boolean } | null;
-  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose): RoadPreview;
+  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, exact?: boolean): RoadPreview;
   addRoad(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose): EditResult;
   // 高架
-  validateHighway(points: readonly Vec2[]): RoadPreview;
+  validateHighway(points: readonly Vec2[], exact?: boolean): RoadPreview;
   addHighway(points: readonly Vec2[]): EditResult;
   highwayAt(x: number, z: number): { points: Vec2[]; width: number } | null;
   cutHighway(x: number, z: number): EditResult;
@@ -90,7 +90,7 @@ export type RepairDeps = {
   dropEdges(edgeIds: readonly string[]): EditResult;
   // 路口
   nodeAt(x: number, z: number): NodeHandle | null;
-  validateMove(nodeId: string, x: number, z: number): RoadPreview;
+  validateMove(nodeId: string, x: number, z: number, exact?: boolean): RoadPreview;
   moveNode(nodeId: string, x: number, z: number): EditResult;
   // 落位试算（悬停）
   buildingGhost(buildingId: string, x: number, z: number): PlacementGhost | null;
@@ -102,6 +102,11 @@ export type RepairDeps = {
   siteTargetAt(site: SiteInfo, x: number, z: number): string | null;
   moveSite(site: SiteInfo, targetId: string): SiteEditResult;
   removeSite(site: SiteInfo): EditResult;
+  /**
+   * 推迟执行（返回取消函数）。提供时，画路/拖路口/高架的悬停预览在鼠标移动中只给估计，停住 HOVER_SETTLE_MS 后再跑推土机试算
+   * （4000 楼一次试算 ~50 ms，跟着鼠标每帧跑会掉帧——路线图 SPEC P0-1）。不提供（测试）时始终同步给确切结果。
+   */
+  defer?(run: () => void, ms: number): () => void;
 };
 
 const BLOCKER_TEXT: Record<string, string> = {
@@ -183,6 +188,7 @@ export const warningText = (code: string): string => {
   return count !== undefined && COUNTED_TEXT[key] ? COUNTED_TEXT[key](Number(count)) : WARNING_TEXT[code] ?? code;
 };
 
+const noteOfVerdict = (verdict: RoadPreview) => { const note = noteOf(verdict.warnings); return note && verdict.estimate ? `${note}${ESTIMATE_NOTE}` : note; };
 const reasonOf = (blockers: readonly string[]) => (blockers.length ? blockers.map(blockerText).join("；") : null);
 const noteOf = (warnings: readonly string[]) => (warnings.length ? warnings.map(warningText).join("；") : null);
 
@@ -222,13 +228,18 @@ const movedEdges = (node: NodeHandle, to: Vec2) => node.edges.map((edge) => {
   return { points, width: edge.width };
 });
 
-const HOVER_EPS = 0.75; // 地面点移动不到这么多就不重算预览（鼠标抖动）
+const HOVER_EPS = 0.75;
+const HOVER_SETTLE_MS = 150;
+const ESTIMATE_NOTE = "（预估，鼠标停住后给出确切结果）"; // 地面点移动不到这么多就不重算预览（鼠标抖动）
 
 export class RepairController {
   private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], preview: null, message: null };
   private readonly listeners = new Set<(state: RepairState) => void>();
   private lastGround: Vec2 | null = null;
   private lastRay: RepairRay | null = null;
+  /** 鼠标停住了：悬停预览可以跑确切的推土机试算。没有 defer 时恒为真。 */
+  private settled = true;
+  private cancelSettle: (() => void) | null = null;
 
   constructor(private readonly deps: RepairDeps) {}
 
@@ -254,6 +265,7 @@ export class RepairController {
 
   exit(): void {
     if (!this.state.active) return;
+    this.cancelSettle?.(); this.cancelSettle = null; this.settled = true;
     this.deps.setSelected(null);
     this.lastGround = null;
     this.set({ active: false, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], preview: null, message: null });
@@ -327,6 +339,11 @@ export class RepairController {
     if (!ground) { this.lastGround = null; this.lastRay = null; if (this.state.preview) this.set({ preview: null }); return; }
     if (this.lastGround && Math.hypot(ground.x - this.lastGround.x, ground.z - this.lastGround.z) < HOVER_EPS) return;
     this.lastGround = ground; this.lastRay = ray;
+    if (this.deps.defer) {
+      this.cancelSettle?.();
+      this.settled = false;
+      this.cancelSettle = this.deps.defer(() => { this.cancelSettle = null; this.settled = true; if (this.state.active) this.recomputePreview(); }, HOVER_SETTLE_MS);
+    }
     this.recomputePreview();
   }
 
@@ -357,8 +374,8 @@ export class RepairController {
         this.set({ preview: near ? { kind: "node-hover", at: { x: near.x, z: near.z }, ok: !near.locked, reason: near.locked ? blockerText("locked-edge") : null } : null });
         return;
       }
-      const verdict = this.deps.validateMove(node.id, ground.x, ground.z);
-      this.set({ preview: { kind: "node", at: ground, edges: movedEdges(node, ground), ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers.filter((code) => code !== "unchanged")), warning: noteOf(verdict.warnings), impact: verdict.impact ?? null } });
+      const verdict = this.deps.validateMove(node.id, ground.x, ground.z, this.settled);
+      this.set({ preview: { kind: "node", at: ground, edges: movedEdges(node, ground), ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers.filter((code) => code !== "unchanged")), warning: noteOfVerdict(verdict), impact: verdict.impact ?? null } });
       return;
     }
     if (tool === "erase") {
@@ -375,8 +392,8 @@ export class RepairController {
       const at = this.deps.highwayEndAt(ground.x, ground.z) ?? ground;
       const points = [...this.state.viaduct, at];
       if (points.length < 2) { this.set({ preview: { kind: "viaduct", points, ok: true, reason: null, warning: this.deps.highwayEndAt(ground.x, ground.z) ? warningText("joins-viaduct") : null, impact: null } }); return; }
-      const verdict = this.deps.validateHighway(points);
-      this.set({ preview: { kind: "viaduct", points, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), impact: verdict.impact ?? null } });
+      const verdict = this.deps.validateHighway(points, this.settled);
+      this.set({ preview: { kind: "viaduct", points, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOfVerdict(verdict), impact: verdict.impact ?? null } });
       return;
     }
     const snap = this.deps.snap(ground.x, ground.z);
@@ -386,8 +403,8 @@ export class RepairController {
       return;
     }
     const spec = ROAD_SPEC[roadType];
-    const verdict: RoadPreview = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, spec.width, spec.purpose);
-    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: spec.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings), snap, impact: verdict.impact ?? null, path: verdict.path ?? null, waterfront: spec.purpose === "waterfront" } });
+    const verdict: RoadPreview = snap.locked ? { blockers: ["locked-edge"], warnings: [] } : this.deps.validateAdd(drawStart, snap, spec.width, spec.purpose, this.settled);
+    this.set({ preview: { kind: "draw", from: { x: drawStart.x, z: drawStart.z }, to: { x: snap.x, z: snap.z }, width: spec.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOfVerdict(verdict), snap, impact: verdict.impact ?? null, path: verdict.path ?? null, waterfront: spec.purpose === "waterfront" } });
   }
 
   // ── 点击 ────────────────────────────────────────────────────────────────

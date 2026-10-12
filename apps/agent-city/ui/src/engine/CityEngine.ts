@@ -72,6 +72,14 @@ export type CityEngineOptions = {
   onFirstFrame?: () => void;
 };
 
+/** 补丁对底层布局的唯一影响是移楼钉子（layoutPinsFor）：钉子相同 → 底层布局相同。 */
+// 没有移楼 = 没有钉子（layoutPinsFor 返回 null），与「没有补丁」同键——曾把档位也拼进去，空补丁与无补丁键不同，
+// 第一笔编辑和撤销回空都走了全量重排（浏览器实测 4000 楼每次 ~1 s）。
+const pinsKey = (patch: PlanPatchV1 | null, seed: number): string => {
+  if (!patch || patch.seed !== seed || !Object.keys(patch.buildingMoves).length) return "";
+  return `${patch.scaleTier}|${Object.keys(patch.buildingMoves).sort().map((id) => `${id}=${patch.buildingMoves[id]}`).join(",")}`;
+};
+
 const IDLE_AFTER_MS = 12_000;
 const IDLE_FRAME_INTERVAL_MS = 50;
 
@@ -515,6 +523,9 @@ export class CityEngine {
     const previous = this.planPatch;
     this.planPatchValue = patch;
     if (!this.model || this.seed === null) return;
+    // 提交分级（路线图 SPEC P0-1）：layoutCity 只为移楼的 pins 存在。钉子没变（只改了路/高架/设施）时，
+    // 底层布局不会变——直接在缓存的 baseLayout 上重套补丁。4000 楼实测：每次编辑省掉 ~0.8–1.3 s 的重排。
+    if (this.baseLayout && pinsKey(previous, this.seed) === pinsKey(patch, this.seed)) { this.applyModel(this.model, true, true); return; }
     const removed = !!previous && Object.keys(previous.buildingMoves).some((id) => patch?.seed !== this.seed || !(id in patch.buildingMoves));
     this.applyModel(this.model, !removed);
   }
@@ -622,8 +633,10 @@ export class CityEngine {
     if (!first) this.resetView();
   }
 
-  /** reuse=false：丢弃上一布局做全量重排（分页到齐后的圈层修正）。 */
-  applyModel(model: CityModel, reuse = true): void {
+  /** reuse=false：丢弃上一布局做全量重排（分页到齐后的圈层修正）。
+   *  keepBase：模型与钉子都没变，沿用缓存的底层布局只重套补丁（setPlanPatch 的快路径）。 */
+  applyModel(model: CityModel, reuse = true, keepBase = false): void {
+    const sameModel = model === this.model;
     this.model = model;
     if (this.seed === null) return;
     // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
@@ -634,7 +647,8 @@ export class CityEngine {
       this.parts = null;
     }
     const patch = this.planPatch;
-    const base = layoutCity(model, reuse ? this.baseLayout : null, this.seed, MIAMI_COASTAL, this.backdrop, layoutPinsFor(patch));
+    const base = keepBase && sameModel && this.baseLayout ? this.baseLayout
+      : layoutCity(model, reuse ? this.baseLayout : null, this.seed, MIAMI_COASTAL, this.backdrop, layoutPinsFor(patch));
     this.baseLayout = base;
     this.planResult = patch ? applyPlanPatch(base, patch) : null;
     const layout = this.planResult ? this.planResult.layout : base;

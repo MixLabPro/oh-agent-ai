@@ -6,7 +6,7 @@
  */
 import type { CityBuilding, CityModel } from "../cityModel";
 import type { CityLayout, Parcel, Vec2 } from "./cityLayout";
-import { buildingRect, clearanceRoads, rectClearOfEdges, rectsOverlap, type BuildingRect, type PatchStaleEntry } from "./planPatch";
+import { buildingRect, clearanceRoads, rectClearOfRoads, rectsOverlap, type BuildingRect, type PatchStaleEntry } from "./planPatch";
 
 export type PlanIssueSeverity = "error" | "warning" | "info";
 
@@ -63,7 +63,7 @@ export function auditLayout(layout: CityLayout, model: CityModel, stale: readonl
         issues.push({ id: `buildingOnSlope:steep:${id}`, severity: "warning", rule: "buildingOnSlope", at: { x: slot.x, z: slot.z }, detail: `会话楼 ${id} 所在地块坡度超过 ${SLOPE_LIMIT}`, entities: [id] });
       }
       // buildingOverRoad：朝向矩形与路段带相交（含桥下车位不算——只查地面路）。
-      if (!rectClearOfEdges(slot, groundRoads, 0.5)) {
+      if (!rectClearOfRoads(layout, slot, 0.5)) {
         issues.push({ id: `buildingOverRoad:${id}`, severity: "error", rule: "buildingOverRoad", at: { x: slot.x, z: slot.z }, detail: `会话楼 ${id} 压在道路上`, entities: [id] });
       }
     }

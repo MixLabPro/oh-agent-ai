@@ -16,7 +16,7 @@
  */
 import type { CivicKind, CityLayout, Vec2 } from "./cityLayout";
 import { clearsHighways } from "./cityPlan";
-import { clearanceRoads, parcelIndex, rectClearOfEdges, reservedParcelIds } from "./planGeometry";
+import { clearanceRoads, parcelIndex, rectClearOfRoads, reservedParcelIds } from "./planGeometry";
 import type { PatchStaleEntry } from "./planPatch";
 
 export type SiteKind = "civic" | "garden" | "district-landmark" | "context" | "landmark" | "public-site";
@@ -111,7 +111,7 @@ export function siteMoveProblem(layout: CityLayout, site: SiteInfo, targetId: st
   if (!layout.terrain.buildable(parcel.x, parcel.z)) return "not-buildable";
   if (layout.terrain.slope(parcel.x, parcel.z) > SLOPE_LIMIT) return "steep-slope";
   if (!clearsHighways(parcel, 16, 16, layout.highways)) return "highway-clearance";
-  if (!rectClearOfEdges(parcel, clearanceRoads(layout), 0.5)) return "site-over-road";
+  if (!rectClearOfRoads(layout, parcel, 0.5)) return "site-over-road";
   return null;
 }
 

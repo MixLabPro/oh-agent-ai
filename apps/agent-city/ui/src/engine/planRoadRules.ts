@@ -14,7 +14,7 @@
  */
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
-import { buildingRect, edgeLocked, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
+import { buildingRect, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
 import { polygonDistance, roadNodeId } from "./cityPlan";
 import { listSites } from "./planSites";
 
@@ -170,21 +170,49 @@ export function validateNodeMove(layout: CityLayout, model: CityModel, nodeId: s
   return { blockers, warnings };
 }
 
+type Access = { node: string | null; distance: number; edge: RoadEdge | null };
+
 /** 每栋会话楼的「接路端点」与离最近路的距离（近似：最近路段的较近端点）。 */
-function accessOf(layout: CityLayout, edges: readonly RoadEdge[], rects: readonly Vec2[]): Array<{ node: string | null; distance: number }> {
+function accessOf(layout: CityLayout, edges: readonly RoadEdge[], rects: readonly Vec2[]): Access[] {
   const nodes = new Map<string, Vec2>(layout.roadNodes.map((node) => [node.id, node]));
-  return rects.map((p) => {
-    let best: RoadEdge | null = null; let bestD = Infinity;
-    for (const edge of edges) {
-      if (edge.bridge) continue;
-      const d = distanceToPolyline(p, edge.points);
-      if (d < bestD) { bestD = d; best = edge; }
+  // 全路网时走网格逐圈扩大搜索（结果逐字相同）：最近者距离 ≤ 当前半径时，半径外不可能有更近或并列的路。
+  if (edges === layout.roadEdges) return rects.map((p) => {
+    for (let radius = 40; radius < 1e5; radius *= 2) {
+      const access = accessAt(nodes, edgesNear(layout, p.x, p.z, radius), p);
+      if (access.edge && access.distance <= radius) return access;
     }
-    if (!best) return { node: null, distance: Infinity };
-    const from = nodes.get(best.from); const to = nodes.get(best.to);
-    const near = from && to && Math.hypot(from.x - p.x, from.z - p.z) <= Math.hypot(to.x - p.x, to.z - p.z) ? best.from : best.to;
-    return { node: near, distance: bestD };
+    return accessAt(nodes, edges, p);
   });
+  return rects.map((p) => accessAt(nodes, edges, p));
+}
+function accessAt(nodes: ReadonlyMap<string, Vec2>, edges: readonly RoadEdge[], p: Vec2): Access {
+  let best: RoadEdge | null = null; let bestD = Infinity;
+  for (const edge of edges) {
+    if (edge.bridge) continue;
+    const d = distanceToPolyline(p, edge.points);
+    if (d < bestD) { bestD = d; best = edge; }
+  }
+  if (!best) return { node: null, distance: Infinity, edge: null };
+  const from = nodes.get(best.from); const to = nodes.get(best.to);
+  const near = from && to && Math.hypot(from.x - p.x, from.z - p.z) <= Math.hypot(to.x - p.x, to.z - p.z) ? best.from : best.to;
+  return { node: near, distance: bestD, edge: best };
+}
+
+/** 擦路校验的「擦之前」部分只依赖布局与模型：按布局缓存（橡皮擦悬停时鼠标每动一下都要校验）。 */
+const dropBaseCache = new WeakMap<CityLayout, { model: CityModel; edges: readonly RoadEdge[]; slots: Vec2[]; ids: string[]; before: Access[]; comp: Map<string, number>; main: number | undefined }>();
+function dropBase(layout: CityLayout, model: CityModel) {
+  const hit = dropBaseCache.get(layout);
+  if (hit && hit.model === model && hit.edges === layout.roadEdges) return hit;
+  const slots: Vec2[] = []; const ids: string[] = [];
+  const buildings = new Set(model.buildings.map((building) => building.id));
+  for (const district of layout.districts) for (const [id, slot] of district.slots) if (buildings.has(id)) { slots.push(slot); ids.push(id); }
+  const comp = components(layout.roadEdges);
+  const sizes = new Map<number, number>();
+  for (const label of comp.values()) sizes.set(label, (sizes.get(label) ?? 0) + 1);
+  const main = [...sizes].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const entry = { model, edges: layout.roadEdges, slots, ids, before: accessOf(layout, layout.roadEdges, slots), comp, main };
+  dropBaseCache.set(layout, entry);
+  return entry;
 }
 
 /** 连通分量标号（含桥——桥连着岛上两片路网）。 */
@@ -218,21 +246,18 @@ export function validateEdgeDrop(layout: CityLayout, model: CityModel, edgeId: s
   if (edge.purpose === "waterfront") warnings.push("erases-waterfront");
 
   const remaining = layout.roadEdges.filter((candidate) => candidate !== edge);
-  const slots: Vec2[] = []; const ids: string[] = [];
-  const buildings = new Set(model.buildings.map((building) => building.id));
-  for (const district of layout.districts) for (const [id, slot] of district.slots) if (buildings.has(id)) { slots.push(slot); ids.push(id); }
-  const before = accessOf(layout, layout.roadEdges, slots);
-  const after = accessOf(layout, remaining, slots);
+  const { slots, ids, before, comp: compBefore, main: mainBefore } = dropBase(layout, model);
+  // 结果逐字不变：最近路段不是被擦的那条的楼，擦掉一条「更远或并列在后」的路不改变它的最近路段（取最小用严格 <，
+  // 并列取先出现的）——只有最近路段恰是被擦那条的楼要重算。曾每次对全城楼 × 全城路重算两遍（4000 楼 0.7 秒/次悬停）。
+  const nodes = new Map<string, Vec2>(layout.roadNodes.map((node) => [node.id, node]));
+  const after = before.map((access, i) => (access.edge === edge ? accessAt(nodes, remaining, slots[i]) : access));
 
   // 离路太远：原本在范围内、删后超出的楼。
   const stranded = ids.filter((_, i) => before[i].distance <= FRONTAGE_LIMIT && after[i].distance > FRONTAGE_LIMIT);
   if (stranded.length) warnings.push("strands-buildings");
 
   // 断网：原本接在主网上的楼，删后不再与其他「接主网的楼」同一连通分量。
-  const compBefore = components(layout.roadEdges); const compAfter = components(remaining);
-  const sizes = new Map<number, number>();
-  for (const label of compBefore.values()) sizes.set(label, (sizes.get(label) ?? 0) + 1);
-  const mainBefore = [...sizes].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const compAfter = components(remaining);
   const served = ids.map((_, i) => i).filter((i) => before[i].node !== null && compBefore.get(before[i].node!) === mainBefore);
   const afterLabels = new Set(served.map((i) => (after[i].node === null ? -1 : (compAfter.get(after[i].node!) ?? -1))));
   if (afterLabels.size > 1 || afterLabels.has(-1)) warnings.push("disconnects-buildings");
