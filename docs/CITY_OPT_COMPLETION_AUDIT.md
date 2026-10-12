@@ -1303,3 +1303,9 @@ RoadEdge 新增可选structure（ground-road/ground-approach/deck），由addNet
 `verify-city-planning` 具名样本一度发现 patch 已含 owner、外层又 push 一次的重复对象；已改成按 owner id 唯一提交，network map/version 只在统一提交点更新。修复后的同口径2B 60/t1复测（score 仅诊断，161秒）：`siteWithoutDoorRoad` 8/60岛、9项；`sitesOverlap` 1/60/1；`roadThroughSite` 0；unjoined ground junction 28/60、59项；acute 0/60；loose ends 12/60、13项；crowded 5/60、14项；disconnected 1/60、bridgehead 3/60、3项；siteInWater 1/60，其余列出约束0。与只扩360外圈版的11岛/12项门路相比减少3岛/3项；以原细分13岛/15项相比减少5岛/6项。2B仍有大量路口未接及门路失败，不能据此判定完成。
 
 具名回归 `2005655366`、`2005864824`、`2005969553` 的两项 required owner 均只出现一次，均有 `plot-gate` 且无用地重叠/道路穿地；`2000837832`、`2002199309`仍保留因buildable/dry/必要间距无法满足的显式失败。typecheck、sitespec候选续试、planning 30岛和60岛2B普查通过。去重后一行network version更新的最后微调还需复验；跨引擎、road-report、build及完整套件/四档独立验收尚未复验。此前未冻结4B预检只作为其旧构建失败记录，不据其调参。
+
+### 联合修复续：迁移道路端点与全部关联边（2026-10-12）
+
+在 `192d721a` 的端点保留折线修复上，真实断点仍是实体包络内的路口端点。现允许最多两个非主锚点、非桥接、非已声明岛门节点在同一 NetworkPatch 中迁移；受影响节点的所有关联地面边必须完整重定线，端点/edge lineage/remap 随事务提交。超过节点/边预算、存在保护状态或任何关联边无法通过道路净距、地形、地块与桥面检查则拒绝。未扩大吸附阈值。
+
+原两个失败种子 `1703350391/t2`、`2003037141/t1` 均已从 ground violation 1、规划 failed 恢复为 ground violation 0、无 groundFailures、规划 degraded；剩余 degraded 原因是完整模型覆盖与全局预算/取消尚未实现。`verify-city-joint-site-road.mjs` 加入这两项真实种子回归及综合网络/地面专项断言；typecheck与该专项通过。节点迁移后的 `verify-city-solve.mjs` 终态exit0：28策略、10约束、6岛均未恶化且重复确定。30岛主批、独立四档、跨引擎/场景视觉与完整预算门禁仍未完成；不据具名样本恢复宣称整体完成。

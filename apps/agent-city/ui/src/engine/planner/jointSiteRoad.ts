@@ -14,13 +14,18 @@ import { polylineDistance } from "./footprint";
 import { groundJunctionCorridorFailure } from "./civicClearance";
 import { classifyRoadSegments, closestSegmentPoints } from "./relations";
 import { groundJunctionFindings } from "./report";
+import { roadNodeId } from "../cityPlan";
+import { isOwnedIslandGate } from "./endpoints";
+
+/** Bounded node closure; at most 4P2=12 target assignments per proposal. */
+export const JOINT_NODE_RELOCATION_CONFIG = { version: 1, maxNodes: 2, targetCorners: 4 } as const;
 
 /** Six-node visibility graph: endpoints plus conservative bounding corners are
  * candidate waypoints only. Every visibility edge checks the actual UNION,
  * so openings are not replaced by a solid bounding rectangle. */
-export function declaredOwnerDetour(footprint: LocalFootprint, road: RoadEdge,
+function declaredOwnerDetourBetween(footprint: LocalFootprint, road: RoadEdge, a: Vec2, b: Vec2,
   allowed: (a: Vec2, b: Vec2) => boolean = () => true): Vec2[] | null {
-  const a = road.points[0], b = road.points[road.points.length - 1], required = road.width / 2 + 3;
+  const required = road.width / 2 + 3;
   if (!a || !b || !Number.isFinite(required) || road.width <= 0 ||
     ![a, b].every(point => { const distance = footprintPolylineDistance(footprint, [point]); return Number.isFinite(distance) && distance >= required; })) return null;
   const bounds = footprint.parts.flatMap(part => part.shape === "circle" ? [
@@ -58,6 +63,11 @@ export function declaredOwnerDetour(footprint: LocalFootprint, road: RoadEdge,
   return null;
 }
 
+export function declaredOwnerDetour(footprint: LocalFootprint, road: RoadEdge,
+  allowed: (a: Vec2, b: Vec2) => boolean = () => true): Vec2[] | null {
+  return declaredOwnerDetourBetween(footprint, road, road.points[0], road.points[road.points.length - 1], allowed);
+}
+
 type Proposal = { ok: true; patch: NetworkPatch } | { ok: false; reason: string };
 export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: string, at: Vec2): Proposal {
   const reject = (reason: string): Proposal => ({ ok: false, reason });
@@ -85,10 +95,86 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
     && reservation.state !== "released" && (reservation.immutable || reservation.state !== "tentative")))) return reject("joint-road-reservation-protected");
   const world = { network: ctx.network, geo: ctx.geo, inRiver: ctx.inRiver, reservations: () => [...ctx.publicSites, ...ctx.landmarks].filter(site => site.id !== ownerId) };
   const decks = [...ctx.ringRuns.map(points => ({ points, width: 10.5 })), ...[...ctx.network.edges.values()].filter(edge => edge.bridge)];
+  const endpointsInside = new Set(roads.flatMap(road => [road.from, road.to].filter((nodeId, index) =>
+    footprintPolylineDistance(envelope.conservativeProjection, [road.points[index === 0 ? 0 : road.points.length - 1]]) < road.width / 2 + 3)));
+  const relocationOptions: Array<{ nodes: Array<{ from: string; to: string; targetAt: Vec2 }>; edges: NonNullable<NetworkPatch["relineEdges"]> }> = [];
+  let relocationReason = "joint-road-endpoint-in-owner-envelope";
+  if (endpointsInside.size) {
+    const ownersForGate = [...ctx.publicSites, ...ctx.landmarks];
+    if (endpointsInside.size > JOINT_NODE_RELOCATION_CONFIG.maxNodes) return reject("joint-road-endpoint-node-budget");
+    const protectedNode = [...endpointsInside].find(id => id === ctx.primaryAnchorNodeId || isOwnedIslandGate(id, ownersForGate)
+      || [...ctx.network.edges.values()].some(edge => edge.bridge && (edge.from === id || edge.to === id)));
+    if (protectedNode) return reject(`joint-road-endpoint-protected:${protectedNode}`);
+    const affected = [...ctx.network.edges.values()].filter(edge => endpointsInside.has(edge.from) || endpointsInside.has(edge.to));
+    if (!affected.length || affected.length > NETWORK_RELINE_CONFIG.maxEdgesPerPatch
+      || affected.some(edge => edge.bridge || edge.structure !== "ground-road" || !Number.isFinite(edge.width) || edge.width <= 0
+        || ctx.planningWorld?.reservations.some(reservation => reservation.ownerId === `road:${edge.id}`
+          && reservation.state !== "released" && (reservation.immutable || reservation.state !== "tentative"))))
+      return reject("joint-road-endpoint-dependency-protected");
+    const maxSetback = Math.max(...affected.map(edge => edge.width / 2 + 3));
+    const parts = envelope.conservativeProjection.parts;
+    const bounds = parts.flatMap(part => part.shape === "circle" ? [
+      { x: part.center.x - part.radius, z: part.center.z - part.radius }, { x: part.center.x + part.radius, z: part.center.z + part.radius },
+    ] : part.shape === "convex" ? part.vertices : [
+      { x: part.center.x - part.width / 2, z: part.center.z - part.depth / 2 }, { x: part.center.x + part.width / 2, z: part.center.z + part.depth / 2 },
+    ]);
+    const left = Math.floor(Math.min(...bounds.map(point => point.x)) - maxSetback - 2), right = Math.ceil(Math.max(...bounds.map(point => point.x)) + maxSetback + 2);
+    const top = Math.floor(Math.min(...bounds.map(point => point.z)) - maxSetback - 2), bottom = Math.ceil(Math.max(...bounds.map(point => point.z)) + maxSetback + 2);
+    const corners = [{ x: left, z: top }, { x: right, z: top }, { x: right, z: bottom }, { x: left, z: bottom }]
+      .slice(0, JOINT_NODE_RELOCATION_CONFIG.targetCorners);
+    const nodes = [...endpointsInside];
+    const assignments: Vec2[][] = [];
+    const enumerate = (index: number, chosen: Vec2[]) => {
+      if (index === nodes.length) { assignments.push(chosen); return; }
+      for (const point of corners) if (!chosen.some(other => other.x === point.x && other.z === point.z)) enumerate(index + 1, [...chosen, point]);
+    };
+    enumerate(0, []);
+    const routeAllowed = (road: RoadEdge, a: Vec2, b: Vec2, blockedBy: { value: string }) => {
+      const corridor = groundJunctionCorridorFailure(world, a, b, road.width, road);
+      if (corridor) { blockedBy.value = `corridor-${corridor}`; return false; }
+      if (ctx.blocks.some(block => block.parcels.some(parcel => polylineDistance([[a, b]], parcel)
+        < Math.hypot(parcel.width, parcel.depth) / 2 + road.width / 2 + 0.5))) { blockedBy.value = "reserved-parcel-corridor"; return false; }
+      for (const deck of decks) for (let k = 1; k < deck.points.length; k++) {
+        const relation = classifyRoadSegments(a, b, deck.points[k - 1], deck.points[k], 0);
+        if (["invalid", "interior-crossing", "endpoint-contact", "endpoint-on-edge", "collinear-overlap"].includes(relation.kind)
+          || closestSegmentPoints(a, b, deck.points[k - 1], deck.points[k]).distance < road.width / 2 + deck.width / 2 + 1) {
+          blockedBy.value = "deck-clearance-unsupported"; return false;
+        }
+      }
+      return true;
+    };
+    for (const assignment of assignments) {
+      const moved = new Map(nodes.map((id, index) => [id, assignment[index]]));
+      if (assignment.some(point => [...ctx.network.nodes.values()].some(node => !endpointsInside.has(node.id)
+        && Math.hypot(node.x - point.x, node.z - point.z) < 1))) continue;
+      if (nodes.some((id, index) => {
+        const width = Math.max(...affected.filter(edge => edge.from === id || edge.to === id).map(edge => edge.width));
+        return footprintPolylineDistance(envelope.conservativeProjection, [assignment[index]]) < width / 2 + 3;
+      })) continue;
+      const edgePlans: NonNullable<NetworkPatch["relineEdges"]> = [];
+      let failed = false;
+      for (const road of affected) {
+        const start = moved.get(road.from) ?? road.points[0], end = moved.get(road.to) ?? road.points[road.points.length - 1];
+        const blockedBy = { value: "path-length-or-visibility" };
+        const shape = declaredOwnerDetourBetween(envelope.conservativeProjection, road, start, end,
+          (a, b) => routeAllowed(road, a, b, blockedBy));
+        if (!shape) { relocationReason = `joint-road-node-detour:${blockedBy.value}`; failed = true; break; }
+        const points = shape.map(point => ({ ...point }));
+        points[0] = { ...road.points[0] }; points[points.length - 1] = { ...road.points[road.points.length - 1] };
+        edgePlans.push({ edgeId: road.id, points });
+      }
+      if (failed) continue;
+      relocationOptions.push({ nodes: nodes.map((from, index) => ({ from, to: roadNodeId(assignment[index]), targetAt: assignment[index] })), edges: edgePlans });
+    }
+    if (!relocationOptions.length) return reject(relocationReason);
+  }
   const replacements: NonNullable<NetworkPatch["relineEdges"]> = [];
+  const routedEdges = relocationOptions[0]?.edges ?? [];
   for (const road of roads) {
-    if ([road.points[0], road.points[road.points.length - 1]].some(point =>
-      footprintPolylineDistance(envelope.conservativeProjection, [point]) < road.width / 2 + 3)) return reject("joint-road-endpoint-in-owner-envelope");
+    if (endpointsInside.size && routedEdges.some(route => route.edgeId === road.id)) {
+      replacements.push(...routedEdges.filter(route => route.edgeId === road.id));
+      continue;
+    }
     let blockedBy = "path-length-or-visibility";
     const shape = declaredOwnerDetour(envelope.conservativeProjection, road, (a, b) => {
       const corridor = groundJunctionCorridorFailure(world, a, b, road.width, road);
@@ -98,19 +184,29 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
       for (const deck of decks) for (let k = 1; k < deck.points.length; k++) {
         const relation = classifyRoadSegments(a, b, deck.points[k - 1], deck.points[k], 0);
         if (["invalid", "interior-crossing", "endpoint-contact", "endpoint-on-edge", "collinear-overlap"].includes(relation.kind)
-          || closestSegmentPoints(a, b, deck.points[k - 1], deck.points[k]).distance < road.width / 2 + deck.width / 2 + 1) { blockedBy = "deck-clearance-unsupported"; return false; }
+          || closestSegmentPoints(a, b, deck.points[k - 1], deck.points[k]).distance < road.width / 2 + deck.width / 2 + 1) {
+          blockedBy = "deck-clearance-unsupported"; return false;
+        }
       }
       return true;
     });
     if (!shape) return reject(`joint-road-no-endpoint-preserving-detour:${blockedBy}`);
     replacements.push({ edgeId: road.id, points: shape });
   }
-  const patch: NetworkPatch = { baseVersion: (ctx.network as Network & { version?: number }).version ?? 0,
-    removeEdgeIds: [], addEdges: [], splits: [], relineEdges: replacements };
-  const preview = previewNetworkPatch(ctx.network, patch);
-  if (!preview.ok) return reject(preview.detail ?? preview.reason);
-  const final = relocatedSitePositionFailure({ ...ctx, network: preview.network }, owner, at, true);
-  return final ? reject(final) : { ok: true, patch };
+  const alternatives = relocationOptions.length ? relocationOptions : [{ nodes: [], edges: [] }];
+  let lastFailure = "joint-road-no-valid-patch";
+  for (const option of alternatives) {
+    const byId = new Map(replacements.map(edge => [edge.edgeId, edge]));
+    for (const edge of option.edges) byId.set(edge.edgeId, edge);
+    const patch: NetworkPatch = { baseVersion: (ctx.network as Network & { version?: number }).version ?? 0,
+      removeEdgeIds: [], addEdges: [], splits: [], relineEdges: [...byId.values()], ...(option.nodes.length ? { rebindNodes: option.nodes } : {}) };
+    const preview = previewNetworkPatch(ctx.network, patch);
+    if (!preview.ok) { lastFailure = preview.detail ?? preview.reason; continue; }
+    const final = relocatedSitePositionFailure({ ...ctx, network: preview.network }, owner, at, true);
+    if (final) { lastFailure = final; continue; }
+    return { ok: true, patch };
+  }
+  return reject(lastFailure);
 }
 
 export function relocateSiteWithGroundRoads(ctx: RepairContext, ownerId: string, at: Vec2): { changes: number; reason?: string } {
