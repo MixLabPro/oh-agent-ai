@@ -166,6 +166,14 @@ city-opt 已导出 `checkSitePlacement`（`d500ffc7`）。按 `CITY_SITE_REGISTR
 的街区级/地块级判定改调生成器谓词，删掉编辑器自造的「整块空街区」近似与 `PICK_HEIGHT` 表；修 D1（城区地标搬到装不下包络的地方）、
 D2（不规则街区里设施出界）。既有补丁里原本「合法」的少数搬家会被判失效，如实上报（注册表 SPEC §12-3）。小，建议紧跟 P0 做。
 
+**实施记录（2026-10-12）**：`planSites.blockPlacement` / `placementVerdict` 调 `checkSitePlacement`——
+街区级（face-lot）设施保持自身尺寸，按确定顺序试落点（街区中心 → 地块重心 → 各地块中心，地块朝向 → 转 90°），取谓词接受的第一个；
+包络用 `civicEnvelopeSize`（花园用自身矩形）；城区地标（face-reserve）按「地址 ⊕ 17 m 裙房」检查；占用不含正在搬的那座。
+谓词拒因映射成编辑器码（越面/压洞 → `does-not-fit`，压路 → `site-over-road`，高架 → `highway-clearance`，压设施 → `target-occupied`）。
+候选绿框画设施真实会落的位置与尺寸。`verify-plan-sites` (b2)：L 形街区装不下学校（D2）、12 × 12 街区装不下地标裙房（D1）、搬家不被拉成街区外接矩形。
+真实城市：搬到首个候选 118 次干净 / 17 座无候选（与前相同）；扩档重定位 380 → 420 由 26/28 变 25/28——多出的那条是旧近似放行、谓词判装不下的搬家，如实失效。
+未做（注册表 B3 的其余部分）：`listSites` 改遍历注册表、删 `PICK_HEIGHT`——要等注册表的 `instance()` / `pickHeight()`（`pendingCapabilities`）落地。
+
 ### 3.1 已先做：自由级设施的真实占地（2026-10-12，用户截图「为什么占地是圆形，建筑无法衔接路网」）
 
 致敬地标与市政用地在布局里是「中心 + radius」，radius 是生成器的**名义预留圆**，不是模型形状。编辑器曾直接拿圆做自由落位：

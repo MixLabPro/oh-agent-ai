@@ -10,11 +10,17 @@
  * 海上地标（原址堤道留下）与港口（搬到内陆就失去码头的意义，由用户自己判断）也放开；
  * 唯一锁定的是悬索桥——它不是建筑，是路网里的一段桥面，锁定理由随对象给出，点到时原样显示。
  *
+ * 落位判定与生成器**同一个谓词**（注册表 SPEC §5 / 路线图 P1-3，修 D1、D2）：街区级（学校/商场/医院、花园，face-lot）
+ * 与城区地标（face-reserve）的搬家调生成器导出的 `checkSitePlacement`——渲染包络在目标街区的**真实面**内、不压路/高架/
+ * 其他设施、地形可建。曾用「整块空街区 + 外接矩形」近似：不规则街区里设施出界（D2）、城区地标搬到装不下 17 m 裙房的地方（D1）。
+ * 设施搬家保持自身尺寸（不再被拉成街区外接矩形），位置/朝向取谓词接受的候选。
+ *
  * 操作带**位置校验**（`at`）：公共设施 id 是按序号编的（civic:0、civic:1…），数据增长后序号会变，
  * 没有校验时旧补丁会悄悄落到另一座设施上；位置对不上就判失效，不猜。
  * 纯函数、无副作用；被 planPatch（重放）与编辑器（校验/拾取/候选）共用。
  */
-import type { CivicKind, CityLayout, Vec2 } from "./cityLayout";
+import { checkSitePlacement, type CivicKind, type CityLayout, type Parcel, type Vec2 } from "./cityLayout";
+import { civicEnvelopeSize, DISTRICT_LANDMARK_ENVELOPE } from "./models/layoutPlacementGeometry";
 import { clearsHighways } from "./cityPlan";
 import { clearanceRoads, edgesNear, parcelIndex, rectClearOfRoads, reservedParcelIds } from "./planGeometry";
 import { polygonsOverlap, rectPolygon, ROAD_SETBACK, segmentPolygonDistance, siteFootprint, toWorld, worldBox, worldOverhead, worldParts, yawFacing, type FootprintSpec, type Polygon } from "./planFootprint";
@@ -124,9 +130,8 @@ export function siteMoveProblem(layout: CityLayout, site: SiteInfo, targetId: st
     const block = layout.blocks.find((candidate) => candidate.id === targetId);
     if (!block || !block.parcels.length) return "missing-target";
     if (block.parcels.some((parcel) => reserved.has(parcel.id))) return "target-occupied";
-    if (!layout.terrain.buildable(block.x, block.z)) return "not-buildable";
-    if (!clearsHighways(block, block.width, block.depth, layout.highways)) return "highway-clearance";
-    return null;
+    const placed = blockPlacement(layout, site, targetId, suppressedContext);
+    return placed.ok ? null : placed.problem;
   }
   const parcel = parcelIndex(layout).get(targetId);
   if (!parcel) return "missing-target";
@@ -136,12 +141,79 @@ export function siteMoveProblem(layout: CityLayout, site: SiteInfo, targetId: st
     const free = reservedParcelIds(without, suppressedContext);
     const block = layout.blocks.find((candidate) => candidate.id === parcel.blockId);
     if ((block?.parcels ?? [parcel]).some((member) => free.has(member.id))) return "target-occupied";
+    // 17 m 裙房 ⊕ 地址：与生成器摆城区地标时同一个包络检查（修 D1：地址够、裙房装不下的街区）。
+    const placed = placementVerdict(layout, site, { ...parcel, ...DISTRICT_LANDMARK_ENVELOPE, blockId: parcel.blockId }, suppressedContext);
+    if (placed) return placed;
   } else if (reserved.has(parcel.id)) return "target-occupied";
   if (!layout.terrain.buildable(parcel.x, parcel.z)) return "not-buildable";
   if (layout.terrain.slope(parcel.x, parcel.z) > SLOPE_LIMIT) return "steep-slope";
   if (!clearsHighways(parcel, 16, 16, layout.highways)) return "highway-clearance";
   if (!rectClearOfRoads(layout, parcel, 0.5)) return "site-over-road";
   return null;
+}
+
+/** 生成器谓词的拒绝原因 → 编辑器的问题码（面板按码翻译成人话）。 */
+function placementProblem(reason: string | undefined): string {
+  if (reason === "actual-road-capsule-conflict") return "site-over-road";
+  if (reason === "highway-capsule-conflict") return "highway-clearance";
+  if (reason === "declared-site-circle-conflict") return "target-occupied";
+  if (reason === "rectangle-terrain-or-reserve-conflict") return "not-buildable";
+  return "does-not-fit"; // 越出街区真实面、压到洞（水塘/广场），或几何无效
+}
+
+/** 搬家时的占用：别的设施与会话楼占的地块（不含正在搬的这座自己——生成器同口径：occupancy excludes the moving owner）。 */
+function occupiedWithout(layout: CityLayout, site: SiteInfo, suppressedContext: Iterable<string>): Parcel[] {
+  const without: CityLayout = {
+    ...layout,
+    civics: layout.civics.filter((civic) => civic.id !== site.id),
+    gardens: layout.gardens.filter((garden) => garden.id !== site.id),
+    districtLandmarks: (layout.districtLandmarks ?? []).filter((landmark) => `district-landmark:${landmark.districtId}` !== site.id),
+  };
+  const reserved = reservedParcelIds(without, suppressedContext);
+  return [...parcelIndex(layout).values()].filter((parcel) => reserved.has(parcel.id));
+}
+
+/** 一次生成器谓词检查；null = 接受。 */
+function placementVerdict(layout: CityLayout, site: SiteInfo, footprint: Vec2 & { yaw: number; width: number; depth: number; blockId: string }, suppressedContext: Iterable<string>): string | null {
+  const result = checkSitePlacement(layout, footprint, occupiedWithout(layout, site, suppressedContext));
+  return result.ok ? null : placementProblem(result.reason);
+}
+
+/** 设施的渲染包络尺寸（谓词检查用）：商场/学校/医院按 civicEnvelopeSize（窗台、雨棚、旗杆外伸），花园就是自身矩形。 */
+function envelopeOf(site: SiteInfo): { width: number; depth: number } {
+  return (site.civicKind && civicEnvelopeSize(site.civicKind, site.width, site.depth)) || { width: site.width, depth: site.depth };
+}
+
+export type BlockPlacement = { ok: true; x: number; z: number; yaw: number } | { ok: false; problem: string };
+const blockPlacementMemo = new WeakMap<CityLayout, Map<string, BlockPlacement>>();
+/**
+ * 街区级设施（face-lot）搬进一个空街区：保持自身尺寸，按确定的顺序试候选落点——街区中心、地块重心、各地块中心；
+ * 朝向先取地块朝向、再转 90°——第一个被生成器谓词接受的就是落点。全部被拒返回第一个拒绝原因（最有代表性的：中心落点为什么不行）。
+ * 按（布局, 设施, 街区）记忆：候选列表与套用各要一次。
+ */
+export function blockPlacement(layout: CityLayout, site: SiteInfo, blockId: string, suppressedContext: Iterable<string> = []): BlockPlacement {
+  const suppressed = [...suppressedContext];
+  const key = `${site.id}|${blockId}|${site.width}x${site.depth}|${suppressed.join(",")}`;
+  let memo = blockPlacementMemo.get(layout);
+  const hit = memo?.get(key); if (hit) return hit;
+  const block = layout.blocks.find((candidate) => candidate.id === blockId);
+  let result: BlockPlacement = { ok: false, problem: "missing-target" };
+  if (block?.parcels.length) {
+    const envelope = envelopeOf(site);
+    const mean = { x: block.parcels.reduce((sum, parcel) => sum + parcel.x, 0) / block.parcels.length, z: block.parcels.reduce((sum, parcel) => sum + parcel.z, 0) / block.parcels.length };
+    const centres = [{ x: block.x, z: block.z }, mean, ...block.parcels.slice(0, 8)];
+    const yaw = block.parcels[0].yaw;
+    let first: string | null = null;
+    search: for (const centre of centres) for (const turn of [0, Math.PI / 2]) {
+      const problem = placementVerdict(layout, site, { x: centre.x, z: centre.z, yaw: yaw + turn, ...envelope, blockId }, suppressed);
+      if (!problem) { result = { ok: true, x: centre.x, z: centre.z, yaw: yaw + turn }; break search; }
+      first ??= problem;
+    }
+    if (!result.ok && first) result = { ok: false, problem: first };
+  }
+  if (!memo) { memo = new Map(); blockPlacementMemo.set(layout, memo); }
+  memo.set(key, result);
+  return result;
 }
 
 /** "@x,z" 或 "@x,z,yaw" → 坐标（与朝向）；格式不对返回 null。没有 yaw 的旧目标保持原朝向。 */
@@ -263,7 +335,10 @@ export function siteTargets(layout: CityLayout, site: SiteInfo, suppressedContex
   const out: SiteTarget[] = [];
   for (const target of sorted) {
     if (siteMoveProblem(layout, site, target.id, suppressedContext) !== null) continue;
-    out.push({ ...target, distance: Math.round(target.distance) });
+    // 街区级：绿框画设施真实会落的位置与朝向（谓词接受的候选），不是整块街区。
+    const placed = site.level === "block" ? blockPlacement(layout, site, target.id, suppressedContext) : null;
+    const shown = placed?.ok ? { x: placed.x, z: placed.z, yaw: placed.yaw, width: site.width, depth: site.depth } : {};
+    out.push({ ...target, ...shown, distance: Math.round(target.distance) });
     if (out.length >= limit) break;
   }
   return out;
@@ -337,12 +412,14 @@ export function applySiteOps(layout: CityLayout, ops: readonly SiteOp[], suppres
       return;
     }
     if (site.level === "block") {
-      const block = view.blocks.find((candidate) => candidate.id === op.to)!;
-      const place = { x: block.x, z: block.z, y: height(block.x, block.z), yaw: block.parcels[0].yaw, width: block.width, depth: block.depth };
+      // 落点 = 生成器谓词接受的候选；尺寸保持设施自己的（曾拉成街区外接矩形：不规则街区里出界，D2）。
+      const placed = blockPlacement(view, site, op.to, suppressed);
+      if (!placed.ok) return; // siteMoveProblem 刚判过可以，不会走到
+      const place = { x: placed.x, z: placed.z, y: height(placed.x, placed.z), yaw: placed.yaw };
       view = {
         ...view,
-        civics: view.civics.map((civic) => (civic.id === op.id ? { ...civic, ...place, parcelId: block.id } : civic)),
-        gardens: view.gardens.map((garden) => (garden.id === op.id ? { ...garden, ...place, blockId: block.id } : garden)),
+        civics: view.civics.map((civic) => (civic.id === op.id ? { ...civic, ...place, parcelId: op.to } : civic)),
+        gardens: view.gardens.map((garden) => (garden.id === op.id ? { ...garden, ...place, blockId: op.to } : garden)),
       };
     } else {
       const parcel = parcelIndex(view).get(op.to)!;

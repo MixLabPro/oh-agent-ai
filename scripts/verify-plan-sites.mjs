@@ -3,6 +3,7 @@
 //   (a) 拆除：公共设施/花园/城区地标/背景楼各一例；占用随之释放（空出的街区/地块可被后续操作使用）；
 //   (b) 移动：街区级（公共设施/花园）要整块空街区，地块级（城区地标/背景楼）要空地块；
 //       被占 / 不存在 / 不可建 / 压路 / 高架净空各拒一例；背景楼搬家后 id 跟着地块变；
+//   (b2) 与生成器同一个落位谓词：不规则街区装不下（D2）、城区地标裙房越出小街区（D1）、搬家保持自身尺寸；
 //   (c) 位置校验：`at` 对不上 → site-changed（公共设施 id 按序号编，数据增长后序号会变，不能落到另一座上）；未知 id → unknown-site；
 //   (d) 顺序语义：设施操作先于会话楼移动套用——设施让出的地块，同一份补丁里的会话楼可以搬进去；
 //   (e) 实例级拾取：射线对占地盒求交取最近；打空 → null；
@@ -27,7 +28,9 @@ const {
 // ── 合成城市 ──────────────────────────────────────────────────────────────────
 const terrain = { height: () => 2, slope: (x, z) => (Math.hypot(x - 330, z - 200) < 10 ? 0.9 : 0.1), buildable: (x) => x < 400, center: { x: 0, z: 0 }, radius: 500, coastRadius: () => 500, hasRiver: false };
 const parcel = (id, blockId, x, z, w = 8, d = 8) => ({ id, blockId, x, z, yaw: 0, zone: "residential", width: w, depth: d });
-const block = (id, x, z, w, d, parcels) => ({ id, districtId: "d0", x, z, width: w, depth: d, zone: "residential", parcels, polygon: [] });
+// 街区的真实面（生成器谓词 checkSitePlacement 在面内判设施包络——空 polygon 会被判 invalid-block-boundary）。
+const rectFace = (x, z, w, d) => [{ x: x - w / 2, z: z - d / 2 }, { x: x + w / 2, z: z - d / 2 }, { x: x + w / 2, z: z + d / 2 }, { x: x - w / 2, z: z + d / 2 }];
+const block = (id, x, z, w, d, parcels, polygon = rectFace(x, z, w, d)) => ({ id, districtId: "d0", x, z, width: w, depth: d, zone: "residential", parcels, polygon });
 const B1 = block("B1", 100, 100, 40, 40, [parcel("p1a", "B1", 90, 90), parcel("p1b", "B1", 110, 90), parcel("p1c", "B1", 90, 110), parcel("p1d", "B1", 110, 110)]);
 const B2 = block("B2", 200, 100, 40, 40, [parcel("p2a", "B2", 190, 90), parcel("p2b", "B2", 210, 90), parcel("p2c", "B2", 190, 110), parcel("p2d", "B2", 210, 110)]);
 const BG = block("BG", -100, 100, 36, 36, [parcel("pg1", "BG", -100, 100)]);
@@ -59,6 +62,7 @@ function makeLayout() {
     districtLandmarks: [{ districtId: "d0", parcelId: "pL", x: 50, z: 200, yaw: 0, y: 2 }],
     contextBuildings: [{ id: "context:pC", x: 70, z: 200, y: 2, yaw: 0, width: 8, depth: 8, height: 15, seed: 0.5, zone: "residential", appearAt: 0 }],
     highways: [[{ x: 0, z: 300 }, { x: 400, z: 300 }]],
+    landmarks: [], publicSites: [],
     districts: [{ id: "d0", label: "D0", center: { x: 100, z: 100 }, radius: 300, terrain, slots, grounds: new Map([["b1", 2], ["b2", 2]]), roads: [], carPaths: [], river: null, riverHalfWidth: 0, trees: [], plaza: { x: 0, z: 0, y: 2 }, anomaly: null, sessionCount: 2 }],
   };
 }
@@ -123,6 +127,30 @@ const centre = (layout, id) => { const site = listSites(layout).find((s) => s.id
     assert.deepEqual(failed.stale.map((s) => s.reason), [reason], `move to ${to}`);
     assert.equal(failed.layout.civics[0].parcelId, "B1", "a rejected move leaves the civic where it was");
   }
+}
+
+// (b2) 与生成器同一个落位谓词（checkSitePlacement，注册表 SPEC §5 / 路线图 P1-3）。
+{
+  const base = makeLayout();
+  // D2：L 形街区，外接 60 × 60，但两条臂只有 12 宽——旧近似「整块空街区」放行，学校（40 × 40）会越出街区面。
+  const L = [{ x: 120, z: -130 }, { x: 180, z: -130 }, { x: 180, z: -118 }, { x: 132, z: -118 }, { x: 132, z: -70 }, { x: 120, z: -70 }];
+  base.blocks.push(block("BLs", 150, -100, 60, 60, [parcel("pl1", "BLs", 126, -100), parcel("pl2", "BLs", 160, -124)], L));
+  // 方正的大街区：放得下，且学校保持自己的 40 × 40（不再被拉成 60 × 60 的街区外接矩形）。
+  base.blocks.push(block("BW", 250, -100, 60, 60, [parcel("pw1", "BW", 240, -100), parcel("pw2", "BW", 260, -100)]));
+  // D1：只有一个地址的 12 × 12 小街区——地址空着，但城区地标的 17 m 裙房装不下。
+  base.blocks.push(block("BS", 330, -100, 12, 12, [parcel("ps1", "BS", 330, -100)]));
+  const civic = listSites(base).find((s) => s.id === "civic:0"); const lm = listSites(base).find((s) => s.id === "district-landmark:d0");
+  assert.equal(siteMoveProblem(base, civic, "BLs"), "does-not-fit", "D2: a school does not fit an L-shaped block whose bounding box is big enough");
+  assert.equal(siteMoveProblem(base, civic, "BW"), null, "a square block that really holds it is accepted");
+  const moved = applyPlanPatch(base, withOps({ t: "move", id: "civic:0", at: { x: 100, z: 100 }, to: "BW" }));
+  assert.equal(moved.stale.length, 0);
+  const school = moved.layout.civics.find((c) => c.id === "civic:0");
+  assert.deepEqual([school.width, school.depth, school.parcelId], [40, 40, "BW"], "the school keeps its own size — not stretched to the block's bounding box");
+  assert.ok(Math.hypot(school.x - 250, school.z + 100) < 1e-6, "…placed where the generator predicate accepted it (the block centre)");
+  assert.equal(siteMoveProblem(base, lm, "ps1"), "does-not-fit", "D1: an empty address is not enough when the 17 m skirt overflows its block");
+  assert.ok(!siteTargets(base, civic, [], 40, 400).some((t) => t.id === "BLs"), "…and the candidate list agrees with the predicate");
+  const target = siteTargets(base, civic, [], 40, 400).find((t) => t.id === "BW");
+  assert.ok(target && target.width === 40 && target.depth === 40, "the green candidate box is the school where it would land, not the whole block");
 }
 
 // (c) 位置校验 / 未知 id。

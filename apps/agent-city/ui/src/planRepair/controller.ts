@@ -145,6 +145,7 @@ const BLOCKER_TEXT: Record<string, string> = {
   // 设施
   "target-occupied": "目标已被占用（会话楼、配套、花园或背景楼）",
   "site-over-road": "会压到道路上",
+  "does-not-fit": "这块街区的真实形状装不下它（会越出街区边界或压到街区里的空地/水塘）",
   "missing-target": "这里没有可落位的街区或地块",
   "viaduct-too-short": "高架太短（至少 30）",
   "viaduct-end-in-water": "匝道落地点在水里——高架两端要落在陆地上，或接到已有高架上",
