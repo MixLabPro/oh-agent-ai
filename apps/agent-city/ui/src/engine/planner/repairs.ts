@@ -11,6 +11,7 @@ import { crosses, nearBridgeEnd, polylineDistance, safeRoadLink } from "./footpr
 import { bridgeLandingNodes, isPlannedRoadEnd } from "./endpoints";
 import { canRelocateGroundSite, specByKind } from "./sitespec";
 import { planarAccessPose, resolvePlanarAccess } from "../models/siteAccess";
+import { declaredGroundRoadClear } from "./modelEnvelope";
 
 /** 与 constraints/networkRepairs 同一计划内终点视图（批次 3-2：repairs 的两处 height 门切语义判定）。 */
 function plannedEndWorld(ctx: RepairContext) {
@@ -130,12 +131,14 @@ export function nudgeSitesOffRoads(ctx: RepairContext, onlyOwnerId?: string): nu
   const { publicSites, landmarks, blocks, ringRuns, height } = ctx;
   const g = siteGeometry(ctx, onlyOwnerId);
   const { movable, nearestRoad, wetAt } = g;
+  const groundRoads = [...ctx.network.edges.values()].filter(road => !road.bridge);
   let total = 0;
   for (let round = 0; round < 6; round += 1) {
     let moved = 0;
     for (const site of movable) {
       const near = nearestRoad(site.x, site.z);
-      if (!near || near.d >= site.radius * 0.7) continue;
+      const declared = declaredGroundRoadClear(site, groundRoads);
+      if (!near || declared === true || (declared === undefined && near.d >= site.radius * 0.7)) continue;
       const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
       const away = near.d > 0.5 ? { x: (site.x - near.q.x) / near.d, z: (site.z - near.q.z) / near.d } : { x: 1, z: 0 };
       const wet0 = wetAt(site, site.x, site.z);
@@ -146,7 +149,8 @@ export function nudgeSitesOffRoads(ctx: RepairContext, onlyOwnerId?: string): nu
         for (let push = 4; push <= site.radius * 1.3 && !done; push += 3) {
           const nx = site.x + dir.x * push; const nz = site.z + dir.z * push;
           const probe = nearestRoad(nx, nz);
-          if (!probe || probe.d < site.radius * 0.85) continue;
+          const proposed = declaredGroundRoadClear({ ...site, x: nx, z: nz }, groundRoads);
+          if (!probe || proposed === false || (proposed === undefined && probe.d < site.radius * 0.85)) continue;
           if (wetAt(site, nx, nz) > Math.max(3, wet0) || height(nx, nz) <= 0.5) continue;
           if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
           if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;

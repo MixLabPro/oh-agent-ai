@@ -3,7 +3,7 @@
  */
 import { hashSeed } from "../../cityModel";
 import { DetMath as Math } from "../detMath";
-import { resolveGroundModel, type GroundModelResolution } from "../models/groundRegistry";
+import { GROUND_MODEL_FACTORIES, resolveGroundModel, type GroundModelResolution } from "../models/groundRegistry";
 import { pointInRegion, MAX_FOOTPRINT_PARTS, MAX_CONVEX_VERTICES, type LocalFootprint, type LocalRegion, type Vec2 } from "../models/physical";
 import type { GroundOwner } from "./modelGround";
 
@@ -165,6 +165,16 @@ export function inspectEnvelopeRoad(owner: GroundOwner, road: EnvelopeRoad,
   return { status: "partial", ownerId: model.ownerId, roadId: road.id,
     entity: relation(footprintPolylineDistance(model.conservativeProjection, road.points), required), plotReservation: plotReservation!,
     semantic: "conservative-entity-projection", wholeModelReady: false, missing: model.missing };
+}
+/** Complete XY corridor admission is not whole-model readiness. Undefined
+ * preserves the legacy proxy for models without this explicit capability. */
+export function declaredGroundRoadClear(owner: GroundOwner, roads: readonly EnvelopeRoad[]): boolean | undefined {
+  const envelope = resolveModelEnvelope(owner);
+  if (envelope.status === "unsupported" && Object.hasOwn(GROUND_MODEL_FACTORIES, owner?.kind ?? "")) return false;
+  if (envelope.status !== "partial" || envelope.relocationCorridorEnvelope?.schemaVersion !== 1
+    || envelope.relocationCorridorEnvelope.coverage !== "complete-conservative-renderer-xy") return undefined;
+  return roads.every(road => !!road && Number.isFinite(road.width) && road.width > 0 && Array.isArray(road.points) && road.points.length >= 2
+    && footprintPolylineDistance(envelope.conservativeProjection, road.points) >= road.width / 2 + MODEL_ENVELOPE_CONFIG.defaultRoadSetback);
 }
 export function inspectEnvelopePair(a: GroundOwner, b: GroundOwner, options: { readonly setback?: number } = {}): EnvelopePairInspection {
   const setback = options.setback ?? 0, first = resolveModelEnvelope(a), second = resolveModelEnvelope(b);

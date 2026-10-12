@@ -15,6 +15,8 @@ synthetic.push(...newGeometryStages);
 synthetic.push("verify-city-layout-capacity");
 synthetic.push("verify-city-model-envelope");
 synthetic.push("verify-city-site-registry");
+synthetic.push("verify-city-joint-site-road");
+for (const group of ["network", "planning", "sites"]) groups[group].push("verify-city-joint-site-road");
 groups.planning.push("verify-city-site-registry");
 groups.sites.push("verify-city-site-registry");
 groups.planning.push("verify-city-site-registry-scene");

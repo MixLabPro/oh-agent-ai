@@ -20,6 +20,7 @@ import { applyWorldPatch, createPlanningWorld } from "./world";
 import type { PlanningWorld, Reservation, WorldDemand, WorldOperation, WorldVersionDomain, WorldVersions } from "./world";
 import { inspectModelGround, registeredModelGroundFailure } from "./modelGround";
 import { GROUND_MODEL_FACTORIES } from "../models/groundRegistry";
+import { prepareJointSiteRoadRelocation, relocateSiteWithGroundRoads } from "./jointSiteRoad";
 
 /**
  * 规划求解循环（CITY_ARCHITECTURE §2 迁移步 5b）：把 buildPlan 尾部内联的修复遍登记成「约束 id → 修复策略」的表。
@@ -138,10 +139,17 @@ function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoo
     const positions = constraint === "siteInWater" ? localResiteCandidates(owner)
       : shoreRelocationCandidates(ctx, owner, siteGeometry(ctx, owner.id), others);
     for (const at of positions) {
-      if (relocatedSitePositionFailure(ctx, owner, at, true) || polylineDistance(primaryRoads, at) > owner.radius + 20) continue;
+      const placementFailure = relocatedSitePositionFailure(ctx, owner, at, true);
+      const joint = constraint === "siteInWater" && placementFailure === "owner-road-envelope";
+      if ((placementFailure && !joint) || polylineDistance(primaryRoads, at) > owner.radius + 20) continue;
       if (ctx.blocks.some((block) => block.parcels.some((parcel) => Math.hypot(parcel.x - at.x, parcel.z - at.z)
         < owner.radius + 9 + Math.hypot(parcel.width, parcel.depth) / 2))) continue;
       if (registeredModelGroundFailure({ ...owner, ...at }, groundGeo)) continue;
+      if (joint) {
+        if (prepareJointSiteRoadRelocation(ctx, owner.id, at).ok) candidates.push({ constraint,
+          name: `resiteGroundJointRoad:${owner.id}:${at.x}:${at.z}`, run: draft => relocateSiteWithGroundRoads(draft, owner.id, at) });
+        continue;
+      }
       candidates.push({ constraint, name: `${constraint === "siteInWater" ? "resiteWetShore" : "resiteUnservedShore"}:${owner.id}:${at.x}:${at.z}`, run: (draft) => {
         const site = [...draft.publicSites, ...draft.landmarks].find((entry) => entry.id === owner.id);
         const missing = constraint === "siteInWater" ? !!site && (registeredModelGroundFailure(site, { height: draft.height, inRiver: draft.inRiver })
@@ -590,7 +598,7 @@ function acceptDraft(ctx: RepairContext, draft: RepairContext, remaps: readonly 
     (ctx.network.patchRemaps ??= []).push(...remaps);
     parentScope.referenceCursor = ctx.network.patchRemaps.length;
   }
-  for (const field of ["publicSites", "landmarks", "blocks", "carPaths", "bridges", "connectionLog", "coastRoadRuns", "riverRoadRuns", "coastRoadRunEnds", "siteObligations"] as const) {
+  for (const field of ["publicSites", "landmarks", "blocks", "carPaths", "trunkRuns", "bridges", "connectionLog", "coastRoadRuns", "riverRoadRuns", "coastRoadRunEnds", "siteObligations"] as const) {
     const target = ctx[field]; const source = draft[field];
     if (target && source) (target as unknown[]).splice(0, target.length, ...source);
   }

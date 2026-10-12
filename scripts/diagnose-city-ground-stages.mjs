@@ -56,6 +56,7 @@ const output = await build({ stdin: { contents: [
   `export {relocatedSitePositionFailure} from ${JSON.stringify(path.join(citySrc, "engine/planner/snapJunctions.ts"))};`,
   `export {inspectModelGround, registeredModelGroundFailure} from ${JSON.stringify(path.join(citySrc, "engine/planner/modelGround.ts"))};`,
   `export {inspectEnvelopeRoad, inspectEnvelopePair} from ${JSON.stringify(path.join(citySrc, "engine/planner/modelEnvelope.ts"))};`,
+  `export {prepareJointSiteRoadRelocation} from ${JSON.stringify(path.join(citySrc, "engine/planner/jointSiteRoad.ts"))};`,
   `export {closestPolylineSegment} from ${JSON.stringify(path.join(citySrc, "engine/planner/footprint.ts"))};`,
   `export {DetMath} from ${JSON.stringify(path.join(citySrc, "engine/detMath.ts"))};`,
   `export {polylineDistance, nearBridgeEnd, wetCount} from ${JSON.stringify(path.join(citySrc, "engine/planner/footprint.ts"))};`,
@@ -138,7 +139,7 @@ for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.isla
     river: ctx.geo.river, seaside: ctx.seaside, primaryAnchorNodeId: ctx.primaryAnchorNodeId, siteObligations: ctx.siteObligations, demandCatalogue: ctx.demandCatalogue };
   const components = module.componentOf(view), primary = module.primaryComponentId(view, components);
   const primaryRoads = view.roadEdges.filter(edge => !edge.bridge && components.get(edge.from) === primary).map(edge => edge.points);
-  const counts = {}, examples = {}, groundAdmissibleRejectedBy = {}, groundAdmissibleExamples = {}, entityFactCounts = {}, entityFactExamples = {}, remainingPolicyCandidates = [], coastAlignedCandidateCounts = {}, coastAlignedCandidateExamples = {}; let attempts = 0;
+  const counts = {}, examples = {}, groundAdmissibleRejectedBy = {}, groundAdmissibleExamples = {}, entityFactCounts = {}, entityFactExamples = {}, remainingPolicyCandidates = [], coastAlignedCandidateCounts = {}, coastAlignedCandidateExamples = {}, jointRoadCounts = {}, jointRoadExamples = {}; let attempts = 0;
   for (const at of module.localResiteCandidates(owner)) {
     attempts += 1;
     // Read-only counterfactual: one local coast-facing yaw per existing position,
@@ -165,6 +166,8 @@ for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.isla
     tally(examples, counts, reason ?? "candidate-admitted", at);
     if (module.inspectModelGround({ ...owner, ...at }, { height: ctx.height, inRiver: ctx.inRiver }).status === "partial") {
       tally(groundAdmissibleExamples, groundAdmissibleRejectedBy, reason ?? "candidate-admitted", at);
+      const joint = module.prepareJointSiteRoadRelocation(ctx, owner.id, at);
+      tally(jointRoadExamples, jointRoadCounts, joint.ok ? "joint-proposal-prepared-not-published" : joint.reason, at);
       const candidate = { ...owner, ...at };
       const roadFacts = view.roadEdges.map(road => module.inspectEnvelopeRoad(candidate, road, { setback: 3 }));
       const ownerFacts = [...ctx.publicSites, ...ctx.landmarks].filter(other => other.id !== owner.id && other.radius > 0)
@@ -205,6 +208,7 @@ for (const { radius, ctx } of beforeSolve.filter(row => row.radius === plan.isla
   }
   console.log(JSON.stringify({ stage: "pre-solve-wet-local-tier", radius, owner, attempts, firstRejectionCounts: counts, examples,
     groundAdmissibleRejectedBy, groundAdmissibleExamples, entityFactCounts, entityFactExamples, remainingPolicyCandidates, coastAlignedCandidateCounts, coastAlignedCandidateExamples,
+    jointRoadCounts, jointRoadExamples,
     entityFactScope: "read-only conservative XY projection; neighbor extra setback=0; highway/plot/entrance policy remains pending; no candidate published" }));
 }
 delete globalThis.__groundDiagnostic;

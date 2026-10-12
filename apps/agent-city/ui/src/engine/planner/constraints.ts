@@ -14,6 +14,7 @@
 // 边界：这里只放「单个违规的几何定义」（如中心到路 < 0.7 半径算穿路）；
 // 「允许多少条」的容忍计数是策略，留在守卫里。逻辑逐字取自两个守卫，勿在此改语义。
 import type { createCityPlan } from "../cityPlan";
+import { declaredGroundRoadClear } from "./modelEnvelope";
 import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
 import { wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
 import { componentOf, primaryComponentId } from "./intent";
@@ -74,13 +75,15 @@ export const siteWithoutDoorRoad: Constraint = {
 };
 
 export const roadThroughSite: Constraint = {
-  id: "roadThroughSite", description: "道路不穿用地：中心到路 ≥ 0.7 半径（市政广场=环岛、凯旋门=骑路，豁免）",
+  id: "roadThroughSite", description: "已声明完整XY实体避全路幅+3；未知模型保留中心距≥0.7半径（市政/门式豁免）",
   measure(plan) {
     const out: Violation[] = [];
     for (const s of planSites(plan)) {
       if (s.kind === "arch" || s.kind === "civic") continue;
       const near = nearRoad(plan, s);
-      if (near < s.radius * 0.7) out.push(v("roadThroughSite", s, `${s.kind} d=${Math.round(near)}`));
+      const declared = declaredGroundRoadClear(s, plan.roadEdges.filter(road => !road.bridge));
+      if (declared === false || (declared === undefined && near < s.radius * 0.7)) out.push(v("roadThroughSite", s,
+        declared === false ? "declared complete XY corridor conflict" : `${s.kind} d=${Math.round(near)}`));
     }
     return out;
   },
