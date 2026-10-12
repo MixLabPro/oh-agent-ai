@@ -36,8 +36,9 @@ export const PLAN_PATCH_VERSION = 1;
 
 /** 道路操作日志的一项。node/edge 是**执行当时**的当前 id。 */
 export type RoadOp =
-  | { t: "drop"; edge: string }
-  | { t: "move"; node: string; to: Vec2 }
+  /** anchor：写下时被引用对象的位置（路段折线中点 / 路口坐标），跨档重定位用（路线图 SPEC P0-2）。旧存档没有，按 id 里的坐标推。 */
+  | { t: "drop"; edge: string; anchor?: Vec2 }
+  | { t: "move"; node: string; to: Vec2; anchor?: Vec2 }
   /** 新增一段直路。端点吸附规则见 resolveEndpoint：靠近路口 → 接到路口；落在路段中间 → 把该路段拆成两半；否则新建路口。
    *  purpose=waterfront：滨海大道（与生成器的环岛滨海路同级，沿它铺滨海景观带）。
    *  起点是一条路的尽头且新路拐弯时，重放会在拐角处自动倒圆（filletAt，SPEC §17.3）。 */
@@ -54,8 +55,11 @@ export type HighwayOp = { t: "add"; points: Vec2[] } | { t: "cut"; at: Vec2 };
 export type PlanPatchV1 = {
   version: 1;
   seed: number;
-  /** 补丁写下时的规模档位。跨档（岛放大、地块与节点重排）后全部条目失效——不做坐标重定位（SPEC §4）。 */
+  /** 补丁写下时的规模档位。跨档（岛放大、地块与节点重排）后按坐标重定位到新档（planRemap.ts，路线图 SPEC P0-2）；
+   *  未重定位前套用时整份报 tier-changed。 */
   scaleTier: number;
+  /** 写下时的岛半径（重定位的缩放比 = 新半径 / 旧半径）。旧存档没有，退回 √(新档/旧档)。 */
+  islandRadius?: number;
   updatedAt: number;
   /** 道路操作日志，按顺序重放。 */
   roadOps: RoadOp[];
@@ -65,6 +69,8 @@ export type PlanPatchV1 = {
   siteOps: SiteOp[];
   /** 会话楼 id（session_ref）→ 新地块 id（Parcel.id）。 */
   buildingMoves: Record<string, string>;
+  /** 移楼目标地块写下时的中心（跨档重定位用）。不进指纹——锚点不影响重放。 */
+  moveAnchors?: Record<string, Vec2>;
   /** 压制的背景楼 id（"context:<parcelId>"，M3）。 */
   suppressedContext: string[];
 };
@@ -102,8 +108,9 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
   }
   if (Array.isArray(raw.roadOps)) for (const op of raw.roadOps) {
     if (!isRecord(op)) continue;
-    if (op.t === "drop" && typeof op.edge === "string") roadOps.push({ t: "drop", edge: op.edge });
-    else if (op.t === "move" && typeof op.node === "string") { const to = point(op.to); if (to) roadOps.push({ t: "move", node: op.node, to }); }
+    const anchor = point(op.anchor);
+    if (op.t === "drop" && typeof op.edge === "string") roadOps.push({ t: "drop", edge: op.edge, ...(anchor ? { anchor } : {}) });
+    else if (op.t === "move" && typeof op.node === "string") { const to = point(op.to); if (to) roadOps.push({ t: "move", node: op.node, to, ...(anchor ? { anchor } : {}) }); }
     else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); if (from && to) roadOps.push({ t: "add", from, to, width: op.width, ...(op.purpose === "waterfront" ? { purpose: "waterfront" as const } : {}) }); }
   }
   const highwayOps: HighwayOp[] = [];
@@ -116,19 +123,24 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
   if (Array.isArray(raw.siteOps)) for (const op of raw.siteOps) {
     if (!isRecord(op) || typeof op.id !== "string") continue;
     const at = point(op.at) ?? undefined;
-    if (op.t === "remove") siteOps.push({ t: "remove", id: op.id, ...(at ? { at } : {}) });
-    else if (op.t === "move" && typeof op.to === "string") siteOps.push({ t: "move", id: op.id, to: op.to, ...(at ? { at } : {}) });
+    const cls = typeof op.cls === "string" ? { cls: op.cls } : {};
+    if (op.t === "remove") siteOps.push({ t: "remove", id: op.id, ...(at ? { at } : {}), ...cls });
+    else if (op.t === "move" && typeof op.to === "string") { const toAnchor = point(op.toAnchor); siteOps.push({ t: "move", id: op.id, to: op.to, ...(at ? { at } : {}), ...(toAnchor ? { toAnchor } : {}), ...cls }); }
   }
   const buildingMoves: Record<string, string> = {};
   if (isRecord(raw.buildingMoves)) for (const [id, parcelId] of Object.entries(raw.buildingMoves)) {
     if (typeof parcelId === "string") buildingMoves[id] = parcelId;
   }
+  const moveAnchors: Record<string, Vec2> = {};
+  if (isRecord(raw.moveAnchors)) for (const [id, at] of Object.entries(raw.moveAnchors)) { const p = point(at); if (p && id in buildingMoves) moveAnchors[id] = p; }
   const strings = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
   return {
     version: PLAN_PATCH_VERSION, seed: raw.seed, scaleTier: raw.scaleTier,
     updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : 0,
     roadOps, siteOps, buildingMoves, suppressedContext: strings(raw.suppressedContext),
     ...(highwayOps.length ? { highwayOps } : {}),
+    ...(isFiniteNumber(raw.islandRadius) && raw.islandRadius > 0 ? { islandRadius: raw.islandRadius } : {}),
+    ...(Object.keys(moveAnchors).length ? { moveAnchors } : {}),
   };
 }
 
@@ -248,6 +260,7 @@ export function pruneStalePatch(patch: PlanPatchV1, stale: readonly PatchStaleEn
     ...(patch.highwayOps?.length ? { highwayOps: patch.highwayOps.filter((op, index) => !highwayLabels.has(`${index + 1}:${op.t}`)) } : {}),
     siteOps: patch.siteOps.filter((op, index) => !siteLabels.has(`${index + 1}:${op.t}`)),
     buildingMoves: Object.fromEntries(Object.entries(patch.buildingMoves).filter(([id]) => !buildings.has(id))),
+    ...(patch.moveAnchors ? { moveAnchors: Object.fromEntries(Object.entries(patch.moveAnchors).filter(([id]) => !buildings.has(id))) } : {}),
     suppressedContext: patch.suppressedContext.filter((id) => !contexts.has(id)),
   };
   return planPatchEmpty(next) ? null : next;

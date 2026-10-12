@@ -249,5 +249,6 @@
   { "id": "verify-plan-repair-controller", "file": "verify-plan-repair-controller.mjs", "env": {}, "shared": false },
   { "id": "verify-plan-road-rules", "file": "verify-plan-road-rules.mjs", "env": {}, "shared": false },
   { "id": "verify-plan-sites", "file": "verify-plan-sites.mjs", "env": {}, "shared": false },
-  { "id": "verify-plan-bulldozer", "file": "verify-plan-bulldozer.mjs", "env": {}, "shared": false }
+  { "id": "verify-plan-bulldozer", "file": "verify-plan-bulldozer.mjs", "env": {}, "shared": false },
+  { "id": "verify-plan-remap", "file": "verify-plan-remap.mjs", "env": {}, "shared": false }
 ]

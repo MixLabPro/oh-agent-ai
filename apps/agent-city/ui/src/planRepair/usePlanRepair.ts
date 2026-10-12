@@ -11,19 +11,22 @@ import type { PlanIssue } from "../engine/planAudit";
 import { RepairController, type RepairState, type RepairTool, type RoadType } from "./controller";
 import { ParcelOverlay, type OverlayMarker, type OverlayRibbon, type OverlaySiteMark } from "./overlay";
 import { installPlanRepairDebug, planDevEnabled, type PlanRect, type PlanRepairSession } from "./session";
+import type { RemapReport } from "../engine/planRemap";
 
 export type RepairInfo = {
   counts: { buildingMoves: number; roadOps: number; highwayOps: number; roadAdds: number; roadDrops: number; siteOps: number; suppressedContext: number } | null;
   staleCount: number;
-  /** 补丁写于更小的档位（城市随数据增长扩大过）：整份失效。 */
+  /** 补丁写于更小的档位（城市随数据增长扩大过）：整份失效。重定位成功后为 false，改由 remap 报告。 */
   tierChanged: boolean;
+  /** 最近一次跨档重定位的结果。 */
+  remap: RemapReport | null;
   canUndo: boolean;
   canRedo: boolean;
   saveFailed: boolean;
 };
 
 const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], preview: null, message: null };
-const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, canUndo: false, canRedo: false, saveFailed: false };
+const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
   const enabled = planDevEnabled();
@@ -39,8 +42,10 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
   const syncInfo = useCallback(() => {
     const session = installed.current?.session;
     if (!session) return;
-    const status = session.status();
-    setInfo({ counts: status.counts, staleCount: status.stale.length, tierChanged: status.tierChanged, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed });
+    let status = session.status();
+    // 城市升/降了一档：自动把补丁搬到新档（路线图 SPEC P0-2），不等用户进修复模式。
+    if (status.tierChanged && session.remapForTier()) { status = session.status(); controllerRef.current?.refresh(); }
+    setInfo({ counts: status.counts, staleCount: status.stale.length, tierChanged: status.tierChanged, remap: status.remap, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed });
     if (auditOpen.current) setIssues(session.audit());
   }, []);
 
@@ -206,6 +211,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     setTool: (tool: RepairTool) => withSession((_s, controller) => controller.setTool(tool)),
     removeSelected: () => withSession((_s, controller) => controller.removeSelected()),
     eraseStranded: () => withSession((_s, controller) => controller.eraseStranded()),
+    dismissRemap: () => withSession((session) => session.dismissRemap()),
     pruneStale: () => withSession((session, controller) => { if (session.pruneStale()) controller.refresh({ kind: "ok", text: "已清除失效的修改（撤销可恢复）" }); }),
     setRoadType: (type: RoadType) => withSession((_s, controller) => controller.setRoadType(type)),
     finishViaduct: () => withSession((_s, controller) => controller.finishViaduct()),

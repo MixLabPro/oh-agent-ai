@@ -9,8 +9,9 @@
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, type PlanIssue } from "../engine/planAudit";
 import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
-import { listSites, parseFreeTarget, pickSite, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
+import { listSites, parseFreeTarget, pickSite, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, strandedAccessEdges } from "../engine/planAccess";
+import { remapPlanPatch, type RemapReport } from "../engine/planRemap";
 import type { RepairRay } from "../engine/CityEngine";
 import { bulldozeForRoads } from "../engine/planBulldozer";
 import { nearestEdgeAt, snapPoint, validateEdgeDrop, validateHighwayAdd, validateHighwayCut, validateNodeMove, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
@@ -53,6 +54,8 @@ export class PlanRepairSession {
   private saveFailed = false;
   private loadTicket = 0;
   private dryRunMemo: { key: string; preview: RoadPreview } | null = null;
+  /** 最近一次跨档重定位的报告（面板横幅读它；用户点「知道了」清掉）。 */
+  private lastRemap: RemapReport | null = null;
 
   constructor(private readonly engine: CityEngine) {}
 
@@ -78,9 +81,10 @@ export class PlanRepairSession {
     const layout = this.engine.currentLayout;
     if (!layout || !this.engine.currentModel) return { ok: false, reason: "city-not-ready" };
     const existing = this.engine.planPatch;
-    if (!existing) return { ok: true, patch: emptyPlanPatch(layout.seed, layout.scaleTier) };
+    // 岛半径随补丁记下（跨档重定位的缩放比，路线图 SPEC P0-2）；旧补丁在同档的下一次编辑时补上。
+    if (!existing) return { ok: true, patch: { ...emptyPlanPatch(layout.seed, layout.scaleTier), islandRadius: layout.islandRadius } };
     if (existing.scaleTier !== layout.scaleTier) return { ok: false, reason: `patch-tier-${existing.scaleTier}-vs-city-tier-${layout.scaleTier}: reset() first` };
-    return { ok: true, patch: existing };
+    return { ok: true, patch: existing.islandRadius ? existing : { ...existing, islandRadius: layout.islandRadius } };
   }
 
   private commit(next: PlanPatchV1 | null): void {
@@ -114,7 +118,9 @@ export class PlanRepairSession {
     const layout = this.engine.currentLayout!; const model = this.engine.currentModel!;
     const verdict = validateBuildingMove(layout, model, base.patch, buildingId, parcelId);
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
-    const patch = { ...base.patch, updatedAt: Date.now(), buildingMoves: { ...base.patch.buildingMoves, [buildingId]: parcelId } };
+    const target = this.nearestParcelById(parcelId);
+    const patch = { ...base.patch, updatedAt: Date.now(), buildingMoves: { ...base.patch.buildingMoves, [buildingId]: parcelId },
+      ...(target ? { moveAnchors: { ...base.patch.moveAnchors, [buildingId]: { x: target.x, z: target.z } } } : {}) };
     this.commit(patch);
     return { ok: true, patch, warnings: verdict.warnings };
   }
@@ -125,7 +131,8 @@ export class PlanRepairSession {
     if (!base.ok) return base;
     const verdict = validateNodeMove(this.engine.currentLayout!, this.engine.currentModel!, nodeId, { x, z });
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
-    return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "move", node: nodeId, to: { x, z } }), verdict.warnings);
+    const node = this.engine.currentLayout!.roadNodes.find((candidate) => candidate.id === nodeId);
+    return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "move", node: nodeId, to: { x, z }, ...(node ? { anchor: { x: node.x, z: node.z } } : {}) }), verdict.warnings);
   }
 
   /** 橡皮擦：删一段路（传当前 id）。 */
@@ -134,7 +141,7 @@ export class PlanRepairSession {
     if (!base.ok) return base;
     const verdict = validateEdgeDrop(this.engine.currentLayout!, this.engine.currentModel!, edgeId);
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
-    const patch = appendRoadOp(base.patch, { t: "drop", edge: edgeId });
+    const patch = appendRoadOp(base.patch, { t: "drop", edge: edgeId, ...this.edgeAnchor(edgeId) });
     this.commit(patch);
     return { ok: true, patch, warnings: verdict.warnings };
   }
@@ -234,7 +241,8 @@ export class PlanRepairSession {
     if (!base.ok) return base;
     const problem = siteMoveProblem(this.engine.currentLayout!, site, targetId, base.patch.suppressedContext);
     if (problem) return { ok: false, reason: "blocked", blockers: [problem] };
-    let patch = appendSiteOp(base.patch, { t: "move", id: site.id, at: { x: site.x, z: site.z }, to: targetId });
+    const anchor = site.level === "free" ? null : this.targetAnchor(site, targetId);
+    let patch = appendSiteOp(base.patch, { t: "move", id: site.id, at: { x: site.x, z: site.z }, to: targetId, cls: siteClassOf(site), ...(anchor ? { toAnchor: anchor } : {}) });
     if (site.level !== "free") {
       this.commit(patch);
       return { ok: true, patch, warnings: [], siteId: site.kind === "context" ? `context:${targetId}` : site.id };
@@ -264,7 +272,7 @@ export class PlanRepairSession {
   removeSite(site: SiteInfo): EditResult {
     const base = this.working();
     if (!base.ok) return base;
-    const patch = appendSiteOp(base.patch, { t: "remove", id: site.id, at: { x: site.x, z: site.z } });
+    const patch = appendSiteOp(base.patch, { t: "remove", id: site.id, at: { x: site.x, z: site.z }, cls: siteClassOf(site) });
     this.commit(patch);
     return { ok: true, patch, warnings: [] };
   }
@@ -415,9 +423,31 @@ export class PlanRepairSession {
     const ids = edgeIds.filter((id) => { const edge = layout.roadEdges.find((candidate) => candidate.id === id); return !!edge && !edgeLocked(edge); });
     if (!ids.length) return { ok: false, reason: "blocked", blockers: ["missing-edge"] };
     let patch = base.patch;
-    for (const id of ids) patch = appendRoadOp(patch, { t: "drop", edge: id });
+    for (const id of ids) patch = appendRoadOp(patch, { t: "drop", edge: id, ...this.edgeAnchor(id) });
     this.commit(patch);
     return { ok: true, patch, warnings: [] };
+  }
+
+  /**
+   * 跨档重定位（路线图 SPEC P0-2）：当前补丁写于别的档位时，把它逐条搬到新档并提交（不可撤销，见下），原补丁归档到存档的
+   * archive[种子][旧档]。没有档位差时什么都不做、返回 null。数据刷新后由界面胶水调用（城市一升档就搬，用户不必进修复模式）。
+   */
+  remapForTier(): RemapReport | null {
+    const patch = this.engine.planPatch; const layout = this.engine.generatedLayout; const model = this.engine.currentModel;
+    if (!patch || !layout || !model || patch.seed !== layout.seed || patch.scaleTier === layout.scaleTier) return null;
+    const { patch: next, report } = remapPlanPatch(layout, model, patch);
+    const seed = String(layout.seed);
+    this.store.archive = { ...this.store.archive, [seed]: { ...this.store.archive?.[seed], [String(patch.scaleTier)]: patch } };
+    // 不进撤销栈：撤销回旧档补丁在新地图上画不出来，下一次同步又会自动重定位——撤销等于空转。原补丁已在存档里。
+    // 旧档的撤销历史同理作废（那些补丁都是旧地图上的）。
+    this.undoStack = []; this.redoStack = [];
+    this.apply(next);
+    this.lastRemap = report;
+    return report;
+  }
+
+  dismissRemap(): void {
+    this.lastRemap = null;
   }
 
   /** 清除失效修改（含跨档整份失效）。可撤销。 */
@@ -487,6 +517,35 @@ export class PlanRepairSession {
     return best;
   }
 
+  /** 路段折线的中点（删路的锚点）。 */
+  private edgeAnchor(edgeId: string): { anchor?: Vec2 } {
+    const edge = this.engine.currentLayout?.roadEdges.find((candidate) => candidate.id === edgeId);
+    if (!edge) return {};
+    const lengths = edge.points.slice(1).map((p, i) => Math.hypot(p.x - edge.points[i].x, p.z - edge.points[i].z));
+    let half = lengths.reduce((sum, l) => sum + l, 0) / 2;
+    for (let i = 0; i < lengths.length; i += 1) {
+      if (half <= lengths[i] || i === lengths.length - 1) { const t = lengths[i] ? Math.min(1, half / lengths[i]) : 0; const a = edge.points[i]; const b = edge.points[i + 1]; return { anchor: { x: Math.round((a.x + (b.x - a.x) * t) * 100) / 100, z: Math.round((a.z + (b.z - a.z) * t) * 100) / 100 } }; }
+      half -= lengths[i];
+    }
+    return {};
+  }
+
+  /** 街区/地块目标的中心（设施搬家的锚点）。 */
+  private targetAnchor(site: SiteInfo, targetId: string): Vec2 | null {
+    const layout = this.engine.currentLayout;
+    if (!layout) return null;
+    if (site.level === "block") { const block = layout.blocks.find((candidate) => candidate.id === targetId); return block ? { x: block.x, z: block.z } : null; }
+    return this.nearestParcelById(targetId);
+  }
+
+  private nearestParcelById(parcelId: string): Vec2 | null {
+    const layout = this.engine.currentLayout;
+    if (!layout) return null;
+    for (const block of layout.blocks) for (const parcel of block.parcels) if (parcel.id === parcelId) return { x: parcel.x, z: parcel.z };
+    for (const district of layout.districts) for (const parcel of district.slots.values()) if (parcel.id === parcelId) return { x: parcel.x, z: parcel.z };
+    return null;
+  }
+
   /** 同 nearestParcel，但带回地块的朝向与尺寸（落位试算画占地用）。 */
   private nearestParcelInfo(x: number, z: number, radius = 14): Parcel | null {
     const layout = this.engine.currentLayout;
@@ -512,6 +571,7 @@ export class PlanRepairSession {
       ready: !!layout, seed: layout?.seed ?? null, cityTier: layout?.scaleTier ?? null, patchTier: patch?.scaleTier ?? null,
       patch, stale: this.engine.planPatched?.stale ?? [], saveFailed: this.saveFailed,
       tierChanged: !!patch && !!layout && patch.scaleTier !== layout.scaleTier,
+      remap: this.lastRemap,
       canUndo: this.undoStack.length > 0, canRedo: this.redoStack.length > 0,
       counts: patch ? { buildingMoves: Object.keys(patch.buildingMoves).length, roadOps: patch.roadOps.length, highwayOps: patch.highwayOps?.length ?? 0, roadAdds: patch.roadOps.filter((op) => op.t === "add").length, roadDrops: patch.roadOps.filter((op) => op.t === "drop").length, siteOps: patch.siteOps.length, suppressedContext: patch.suppressedContext.length } : null,
     };

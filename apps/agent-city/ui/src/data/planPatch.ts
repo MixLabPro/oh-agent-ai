@@ -11,7 +11,8 @@ import { invokeHost, embedded } from "../host";
 import type { PluginResponseV1 } from "@agent-vitals/app-sdk";
 import { coercePlanPatch, type PlanPatchV1 } from "../engine/planPatch";
 
-export type PlanPatchStoreV1 = { version: 1; patches: Record<string, PlanPatchV1> };
+/** archive：跨档重定位前的原补丁，种子 → 档位 → 补丁（路线图 SPEC P0-2）。只增不删，供导出/恢复用。 */
+export type PlanPatchStoreV1 = { version: 1; patches: Record<string, PlanPatchV1>; archive?: Record<string, Record<string, PlanPatchV1>> };
 const STORAGE_KEY = "city.plan-patch";
 let sequence = 0;
 
@@ -29,7 +30,16 @@ function coerceStore(raw: unknown): PlanPatchStoreV1 | null {
     const patch = coercePlanPatch(candidate);
     if (patch) patches[seed] = patch;
   }
-  return { version: 1, patches };
+  const archive: Record<string, Record<string, PlanPatchV1>> = {};
+  const rawArchive = (raw as { archive?: unknown }).archive;
+  if (rawArchive && typeof rawArchive === "object") for (const [seed, tiers] of Object.entries(rawArchive as Record<string, unknown>)) {
+    if (!tiers || typeof tiers !== "object") continue;
+    for (const [tier, candidate] of Object.entries(tiers as Record<string, unknown>)) {
+      const patch = coercePlanPatch(candidate);
+      if (patch) (archive[seed] ??= {})[tier] = patch;
+    }
+  }
+  return { version: 1, patches, ...(Object.keys(archive).length ? { archive } : {}) };
 }
 
 /** localStorage 读写都可能抛（隐私窗口、配额、被清的站点数据、手改坏的 JSON）：

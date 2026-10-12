@@ -21,9 +21,16 @@ import type { PatchStaleEntry } from "./planPatch";
 
 export type SiteKind = "civic" | "garden" | "district-landmark" | "context" | "landmark" | "public-site";
 
+/** cls：写下时设施的类别（`siteClassOf`，如 "civic/school"）。公共设施的 id 是序号（civic:0），跨档后序号对应的可能已是
+ *  另一种设施——重定位按类别找（路线图 SPEC P0-2）。 */
 export type SiteOp =
-  | { t: "remove"; id: string; at?: Vec2 }
-  | { t: "move"; id: string; at?: Vec2; to: string };
+  | { t: "remove"; id: string; at?: Vec2; cls?: string }
+  /** toAnchor：目标街区/地块写下时的中心（跨档重定位用，路线图 SPEC P0-2）；自由级目标 "@x,z" 自带坐标，不需要。 */
+  | { t: "move"; id: string; at?: Vec2; to: string; toAnchor?: Vec2; cls?: string };
+
+/** 设施的类别签名：种类 + 子类（学校/商场…、地标种类、市政用地种类）。 */
+export const siteClassOf = (site: Pick<SiteInfo, "kind" | "civicKind" | "landmarkKind" | "publicKind">): string =>
+  `${site.kind}/${site.civicKind ?? site.landmarkKind ?? site.publicKind ?? ""}`;
 
 export type SiteInfo = {
   id: string;

@@ -12,7 +12,7 @@ import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge } from "./cityLayout";
 import { applyPlanPatch, appendSiteOp, buildingRect, clearanceRoads, nearestOnPolyline, rectClearOfEdges, reservedParcelIdsShared, validateBuildingMove, type PlanPatchV1 } from "./planPatch";
 import { roadImpact, viaductEdges } from "./planRoadRules";
-import { listSites } from "./planSites";
+import { listSites, siteClassOf } from "./planSites";
 
 export type BulldozeResult = {
   patch: PlanPatchV1;
@@ -76,7 +76,7 @@ export function bulldozeForRoads(generated: CityLayout, model: CityModel, before
   for (const id of impact.bulldoze) {
     const site = sites.get(id);
     if (!site || site.locked || alreadyHit(before, site)) continue;
-    next = appendSiteOp(next, { t: "remove", id, at: { x: site.x, z: site.z } });
+    next = appendSiteOp(next, { t: "remove", id, at: { x: site.x, z: site.z }, cls: siteClassOf(site) });
     result.bulldozed.push(id);
   }
   if (result.bulldozed.length) after = applyPlanPatch(generated, next).layout;
@@ -96,7 +96,7 @@ export function bulldozeForRoads(generated: CityLayout, model: CityModel, before
     const pending = new Set(Object.entries(next.buildingMoves).filter(([other]) => other !== id).map(([, parcelId]) => parcelId));
     const target = candidates.find(({ parcel }) => !taken.has(parcel.id) && !pending.has(parcel.id) && validateBuildingMove(after, model, next, id, parcel.id).blockers.length === 0)?.parcel;
     if (!target) { result.homeless.push(id); continue; }
-    next = { ...next, buildingMoves: { ...next.buildingMoves, [id]: target.id } };
+    next = { ...next, buildingMoves: { ...next.buildingMoves, [id]: target.id }, moveAnchors: { ...next.moveAnchors, [id]: { x: target.x, z: target.z } } };
     after = applyPlanPatch(generated, next).layout;
     result.relocated.push({ id, to: target.id });
   }
