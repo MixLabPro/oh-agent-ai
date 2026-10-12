@@ -13,6 +13,8 @@
 //   (i) 提速不改结果（路线图 SPEC P0-1）：网格版净空 = 逐条版；网格邻域不漏路；钉子不变时重排 = 缓存的底层布局；
 //   (j) 自由级设施按模型真实占地：车站是矩形不是预留圆、能贴路（正门朝路、前沿离路肩 ROAD_SETBACK）、贴上后不需要接入路、
 //       [ / ] 转向、接到正门的路不算压到它（穿过它的路才算）——用户截图：车站按圆占地，贴不上路、接入路断在草地上；
+//   (k) 两层投影：有物理声明的模型（摩天轮/凯旋门/歌剧院陆侧）用声明——地面占地管地形与正门，俯视投影（∪ 悬挑 ∪ 运动包络）
+//       管路与楼的碰撞；摩天轮转盘竖在 x-y 平面，俯视是窄条不是圆（用户：摩天轮、港口不该是圆）；海上歌剧院、港口仍是名义圆；
 //   (h) 高架下不能有楼：新高架压到的设施推平、会话楼安置；切高架不算新几何；真实城市跨河高架 + 滨海大道干净重放（SPEC §17）。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
@@ -23,9 +25,9 @@ const {
   validateRoadAdd, rectClearOfEdges, buildingRect, buildCityModel, layoutCity, MIAMI_COASTAL,
   accessRoadFor, strandedAccessEdges, pruneStalePatch, appendHighwayOp, validateHighwayAdd, freshViaductGeometry,
   rectClearOfRoads, edgesNear, clearanceRoads, rectClearOfEdgesRaw, nearestOnPolyline,
-  autoPlaceFree, formatFreeTarget, siteTouchesRoad, frontEntrance, worldParts, segmentPolygonDistance, ROAD_SETBACK,
+  autoPlaceFree, formatFreeTarget, siteTouchesRoad, frontEntrance, worldParts, segmentPolygonDistance, ROAD_SETBACK, siteFootprint,
 } = await loadCity({
-  "engine/planFootprint.ts": ["frontEntrance", "worldParts", "segmentPolygonDistance", "ROAD_SETBACK"],
+  "engine/planFootprint.ts": ["frontEntrance", "worldParts", "segmentPolygonDistance", "ROAD_SETBACK", "siteFootprint"],
   "engine/planGeometry.ts": ["rectClearOfRoads", "edgesNear", "clearanceRoads", "rectClearOfEdges as rectClearOfEdgesRaw"],
   "engine/planAccess.ts": ["accessRoadFor", "strandedAccessEdges", "siteTouchesRoad"],
   "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry", "freshViaductGeometry"],
@@ -133,8 +135,11 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   assert.equal(harbor.locked, undefined, "the harbor can be moved too");
   assert.equal(siteMoveProblem(base, wheel, "@60,-100"), null, "open ground accepts the wheel");
   assert.equal(siteMoveProblem(base, wheel, "@60,5"), "site-over-road", "the wheel cannot sit on the main road");
-  assert.equal(siteMoveProblem(base, wheel, "@110,40"), "target-occupied", "nor on a session building");
-  assert.equal(siteMoveProblem(base, wheel, "@60,-140"), "not-buildable", "nor half in the sea");
+  assert.equal(siteMoveProblem(base, wheel, "@110,30"), "target-occupied", "nor on a session building");
+  // 真实占地（平台 20×8 + 转盘俯视窄条 57×5）比旧的名义圆（r 18）小：中心离会话楼 10 已经碰不到——旧圆在这里算占用。
+  assert.equal(siteMoveProblem(base, wheel, "@110,42"), null, "the wheel's real footprint clears a session building its nominal circle would have hit");
+  assert.equal(siteMoveProblem(base, wheel, "@60,-148"), "not-buildable", "nor half in the sea");
+  assert.equal(siteMoveProblem(base, wheel, "@60,-140"), null, "…but its platform (z ±4) may stand right at the shore — only the ground footprint needs buildable land");
   assert.equal(siteMoveProblem(base, wheel, "nope"), "missing-target");
   assert.equal(siteMoveProblem(base, bridge, "@60,-100"), "site-locked");
   const moved = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: "landmark:ferris-wheel", at: { x: 60, z: -80 }, to: "@60,-100" }, 1));
@@ -150,8 +155,8 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
 // (d) 搬到地块上的地标：圆内地块算占用。
 {
   const base = makeLayout();
-  const onto = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: "landmark:ferris-wheel", at: { x: 60, z: -80 }, to: "@200,75" }, 1));
-  // (200,75) 与 b 排地块重叠，但不压会话楼/路——放下后圆内地块应被占用。
+  const onto = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: "landmark:ferris-wheel", at: { x: 60, z: -80 }, to: "@200,62" }, 1));
+  // (200,62) 的俯视投影（转盘窄条 x 171..229）盖住 b 排地块，但不压会话楼/路——放下后占地内的地块应被占用。
   if (onto.stale.length === 0) {
     const reserved = reservedParcelIds(onto.layout);
     assert.ok(reserved.has("b6"), "parcels under a relocated landmark are reserved");
@@ -178,7 +183,8 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   assert.equal(road.to.z, 0, "…ending on the main road");
   assert.ok(Math.abs(road.to.x - 200) < 1, "…at the nearest point");
   // 起笔在正门（占地 +z 面中点），不再在名义预留圆的外接方形外——曾离建筑大半个半径，路像断在草地上（用户截图：车站）。
-  assert.deepEqual(road.from, { x: 200, z: -42 }, "…starting right at the front door, not half a radius out in the grass");
+  // 摩天轮的正门 = 地面占地（平台 + 腿条带 + 售票亭）+z 面中点：x 跨 −10..10.5 → 中点 0.25；z 前沿 4。
+  assert.deepEqual(road.from, { x: 200.25, z: -56 }, "…starting right at the front door, not half a radius out in the grass");
   const withRoad = appendRoadOp(movedPatch, { t: "add", from: road.from, to: road.to, width: 5 }, 2);
   const after = applyPlanPatch(base, withRoad);
   assert.equal(after.stale.length, 0, "move + access road replay cleanly");
@@ -186,7 +192,7 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   const stranded = strandedAccessEdges(after.layout, { x: 60, z: -80 }, wheel.width / 2, "60:-60", new Set(moved.roadEdges.map((e) => e.id)));
   assert.deepEqual(stranded, ["60:-60/60:0"], "the old dead-end access road is listed, and the walk stops at the junction with the main road");
   // 挨着路：不补。
-  const close = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@200,-22" }, 1)).layout;
+  const close = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@200,-9.5" }, 1)).layout; // 正门 z −5.5，离路肩 3
   assert.equal(accessRoadFor(close, model, placedAt(close, wheel.id)), null, "a site whose front door is already at the road gets no extra road");
   // 搬到旧接入路旁：接入路接到断头路口上，它不再是断头路——不列为遗留。
   const reuse = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@60,-110" }, 1)).layout;
@@ -280,6 +286,40 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   const crossVerdict = validateRoadAdd(farLayout, model, { x: 70, z: -110 }, { x: 130, z: -110 }, 5);
   assert.ok(crossVerdict.warnings.includes("bulldoze:1"), `a road straight through the station still hits it — ${crossVerdict.warnings}`);
   void through;
+}
+
+// (k) 两层投影。
+{
+  const wheelFp = siteFootprint("ferris-wheel", "landmark:ferris-wheel", 18);
+  assert.equal(wheelFp.exact, true, "the Ferris wheel uses its physical declaration, not the nominal circle");
+  assert.equal(wheelFp.parts.length, 4, "…ground footprint = platform + two leg strips + ticket booth");
+  assert.equal(wheelFp.overhead.length, 6, "…overhead = ground + the wheel's two swept-disc variants");
+  assert.ok(Math.abs(wheelFp.max.x - wheelFp.min.x - 2 * 28.7) < 1e-6 && wheelFp.max.z - wheelFp.min.z === 8,
+    `…seen from above the vertical wheel is a 57.4 × 8 strip, not a circle: ${JSON.stringify([wheelFp.min, wheelFp.max])}`);
+  const archFp = siteFootprint("arch", "landmark:arch", 16);
+  assert.equal(archFp.parts.length, 2, "the arch stands on two piers");
+  assert.ok(archFp.overhead.length === 3 && archFp.max.x - archFp.min.x === 34, "…its vault (33 wide) overhangs the gap between them; the piers' outer faces (±17) bound it");
+  assert.equal(siteFootprint("sail-opera", "landmark:sail-opera", 14).exact, true, "the land-side opera uses its declaration");
+  assert.equal(siteFootprint("sail-opera", "landmark:sail-opera", 14, true).exact, false, "…the island variant keeps its round island (the declaration covers land only)");
+  assert.equal(siteFootprint("harbor", "public:site:harbor", 12).exact, false, "the harbor has no declaration yet — it stays the nominal circle, honestly marked");
+  // 物理声明待补的声明式模型：从 3D 件表俯视投影（用户截图：电视塔底是巨大的圆——那是名义留地 r，模型裙房直径只有 17）。
+  const tower = siteFootprint("tv-tower", "landmark:tv-tower", 22);
+  assert.equal(tower.source, "projected", "the TV tower is projected from its part list");
+  const towerR = Math.max(...tower.parts.flat().map((p) => Math.hypot(p.x, p.z)));
+  assert.ok(towerR >= 8.5 && towerR < 9, `…its ground footprint is the podium (Ø17, sampled circumscribed), not the nominal r 22: ${towerR}`);
+  assert.ok(tower.overhead.flat().every((p) => Math.hypot(p.x, p.z) < 9), "…and nothing above (pod, ring, deck) reaches past the podium");
+  for (const kind of ["pagoda", "lighthouse"]) assert.equal(siteFootprint(kind, `landmark:${kind}`, 18).source, "projected", `${kind} is projected too`);
+  assert.equal(siteFootprint("twin-towers", "landmark:twin-towers", 20).source, "nominal", "hand-drawn models without a part list stay nominal");
+
+  const base = makeLayout(); base.landmarks[0] = { ...base.landmarks[0], x: 150, z: -60 };
+  // 路从转盘下穿过（离平台很远，但在转盘俯视窄条里）：压到；挪开到窄条外：不压。
+  const under = validateRoadAdd(base, model, { x: 172, z: -80 }, { x: 172, z: -40 }, 5);
+  assert.ok(under.warnings.includes("bulldoze:1"), `a road under the wheel's disc hits it (no height contract → no passing underneath) — ${under.warnings}`);
+  const beside = validateRoadAdd(base, model, { x: 182.5, z: -80 }, { x: 182.5, z: -40 }, 5);
+  assert.ok(!beside.warnings.some((code) => code.startsWith("bulldoze:")), `a road just past the disc's end clears it — ${beside.warnings}`);
+  // 楼与楼按俯视投影：平台碰不到会话楼 b1 (110,30)，但转盘窄条压在它头上 → 占用。
+  const wheel = listSites(base).find((site) => site.id === "landmark:ferris-wheel");
+  assert.equal(siteMoveProblem(base, wheel, "@135,30"), "target-occupied", "the wheel's disc may not swing over a session building even though its platform clears it");
 }
 
 // (e) 真实城市：一条横穿城区的路。
@@ -414,4 +454,4 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   console.log(`  真实城市：${movedOne.site} → ${movedOne.target}，补接入路 ${movedOne.length}（求路耗时 ${movedOne.accessMs}ms）`);
 }
 
-console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; moved sites get a non-destructive access road and their old dead-end access road is listed; pruning stale entries leaves the rest unchanged; viaducts clear the ground beneath them like roads do; free-level sites use their real model footprint, snap their front door to the road and are not bulldozed by the road that serves them; real-city cross-town road, landmark move, river-crossing viaduct and waterfront boulevard replay cleanly.");
+console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; moved sites get a non-destructive access road and their old dead-end access road is listed; pruning stale entries leaves the rest unchanged; viaducts clear the ground beneath them like roads do; free-level sites use their real model footprint (declared, or projected from the part list when the declaration is pending; ground for terrain and the front door, overhead projection incl. overhangs and the wheel swept disc for collisions), snap their front door to the road and are not bulldozed by the road that serves them; real-city cross-town road, landmark move, river-crossing viaduct and waterfront boulevard replay cleanly.");

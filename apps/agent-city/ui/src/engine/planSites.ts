@@ -17,7 +17,7 @@
 import type { CivicKind, CityLayout, Vec2 } from "./cityLayout";
 import { clearsHighways } from "./cityPlan";
 import { clearanceRoads, edgesNear, parcelIndex, rectClearOfRoads, reservedParcelIds } from "./planGeometry";
-import { polygonsOverlap, rectPolygon, ROAD_SETBACK, segmentPolygonDistance, siteFootprint, toWorld, worldBox, worldParts, yawFacing, type FootprintSpec, type Polygon } from "./planFootprint";
+import { polygonsOverlap, rectPolygon, ROAD_SETBACK, segmentPolygonDistance, siteFootprint, toWorld, worldBox, worldOverhead, worldParts, yawFacing, type FootprintSpec, type Polygon } from "./planFootprint";
 import type { PatchStaleEntry } from "./planPatch";
 
 export type SiteKind = "civic" | "garden" | "district-landmark" | "context" | "landmark" | "public-site";
@@ -58,10 +58,10 @@ export const siteBox = (site: Pick<SiteInfo, "x" | "z" | "yaw" | "width" | "dept
 
 const footprintCache = new Map<string, FootprintSpec>();
 /** free 级设施的模型占地（按 种类|id|半径 缓存：庄园的声明要按 id 种子生成，悬停拾取每帧都要列设施）。 */
-export function footprintFor(kind: string, id: string, radius: number): FootprintSpec {
-  const key = `${kind}|${id}|${radius}`;
+export function footprintFor(kind: string, id: string, radius: number, island = false): FootprintSpec {
+  const key = `${kind}|${id}|${radius}|${island ? 1 : 0}`;
   let hit = footprintCache.get(key);
-  if (!hit) { hit = siteFootprint(kind, id, radius); footprintCache.set(key, hit); }
+  if (!hit) { hit = siteFootprint(kind, id, radius, island); footprintCache.set(key, hit); }
   return hit;
 }
 
@@ -101,7 +101,7 @@ export function listSites(layout: CityLayout): SiteInfo[] {
   for (const landmark of layout.landmarks ?? []) {
     if (!landmark.radius) continue;
     const locked = landmark.kind === "suspension-bridge" ? "悬索桥不是建筑，是路网里的一段桥面（由桥梁模型绑定），不能单独搬或拆" : undefined;
-    const footprint = footprintFor(landmark.kind, landmark.id, landmark.radius);
+    const footprint = footprintFor(landmark.kind, landmark.id, landmark.radius, !!landmark.shore);
     const box = worldBox(footprint, landmark, landmark.yaw);
     out.push({ id: landmark.id, kind: "landmark", landmarkKind: landmark.kind, x: landmark.x, z: landmark.z, yaw: landmark.yaw, width: box.width, depth: box.depth, height: Math.max(30, landmark.radius * 2.5), y: ground(landmark.x, landmark.z), level: "free", slotId: "", radius: landmark.radius, footprint, box, ...(locked ? { locked } : {}) });
   }
@@ -152,13 +152,13 @@ export function parseFreeTarget(targetId: string): (Vec2 & { yaw?: number }) | n
 export const formatFreeTarget = (p: Vec2 & { yaw?: number }): string =>
   `@${Math.round(p.x * 100) / 100},${Math.round(p.z * 100) / 100}${p.yaw === undefined ? "" : `,${Math.round(p.yaw * 1e4) / 1e4}`}`;
 
-/** free 级设施在 (origin, yaw) 处的世界占地（凸多边形并集）。 */
+/** free 级设施在 (origin, yaw) 处的世界**俯视投影**（凸多边形并集；碰撞按它，见 planFootprint 两层投影）。 */
 export function freeSiteParts(site: SiteInfo, origin: Vec2, yaw: number): Polygon[] {
   const footprint = site.footprint ?? footprintFor(site.landmarkKind ?? site.publicKind ?? "", site.id, site.radius ?? site.width / 2);
-  return worldParts(footprint, origin, yaw);
+  return worldOverhead(footprint, origin, yaw);
 }
 
-/** 别的设施的世界占地：free 级按模型占地，其余按自己的矩形。 */
+/** 别的设施的世界占地：free 级按模型俯视投影，其余按自己的矩形。 */
 const sitePolygons = (site: SiteInfo): Polygon[] => (site.level === "free" ? freeSiteParts(site, site, site.yaw) : [rectPolygon(siteBox(site))]);
 
 /**
@@ -181,7 +181,7 @@ export function autoPlaceFree(layout: CityLayout, site: SiteInfo, click: Vec2, t
   const n = { x: (best.p.x - click.x) / best.d, z: (best.p.z - click.z) / best.d };
   const yaw = yawFacing(n) + extra;
   // 转完以后朝路方向的前沿伸出多少（转了 90° 就是侧面）。
-  const front = Math.max(...footprint.parts.flat().map((v) => { const w = toWorld(v, { x: 0, z: 0 }, yaw); return w.x * n.x + w.z * n.z; }));
+  const front = Math.max(...footprint.overhead.flat().map((v) => { const w = toWorld(v, { x: 0, z: 0 }, yaw); return w.x * n.x + w.z * n.z; }));
   const snapped = { x: best.p.x - n.x * (front + best.width / 2 + ROAD_SETBACK), z: best.p.z - n.z * (front + best.width / 2 + ROAD_SETBACK) };
   const near = Math.hypot(snapped.x - click.x, snapped.z - click.z) <= extent + 10;
   const at = near ? snapped : click;
@@ -206,8 +206,9 @@ function freeMoveProblem(layout: CityLayout, site: SiteInfo, targetId: string): 
   if (Math.hypot(at.x - site.x, at.z - site.z) < 1 && Math.abs(normalizeAngle(yaw - site.yaw)) < 1e-3) return "unchanged";
   const footprint = site.footprint ?? footprintFor(site.landmarkKind ?? site.publicKind ?? "", site.id, site.radius ?? site.width / 2);
   if (footprint.exact) {
-    const parts = worldParts(footprint, at, yaw);
-    const samples = [at, ...parts.flat()];
+    // 地形看落地的实体（墩、腿、基座）；路与楼的碰撞看俯视投影（悬挑、转盘下面不能有路或楼）。
+    const parts = worldOverhead(footprint, at, yaw);
+    const samples = [at, ...worldParts(footprint, at, yaw).flat()];
     if (samples.some((p) => !layout.terrain.buildable(p.x, p.z))) return "not-buildable";
     const reach = Math.hypot(footprint.max.x - footprint.min.x, footprint.max.z - footprint.min.z) + 12;
     for (const edge of edgesNear(layout, at.x, at.z, reach)) {

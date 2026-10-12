@@ -10,7 +10,7 @@ import type { CityEngine } from "../engine/CityEngine";
 import type { PlanIssue } from "../engine/planAudit";
 import { RepairController, type RepairState, type RepairTool, type RoadType } from "./controller";
 import { ParcelOverlay, type OverlayMarker, type OverlayRibbon, type OverlaySiteMark } from "./overlay";
-import { installPlanRepairDebug, planDevEnabled, type PlanRect, type PlanRepairSession } from "./session";
+import { installPlanRepairDebug, planDevEnabled, siteMarkRect, type PlanRect, type PlanRepairSession } from "./session";
 import type { RemapReport } from "../engine/planRemap";
 
 export type RepairInfo = {
@@ -164,7 +164,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     })));
     const marks: OverlaySiteMark[] = [];
     if (state.preview?.kind === "site") marks.push({ ...state.preview.rect, y: Math.max(0, heightAt(state.preview.rect.x, state.preview.rect.z)), tone: "hover" });
-    if (state.site) { const box = state.site.box ?? state.site; marks.push({ x: box.x, z: box.z, yaw: box.yaw, width: box.width, depth: box.depth, round: state.site.level === "free" && !state.site.footprint?.exact, y: Math.max(0, heightAt(box.x, box.z)), tone: "selected" }); }
+    if (state.site) { const rect = siteMarkRect(state.site); marks.push({ ...rect, y: Math.max(0, heightAt(state.site.x, state.site.z)), tone: "selected" }); }
     const mark = (rect: PlanRect, tone: OverlaySiteMark["tone"]): OverlaySiteMark => ({ ...rect, y: Math.max(0, heightAt(rect.x, rect.z)), tone });
     const { preview, drawStart } = state;
     if (preview?.kind === "ghost") marks.push(mark(preview.rect, preview.ok ? "ghost-ok" : "ghost-bad"));

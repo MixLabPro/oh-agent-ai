@@ -17,7 +17,7 @@ import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
 import { buildingRect, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
 import { polygonDistance, roadNodeId } from "./cityPlan";
 import { listSites, siteBox } from "./planSites";
-import { frontEntrance } from "./planFootprint";
+import { frontEntrance, segmentPolygonDistance, worldOverhead, type Polygon } from "./planFootprint";
 
 export type RoadVerdict = { blockers: string[]; warnings: string[] };
 
@@ -59,8 +59,9 @@ function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boole
 }
 
 /** 路会压到的对象：会话楼（只能被安置，不能被拆）与设施（可推平；锁定的不能动）。 */
-/** door：自由级设施的正门（模型占地 +z 面中点 + 朝外方向）。 */
-export type Obstacle = { kind: "session" | "site"; id: string; rect: BuildingRect; locked: boolean; door?: { at: Vec2; outward: Vec2 } };
+/** door：自由级设施的正门（模型占地 +z 面中点 + 朝外方向）。shape：有真实占地的自由级设施的俯视投影——rect 只是它的包围盒，
+ *  摩天轮（平台 + 横着的转盘窄条）、凯旋门的包围盒四角是空地，路擦过空角不算压到。 */
+export type Obstacle = { kind: "session" | "site"; id: string; rect: BuildingRect; locked: boolean; door?: { at: Vec2; outward: Vec2 }; shape?: Polygon[] };
 const obstacleCache = new WeakMap<CityLayout, { model: CityModel; obstacles: Obstacle[] }>();
 
 /** 悬停预览每次鼠标移动都要评估，障碍按（布局, 模型）缓存——布局不可变，缓存随布局对象一起回收。 */
@@ -73,7 +74,9 @@ function obstacles(layout: CityLayout, model: CityModel): Obstacle[] {
     const building = buildings.get(id);
     if (building) out.push({ kind: "session", id, rect: buildingRect(building, slot), locked: false });
   }
-  for (const site of listSites(layout)) out.push({ kind: "site", id: site.id, rect: siteBox(site), locked: !!site.locked, ...(site.footprint ? { door: frontEntrance(site.footprint, site, site.yaw) } : {}) });
+  for (const site of listSites(layout)) out.push({ kind: "site", id: site.id, rect: siteBox(site), locked: !!site.locked,
+    ...(site.footprint ? { door: frontEntrance(site.footprint, site, site.yaw) } : {}),
+    ...(site.footprint?.exact ? { shape: worldOverhead(site.footprint, site, site.yaw) } : {}) });
   obstacleCache.set(layout, { model, obstacles: out });
   return out;
 }
@@ -84,12 +87,22 @@ function hitsBy(edge: RoadEdge, list: readonly Obstacle[]): Set<number> {
   list.forEach((item, index) => {
     if (distanceToPolyline(item.rect, edge.points) > 60 + Math.hypot(item.rect.width, item.rect.depth) / 2) return;
     if (rectClearOfEdges(item.rect, [edge], 0.5)) return;
+    if (item.shape && !touchesShape(edge, item.shape)) return;
     // 一端落在设施正门、另一端朝门外：这是接到门口的路（接入路），不是压到设施。曾把它算作压到——
     // 推土机会把接入路服务的那座设施自己推平（verify-plan-bulldozer (f) 抓到）。
     if (item.door && servesDoor(edge, item.door, item.rect)) return;
     hit.add(index);
   });
   return hit;
+}
+
+/** 路带（半宽 + 0.5，同 rectClearOfEdges 的余量）是否碰到俯视投影的某一块。 */
+function touchesShape(edge: RoadEdge, shape: readonly Polygon[]): boolean {
+  const reach = edge.width / 2 + 0.5;
+  for (let i = 1; i < edge.points.length; i += 1) {
+    if (shape.some((part) => segmentPolygonDistance(edge.points[i - 1], edge.points[i], part) < reach)) return true;
+  }
+  return edge.points.length === 1 && shape.some((part) => segmentPolygonDistance(edge.points[0], edge.points[0], part) < reach);
 }
 
 function servesDoor(edge: RoadEdge, door: { at: Vec2; outward: Vec2 }, rect: BuildingRect): boolean {

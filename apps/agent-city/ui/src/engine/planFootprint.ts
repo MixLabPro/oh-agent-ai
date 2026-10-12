@@ -7,8 +7,18 @@
  *
  * 这里按模型的真实地面实体给占地（局部坐标，+z 为正面——与 models/physical 的 EntranceSpec 同一约定）：
  *   - 在生成器的地面登记表里的（villa-complex）：resolveGroundModel 的声明；
+ *   - 模型带物理声明的（凯旋门、帆形歌剧院陆侧变体、摩天轮）：声明的 footprint；
  *   - 渲染层导出了几何的：市政厅 civicGroundFootprint、车站站台 + 站房、体育场看台外廓；
- *   - 其余（塔、摩天轮、公园、港口…，本来就近似圆）：保留预留圆，如实标 `exact: false`。
+ *   - 声明式模型但物理声明待补的（电视塔、宝塔、灯塔）：从它的 3D 件表俯视投影（planProjection）——派生口径，声明一到就让位；
+ *   - 其余（双子塔、扭转塔、观景塔、港口、公园…，手写造型、没有件表）：保留预留圆，如实标 `exact: false`——
+ *     那是生成器的**留地**，不是建筑的形状。
+ *
+ * 两层投影（用户：「建筑空间从上往下投影到地面，叠加基座」——对，但要按高度分层）：
+ *   - parts（地面占地）：落地的实体——基座、墩、腿、售票亭。地形可建、正门、贴路的前沿按它；
+ *   - overhead（俯视投影）：parts ∪ 上层悬挑（拱券、帆壳）∪ 运动件扫过的范围（摩天轮转盘竖在 x-y 平面，
+ *     俯视是一条 ≈57 × 5 的窄条，不是圆）。路与楼、楼与楼的碰撞都按它——与生成器
+ *     planner/modelEnvelope 的 conservativeProjection 同一口径：没有高度契约就不放路从悬挑下穿过
+ *     （凯旋门两墩之间按设计是路面，但「净空够不够」要模型层给高度声明，编辑器不替它下结论）。
  * 纯函数；局部 → 世界的变换与 planner/modelEnvelope 的 worldPoint 同一个公式（yaw 绕 y，+z 正面 → 世界 (sin yaw, cos yaw)）。
  */
 import { hashSeed } from "../cityModel";
@@ -16,17 +26,30 @@ import type { Vec2 } from "./cityLayout";
 import { resolveGroundModel } from "./models/groundRegistry";
 import type { LocalFootprint, LocalRegion } from "./models/physical";
 import { civicGroundFootprint, stationHallLocal } from "./models/publicSiteGeometry";
+import type { MotionEnvelope, PhysicalDeclaration } from "./models/physical";
+import { archModel } from "./models/landmarks/arch";
+import { sailOperaModel } from "./models/landmarks/sailOpera";
+import { ferrisWheelModel } from "./models/landmarks/ferrisWheel";
+import { tvTowerModel } from "./models/landmarks/tvTower";
+import { pagodaModel } from "./models/landmarks/pagoda";
+import { lighthouseModel } from "./models/landmarks/lighthouse";
+import type { BuildingModel } from "./models/model";
+import { projectParts } from "./planProjection";
 
 export type Polygon = readonly Vec2[];
 /** 设施前沿到路肩的退距（同 MODEL_ENVELOPE_CONFIG.defaultRoadSetback）。 */
 export const ROAD_SETBACK = 3;
 
 export type FootprintSpec = {
-  /** 局部坐标的凸多边形并集（圆已离散成 16 边形）。 */
+  /** 地面占地：局部坐标的凸多边形并集（圆已离散成 16 边形）。 */
   parts: readonly Polygon[];
+  /** 俯视投影：parts ∪ 悬挑 ∪ 运动包络投影（无声明时 = parts）。碰撞按它。 */
+  overhead: readonly Polygon[];
   /** 是否是模型的真实形状（false = 名义预留圆）。 */
   exact: boolean;
-  /** 局部包围盒。 */
+  /** 形状从哪来：物理声明 / 地面登记表 / 渲染层导出 / 件表俯视投影（派生）/ 名义圆。 */
+  source: FootprintSource;
+  /** 俯视投影的局部包围盒。 */
   min: Vec2; max: Vec2;
 };
 
@@ -37,29 +60,67 @@ const fromRegion = (region: LocalRegion): Polygon =>
     : region.shape === "rect" ? rect(region.center.x, region.center.z, region.width, region.depth) : region.vertices;
 const fromFootprint = (footprint: LocalFootprint): Polygon[] => footprint.parts.map(fromRegion);
 
-function spec(parts: Polygon[], exact: boolean): FootprintSpec {
-  const xs = parts.flat().map((p) => p.x); const zs = parts.flat().map((p) => p.z);
-  return { parts, exact, min: { x: Math.min(...xs), z: Math.min(...zs) }, max: { x: Math.max(...xs), z: Math.max(...zs) } };
+export type FootprintSource = "declared" | "registry" | "renderer" | "projected" | "nominal";
+
+function spec(parts: Polygon[], source: FootprintSource, above: Polygon[] = []): FootprintSpec {
+  const overhead = [...parts, ...above];
+  const xs = overhead.flat().map((p) => p.x); const zs = overhead.flat().map((p) => p.z);
+  return { parts, overhead, exact: source !== "nominal", source, min: { x: Math.min(...xs), z: Math.min(...zs) }, max: { x: Math.max(...xs), z: Math.max(...zs) } };
+}
+
+/** 运动包络（绕轴扫掠圆柱）的俯视投影：绕 y 转是圆；绕 x/z 转是竖着的圆盘，俯视是 2·外半径 × 2·半厚 的矩形。 */
+function motionProjection(m: MotionEnvelope): Polygon {
+  const [cx, , cz] = m.center;
+  if (m.axis === "y") return circle(cx, cz, m.outerRadius);
+  return m.axis === "z" ? rect(cx, cz, 2 * m.outerRadius, 2 * m.halfDepth) : rect(cx, cz, 2 * m.halfDepth, 2 * m.outerRadius);
+}
+
+/** 已声明物理占地的模型（registry 的 BUILDING_MODELS 里带 physical 的那些；直接引叶子模块，不经 registry——它拉 three）。 */
+const DECLARED: Record<string, PhysicalDeclaration | undefined> = Object.fromEntries(
+  [archModel, sailOperaModel, ferrisWheelModel].map((model) => [model.id, model.physical]));
+
+/** 声明式模型里物理声明还没补的：从件表俯视投影（registry 的 PHYSICAL_PENDING——补了声明就会走 DECLARED）。 */
+const PROJECTABLE: Record<string, BuildingModel> = Object.fromEntries([tvTowerModel, pagodaModel, lighthouseModel].map((model) => [model.id, model]));
+
+/** 件表投影（默认 sizing：塔高取上限——XZ 外廓与高度无关或随高度只增不减，取上限是保守方向）。 */
+function fromProjection(model: BuildingModel, id: string, radius: number): FootprintSpec | null {
+  try {
+    const projected = projectParts(model.geometry({ seed: hashSeed(id), radius }));
+    return projected ? spec(projected.ground, "projected", projected.overhead.slice(projected.ground.length)) : null;
+  } catch { return null; }
+}
+
+/** 声明 → 两层投影。运动包络是多个输入变体的联合（摩天轮按 cap 有两种半径），全取——保守方向。 */
+function fromDeclaration(declaration: PhysicalDeclaration): FootprintSpec {
+  return spec(fromFootprint(declaration.footprint), "declared", [
+    ...(declaration.overhang ? fromFootprint(declaration.overhang) : []),
+    ...(declaration.motion ?? []).map(motionProjection),
+  ]);
 }
 
 /**
  * 设施的局部占地。kind：地标种类（landmarkKind）或市政用地种类（publicKind）；id 给需要种子的模型（庄园）。
- * 只认得出名义圆时返回圆（exact=false）。
+ * 只认得出名义圆时返回圆（exact=false）。island：立在海上小岛的变体（歌剧院带 shore）——声明只覆盖陆侧，岛本来就是圆，照旧按圆。
  */
-export function siteFootprint(kind: string, id: string, radius: number): FootprintSpec {
+export function siteFootprint(kind: string, id: string, radius: number, island = false): FootprintSpec {
+  const declared = island ? undefined : DECLARED[kind];
+  if (declared) return fromDeclaration(declared);
   const ground = resolveGroundModel(kind, { seed: hashSeed(id), radius });
-  if (ground.status === "partial") return spec(fromFootprint(ground.declaration.footprint), true);
-  if (kind === "civic") return spec(fromFootprint(civicGroundFootprint(radius)), true);
+  if (ground.status === "partial") return spec(fromFootprint(ground.declaration.footprint), "registry");
+  if (kind === "civic") return spec(fromFootprint(civicGroundFootprint(radius)), "renderer");
   if (kind === "station") {
     // 与 civicSystem 渲染同源：站台 r·1.5 × r·1.1（含雨棚、轨道、列车），站房在站台后沿外侧。
     const hall = stationHallLocal(radius);
-    return spec([rect(0, 0, radius * 1.5, radius * 1.1), rect(hall.centre.x, hall.centre.z, hall.width, hall.depth)], true);
+    return spec([rect(0, 0, radius * 1.5, radius * 1.1), rect(hall.centre.x, hall.centre.z, hall.width, hall.depth)], "renderer");
   }
   if (kind === "stadium") {
     // 看台：椭圆 27 × 19.5 上 18 段 10.5 × 5.5 的看台块（渲染写死，不随 radius 缩放）；外廓按看台外沿取矩形。
-    return spec([rect(0, 0, 2 * (27 + 5.5), 2 * (19.5 + 5.5))], true);
+    return spec([rect(0, 0, 2 * (27 + 5.5), 2 * (19.5 + 5.5))], "renderer");
   }
-  return spec([circle(0, 0, radius)], false);
+  const projectable = island ? undefined : PROJECTABLE[kind];
+  const projected = projectable && fromProjection(projectable, id, radius);
+  if (projected) return projected;
+  return spec([circle(0, 0, radius)], "nominal");
 }
 
 /** 局部 → 世界（同 modelEnvelope.worldPoint）。 */
@@ -71,6 +132,10 @@ export const toWorld = (p: Vec2, origin: Vec2, yaw: number): Vec2 => ({
 export function worldParts(footprint: FootprintSpec, origin: Vec2, yaw: number): Polygon[] {
   return footprint.parts.map((part) => part.map((p) => toWorld(p, origin, yaw)));
 }
+/** 俯视投影 → 世界（碰撞用）。 */
+export function worldOverhead(footprint: FootprintSpec, origin: Vec2, yaw: number): Polygon[] {
+  return footprint.overhead.map((part) => part.map((p) => toWorld(p, origin, yaw)));
+}
 
 /** 包围盒在世界里的朝向矩形（叠加层、拾取、障碍物用）。 */
 export function worldBox(footprint: FootprintSpec, origin: Vec2, yaw: number): { x: number; z: number; yaw: number; width: number; depth: number } {
@@ -78,9 +143,10 @@ export function worldBox(footprint: FootprintSpec, origin: Vec2, yaw: number): {
   return { x: c.x, z: c.z, yaw, width: footprint.max.x - footprint.min.x, depth: footprint.max.z - footprint.min.z };
 }
 
-/** 正面入口：局部包围盒 +z 面的中点，朝外方向 = 局部 +z。 */
+/** 正面入口：**地面占地**局部包围盒 +z 面的中点（门开在落地的实体上，不在悬挑或转盘下），朝外方向 = 局部 +z。 */
 export function frontEntrance(footprint: FootprintSpec, origin: Vec2, yaw: number): { at: Vec2; outward: Vec2 } {
-  return { at: toWorld({ x: (footprint.min.x + footprint.max.x) / 2, z: footprint.max.z }, origin, yaw), outward: { x: Math.sin(yaw), z: Math.cos(yaw) } };
+  const xs = footprint.parts.flat().map((p) => p.x); const maxZ = Math.max(...footprint.parts.flat().map((p) => p.z));
+  return { at: toWorld({ x: (Math.min(...xs) + Math.max(...xs)) / 2, z: maxZ }, origin, yaw), outward: { x: Math.sin(yaw), z: Math.cos(yaw) } };
 }
 
 /** 让局部 +z（正面）指向方向 d 的 yaw。 */

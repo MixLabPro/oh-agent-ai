@@ -12,7 +12,7 @@ import type { CityModel } from "../cityModel";
 import type { CityLayout, Vec2 } from "./cityLayout";
 import { nearestOnPolyline } from "./planPatch";
 import { snapPoint, validateRoadAdd } from "./planRoadRules";
-import { frontEntrance, ROAD_SETBACK, segmentPolygonDistance, worldParts } from "./planFootprint";
+import { frontEntrance, ROAD_SETBACK, segmentPolygonDistance, worldOverhead } from "./planFootprint";
 import type { SiteInfo } from "./planSites";
 
 /** 正门到路肩不超过「退距 + 这么多」就算已经挨着路，不再补接入路。 */
@@ -43,7 +43,7 @@ export function accessRoadFor(layout: CityLayout, model: CityModel, site: SiteIn
   const footprint = site.footprint; if (!footprint) return null;
   if (siteTouchesRoad(layout, site)) return null;
   const { at: door, outward } = frontEntrance(footprint, site, site.yaw);
-  const parts = worldParts(footprint, site, site.yaw);
+  const parts = worldOverhead(footprint, site, site.yaw); // 路也不能从悬挑/转盘下穿过去
   const from = { x: Math.round(door.x * 100) / 100, z: Math.round(door.z * 100) / 100 };
   const lead = { x: door.x + outward.x * 0.05, z: door.z + outward.z * 0.05 };
   const near = layout.roadEdges.filter((edge) => !edge.bridge && edge.structure !== "deck")

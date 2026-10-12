@@ -4,7 +4,7 @@
  */
 import type { CityBuilding } from "../cityModel";
 import type { CityLayout, Parcel, RoadEdge, Vec2 } from "./cityLayout";
-import { pointInPolygon, siteFootprint, worldParts } from "./planFootprint";
+import { pointInPolygon, siteFootprint, worldOverhead } from "./planFootprint";
 
 const distanceToSegment = (p: Vec2, a: Vec2, b: Vec2) => {
   const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
@@ -105,8 +105,8 @@ function buildReserved(layout: CityLayout, suppressedContext: readonly string[])
   // 按模型真实占地（planFootprint）判：地块中心落在占地外扩 4 以内即占用；只认得出预留圆的模型照旧按圆 + 4。
   const roundSites = [...(layout.landmarks ?? []).map((site) => ({ site, id: site.id })), ...(layout.publicSites ?? []).map((site) => ({ site, id: `public:${site.id}` }))].filter(({ site }) => site.radius);
   const shapes = roundSites.map(({ site, id }) => {
-    const footprint = siteFootprint(site.kind, id, site.radius);
-    return { site, footprint, parts: footprint.exact ? worldParts(footprint, site, site.yaw) : [] };
+    const footprint = siteFootprint(site.kind, id, site.radius, "shore" in site && !!site.shore);
+    return { site, footprint, parts: footprint.exact ? worldOverhead(footprint, site, site.yaw) : [] };
   });
   if (shapes.length) for (const parcel of parcels.values()) {
     if (shapes.some(({ site, footprint, parts }) => (footprint.exact
