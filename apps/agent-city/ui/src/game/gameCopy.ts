@@ -28,6 +28,7 @@ const ENGLISH: Record<string, string> = {
   "Esc": "Esc",
   "暂停 / 继续": "Pause / resume",
   "收起": "Hide",
+  "展开": "Show",
   "按键提示": "Controls hint",
   "已越过软边界，请返航": "Past the soft boundary — turn back",
   "高度": "Alt",
@@ -53,6 +54,13 @@ const ENGLISH: Record<string, string> = {
   "剩时": "Left",
   "穿过高亮圆环，顺序错误不计数。": "Fly through the highlighted rings in order; wrong order does not count.",
   "成绩仅本次保留": "Records are kept for this session only",
+  "游戏声音": "Game sound",
+  "游戏声音大小": "Game sound volume",
+  "声音": "Sound",
+  "音量": "Volume",
+  "音效": "Sound FX",
+  "开": "On",
+  "关": "Off",
 };
 
 export function gameText(text: string, locale: GameLocale): string {

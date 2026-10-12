@@ -2261,14 +2261,71 @@ fn warm_authority_db(app: &AppHandle) {
 /// 打开工作台主窗口：显示 + 聚焦。**不做 toggle**——工作台是常驻主窗口，× 只
 /// 隐藏不销毁（`on_window_event` 拦截 prevent_close + hide），再开保留当前
 /// tab/月/分页状态，不是重建一个空白窗口。
+/// 工作台窗口句柄获取。**不能用 `get_webview_window`**：tauri 的实现要求窗口内
+/// 【所有】webview 与窗口同名（`is_webview_window`），而 plugin_host 的 `add_child`
+/// 会把插件 webview（plugin-city-N）挂进工作台窗口——插件一开，该 API 对
+/// "workbench" 恒返回 None（窗口与 webview 实际都在，日志已证），表现为
+/// 「开 City 后关窗，Dock/菜单都唤不回工作台」。窗口优先 + 按名取主 webview。
+fn workbench_parts(app: &AppHandle) -> Option<(tauri::Window, Option<tauri::Webview>)> {
+    let window = app.get_window("workbench")?;
+    let main = window.webviews().into_iter().find(|view| view.label() == "workbench");
+    Some((window, main))
+}
+
 fn show_workbench(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("workbench") else { return };
-    // 工作台可见期间切 Regular：程序坞/⌘Tab 出现图标与菜单栏（用户 2026-10-09：
-    // 控制面板出现时希望有 Dock 图标）；窗口隐藏时 CloseRequested 处切回 Accessory。
-    // 启动时的 Accessory 仍由 setup 设置（tao 启动重置 Regular 的兜底不变）。
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    let _ = w.show();
-    let _ = w.set_focus();
+    let Some((window, main)) = workbench_parts(app) else {
+        agent_vitals_runtime::logging::log_warn("workbench", "show: window lookup FAILED (registry lost)");
+        return;
+    };
+    // 工作台可见期间显示 Dock 图标（用户理想形态：关窗图标消失、菜单栏唤起）。
+    // 双向 Process Transform 此前被判「间歇性卡死再唤起」而降级为单向——后来
+    // 证实那些失败的真根因是 get_webview_window 多 webview 门槛 + tao show 在
+    // wedge 态静默无效（均已修复），与图标切换无关，故恢复双向。tao 自带 1s
+    // 防抖防快速开关产生幽灵图标。
+    let _ = app.set_dock_visibility(true);
+    // 诊断 2026-10-09「开 City 后关窗，二次唤起失败」：窗口在 CGWindowList 里存在
+    // 但 onScreen=false——记录 NSApp 层 hidden 与 show/focus 的真实返回值定位卡点。
+    #[cfg(target_os = "macos")]
+    {
+        // objc 0.2 的宏内部会生成 cfg(cargo-clippy)（与 plugin_host 的用法一致），
+        // clippy -D warnings 会把它当 unexpected_cfgs——就地豁免。
+        #[allow(unexpected_cfgs, clippy::undocumented_unsafe_blocks)]
+        let app_hidden: bool = unsafe {
+            use objc::{msg_send, sel, sel_impl};
+            let ns_app: *mut objc::runtime::Object = msg_send![objc::class!(NSApplication), sharedApplication];
+            msg_send![ns_app, isHidden]
+        };
+        agent_vitals_runtime::logging::log_info("workbench", &format!("show: nsapp_hidden={app_hidden}"));
+    }
+    let shown = window.show();
+    let webview_shown = main.as_ref().map(|view| view.show());
+    let focused = window.set_focus();
+    // 重锤兜底（2026-10-09 实测）：City 插件打开后关窗再唤起，tao 的 show/set_focus
+    // 返回 Ok 但 NSWindow 不排到前台（CGWindowList onScreen=false）。直接走 AppKit：
+    // 应用级激活 + 反最小化 + makeKeyAndOrderFront——分别覆盖「后台应用无权切 Space」
+    // 「窗口处于最小化」「orderFront 被吞」三类静默失败。
+    #[cfg(target_os = "macos")]
+    {
+        #[allow(unexpected_cfgs, clippy::undocumented_unsafe_blocks)]
+        unsafe {
+            use objc::{msg_send, sel, sel_impl};
+            let ns_app: *mut objc::runtime::Object = msg_send![objc::class!(NSApplication), sharedApplication];
+            #[allow(clippy::upper_case_acronyms)]
+            const YES: u8 = 1;
+            let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+            if let Ok(handle) = window.ns_window() {
+                let ns_window = handle as *mut objc::runtime::Object;
+                let miniaturized: bool = msg_send![ns_window, isMiniaturized];
+                if miniaturized {
+                    let nil: *mut objc::runtime::Object = std::ptr::null_mut();
+                    let _: () = msg_send![ns_window, deminiaturize: nil];
+                }
+                let nil2: *mut objc::runtime::Object = std::ptr::null_mut();
+                let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil2];
+            }
+        }
+    }
+    agent_vitals_runtime::logging::log_info("workbench", &format!("show: show={shown:?} webview={webview_shown:?} focus={focused:?}"));
 }
 
 /// 信息行菜单 id → 工作台 tab 名。纯函数，单测钉住映射——切错 tab 的回归靠它挡。
@@ -3270,6 +3327,65 @@ fn fail_pricing_catalog_update(
     );
     write_pricing_catalog_status(data_home, status)?;
     Err(reason)
+}
+
+/// 「测试」板嵌入的 Claude IP 风险自检：webview 受 ATS 限制拿不到 ip-api 的
+/// http 明文接口（免费版才带 proxy/hosting 标记），由本进程代取一次公开 geo
+/// 情报。仅对公共目录发 GET、查询对象就是待检 IP 本身，不携带任何本地数据；
+/// 无缓存、无持久化、失败即向调用方报错（页面自行降级到 HTTPS 数据源）。
+fn ip_check_intel_arg_is_ip(ip: &str) -> bool {
+    let ip = ip.trim();
+    if ip.is_empty() || ip.len() > 45 {
+        return false;
+    }
+    let v4: Vec<&str> = ip.split('.').collect();
+    if v4.len() == 4 {
+        return v4.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 3
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && part.parse::<u8>().is_ok()
+        });
+    }
+    // IPv6：十六进制冒号，允许 IPv4 尾段（ip-api 接受该写法）
+    ip.contains(':') && ip.bytes().all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+}
+
+#[tauri::command]
+async fn ip_check_intel(ip: String) -> Result<Value, String> {
+    if !ip_check_intel_arg_is_ip(&ip) {
+        return Err("invalid ip".into());
+    }
+    let url = format!(
+        "http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,isp,org,as,asname,mobile,proxy,hosting,query"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("agent-vitals-ip-check/1")
+        .build()
+        .map_err(|e| format!("create ip intel client failed: {e}"))?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("ip intel request failed: {e}"))?;
+    let code = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("ip intel decode failed: {e}"))?;
+    if !code.is_success() {
+        return Err(format!("ip intel http {code}"));
+    }
+    if body.get("status").and_then(Value::as_str) != Some("success") {
+        return Err(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("ip intel rejected")
+                .to_string(),
+        );
+    }
+    Ok(body)
 }
 
 #[tauri::command(async)]
@@ -5587,8 +5703,7 @@ fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use objc::{msg_send, sel, sel_impl};
-        let window = app
-            .get_webview_window("workbench")
+        let (window, _) = crate::workbench_parts(&app)
             .ok_or_else(|| "工作台窗口未打开".to_string())?;
         let ns_window = window.ns_window().map_err(|e| e.to_string())? as *mut objc::runtime::Object;
         if ns_window.is_null() {
@@ -5649,16 +5764,20 @@ pub fn run() {
         // Skill 体检 tab 的扫描缓存 + 取消把手（store.rs SkillsScanState 注释）。
         .manage(store::SkillsScanState::new())
         .on_window_event(|window, event| {
+            if let WindowEvent::Destroyed = event {
+                agent_vitals_runtime::logging::log_warn("workbench", &format!("window destroyed: {}", window.label()));
+            }
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
             // 当前 tab/月/分页游标都在，再开就是上次的样子。
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "workbench" {
                     api.prevent_close();
+                    agent_vitals_runtime::logging::log_info("workbench", "close-requested -> hide");
                     let _ = window.hide();
-                    // 窗口隐藏 = 回到纯菜单栏形态：撤掉程序坞图标（与 show_workbench
-                    // 的 Regular 切换成对；见 AGENTS.md 启动期 Accessory 纪律）。
-                    let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    // 关窗 = 撤 Dock 图标（用户理想形态：无窗口时回到纯菜单栏，
+                    // 经菜单栏唤起）。真根因（webview 门槛/wedge）已修，双向安全。
+                    let _ = window.app_handle().set_dock_visibility(false);
                 }
             }
         })
@@ -5715,6 +5834,7 @@ pub fn run() {
             restore_authority_backup,
             export_diagnostic_package,
             about_diagnostics,
+            ip_check_intel,
             check_for_updates,
             open_trusted_releases_page,
             budget_config,
@@ -5838,9 +5958,8 @@ pub fn run() {
             // setActivationPolicy(Regular) 把 plist 值盖掉（2026-09-14：删掉这行改用
             // plist 后，release 包 open 起来鸟头落进 Dock、状态栏项不出现）。
             // skipTaskbar/visible:false 只藏窗口，藏不住进程的 Dock 图标。
-            // 2026-10-09 起策略动态化：show_workbench 切 Regular（工作台可见期间有
-            // Dock 图标/⌘Tab/菜单栏），CloseRequested 隐藏后切回 Accessory——本行只是
-            // 启动基线，运行时切换以那一对函数为准。
+            // 2026-10-09 起：首次唤起工作台时 Dock 图标单向出现（会话内不隐藏，
+            // 点图标走 Reopen 重开）；逆向 Transform 会间歇性卡死再唤起，不做。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),
@@ -5901,8 +6020,20 @@ pub fn run() {
             warm_authority_db(app.handle());
             Ok(())
         })
-        .run(context)
-        .expect("error while running agent-vitals menubar");
+        .build(context)
+        .expect("error while building agent-vitals menubar")
+        .run(|app, event| {
+            // 点 Dock 图标重开工作台（应用常驻 Dock 后，这是与菜单栏入口并列的唤起路径）。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                agent_vitals_runtime::logging::log_info("workbench", "dock reopen event");
+                show_workbench(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, event);
+            }
+        });
 }
 
 #[cfg(test)]

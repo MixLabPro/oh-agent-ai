@@ -17,10 +17,8 @@ const KEY_MAP: Record<string, keyof FlightInputState> = {
 };
 
 export type FlightInputOptions = {
-  /** 游戏画布当前是否持有焦点（飞行键进入状态的唯一门槛）。 */
+  /** 游戏画布当前是否持有焦点（飞行键进入状态与吞默认行为的唯一门槛）。 */
   isGameFocused: () => boolean;
-  /** 方向键是否应消费默认行为（画布聚焦且模拟运行时才为 true）。 */
-  shouldConsumeArrows: () => boolean;
   /** 焦点丢失/宿主隐藏：清空按键后回调（会话层据此 pause）。 */
   onInterrupt: (reason: Extract<GamePauseReason, "focus-lost" | "host-hidden">) => void;
 };
@@ -66,11 +64,11 @@ export class FlightInput {
     if (!mapped) return;
     if (this.isTypingTarget(event.target) || event.isComposing || event.repeat) return;
     const focused = this.options.isGameFocused();
-    if ((event.code === "ArrowUp" || event.code === "ArrowDown") && focused && this.options.shouldConsumeArrows()) {
-      event.preventDefault();
-    }
     // 画布未聚焦：按键不进入飞行状态（也不吞默认行为，让宿主/其他控件正常工作）。
     if (!focused) return;
+    // 游戏键在画布聚焦时吞掉默认行为：方向键防滚动、WASD 防浏览器快捷行为，
+    // 同时切断输入法在残留可编辑焦点上起组合的通路（画布不可编辑，无组合目标）。
+    event.preventDefault();
     this.state[mapped] = true;
   };
 

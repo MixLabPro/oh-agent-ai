@@ -463,7 +463,10 @@ function makeBodyTexture(): THREE.Texture {
 }
 
 export class FlightVisuals {
+  /** 飞机本体（随 sim 移动）。 */
   readonly group = new THREE.Group();
+  /** 场景根（不移动）：环等世界坐标固定对象挂这里，不继承飞机位移。 */
+  readonly sceneRoot = new THREE.Group();
   private readonly params: FlightParams;
   private readonly propeller: THREE.Mesh;
   private readonly rudder: THREE.Mesh;
@@ -685,7 +688,10 @@ export class FlightVisuals {
     this.flash.intensity = 5;
   }
 
-  /** 生成/替换路线圆环（一次创建，重试复用；实例化渲染）。 */
+  /** 生成/替换路线圆环（一次创建，重试复用；实例化渲染）。
+   *  环必须挂在**不动**的 sceneRoot 上——挂在 this.group 上会继承飞机位移
+   *  （group.position=飞机位置），环的世界坐标叠加偏移后跟着飞机跑
+   *  （2026-10-09 用户实测「环跟着镜头走」）。 */
   setRings(rings: CourseRing[]): void {
     this.clearRings();
     const geometry = new THREE.TorusGeometry(1, 0.07, 8, 40);
@@ -695,7 +701,7 @@ export class FlightVisuals {
     mesh.frustumCulled = false; // 实例包围球不随矩阵更新，禁用裁剪避免整组消失
     this.ringMesh = mesh;
     this.ringData = rings;
-    this.group.add(mesh);
+    this.sceneRoot.add(mesh);
     this.updateRings(0, 0);
   }
 
@@ -731,6 +737,7 @@ export class FlightVisuals {
 
   dispose(): void {
     this.group.removeFromParent();
+    this.sceneRoot.removeFromParent();
     this.clearRings();
     for (const disposable of this.disposables) disposable.dispose();
     this.flash.dispose();
