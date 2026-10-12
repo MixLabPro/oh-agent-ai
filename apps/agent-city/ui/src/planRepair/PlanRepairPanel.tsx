@@ -12,6 +12,7 @@ const TOOLS: Array<{ id: RepairTool; label: string; key: string; hint: string }>
   { id: "build", label: "移动", key: "V", hint: "点选任意建筑，再点空地搬过去：会话楼搬到你选的地块，设施、地标、市政用地搬到任意空地" },
   { id: "draw", label: "画路", key: "R", hint: "点两下画一段路，可连续画" },
   { id: "erase", label: "橡皮擦", key: "E", hint: "点击红色高亮的路段擦掉" },
+  { id: "restyle", label: "改路", key: "T", hint: "选路型后点一条路：整条街改成这个路型" },
   { id: "node", label: "路口", key: "N", hint: "点一个路口拿起来，再点一下放下：连着的路跟着走" },
   { id: "site", label: "设施", key: "S", hint: "编辑非会话建筑：公共设施、花园、地标、市政用地、背景楼——搬家或拆除" },
 ];
@@ -61,8 +62,8 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
         {tool.label}<kbd>{tool.key}</kbd>
       </button>)}
     </div>
-    {state.tool === "draw" && <div className="city-repair-widths" role="radiogroup" aria-label="路型">
-      {ROAD_TYPES.map((type) => <button key={type.id} role="radio" aria-checked={state.roadType === type.id} title={type.hint} className={state.roadType === type.id ? "is-active" : ""} onClick={() => repair.setRoadType(type.id)}>{type.label}</button>)}
+    {(state.tool === "draw" || state.tool === "restyle") && <div className="city-repair-widths" role="radiogroup" aria-label="路型">
+      {ROAD_TYPES.filter((type) => state.tool === "draw" || type.id !== "viaduct").map((type) => <button key={type.id} role="radio" aria-checked={state.roadType === type.id} title={type.hint} className={state.roadType === type.id ? "is-active" : ""} onClick={() => repair.setRoadType(type.id)}>{type.label}</button>)}
     </div>}
     {state.tool === "draw" && state.roadType === "viaduct" && state.viaduct.length > 0 && <div className="city-repair-site">
       <span>高架已点 {state.viaduct.length} 个点</span>

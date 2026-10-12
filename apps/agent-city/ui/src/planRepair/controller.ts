@@ -21,18 +21,22 @@ import type { RepairRay } from "../engine/CityEngine";
 import type { SiteInfo, SiteTarget } from "../engine/planSites";
 import type { EditResult, ImpactPreview, NodeHandle, PlacementGhost, PlanRect, RepairCandidate, RoadPreview, RoadPurpose, SiteEditResult } from "./session";
 
-export type RepairTool = "build" | "draw" | "erase" | "site" | "node";
+export type RepairTool = "build" | "draw" | "erase" | "restyle" | "site" | "node";
 /** 画路的路型：地面路三档宽度 + 滨海大道 + 高架。 */
 export type RoadType = "local" | "secondary" | "main" | "waterfront" | "viaduct";
 export const ROAD_SPEC: Record<Exclude<RoadType, "viaduct">, { width: number; purpose?: RoadPurpose }> = {
   local: { width: 5 }, secondary: { width: 8 }, main: { width: 12 }, waterfront: { width: 12, purpose: "waterfront" },
 };
 
+const ROAD_TYPE_LABEL: Record<RoadType, string> = { local: "小路", secondary: "次干道", main: "主干道", waterfront: "滨海大道", viaduct: "高架" };
+
 export type RepairMessage = { kind: "hint" | "ok" | "warn" | "error"; text: string };
 
 /** 悬停预览（叠加层据此画色带/标记）。reason 非空时面板在消息下方显示。 */
 export type RepairPreview =
   | { kind: "erase"; points: Vec2[]; width: number; ok: boolean; reason: string | null; warning: string | null }
+  /** 改路型：鼠标下那条路的一整段（按目标宽度画）。 */
+  | { kind: "restyle"; edges: Array<{ points: Vec2[]; width: number }>; ok: boolean; reason: string | null; warning: string | null; impact: ImpactPreview | null; waterfront: boolean }
   | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; warning: string | null; snap: SnapPoint; impact: ImpactPreview | null; /** 实际铺成的折线（拐角倒圆）；null = 直线 from→to */ path: Vec2[] | null; waterfront: boolean }
   /** 高架：已点下的点 + 鼠标位置。 */
   | { kind: "viaduct"; points: Vec2[]; ok: boolean; reason: string | null; warning: string | null; impact: ImpactPreview | null }
@@ -88,6 +92,9 @@ export type RepairDeps = {
   cutHighway(x: number, z: number): EditResult;
   highwayEndAt(x: number, z: number): Vec2 | null;
   validateDrop(edgeId: string): RoadVerdict;
+  /** 改路型（路线图 P1-4）：鼠标下那条路的一整段 + 改成目标路型的校验；变宽且 exact 时含推土机试算。 */
+  restyleAt(x: number, z: number, width: number, purpose?: RoadPurpose, exact?: boolean): { edges: Array<{ points: Vec2[]; width: number }>; verdict: RoadPreview } | null;
+  restyleRoad(edgeId: string, width: number, purpose?: RoadPurpose): EditResult;
   dropEdge(edgeId: string): EditResult;
   dropEdges(edgeIds: readonly string[]): EditResult;
   // 路口
@@ -131,7 +138,9 @@ const BLOCKER_TEXT: Record<string, string> = {
   "edge-too-short": "太短了（至少 6）",
   "edge-too-long": "太长了（最多 800）",
   "isolated-road": "新路必须接到现有道路上",
-  "road-in-water": "不能修到水面或岩岸上",
+  "road-in-water": "不能修到水面或岩岸上（起点或终点在水里，或一笔要跨两段水——地面桥一笔只跨一段水面）",
+  "bridge-too-long": "水面太宽，地面桥最长 160——请改用高架",
+  "junction-on-bridge": "桥上不能有路口：新路会在水面上和别的路交叉",
   "road-over-building": "会穿过建筑、配套或花园",
   "crosses-road": "与现有道路交叉——请在交叉点连接",
   "acute-junction": "路口夹角太小（小于 30°）",
@@ -145,6 +154,7 @@ const BLOCKER_TEXT: Record<string, string> = {
   // 设施
   "target-occupied": "目标已被占用（会话楼、配套、花园或背景楼）",
   "site-over-road": "会压到道路上",
+  "does-not-fit": "这块街区的真实形状装不下它（会越出街区边界或压到街区里的空地/水塘）",
   "missing-target": "这里没有可落位的街区或地块",
   "viaduct-too-short": "高架太短（至少 30）",
   "viaduct-end-in-water": "匝道落地点在水里——高架两端要落在陆地上，或接到已有高架上",
@@ -168,6 +178,9 @@ const WARNING_TEXT: Record<string, string> = {
   "joins-viaduct": "将接上已有高架（接缝处不落地）",
   "cuts-viaduct": "高架会断成两条，断口各自落地成匝道",
   "far-from-coast": "离海岸较远——滨海景观带会铺在离海近的一侧",
+  "drops-waterfront": "改掉的是滨海路——沿路的滨海景观带会撤掉",
+  "narrows-arterial": "主干道会变窄",
+  "bridge-under-viaduct": "桥的上方有高架（净空请自己看一眼）",
 };
 /** 带数量的提示码（`code:N`）。 */
 const COUNTED_TEXT: Record<string, (n: number) => string> = {
@@ -179,6 +192,7 @@ const COUNTED_TEXT: Record<string, (n: number) => string> = {
   homeless: (n) => `${n} 栋会话楼附近没有空地块，仍压在路上`,
   "homeless-risk": (n) => `${n} 栋会话楼附近没有空地块，会留在路上`,
   "access-road": (n) => `在新位置补了一条 ${n} 长的接入路`,
+  bridge: (n) => `水面段将架成一座 ${n} 长的桥`,
 };
 
 export const blockerText = (code: string): string => (code.startsWith("patch-tier-") ? BLOCKER_TEXT["tier-changed"] : BLOCKER_TEXT[code] ?? code);
@@ -198,6 +212,7 @@ const HINT: Record<RepairTool, RepairMessage> = {
   build: { kind: "hint", text: "点选任意建筑（会话楼、设施、地标、市政用地），再点要搬去的空地" },
   draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，拐弯自动倒圆，Esc 结束" },
   erase: { kind: "hint", text: "把橡皮擦移到道路上，红色高亮的路段点击即擦掉" },
+  restyle: { kind: "hint", text: "先选路型，再把鼠标移到路上：整条街高亮，点一下就改成这个路型（变宽会推平/安置两侧的楼；桥面不能改）" },
   site: { kind: "hint", text: "点选任意非会话建筑（公共设施、花园、地标、市政用地、背景楼）；再点空地搬家，或点「拆除」" },
   node: { kind: "hint", text: "点一个路口拿起来，移动鼠标预览，再点一下放下；Esc 放回原处" },
 };
@@ -392,6 +407,16 @@ export class RepairController {
       this.set({ preview: { kind: "erase", points: edge.points, width: edge.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings) } });
       return;
     }
+    if (tool === "restyle") {
+      if (roadType === "viaduct") { if (this.state.preview) this.set({ preview: null }); return; }
+      const spec = ROAD_SPEC[roadType];
+      const hit = this.deps.restyleAt(ground.x, ground.z, spec.width, spec.purpose, this.settled);
+      if (!hit) { this.set({ preview: null }); return; }
+      const { verdict } = hit;
+      const unchanged = verdict.blockers.includes("unchanged");
+      this.set({ preview: { kind: "restyle", edges: hit.edges, ok: verdict.blockers.length === 0, reason: unchanged ? "这条路已经是这个路型了" : reasonOf(verdict.blockers), warning: noteOfVerdict(verdict), impact: verdict.impact ?? null, waterfront: spec.purpose === "waterfront" } });
+      return;
+    }
     if (roadType === "viaduct") {
       const at = this.deps.highwayEndAt(ground.x, ground.z) ?? ground;
       const points = [...this.state.viaduct, at];
@@ -421,6 +446,7 @@ export class RepairController {
     if (this.state.tool === "site") { this.clickSite(click); return; }
     if (this.state.tool === "draw") { this.clickDraw(click.ground); return; }
     if (this.state.tool === "erase") { this.clickErase(click.ground); return; }
+    if (this.state.tool === "restyle") { this.clickRestyle(click.ground); return; }
     this.clickBuild(click);
   }
 
@@ -586,6 +612,24 @@ export class RepairController {
     }
     const warnings = result.warnings.map(warningText);
     this.set({ message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已擦掉一段路（${warnings.join("；")}）` : "已擦掉一段路" } });
+    this.recomputePreview();
+  }
+
+  private clickRestyle(ground: Vec2 | null): void {
+    if (!ground) return;
+    this.lastGround = ground;
+    if (this.state.roadType === "viaduct") { this.set({ message: { kind: "warn", text: "高架不是地面路的路型：改路请选小路、次干道、主干道或滨海大道" } }); return; }
+    const edge = this.deps.edgeAt(ground.x, ground.z);
+    if (!edge) { this.set({ message: { kind: "warn", text: "这里没有道路" } }); return; }
+    const spec = ROAD_SPEC[this.state.roadType];
+    const result = this.deps.restyleRoad(edge.id, spec.width, spec.purpose);
+    if (!result.ok) {
+      this.set({ message: { kind: "error", text: result.blockers?.includes("unchanged") ? "这条路已经是这个路型了" : failText("不能改", result) } });
+      return;
+    }
+    const warnings = result.warnings.map(warningText);
+    const label = ROAD_TYPE_LABEL[this.state.roadType];
+    this.set({ message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已改成${label}（${warnings.join("；")}）` : `已改成${label}` } });
     this.recomputePreview();
   }
 

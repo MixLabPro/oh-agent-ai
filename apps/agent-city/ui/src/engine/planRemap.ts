@@ -63,6 +63,21 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
       next = appendRoadOp(next, { t: "add", from: scale(op.from), to: scale(op.to), width: op.width, ...(op.purpose ? { purpose: op.purpose } : {}) }, next.updatedAt); touched();
       return;
     }
+    if (op.t === "restyle") {
+      // 与 drop 同法找新档里对应的路段；路型是目标状态，原样带过去。
+      const anchor = op.anchor ?? parseEdgeMid(op.edge);
+      if (!anchor) { fail("road-restyle", label, `路段 ${op.edge} 没有位置信息，无法重定位`); return; }
+      const p = scale(anchor);
+      let best: { id: string; d: number; mid: Vec2 } | null = null;
+      for (const edge of view().roadEdges) {
+        if (edgeLocked(edge)) continue;
+        const hit = nearestOnPolyline(p, edge.points);
+        if (hit.distance <= MATCH_RADIUS && (!best || hit.distance < best.d)) best = { id: edge.id, d: hit.distance, mid: hit.point };
+      }
+      if (!best) { fail("road-restyle", label, "新档里这附近没有对应的路"); return; }
+      next = appendRoadOp(next, { t: "restyle", edge: best.id, width: op.width, ...(op.purpose ? { purpose: op.purpose } : {}), anchor: quantize(best.mid) }, next.updatedAt); touched();
+      return;
+    }
     if (op.t === "drop") {
       const anchor = op.anchor ?? parseEdgeMid(op.edge);
       if (!anchor) { fail("road-drop", label, `路段 ${op.edge} 没有位置信息，无法重定位`); return; }

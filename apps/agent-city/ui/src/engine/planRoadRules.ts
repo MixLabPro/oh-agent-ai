@@ -15,9 +15,10 @@
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
 import { buildingRect, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
+import { wetSpan } from "./planGeometry";
 import { polygonDistance, roadNodeId } from "./cityPlan";
 import { listSites, siteBox } from "./planSites";
-import { frontEntrance } from "./planFootprint";
+import { frontEntrance, segmentPolygonDistance, worldOverhead, type Polygon } from "./planFootprint";
 
 export type RoadVerdict = { blockers: string[]; warnings: string[] };
 
@@ -59,8 +60,9 @@ function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boole
 }
 
 /** 路会压到的对象：会话楼（只能被安置，不能被拆）与设施（可推平；锁定的不能动）。 */
-/** door：自由级设施的正门（模型占地 +z 面中点 + 朝外方向）。 */
-export type Obstacle = { kind: "session" | "site"; id: string; rect: BuildingRect; locked: boolean; door?: { at: Vec2; outward: Vec2 } };
+/** door：自由级设施的正门（模型占地 +z 面中点 + 朝外方向）。shape：有真实占地的自由级设施的俯视投影——rect 只是它的包围盒，
+ *  摩天轮（平台 + 横着的转盘窄条）、凯旋门的包围盒四角是空地，路擦过空角不算压到。 */
+export type Obstacle = { kind: "session" | "site"; id: string; rect: BuildingRect; locked: boolean; door?: { at: Vec2; outward: Vec2 }; shape?: Polygon[] };
 const obstacleCache = new WeakMap<CityLayout, { model: CityModel; obstacles: Obstacle[] }>();
 
 /** 悬停预览每次鼠标移动都要评估，障碍按（布局, 模型）缓存——布局不可变，缓存随布局对象一起回收。 */
@@ -73,7 +75,9 @@ function obstacles(layout: CityLayout, model: CityModel): Obstacle[] {
     const building = buildings.get(id);
     if (building) out.push({ kind: "session", id, rect: buildingRect(building, slot), locked: false });
   }
-  for (const site of listSites(layout)) out.push({ kind: "site", id: site.id, rect: siteBox(site), locked: !!site.locked, ...(site.footprint ? { door: frontEntrance(site.footprint, site, site.yaw) } : {}) });
+  for (const site of listSites(layout)) out.push({ kind: "site", id: site.id, rect: siteBox(site), locked: !!site.locked,
+    ...(site.footprint ? { door: frontEntrance(site.footprint, site, site.yaw) } : {}),
+    ...(site.footprint?.exact ? { shape: worldOverhead(site.footprint, site, site.yaw) } : {}) });
   obstacleCache.set(layout, { model, obstacles: out });
   return out;
 }
@@ -84,12 +88,22 @@ function hitsBy(edge: RoadEdge, list: readonly Obstacle[]): Set<number> {
   list.forEach((item, index) => {
     if (distanceToPolyline(item.rect, edge.points) > 60 + Math.hypot(item.rect.width, item.rect.depth) / 2) return;
     if (rectClearOfEdges(item.rect, [edge], 0.5)) return;
+    if (item.shape && !touchesShape(edge, item.shape)) return;
     // 一端落在设施正门、另一端朝门外：这是接到门口的路（接入路），不是压到设施。曾把它算作压到——
     // 推土机会把接入路服务的那座设施自己推平（verify-plan-bulldozer (f) 抓到）。
     if (item.door && servesDoor(edge, item.door, item.rect)) return;
     hit.add(index);
   });
   return hit;
+}
+
+/** 路带（半宽 + 0.5，同 rectClearOfEdges 的余量）是否碰到俯视投影的某一块。 */
+function touchesShape(edge: RoadEdge, shape: readonly Polygon[]): boolean {
+  const reach = edge.width / 2 + 0.5;
+  for (let i = 1; i < edge.points.length; i += 1) {
+    if (shape.some((part) => segmentPolygonDistance(edge.points[i - 1], edge.points[i], part) < reach)) return true;
+  }
+  return edge.points.length === 1 && shape.some((part) => segmentPolygonDistance(edge.points[0], edge.points[0], part) < reach);
 }
 
 function servesDoor(edge: RoadEdge, door: { at: Vec2; outward: Vec2 }, rect: BuildingRect): boolean {
@@ -430,7 +444,18 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
   if (ea.kind === "free" || eb.kind === "free") warnings.push("creates-dead-end");
 
   const next: RoadEdge = { id: "new", from: "a", to: "b", width, kind: width >= 8 ? "arterial" : "local", points: [a, b], structure: "ground-road" };
-  if (badSamples(layout, next) > 0 || !layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z)) blockers.push("road-in-water");
+  // 地面桥（路线图 P1-5）：一笔恰好跨一段水、两端在陆地上、桥长 ≤ MAX_GROUND_BRIDGE → 水面段架成桥（重放时拆成 引道 + 桥面 + 引道，
+  // 同一个 wetSpan 判定）；端点在水里、连跨两段水 → 仍是 road-in-water；水面太宽 → bridge-too-long（请用高架）。
+  const span = wetSpan(layout, a, b);
+  if (!layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z)) blockers.push("road-in-water");
+  else if (span.kind === "invalid") blockers.push(span.reason === "bridge-too-long" ? "bridge-too-long" : "road-in-water");
+  else if (span.kind === "bridge") {
+    warnings.push(`bridge:${Math.round(span.length)}`);
+    // 桥上不能有路口（生成器同口径）：交点落在桥面段内就拦。
+    if (crossingPoints(layout, a, b).some((p) => nearestOnPolyline(p, [span.from, span.to]).distance < 0.5)) blockers.push("junction-on-bridge");
+    // 桥上方有高架：本期不算净空，提示用户自己看。
+    if ((layout.highways ?? []).some((run) => run.some((q, i) => i > 0 && !!segmentIntersection(run[i - 1], q, span.from, span.to)))) warnings.push("bridge-under-viaduct");
+  } else if (badSamples(layout, next) > 0) blockers.push("road-in-water");
   // ignoreSites：接入路从设施自己的门口起笔，路带必然擦到它自己——不算「压到设施」。
   const ignored = new Set<number>();
   if (ignoreSites.length) obstacles(layout, model).forEach((item, index) => { if (item.kind === "site" && ignoreSites.includes(item.id)) ignored.add(index); });
@@ -447,6 +472,65 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
     const existing = directionsAt(layout, end, at);
     if (existing.length + 1 < 3) continue;
     if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
+  }
+  return { blockers, warnings };
+}
+
+// ── 改路型（路线图 P1-4）──────────────────────────────────────────────────────
+
+/** 一条路的「一整段」上限（防御：环形路沿度 2 路口能一直走下去）。 */
+const MAX_RUN = 400;
+
+/**
+ * 从一段路出发，沿**度为 2** 的路口向两头走：下一段与它同宽、同用途、不是桥面就连上。走到岔路口、断头、换路型或桥为止。
+ * 用户改路型说的是「这条街」，不是两个路口之间的一小截——画路时一笔经过的自动路口、倒圆的拐点都是度 2 路口，会把一条街切成很多段。
+ * 返回路段 id，按沿路顺序；起点段不存在返回 []。
+ */
+export function roadRun(layout: CityLayout, edgeId: string): string[] {
+  const start = layout.roadEdges.find((edge) => edge.id === edgeId);
+  if (!start) return [];
+  const incident = new Map<string, RoadEdge[]>();
+  for (const edge of layout.roadEdges) for (const node of [edge.from, edge.to]) {
+    const list = incident.get(node); if (list) list.push(edge); else incident.set(node, [edge]);
+  }
+  const same = (edge: RoadEdge) => !edgeLocked(edge) && edge.width === start.width && edge.purpose === start.purpose;
+  const seen = new Set([start.id]);
+  const walk = (node: string, from: RoadEdge): string[] => {
+    const out: string[] = [];
+    let at = node; let prev = from;
+    while (out.length < MAX_RUN) {
+      const around = incident.get(at) ?? [];
+      if (around.length !== 2) break;
+      const next = around[0] === prev ? around[1] : around[0];
+      if (seen.has(next.id) || !same(next)) break;
+      seen.add(next.id); out.push(next.id);
+      at = next.from === at ? next.to : next.from; prev = next;
+    }
+    return out;
+  };
+  const back = walk(start.from, start); const ahead = walk(start.to, start);
+  return [...back.reverse(), start.id, ...ahead];
+}
+
+/**
+ * 改路型的校验：桥面拒绝；已经是这个路型拒绝（unchanged）；变宽压到的楼走推土机提示（与画路同一套）；
+ * 滨海大道离海远提示；把滨海路/主干道改成普通路提示（景观带随之撤掉 / 骨架变窄）——提示不拦。
+ */
+export function validateRestyle(layout: CityLayout, model: CityModel, edgeIds: readonly string[], width: number, purpose?: "waterfront"): RoadVerdict {
+  const blockers: string[] = []; const warnings: string[] = [];
+  const byId = new Map(layout.roadEdges.map((edge) => [edge.id, edge]));
+  const edges = edgeIds.map((id) => byId.get(id)).filter((edge): edge is RoadEdge => !!edge);
+  if (!edges.length) return { blockers: ["missing-edge"], warnings };
+  if (edges.some(edgeLocked)) return { blockers: ["locked-edge"], warnings };
+  const changing = edges.filter((edge) => edge.width !== width || edge.purpose !== purpose);
+  if (!changing.length) return { blockers: ["unchanged"], warnings };
+  const wider = changing.filter((edge) => width > edge.width).map((edge) => ({ ...edge, width }));
+  if (wider.length) applyImpact(roadImpact(layout, model, wider), blockers, warnings);
+  if (changing.some((edge) => edge.purpose === "waterfront") && purpose !== "waterfront") warnings.push("drops-waterfront");
+  if (changing.some((edge) => edge.width >= 8) && width < 8) warnings.push("narrows-arterial");
+  if (purpose === "waterfront" && layout.coast?.length) {
+    const mids = changing.map((edge) => edge.points[Math.floor(edge.points.length / 2)]);
+    if (mids.every((p) => Math.abs(polygonDistance(p, layout.coast!)) > FAR_FROM_COAST)) warnings.push("far-from-coast");
   }
   return { blockers, warnings };
 }

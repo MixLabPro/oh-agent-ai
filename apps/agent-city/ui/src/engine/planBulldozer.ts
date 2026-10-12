@@ -30,6 +30,9 @@ const SEARCH_RADIUS = 260;
 /** 编辑后新出现的路面几何：不在编辑前任一路段上的路段（被拆成两半的旧路不算新几何）。 */
 export function freshRoadGeometry(before: CityLayout, after: CityLayout): RoadEdge[] {
   const ids = new Set(before.roadEdges.map((edge) => edge.id));
+  // 改路型加宽的路段（同 id、变宽）：路带扫过的新地面也要推平/安置（路线图 P1-4）。
+  const widthOf = new Map(before.roadEdges.map((edge) => [edge.id, edge.width]));
+  const widened = after.roadEdges.filter((edge) => !edge.bridge && ids.has(edge.id) && edge.width > (widthOf.get(edge.id) ?? Infinity));
   const old = before.roadEdges.filter((edge) => !edge.bridge);
   const covered = (edge: RoadEdge) => {
     for (let i = 1; i < edge.points.length; i += 1) {
@@ -43,7 +46,7 @@ export function freshRoadGeometry(before: CityLayout, after: CityLayout): RoadEd
     }
     return true;
   };
-  return after.roadEdges.filter((edge) => !edge.bridge && !ids.has(edge.id) && !covered(edge));
+  return [...after.roadEdges.filter((edge) => !edge.bridge && !ids.has(edge.id) && !covered(edge)), ...widened];
 }
 
 /** 编辑后新出现的高架段（不在编辑前任一高架上），按桥面净空当「路段」用（SPEC §17.2：高架下不能有楼）。 */

@@ -694,4 +694,42 @@ function harness(overrides = {}) {
   assert.equal(controller.snapshot.siteTurn, 0, "block-level sites do not rotate");
 }
 
-console.log("City plan repair controller: free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (y) 改路工具（路线图 P1-4）：按当前路型改一整段路；悬停按目标宽度画整段、变宽给推土机试算；已是该路型/桥面说明理由；高架不是改路的路型。
+{
+  const { controller, deps } = harness();
+  const calls = [];
+  deps.restyleAt = (x, z, width, purpose, exact) => {
+    calls.push(["hover", width, purpose, exact]);
+    if (Math.abs(z) >= 4) return null;
+    if (z < -1) return { edges: [{ points: [{ x: 0, z: 0 }, { x: 100, z: 0 }], width: 12 }], verdict: { blockers: ["locked-edge"], warnings: [] } };
+    return { edges: [{ points: [{ x: 0, z: 0 }, { x: 50, z: 0 }], width }, { points: [{ x: 50, z: 0 }, { x: 100, z: 0 }], width }], verdict: width === 5 ? { blockers: ["unchanged"], warnings: [] } : { blockers: [], warnings: ["relocate:2"], impact: { bulldozed: [], relocated: [], homeless: [] } } };
+  };
+  deps.restyleRoad = (id, width, purpose) => { calls.push(["restyle", id, width, purpose]); return width === 5 ? { ok: false, reason: "blocked", blockers: ["unchanged"] } : { ok: true, patch: {}, warnings: ["relocate:2"] }; };
+  controller.enter(); controller.setTool("restyle");
+  assert.match(controller.snapshot.message.text, /先选路型/);
+  controller.setRoadType("main");
+  controller.hover({ x: 30, z: 1 });
+  const preview = controller.snapshot.preview;
+  assert.equal(preview.kind, "restyle"); assert.equal(preview.edges.length, 2, "the whole run is highlighted");
+  assert.ok(preview.ok && preview.edges.every((e) => e.width === 12) && /安置 2 栋/.test(preview.warning), "…at the target width, with the bulldozer note");
+  controller.click({ pickedId: null, ground: { x: 30, z: 1 } });
+  const lastRestyle = () => calls.filter((c) => c[0] === "restyle").at(-1);
+  assert.deepEqual(lastRestyle(), ["restyle", "e1", 12, undefined]);
+  assert.match(controller.snapshot.message.text, /已改成主干道（.*安置 2 栋/);
+  controller.setRoadType("waterfront");
+  controller.click({ pickedId: null, ground: { x: 30, z: 1 } });
+  assert.deepEqual(lastRestyle(), ["restyle", "e1", 12, "waterfront"], "waterfront passes its purpose");
+  controller.setRoadType("local");
+  controller.hover({ x: 60, z: 2 });
+  assert.equal(controller.snapshot.preview.reason, "这条路已经是这个路型了");
+  controller.click({ pickedId: null, ground: { x: 60, z: 2 } });
+  assert.equal(controller.snapshot.message.text, "这条路已经是这个路型了");
+  controller.hover({ x: 30, z: -2 });
+  assert.equal(controller.snapshot.preview.ok, false); assert.match(controller.snapshot.preview.reason, /桥面/);
+  controller.setRoadType("viaduct");
+  assert.equal(controller.snapshot.preview, null, "a viaduct is not a ground-road style");
+  controller.click({ pickedId: null, ground: { x: 30, z: 1 } });
+  assert.match(controller.snapshot.message.text, /高架不是地面路的路型/);
+}
+
+console.log("City plan repair controller: the restyle tool changes a whole run to the chosen road type (target-width preview, bulldozer note, unchanged/locked explained, no viaduct); free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");

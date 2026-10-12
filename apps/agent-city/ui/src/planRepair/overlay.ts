@@ -9,11 +9,16 @@ import * as THREE from "three";
 export type OverlayParcel = { x: number; y: number; z: number; yaw: number; width: number; depth: number };
 export type OverlayRibbon = { points: ReadonlyArray<{ x: number; z: number }>; width: number; tone: "erase" | "erase-blocked" | "draw" | "draw-warn" | "draw-blocked" | "link" };
 export type OverlayMarker = { x: number; z: number; tone: "start" | "snap" | "snap-blocked" };
+/** 世界坐标的凸多边形（点序首尾相接）。 */
+export type OverlayPolygon = ReadonlyArray<{ x: number; z: number }>;
 /**
  * 占地标记，贴地方块（round = 圆形占地按外接圆画）比占地略大一圈：
  * 悬停（黄）/ 选中（青）/ 落位试算能放（绿）不能放（红）/ 将被推平（红）/ 将被安置的会话楼原址与新家（琥珀）/ 无处安置（深红）。
+ * shape：有真实占地的自由级设施按多边形画，不画包围盒——ground（落地实体）实填，overhead 里超出地面的部分
+ * （悬挑、摩天轮转盘）淡填 + 虚线描边（planFootprint 两层投影）。
  */
 export type OverlaySiteMark = { x: number; y: number; z: number; yaw: number; width: number; depth: number; round?: boolean;
+  shape?: { ground: readonly OverlayPolygon[]; overhead: readonly OverlayPolygon[] };
   tone: "hover" | "selected" | "ghost-ok" | "ghost-bad" | "doomed" | "relocate-from" | "relocate-to" | "homeless" };
 
 const COLORS = {
@@ -49,6 +54,9 @@ export class ParcelOverlay {
   private readonly ring = new THREE.RingGeometry(0.55, 1, 28);
   private readonly disc = new THREE.CircleGeometry(0.5, 40);
   private readonly materials = new Map<number, THREE.MeshBasicMaterial>();
+  private readonly dashes = new Map<number, THREE.LineDashedMaterial>();
+  /** 多边形标记每次重建的几何（换标记时释放）。 */
+  private markGeometries: THREE.BufferGeometry[] = [];
 
   constructor() {
     this.group.name = "city-plan-repair-overlay";
@@ -84,11 +92,59 @@ export class ParcelOverlay {
     for (const parcel of parcels) this.parcels.add(this.flat(this.plane, material, parcel.x, parcel.y + 0.45, parcel.z, parcel.yaw, parcel.width, parcel.depth));
   }
 
+  private dashed(color: number): THREE.LineDashedMaterial {
+    let material = this.dashes.get(color);
+    if (!material) {
+      material = new THREE.LineDashedMaterial({ color, dashSize: 1.6, gapSize: 1.1, transparent: true, opacity: 0.95, depthWrite: false, depthTest: false, toneMapped: false });
+      this.dashes.set(color, material);
+    }
+    return material;
+  }
+
+  /** 凸多边形扇形三角化成贴地网格（世界坐标直接进顶点，不经 flat 的缩放旋转）。 */
+  private polygonMesh(polygons: readonly OverlayPolygon[], y: number, material: THREE.Material): THREE.Mesh {
+    const positions: number[] = [];
+    for (const poly of polygons) for (let i = 1; i + 1 < poly.length; i += 1) {
+      for (const p of [poly[0], poly[i], poly[i + 1]]) positions.push(p.x, y, p.z);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    this.markGeometries.push(geometry);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 30; mesh.raycast = noRaycast;
+    return mesh;
+  }
+
+  private polygonOutline(polygons: readonly OverlayPolygon[], y: number, material: THREE.LineDashedMaterial): THREE.LineSegments {
+    const positions: number[] = [];
+    for (const poly of polygons) for (let i = 0; i < poly.length; i += 1) {
+      const a = poly[i]; const b = poly[(i + 1) % poly.length];
+      positions.push(a.x, y, a.z, b.x, y, b.z);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    this.markGeometries.push(geometry);
+    const lines = new THREE.LineSegments(geometry, material);
+    lines.computeLineDistances();
+    lines.renderOrder = 31; lines.raycast = noRaycast;
+    return lines;
+  }
+
   setSiteMarks(marks: readonly OverlaySiteMark[]): void {
     this.siteMarks.clear();
+    for (const geometry of this.markGeometries) geometry.dispose();
+    this.markGeometries = [];
     // 设施标记铺在建筑占地里，会被建筑自己挡住：关深度测试，让轮廓透出来（高楼/大商场也看得见选中了谁）。
     for (const mark of marks) {
       const material = this.material(COLORS[mark.tone], MARK_OPACITY[mark.tone], false);
+      if (mark.shape) {
+        // 地面占地实填；俯视投影里超出地面的部分（悬挑、转盘）淡填 + 虚线框住整个俯视投影。
+        const extra = mark.shape.overhead.slice(mark.shape.ground.length);
+        if (extra.length) this.siteMarks.add(this.polygonMesh(extra, mark.y + 0.55, this.material(COLORS[mark.tone], MARK_OPACITY[mark.tone] * 0.35, false)));
+        this.siteMarks.add(this.polygonMesh(mark.shape.ground, mark.y + 0.6, material));
+        if (extra.length) this.siteMarks.add(this.polygonOutline(mark.shape.overhead, mark.y + 0.65, this.dashed(COLORS[mark.tone])));
+        continue;
+      }
       const rect = mark.round
         ? this.flat(this.disc, material, mark.x, mark.y + 0.6, mark.z, 0, mark.width + 3, mark.width + 3)
         : this.flat(this.plane, material, mark.x, mark.y + 0.6, mark.z, mark.yaw, mark.width + 3, mark.depth + 3);
@@ -122,5 +178,9 @@ export class ParcelOverlay {
     this.plane.dispose(); this.ring.dispose(); this.disc.dispose();
     for (const material of this.materials.values()) material.dispose();
     this.materials.clear();
+    for (const material of this.dashes.values()) material.dispose();
+    this.dashes.clear();
+    for (const geometry of this.markGeometries) geometry.dispose();
+    this.markGeometries = [];
   }
 }

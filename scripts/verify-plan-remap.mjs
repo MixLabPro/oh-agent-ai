@@ -74,6 +74,19 @@ const model = { windowStartMs: 0, windowEndMs: 1, windowLabel: "t", generatedAt:
   assert.deepEqual(back.report.failed, []); assert.equal(back.patch.roadOps[1].edge, "0:100/100:100", "remapping back down returns to the original objects");
 }
 
+// (a2) 改路型（路线图 P1-4）：与删路同法找对应路段，路型原样带过去。
+{
+  const t1 = makeLayout(1, 1); const t2 = makeLayout(1.5, 2);
+  const p = k.appendRoadOp({ ...k.emptyPlanPatch(7, 1), islandRadius: 400 }, { t: "restyle", edge: "0:100/100:100", width: 12, purpose: "waterfront", anchor: { x: 50, z: 100 } }, 1);
+  assert.equal(k.applyPlanPatch(t1, p).stale.length, 0);
+  const { patch, report } = k.remapPlanPatch(t2, model, p);
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(patch.roadOps[0], { t: "restyle", edge: "0:150/150:150", width: 12, purpose: "waterfront", anchor: { x: 75, z: 150 } }, "a restyled edge maps to its scaled counterpart and keeps its target style");
+  const replayed = k.applyPlanPatch(t2, patch);
+  assert.equal(replayed.stale.length, 0);
+  assert.equal(replayed.layout.roadEdges.find((e) => e.id === "0:150/150:150").purpose, "waterfront");
+}
+
 // (b) 旧补丁：没有锚点、没有岛半径。
 {
   const t2 = makeLayout(Math.SQRT2, 2); // 旧补丁的回退比例 √(2/1)

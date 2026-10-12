@@ -11,11 +11,11 @@ import { auditLayout, type PlanIssue } from "../engine/planAudit";
 import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
 import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
-import { worldBox } from "../engine/planFootprint";
+import { worldBox, worldOverhead, worldParts } from "../engine/planFootprint";
 import { remapPlanPatch, type RemapReport } from "../engine/planRemap";
 import type { RepairRay } from "../engine/CityEngine";
 import { bulldozeForRoads } from "../engine/planBulldozer";
-import { nearestEdgeAt, snapPoint, validateEdgeDrop, validateHighwayAdd, validateHighwayCut, validateNodeMove, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
+import { nearestEdgeAt, roadRun, snapPoint, validateEdgeDrop, validateHighwayAdd, validateHighwayCut, validateNodeMove, validateRestyle, validateRoadAdd, type RoadVerdict, type SnapPoint } from "../engine/planRoadRules";
 import type { CityLayout, Parcel, Vec2 } from "../engine/cityLayout";
 import { cityPlanPatchStore, emptyPlanPatchStore, type PlanPatchStoreV1 } from "../data/planPatch";
 
@@ -32,7 +32,17 @@ export type EditResult = { ok: true; patch: PlanPatchV1; warnings: string[] } | 
 export type SiteEditResult = EditResult & { siteId?: string; strandedEdges?: string[] };
 
 /** 平面矩形（叠加层画标记用）。round：圆形占地（自由级设施），按外接圆画。 */
-export type PlanRect = { x: number; z: number; yaw: number; width: number; depth: number; round?: boolean };
+/** shape：有真实占地的自由级设施的两层投影（世界坐标；overhead 以 ground 开头，见 planFootprint）。 */
+export type PlanRect = { x: number; z: number; yaw: number; width: number; depth: number; round?: boolean;
+  shape?: { ground: Vec2[][]; overhead: Vec2[][] } };
+/** 设施在 (at, yaw) 处的标记矩形：有真实占地带多边形，名义圆标 round。 */
+export function siteMarkRect(site: SiteInfo, at: Vec2 = site, yaw = site.yaw): PlanRect {
+  const footprint = site.footprint;
+  if (!footprint) return site.level === "free" ? { x: at.x, z: at.z, yaw, width: site.width, depth: site.depth, round: true } : { ...siteBox(site) };
+  const box = worldBox(footprint, at, yaw);
+  if (!footprint.exact) return { ...box, round: true };
+  return { ...box, shape: { ground: worldParts(footprint, at, yaw).map((p) => [...p]), overhead: worldOverhead(footprint, at, yaw).map((p) => [...p]) } };
+}
 /** 道路编辑的确切后果（推土机试算，和确认后实际发生的一致）。 */
 export type ImpactPreview = { bulldozed: PlanRect[]; relocated: Array<{ from: PlanRect; to: PlanRect }>; homeless: PlanRect[] };
 /** path：这一笔实际会铺成的折线（起点是路尽头且拐弯时带倒圆弧，SPEC §17.3）；预览按它画。 */
@@ -145,6 +155,35 @@ export class PlanRepairSession {
     const patch = appendRoadOp(base.patch, { t: "drop", edge: edgeId, ...this.edgeAnchor(edgeId) });
     this.commit(patch);
     return { ok: true, patch, warnings: verdict.warnings };
+  }
+
+  /** 改路型（路线图 P1-4）：一整段路（roadRun）改成目标路型，一步写入、一步撤销；变宽压到的楼走推土机。 */
+  restyleRoad(edgeId: string, width: number, purpose?: RoadPurpose): EditResult {
+    const base = this.working();
+    if (!base.ok) return base;
+    const layout = this.engine.currentLayout!;
+    const run = roadRun(layout, edgeId);
+    const verdict = validateRestyle(layout, this.engine.currentModel!, run, width, purpose);
+    if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
+    return this.commitWithBulldozer(this.restyleOps(base.patch, run, width, purpose), verdict.warnings);
+  }
+
+  /** 改路型的悬停预览：整段路的折线 + 校验（变宽时停住后跑推土机试算）。 */
+  restyleAt(x: number, z: number, width: number, purpose?: RoadPurpose, exact = true): { edges: Array<{ points: Vec2[]; width: number }>; verdict: RoadPreview } | null {
+    const layout = this.engine.currentLayout; const model = this.engine.currentModel;
+    const hit = this.edgeAt(x, z);
+    if (!layout || !model || !hit) return null;
+    const run = roadRun(layout, hit.id);
+    const byId = new Map(layout.roadEdges.map((edge) => [edge.id, edge]));
+    const edges = run.map((id) => byId.get(id)!).map((edge) => ({ points: edge.points, width: Math.max(edge.width, width) }));
+    if (hit.locked) return { edges: [{ points: hit.points, width: hit.width }], verdict: { blockers: ["locked-edge"], warnings: [] } };
+    const verdict = validateRestyle(layout, model, run, width, purpose);
+    const widens = run.some((id) => (byId.get(id)?.width ?? width) < width);
+    return { edges, verdict: widens ? this.dryRun(`restyle:${run.join(",")}:${width}:${purpose ?? ""}`, (patch) => this.restyleOps(patch, run, width, purpose), verdict, exact) : verdict };
+  }
+
+  private restyleOps(patch: PlanPatchV1, run: readonly string[], width: number, purpose?: RoadPurpose): PlanPatchV1 {
+    return run.reduce((next, edge) => appendRoadOp(next, { t: "restyle", edge, width, ...(purpose ? { purpose } : {}), ...this.edgeAnchor(edge) }), patch);
   }
 
   /** 画路：from/to 是已吸附的坐标（snap() 的结果）。端点落在路段中间会把该路段拆成两半。purpose=waterfront 为滨海大道。 */
@@ -346,7 +385,7 @@ export class PlanRepairSession {
     const sites = new Map(listSites(before).map((site) => [site.id, site]));
     const slots = new Map(before.districts.flatMap((district) => [...district.slots]));
     const buildings = new Map(model.buildings.map((building) => [building.id, building]));
-    const rectOfSite = (id: string): PlanRect | null => { const site = sites.get(id); return site ? { ...siteBox(site), round: site.level === "free" && !site.footprint?.exact } : null; };
+    const rectOfSite = (id: string): PlanRect | null => { const site = sites.get(id); return site ? siteMarkRect(site) : null; };
     const rectOfBuilding = (id: string): PlanRect | null => { const slot = slots.get(id); const building = buildings.get(id); return slot && building ? buildingRect(building, slot) : null; };
     const parcels = new Map(before.blocks.flatMap((block) => block.parcels).map((parcel) => [parcel.id, parcel]));
     const impact: ImpactPreview = {
@@ -411,7 +450,7 @@ export class PlanRepairSession {
     let rect: PlanRect | null = null;
     if (site.level === "free") {
       const at = parseFreeTarget(targetId)!; const yaw = at.yaw ?? site.yaw;
-      rect = site.footprint ? { ...worldBox(site.footprint, at, yaw), round: !site.footprint.exact } : { x: at.x, z: at.z, yaw, width: site.width, depth: site.depth, round: true };
+      rect = siteMarkRect(site, at, yaw);
     }
     else if (site.level === "block") { const block = layout.blocks.find((candidate) => candidate.id === targetId); if (block) rect = { x: block.x, z: block.z, yaw: block.parcels[0]?.yaw ?? 0, width: block.width, depth: block.depth }; }
     else { const parcel = layout.blocks.flatMap((block) => block.parcels).find((candidate) => candidate.id === targetId); if (parcel) rect = { x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: site.width, depth: site.depth }; }
