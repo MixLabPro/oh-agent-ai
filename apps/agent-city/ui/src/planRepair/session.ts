@@ -9,8 +9,9 @@
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, type PlanIssue } from "../engine/planAudit";
 import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
-import { listSites, parseFreeTarget, pickSite, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
-import { accessRoadFor, strandedAccessEdges } from "../engine/planAccess";
+import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
+import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
+import { worldBox } from "../engine/planFootprint";
 import { remapPlanPatch, type RemapReport } from "../engine/planRemap";
 import type { RepairRay } from "../engine/CityEngine";
 import { bulldozeForRoads } from "../engine/planBulldozer";
@@ -222,10 +223,11 @@ export class PlanRepairSession {
   }
 
   /** 地面点落在哪个可接收的目标上：街区级设施取包含该点（或最近）的街区，地块级取最近地块。 */
-  siteTargetAt(site: SiteInfo, x: number, z: number): string | null {
+  siteTargetAt(site: SiteInfo, x: number, z: number, turn = 0): string | null {
     const layout = this.engine.currentLayout;
     if (!layout) return null;
-    if (site.level === "free") return `@${Math.round(x * 100) / 100},${Math.round(z * 100) / 100}`;
+    // 自由级：贴路、正门朝路（autoPlaceFree）；turn = 用户额外转的 90° 次数。
+    if (site.level === "free") return formatFreeTarget(autoPlaceFree(layout, site, { x, z }, turn));
     if (site.level === "parcel") return this.nearestParcel(x, z)?.id ?? null;
     let best: { id: string; d: number } | null = null;
     for (const block of layout.blocks) {
@@ -253,17 +255,17 @@ export class PlanRepairSession {
     const warnings: string[] = [];
     let stranded: string[] = [];
     if (generated) {
-      const at = parseFreeTarget(targetId)!;
       const moved = applyPlanPatch(generated, patch).layout;
-      const road = accessRoadFor(moved, model, at, site.width / 2);
+      const placed = listSites(moved).find((candidate) => candidate.id === site.id);
+      const road = placed ? accessRoadFor(moved, model, placed) : null;
       if (road) { patch = appendRoadOp(patch, { t: "add", from: road.from, to: road.to, width: 5 }); warnings.push(`access-road:${road.length}`); }
-      else if (!touchesRoad(moved, at, site.width / 2)) warnings.push("no-access-road");
+      else if (!placed || !siteTouchesRoad(moved, placed)) warnings.push("no-access-road");
       const after = road ? applyPlanPatch(generated, patch).layout : moved;
       const accessNode = (before.landmarks ?? []).find((landmark) => landmark.id === site.id)?.access?.nodeId
         ?? (before.publicSites ?? []).find((public_) => `public:${public_.id}` === site.id)?.access?.nodeId;
       // 只列编辑前就存在的路段：新补的接入路（以及它拆开的路段）不算原址遗留。
       const existing = new Set(moved.roadEdges.map((edge) => edge.id));
-      stranded = strandedAccessEdges(after, { x: site.x, z: site.z }, site.width / 2, accessNode, existing);
+      stranded = strandedAccessEdges(after, { x: site.x, z: site.z }, site.radius ?? site.width / 2, accessNode, existing);
     }
     this.commit(patch);
     return { ok: true, patch, warnings, siteId: site.id, strandedEdges: stranded };
@@ -344,7 +346,7 @@ export class PlanRepairSession {
     const sites = new Map(listSites(before).map((site) => [site.id, site]));
     const slots = new Map(before.districts.flatMap((district) => [...district.slots]));
     const buildings = new Map(model.buildings.map((building) => [building.id, building]));
-    const rectOfSite = (id: string): PlanRect | null => { const site = sites.get(id); return site ? { x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth, round: site.level === "free" } : null; };
+    const rectOfSite = (id: string): PlanRect | null => { const site = sites.get(id); return site ? { ...siteBox(site), round: site.level === "free" && !site.footprint?.exact } : null; };
     const rectOfBuilding = (id: string): PlanRect | null => { const slot = slots.get(id); const building = buildings.get(id); return slot && building ? buildingRect(building, slot) : null; };
     const parcels = new Map(before.blocks.flatMap((block) => block.parcels).map((parcel) => [parcel.id, parcel]));
     const impact: ImpactPreview = {
@@ -401,13 +403,16 @@ export class PlanRepairSession {
   }
 
   /** 选中设施后悬停：目标街区/地块/空地的落位试算。 */
-  siteGhost(site: SiteInfo, x: number, z: number): PlacementGhost | null {
+  siteGhost(site: SiteInfo, x: number, z: number, turn = 0): PlacementGhost | null {
     const layout = this.engine.currentLayout;
     if (!layout) return null;
-    const targetId = this.siteTargetAt(site, x, z);
+    const targetId = this.siteTargetAt(site, x, z, turn);
     if (!targetId) return null;
     let rect: PlanRect | null = null;
-    if (site.level === "free") { const at = parseFreeTarget(targetId)!; rect = { x: at.x, z: at.z, yaw: site.yaw, width: site.width, depth: site.depth, round: true }; }
+    if (site.level === "free") {
+      const at = parseFreeTarget(targetId)!; const yaw = at.yaw ?? site.yaw;
+      rect = site.footprint ? { ...worldBox(site.footprint, at, yaw), round: !site.footprint.exact } : { x: at.x, z: at.z, yaw, width: site.width, depth: site.depth, round: true };
+    }
     else if (site.level === "block") { const block = layout.blocks.find((candidate) => candidate.id === targetId); if (block) rect = { x: block.x, z: block.z, yaw: block.parcels[0]?.yaw ?? 0, width: block.width, depth: block.depth }; }
     else { const parcel = layout.blocks.flatMap((block) => block.parcels).find((candidate) => candidate.id === targetId); if (parcel) rect = { x: parcel.x, z: parcel.z, yaw: parcel.yaw, width: site.width, depth: site.depth }; }
     if (!rect) return null;
@@ -580,16 +585,6 @@ export class PlanRepairSession {
   dispose(): void {
     clearTimeout(this.saveTimer);
   }
-}
-
-/** 圆形占地（中心 at、半径 r）是否已经挨着地面路（间隙 ≤ 6）。 */
-function touchesRoad(layout: CityLayout, at: Vec2, r: number): boolean {
-  return layout.roadEdges.some((edge) => !edge.bridge && edge.points.some((p, i) => {
-    if (!i) return false;
-    const a = edge.points[i - 1]; const dx = p.x - a.x; const dz = p.z - a.z; const l2 = dx * dx + dz * dz || 1;
-    const t = Math.max(0, Math.min(1, ((at.x - a.x) * dx + (at.z - a.z) * dz) / l2));
-    return Math.hypot(at.x - a.x - dx * t, at.z - a.z - dz * t) - r <= 6 + edge.width / 2;
-  }));
 }
 
 declare global {

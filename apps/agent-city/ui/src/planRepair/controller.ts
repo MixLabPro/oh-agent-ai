@@ -62,6 +62,8 @@ export type RepairState = {
   roadType: RoadType;
   /** 高架：已点下、还没完成的折线点。 */
   viaduct: Vec2[];
+  /** 自由级设施落位时用户额外转的 90° 次数（[ / ] 键）；自动朝向是「正门朝最近的路」。 */
+  siteTurn: number;
   preview: RepairPreview;
   message: RepairMessage | null;
 };
@@ -94,12 +96,12 @@ export type RepairDeps = {
   moveNode(nodeId: string, x: number, z: number): EditResult;
   // 落位试算（悬停）
   buildingGhost(buildingId: string, x: number, z: number): PlacementGhost | null;
-  siteGhost(site: SiteInfo, x: number, z: number): PlacementGhost | null;
+  siteGhost(site: SiteInfo, x: number, z: number, turn?: number): PlacementGhost | null;
   // 设施
   pickSite(ray: RepairRay): SiteInfo | null;
   siteById(id: string): SiteInfo | null;
   siteTargets(site: SiteInfo): SiteTarget[];
-  siteTargetAt(site: SiteInfo, x: number, z: number): string | null;
+  siteTargetAt(site: SiteInfo, x: number, z: number, turn?: number): string | null;
   moveSite(site: SiteInfo, targetId: string): SiteEditResult;
   removeSite(site: SiteInfo): EditResult;
   /**
@@ -209,12 +211,14 @@ export const siteLabel = (site: Pick<SiteInfo, "kind" | "civicKind" | "landmarkK
     : site.kind === "landmark" ? LANDMARK_LABEL[site.landmarkKind ?? ""] ?? "地标"
       : site.kind === "public-site" ? PUBLIC_LABEL[site.publicKind ?? ""] ?? "市政用地"
         : SITE_LABEL[site.kind] ?? site.kind;
-const siteRect = (site: SiteInfo) => ({ x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth });
-/** 地面点是否落在设施占地内（朝向矩形；free 级是外接正方形，宽松一点无妨）。 */
+/** 设施占地的朝向矩形（free 级是模型占地的包围盒，见 planSites.siteBox；控制器只拿类型，不引规则模块）。 */
+const siteRect = (site: SiteInfo) => site.box ?? { x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth };
+/** 地面点是否落在设施占地（包围盒）内。 */
 const footprintContains = (site: SiteInfo, p: Vec2) => {
-  const dx = p.x - site.x; const dz = p.z - site.z;
-  const lx = dx * Math.cos(site.yaw) - dz * Math.sin(site.yaw); const lz = dx * Math.sin(site.yaw) + dz * Math.cos(site.yaw);
-  return Math.abs(lx) <= site.width / 2 && Math.abs(lz) <= site.depth / 2;
+  const box = siteRect(site);
+  const dx = p.x - box.x; const dz = p.z - box.z;
+  const lx = dx * Math.cos(box.yaw) - dz * Math.sin(box.yaw); const lz = dx * Math.sin(box.yaw) + dz * Math.cos(box.yaw);
+  return Math.abs(lx) <= box.width / 2 && Math.abs(lz) <= box.depth / 2;
 };
 
 const VIADUCT_HINT: RepairMessage = { kind: "hint", text: "高架：逐点点击画折线（可跨河、跨路），回车或在最后一点上再点一下完成；Esc 撤回上一个点" };
@@ -233,7 +237,7 @@ const HOVER_SETTLE_MS = 150;
 const ESTIMATE_NOTE = "（预估，鼠标停住后给出确切结果）"; // 地面点移动不到这么多就不重算预览（鼠标抖动）
 
 export class RepairController {
-  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], preview: null, message: null };
+  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], siteTurn: 0, preview: null, message: null };
   private readonly listeners = new Set<(state: RepairState) => void>();
   private lastGround: Vec2 | null = null;
   private lastRay: RepairRay | null = null;
@@ -363,7 +367,7 @@ export class RepairController {
       const hit = this.lastRay ? this.deps.pickSite(this.lastRay) : null;
       const site = this.state.site;
       // 已选中一座：指着别的设施（地面点在它占地内）就高亮它（点击会改选），否则是在找落脚处——给落位试算。
-      if (site && !(hit && hit.id !== site.id && footprintContains(hit, ground))) { this.set({ preview: ghostPreview(this.deps.siteGhost(site, ground.x, ground.z)) }); return; }
+      if (site && !(hit && hit.id !== site.id && footprintContains(hit, ground))) { this.set({ preview: ghostPreview(this.deps.siteGhost(site, ground.x, ground.z, this.state.siteTurn)) }); return; }
       this.set({ preview: hit ? { kind: "site", rect: siteRect(hit), label: siteLabel(hit) } : null });
       return;
     }
@@ -508,9 +512,9 @@ export class RepairController {
   private selectSite(site: SiteInfo, message?: RepairMessage): void {
     const siteTargets = this.deps.siteTargets(site);
     this.set({
-      site, siteTargets,
+      site, siteTargets, ...(this.state.site?.id === site.id ? {} : { siteTurn: 0 }),
       message: message ?? (site.level === "free"
-        ? { kind: "hint", text: `已选中${siteLabel(site)}：点地面任意空地搬过去（会检查地形、道路和建筑），或点「拆除」；原址的接入路${site.kind === "landmark" ? "或堤道" : ""}会留下` }
+        ? { kind: "hint", text: `已选中${siteLabel(site)}：点地面任意空地搬过去——靠近路会自动贴路、正门朝路（[ / ] 转向），或点「拆除」；原址的接入路${site.kind === "landmark" ? "或堤道" : ""}会留下` }
         : siteTargets.length
         ? { kind: "hint", text: `已选中${siteLabel(site)}，附近有 ${siteTargets.length} 个可搬去的${site.level === "block" ? "空街区" : "空地块"}（绿色）；点任一处搬过去，或点「拆除」` }
         : { kind: "warn", text: `已选中${siteLabel(site)}，但附近没有可搬去的${site.level === "block" ? "空街区" : "空地块"}；可以拆除` }),
@@ -539,7 +543,7 @@ export class RepairController {
     }
     if (!site) { this.set({ message: HINT.site }); return; }
     if (!ground) { this.clearSite(HINT.site); return; } // 点到天空：取消选中
-    const targetId = this.deps.siteTargetAt(site, ground.x, ground.z);
+    const targetId = this.deps.siteTargetAt(site, ground.x, ground.z, this.state.siteTurn);
     if (!targetId) { this.set({ message: { kind: "warn", text: `这里没有可落位的${site.level === "block" ? "街区" : "地块"}` } }); return; }
     const result = this.deps.moveSite(site, targetId);
     if (!result.ok) {
@@ -582,6 +586,14 @@ export class RepairController {
     }
     const warnings = result.warnings.map(warningText);
     this.set({ message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已擦掉一段路（${warnings.join("；")}）` : "已擦掉一段路" } });
+    this.recomputePreview();
+  }
+
+  /** 自由级设施落位前转向：在自动朝向（正门朝路）之上再转 ±90°。 */
+  rotateSite(direction: 1 | -1): void {
+    const { active, tool, site } = this.state;
+    if (!active || tool !== "site" || !site || site.level !== "free") return;
+    this.set({ siteTurn: (this.state.siteTurn + direction + 4) % 4 });
     this.recomputePreview();
   }
 

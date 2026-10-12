@@ -122,7 +122,7 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
     if (op.t === "remove") { next = appendSiteOp(next, { t: "remove", id: site.id, at: { x: site.x, z: site.z }, cls: siteClassOf(site) }, next.updatedAt); touched(); return; }
     const free = parseFreeTarget(op.to);
     let to: string | null = null; let toAnchor: Vec2 | undefined;
-    if (free) { const q = scale(free); to = `@${q.x},${q.z}`; }
+    if (free) { const q = scale(free); to = `@${q.x},${q.z}${free.yaw === undefined ? "" : `,${free.yaw}`}`; } // 朝向不随缩放变
     else if (op.toAnchor) {
       // 新档里离缩放后目标最近的**合法**街区/地块（与编辑器同一个 siteMoveProblem）。曾只取最近的一个——
       // 新档在那儿长出了别的楼，重放判 target-occupied，真实城市里设施搬家 4/4 全失败（verify-plan-remap (e)）。

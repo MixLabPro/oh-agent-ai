@@ -12,7 +12,7 @@ import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge } from "./cityLayout";
 import { applyPlanPatch, appendSiteOp, buildingRect, clearanceRoads, nearestOnPolyline, rectClearOfEdges, reservedParcelIdsShared, validateBuildingMove, type PlanPatchV1 } from "./planPatch";
 import { roadImpact, viaductEdges } from "./planRoadRules";
-import { listSites, siteClassOf } from "./planSites";
+import { listSites, siteBox, siteClassOf } from "./planSites";
 
 export type BulldozeResult = {
   patch: PlanPatchV1;
@@ -75,7 +75,7 @@ export function bulldozeForRoads(generated: CityLayout, model: CityModel, before
   const sites = new Map(listSites(before).map((site) => [site.id, site]));
   for (const id of impact.bulldoze) {
     const site = sites.get(id);
-    if (!site || site.locked || alreadyHit(before, site)) continue;
+    if (!site || site.locked || alreadyHit(before, siteBox(site))) continue;
     next = appendSiteOp(next, { t: "remove", id, at: { x: site.x, z: site.z }, cls: siteClassOf(site) });
     result.bulldozed.push(id);
   }

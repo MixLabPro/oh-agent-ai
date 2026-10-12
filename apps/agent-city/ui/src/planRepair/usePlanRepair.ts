@@ -25,7 +25,7 @@ export type RepairInfo = {
   saveFailed: boolean;
 };
 
-const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], preview: null, message: null };
+const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], siteTurn: 0, preview: null, message: null };
 const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
@@ -79,12 +79,12 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         validateMove: (id, x, z, exact) => session.validateMove(id, x, z, exact),
         moveNode: (id, x, z) => session.moveNode(id, x, z),
         buildingGhost: (id, x, z) => session.buildingGhost(id, x, z),
-        siteGhost: (site, x, z) => session.siteGhost(site, x, z),
+        siteGhost: (site, x, z, turn) => session.siteGhost(site, x, z, turn),
         defer: (run, ms) => { const timer = window.setTimeout(run, ms); return () => window.clearTimeout(timer); },
         pickSite: (ray) => session.pickSite(ray),
         siteById: (id) => session.siteById(id),
         siteTargets: (site) => session.siteTargets(site),
-        siteTargetAt: (site, x, z) => session.siteTargetAt(site, x, z),
+        siteTargetAt: (site, x, z, turn) => session.siteTargetAt(site, x, z, turn),
         moveSite: (site, targetId) => session.moveSite(site, targetId),
         removeSite: (site) => session.removeSite(site),
       });
@@ -124,6 +124,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
       if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
       if (event.key === "Escape") { event.preventDefault(); controller.cancel(); return; }
       if (event.key === "Enter" && controller.snapshot.viaduct.length) { event.preventDefault(); controller.finishViaduct(); syncInfo(); return; }
+      if ((event.key === "[" || event.key === "]") && controller.snapshot.site?.level === "free") { event.preventDefault(); controller.rotateSite(event.key === "]" ? 1 : -1); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         const session = installed.current?.session; if (!session) return;
@@ -163,7 +164,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     })));
     const marks: OverlaySiteMark[] = [];
     if (state.preview?.kind === "site") marks.push({ ...state.preview.rect, y: Math.max(0, heightAt(state.preview.rect.x, state.preview.rect.z)), tone: "hover" });
-    if (state.site) marks.push({ x: state.site.x, z: state.site.z, yaw: state.site.yaw, width: state.site.width, depth: state.site.depth, round: state.site.level === "free", y: Math.max(0, heightAt(state.site.x, state.site.z)), tone: "selected" });
+    if (state.site) { const box = state.site.box ?? state.site; marks.push({ x: box.x, z: box.z, yaw: box.yaw, width: box.width, depth: box.depth, round: state.site.level === "free" && !state.site.footprint?.exact, y: Math.max(0, heightAt(box.x, box.z)), tone: "selected" }); }
     const mark = (rect: PlanRect, tone: OverlaySiteMark["tone"]): OverlaySiteMark => ({ ...rect, y: Math.max(0, heightAt(rect.x, rect.z)), tone });
     const { preview, drawStart } = state;
     if (preview?.kind === "ghost") marks.push(mark(preview.rect, preview.ok ? "ghost-ok" : "ghost-bad"));
@@ -210,6 +211,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     exit: () => { auditOpen.current = false; setIssues(null); controllerRef.current?.exit(); },
     setTool: (tool: RepairTool) => withSession((_s, controller) => controller.setTool(tool)),
     removeSelected: () => withSession((_s, controller) => controller.removeSelected()),
+    rotateSite: (direction: 1 | -1) => withSession((_s, controller) => controller.rotateSite(direction)),
     eraseStranded: () => withSession((_s, controller) => controller.eraseStranded()),
     dismissRemap: () => withSession((session) => session.dismissRemap()),
     pruneStale: () => withSession((session, controller) => { if (session.pruneStale()) controller.refresh({ kind: "ok", text: "已清除失效的修改（撤销可恢复）" }); }),

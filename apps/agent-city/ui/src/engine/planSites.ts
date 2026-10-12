@@ -16,7 +16,8 @@
  */
 import type { CivicKind, CityLayout, Vec2 } from "./cityLayout";
 import { clearsHighways } from "./cityPlan";
-import { clearanceRoads, parcelIndex, rectClearOfRoads, reservedParcelIds } from "./planGeometry";
+import { clearanceRoads, edgesNear, parcelIndex, rectClearOfRoads, reservedParcelIds } from "./planGeometry";
+import { polygonsOverlap, rectPolygon, ROAD_SETBACK, segmentPolygonDistance, siteFootprint, toWorld, worldBox, worldParts, yawFacing, type FootprintSpec, type Polygon } from "./planFootprint";
 import type { PatchStaleEntry } from "./planPatch";
 
 export type SiteKind = "civic" | "garden" | "district-landmark" | "context" | "landmark" | "public-site";
@@ -39,13 +40,30 @@ export type SiteInfo = {
   landmarkKind?: string;
   publicKind?: string;
   x: number; z: number; yaw: number; width: number; depth: number; height: number; y: number;
-  /** block：占整个街区（目标是街区 id）；parcel：占一个地块（目标是地块 id）；free：圆形占地，目标是任意地面点（"@x,z"）。 */
+  /** block：占整个街区（目标是街区 id）；parcel：占一个地块（目标是地块 id）；free：按模型占地，目标是任意地面点（"@x,z[,yaw]"）。 */
   level: "block" | "parcel" | "free";
+  /** free 级：模型原点处的名义预留半径（生成器的 radius）、模型真实占地，以及占地包围盒在世界里的朝向矩形。
+   *  x/z 仍是模型原点（位置校验 `at` 认它）；画标记、拾取、碰撞一律用 box（siteBox）。 */
+  radius?: number;
+  footprint?: FootprintSpec;
+  box?: { x: number; z: number; yaw: number; width: number; depth: number };
   /** 非空 = 锁定，内容是给用户看的理由（不能搬、不能拆）。 */
   locked?: string;
   /** 当前所在的街区/地块 id。 */
   slotId: string;
 };
+
+/** 设施占地的朝向矩形：free 级用模型占地的包围盒，其余就是它自己的 x/z/width/depth。 */
+export const siteBox = (site: Pick<SiteInfo, "x" | "z" | "yaw" | "width" | "depth" | "box">) => site.box ?? { x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth };
+
+const footprintCache = new Map<string, FootprintSpec>();
+/** free 级设施的模型占地（按 种类|id|半径 缓存：庄园的声明要按 id 种子生成，悬停拾取每帧都要列设施）。 */
+export function footprintFor(kind: string, id: string, radius: number): FootprintSpec {
+  const key = `${kind}|${id}|${radius}`;
+  let hit = footprintCache.get(key);
+  if (!hit) { hit = siteFootprint(kind, id, radius); footprintCache.set(key, hit); }
+  return hit;
+}
 
 export type SiteTarget = { id: string; x: number; z: number; yaw: number; width: number; depth: number; distance: number };
 
@@ -83,11 +101,15 @@ export function listSites(layout: CityLayout): SiteInfo[] {
   for (const landmark of layout.landmarks ?? []) {
     if (!landmark.radius) continue;
     const locked = landmark.kind === "suspension-bridge" ? "悬索桥不是建筑，是路网里的一段桥面（由桥梁模型绑定），不能单独搬或拆" : undefined;
-    out.push({ id: landmark.id, kind: "landmark", landmarkKind: landmark.kind, x: landmark.x, z: landmark.z, yaw: landmark.yaw, width: landmark.radius * 2, depth: landmark.radius * 2, height: Math.max(30, landmark.radius * 2.5), y: ground(landmark.x, landmark.z), level: "free", slotId: "", ...(locked ? { locked } : {}) });
+    const footprint = footprintFor(landmark.kind, landmark.id, landmark.radius);
+    const box = worldBox(footprint, landmark, landmark.yaw);
+    out.push({ id: landmark.id, kind: "landmark", landmarkKind: landmark.kind, x: landmark.x, z: landmark.z, yaw: landmark.yaw, width: box.width, depth: box.depth, height: Math.max(30, landmark.radius * 2.5), y: ground(landmark.x, landmark.z), level: "free", slotId: "", radius: landmark.radius, footprint, box, ...(locked ? { locked } : {}) });
   }
   for (const site of layout.publicSites ?? []) {
     if (!site.radius) continue;
-    out.push({ id: `public:${site.id}`, kind: "public-site", publicKind: site.kind, x: site.x, z: site.z, yaw: site.yaw, width: site.radius * 2, depth: site.radius * 2, height: 22, y: ground(site.x, site.z), level: "free", slotId: "" });
+    const footprint = footprintFor(site.kind, `public:${site.id}`, site.radius);
+    const box = worldBox(footprint, site, site.yaw);
+    out.push({ id: `public:${site.id}`, kind: "public-site", publicKind: site.kind, x: site.x, z: site.z, yaw: site.yaw, width: box.width, depth: box.depth, height: 22, y: ground(site.x, site.z), level: "free", slotId: "", radius: site.radius, footprint, box });
   }
   return out;
 }
@@ -122,18 +144,89 @@ export function siteMoveProblem(layout: CityLayout, site: SiteInfo, targetId: st
   return null;
 }
 
-/** "@x,z" → 坐标；格式不对返回 null。 */
-export function parseFreeTarget(targetId: string): Vec2 | null {
-  const m = /^@(-?[\d.]+),(-?[\d.]+)$/.exec(targetId);
-  return m ? { x: Number(m[1]), z: Number(m[2]) } : null;
+/** "@x,z" 或 "@x,z,yaw" → 坐标（与朝向）；格式不对返回 null。没有 yaw 的旧目标保持原朝向。 */
+export function parseFreeTarget(targetId: string): (Vec2 & { yaw?: number }) | null {
+  const m = /^@(-?[\d.]+),(-?[\d.]+)(?:,(-?[\d.]+))?$/.exec(targetId);
+  return m ? { x: Number(m[1]), z: Number(m[2]), ...(m[3] !== undefined ? { yaw: Number(m[3]) } : {}) } : null;
+}
+export const formatFreeTarget = (p: Vec2 & { yaw?: number }): string =>
+  `@${Math.round(p.x * 100) / 100},${Math.round(p.z * 100) / 100}${p.yaw === undefined ? "" : `,${Math.round(p.yaw * 1e4) / 1e4}`}`;
+
+/** free 级设施在 (origin, yaw) 处的世界占地（凸多边形并集）。 */
+export function freeSiteParts(site: SiteInfo, origin: Vec2, yaw: number): Polygon[] {
+  const footprint = site.footprint ?? footprintFor(site.landmarkKind ?? site.publicKind ?? "", site.id, site.radius ?? site.width / 2);
+  return worldParts(footprint, origin, yaw);
 }
 
-/** free 级（圆形占地）设施搬到任意地面点：圆内地形可建、不压地面路、不压别的楼与设施（自己除外）。 */
+/** 别的设施的世界占地：free 级按模型占地，其余按自己的矩形。 */
+const sitePolygons = (site: SiteInfo): Polygon[] => (site.level === "free" ? freeSiteParts(site, site, site.yaw) : [rectPolygon(siteBox(site))]);
+
+/**
+ * free 级落点建议（像 SimCity 一样「贴路」）：点击处附近有路，就把设施转到正面朝路、平移到前沿离路肩 ROAD_SETBACK；
+ * 离路太远（超过设施半径 + 10）只转向不平移。turn：用户额外转的 90° 次数（[ / ] 键）。
+ */
+export function autoPlaceFree(layout: CityLayout, site: SiteInfo, click: Vec2, turn = 0): Vec2 & { yaw: number } {
+  const footprint = site.footprint ?? footprintFor(site.landmarkKind ?? site.publicKind ?? "", site.id, site.radius ?? site.width / 2);
+  const extent = Math.hypot(Math.max(Math.abs(footprint.min.x), Math.abs(footprint.max.x)), Math.max(Math.abs(footprint.min.z), Math.abs(footprint.max.z)));
+  let best: { p: Vec2; d: number; width: number } | null = null;
+  for (const edge of edgesNear(layout, click.x, click.z, extent * 1.5 + 30)) {
+    for (let i = 1; i < edge.points.length; i += 1) {
+      const p = nearestOnSegment(click, edge.points[i - 1], edge.points[i]);
+      const d = Math.hypot(p.x - click.x, p.z - click.z);
+      if (!best || d < best.d) best = { p, d, width: edge.width };
+    }
+  }
+  const extra = (turn % 4) * (Math.PI / 2);
+  if (!best || best.d < 1e-6) return { ...click, yaw: site.yaw + extra };
+  const n = { x: (best.p.x - click.x) / best.d, z: (best.p.z - click.z) / best.d };
+  const yaw = yawFacing(n) + extra;
+  // 转完以后朝路方向的前沿伸出多少（转了 90° 就是侧面）。
+  const front = Math.max(...footprint.parts.flat().map((v) => { const w = toWorld(v, { x: 0, z: 0 }, yaw); return w.x * n.x + w.z * n.z; }));
+  const snapped = { x: best.p.x - n.x * (front + best.width / 2 + ROAD_SETBACK), z: best.p.z - n.z * (front + best.width / 2 + ROAD_SETBACK) };
+  const near = Math.hypot(snapped.x - click.x, snapped.z - click.z) <= extent + 10;
+  const at = near ? snapped : click;
+  return { x: Math.round(at.x * 100) / 100, z: Math.round(at.z * 100) / 100, yaw: Math.round(normalizeAngle(yaw) * 1e4) / 1e4 };
+}
+const normalizeAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+const nearestOnSegment = (p: Vec2, a: Vec2, b: Vec2): Vec2 => {
+  const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
+  return { x: a.x + dx * t, z: a.z + dz * t };
+};
+
+/**
+ * free 级设施搬到任意地面点（可带朝向）：按**模型真实占地**检查——占地内可建、不压地面路（离路肩至少 1）、不压别的楼与设施。
+ * 曾用生成器的名义预留圆：路必须离中心 ≥ 0.75r，矩形建筑永远贴不上路（用户截图：车站接不上路网）。
+ * 只认得出预留圆的模型（塔、摩天轮…）照旧按圆，口径与旧版相同。
+ */
 function freeMoveProblem(layout: CityLayout, site: SiteInfo, targetId: string): string | null {
   const at = parseFreeTarget(targetId);
   if (!at) return "missing-target";
-  if (Math.hypot(at.x - site.x, at.z - site.z) < 1) return "unchanged";
-  const r = site.width / 2;
+  const yaw = at.yaw ?? site.yaw;
+  if (Math.hypot(at.x - site.x, at.z - site.z) < 1 && Math.abs(normalizeAngle(yaw - site.yaw)) < 1e-3) return "unchanged";
+  const footprint = site.footprint ?? footprintFor(site.landmarkKind ?? site.publicKind ?? "", site.id, site.radius ?? site.width / 2);
+  if (footprint.exact) {
+    const parts = worldParts(footprint, at, yaw);
+    const samples = [at, ...parts.flat()];
+    if (samples.some((p) => !layout.terrain.buildable(p.x, p.z))) return "not-buildable";
+    const reach = Math.hypot(footprint.max.x - footprint.min.x, footprint.max.z - footprint.min.z) + 12;
+    for (const edge of edgesNear(layout, at.x, at.z, reach)) {
+      for (let i = 1; i < edge.points.length; i += 1) {
+        if (parts.some((part) => segmentPolygonDistance(edge.points[i - 1], edge.points[i], part) < edge.width / 2 + 1)) return "site-over-road";
+      }
+    }
+    for (const district of layout.districts) for (const slot of district.slots.values()) {
+      const lot = rectPolygon({ x: slot.x, z: slot.z, yaw: slot.yaw, width: slot.width * 0.92, depth: slot.depth * 0.9 });
+      if (parts.some((part) => polygonsOverlap(part, lot))) return "target-occupied";
+    }
+    for (const other of listSites(layout)) {
+      if (other.id === site.id) continue;
+      const others = sitePolygons(other);
+      if (parts.some((part) => others.some((poly) => polygonsOverlap(part, poly)))) return "target-occupied";
+    }
+    return null;
+  }
+  const r = site.radius ?? site.width / 2;
   const samples = [at, ...Array.from({ length: 8 }, (_, i) => ({ x: at.x + Math.cos((i * Math.PI) / 4) * r * 0.8, z: at.z + Math.sin((i * Math.PI) / 4) * r * 0.8 }))];
   if (samples.some((p) => !layout.terrain.buildable(p.x, p.z))) return "not-buildable";
   for (const edge of clearanceRoads(layout)) {
@@ -152,7 +245,7 @@ function freeMoveProblem(layout: CityLayout, site: SiteInfo, targetId: string): 
     return Math.hypot(lx - cx, lz - cz) < r;
   };
   for (const district of layout.districts) for (const slot of district.slots.values()) if (hitsRect({ ...slot, width: slot.width * 0.92, depth: slot.depth * 0.9 })) return "target-occupied";
-  for (const other of listSites(layout)) if (other.id !== site.id && hitsRect(other)) return "target-occupied";
+  for (const other of listSites(layout)) if (other.id !== site.id && hitsRect(siteBox(other))) return "target-occupied";
   return null;
 }
 
@@ -179,11 +272,12 @@ export function siteTargets(layout: CityLayout, site: SiteInfo, suppressedContex
 export function pickSite(layout: CityLayout, ray: { origin: { x: number; y: number; z: number }; direction: { x: number; y: number; z: number } }): SiteInfo | null {
   let best: { site: SiteInfo; t: number } | null = null;
   for (const site of listSites(layout)) {
-    const ax = Math.cos(site.yaw); const az = -Math.sin(site.yaw); // 局部 x 轴（面宽）
-    const bx = Math.sin(site.yaw); const bz = Math.cos(site.yaw);  // 局部 z 轴（进深）
-    const hx = Math.abs(ax) * site.width / 2 + Math.abs(bx) * site.depth / 2 + 1;
-    const hz = Math.abs(az) * site.width / 2 + Math.abs(bz) * site.depth / 2 + 1;
-    const lo = [site.x - hx, site.y, site.z - hz]; const hi = [site.x + hx, site.y + site.height, site.z + hz];
+    const box = siteBox(site);
+    const ax = Math.cos(box.yaw); const az = -Math.sin(box.yaw); // 局部 x 轴（面宽）
+    const bx = Math.sin(box.yaw); const bz = Math.cos(box.yaw);  // 局部 z 轴（进深）
+    const hx = Math.abs(ax) * box.width / 2 + Math.abs(bx) * box.depth / 2 + 1;
+    const hz = Math.abs(az) * box.width / 2 + Math.abs(bz) * box.depth / 2 + 1;
+    const lo = [box.x - hx, site.y, box.z - hz]; const hi = [box.x + hx, site.y + site.height, box.z + hz];
     const o = [ray.origin.x, ray.origin.y, ray.origin.z]; const d = [ray.direction.x, ray.direction.y, ray.direction.z];
     let tMin = 0; let tMax = Infinity; let hit = true;
     for (let axis = 0; axis < 3; axis += 1) {
@@ -231,12 +325,13 @@ export function applySiteOps(layout: CityLayout, ops: readonly SiteOp[], suppres
     if (problem) { stale.push({ kind, id: label, reason: problem === "missing-target" ? "missing-target" : problem === "target-occupied" ? "target-occupied" : "site-blocked", detail: `${op.id} → ${op.to}：${problem}` }); return; }
     const height = (x: number, z: number) => layout.terrain.height(x, z);
     if (site.level === "free") {
-      // 圆形占地设施：只挪圆心（朝向不变）；旧接入路留在原地成为断头路——如实保留，不替用户删路。
+      // 自由级设施：挪原点，目标带朝向时一起转（旧目标没有朝向，保持原样）；旧接入路留在原地，不替用户删路。
       const at = parseFreeTarget(op.to)!;
+      const turn = at.yaw === undefined ? {} : { yaw: at.yaw };
       view = {
         ...view,
-        landmarks: (view.landmarks ?? []).map((landmark) => (landmark.id === op.id ? { ...landmark, x: at.x, z: at.z } : landmark)),
-        publicSites: (view.publicSites ?? []).map((public_) => (`public:${public_.id}` === op.id ? { ...public_, x: at.x, z: at.z } : public_)),
+        landmarks: (view.landmarks ?? []).map((landmark) => (landmark.id === op.id ? { ...landmark, x: at.x, z: at.z, ...turn } : landmark)),
+        publicSites: (view.publicSites ?? []).map((public_) => (`public:${public_.id}` === op.id ? { ...public_, x: at.x, z: at.z, ...turn } : public_)),
       };
       return;
     }

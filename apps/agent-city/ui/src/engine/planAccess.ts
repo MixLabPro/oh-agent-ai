@@ -12,9 +12,11 @@ import type { CityModel } from "../cityModel";
 import type { CityLayout, Vec2 } from "./cityLayout";
 import { nearestOnPolyline } from "./planPatch";
 import { snapPoint, validateRoadAdd } from "./planRoadRules";
+import { frontEntrance, ROAD_SETBACK, segmentPolygonDistance, worldParts } from "./planFootprint";
+import type { SiteInfo } from "./planSites";
 
-/** 与路的间隙不超过这么多就算「已经挨着路」，不再补接入路。 */
-const ADJACENT_GAP = 6;
+/** 正门到路肩不超过「退距 + 这么多」就算已经挨着路，不再补接入路。 */
+const ADJACENT_SLACK = 1.5;
 /** 接入路最长（再长就不是接入路，是一条新路，交给用户画）。 */
 const MAX_ACCESS = 160;
 /** 比这更短的接入路不补（路段最短 6，留一点余量）。 */
@@ -24,32 +26,38 @@ const CANDIDATE_EDGES = 4;
 
 export type AccessRoad = { from: Vec2; to: Vec2; length: number };
 
+/** 设施的正门是否已经挨着路（正门到某条地面路的路肩 ≤ 退距 + 余量）。 */
+export function siteTouchesRoad(layout: CityLayout, site: SiteInfo): boolean {
+  const footprint = site.footprint; if (!footprint) return false;
+  const door = frontEntrance(footprint, site, site.yaw).at;
+  return layout.roadEdges.some((edge) => !edge.bridge && nearestOnPolyline(door, edge.points).distance - edge.width / 2 <= ROAD_SETBACK + ADJACENT_SLACK);
+}
+
 /**
- * 圆形占地（中心 center、半径 r）到最近道路的接入路。起点放在占地外接正方形之外——
- * 占地按正方形参与「压到建筑」判定，起点落在正方形对角区会被当成压到设施自己。
+ * 从设施**正门**（模型占地 +z 面中点，planFootprint.frontEntrance）到最近道路的接入路。曾从名义预留圆的外接方形外起笔
+ * （r·√2 外），离建筑真实边缘大半个半径，路像是凭空断在草地上（用户截图：车站）。
+ * 起笔就在门口，路带擦到设施自己不算压到它（ignoreSites）；但路不能穿过设施本体去够背后的路——那样的候选跳过。
+ * 只接受「不推平、不安置、不入水」的路；正门已挨着路返回 null（不需要）。
  */
-export function accessRoadFor(layout: CityLayout, model: CityModel, center: Vec2, r: number, width = 5): AccessRoad | null {
-  const edges = layout.roadEdges.filter((edge) => !edge.bridge && edge.structure !== "deck");
-  const near = edges
-    .map((edge) => ({ edge, hit: nearestOnPolyline(center, edge.points) }))
+export function accessRoadFor(layout: CityLayout, model: CityModel, site: SiteInfo, width = 5): AccessRoad | null {
+  const footprint = site.footprint; if (!footprint) return null;
+  if (siteTouchesRoad(layout, site)) return null;
+  const { at: door, outward } = frontEntrance(footprint, site, site.yaw);
+  const parts = worldParts(footprint, site, site.yaw);
+  const from = { x: Math.round(door.x * 100) / 100, z: Math.round(door.z * 100) / 100 };
+  const lead = { x: door.x + outward.x * 0.05, z: door.z + outward.z * 0.05 };
+  const near = layout.roadEdges.filter((edge) => !edge.bridge && edge.structure !== "deck")
+    .map((edge) => ({ edge, hit: nearestOnPolyline(door, edge.points) }))
     .sort((a, b) => a.hit.distance - b.hit.distance)
     .slice(0, CANDIDATE_EDGES);
-  if (!near.length) return null;
-  if (near[0].hit.distance - r <= ADJACENT_GAP) return null;
-  const startOffset = r * Math.SQRT2 + 2;
   for (const { hit } of near) {
-    const d = hit.distance;
-    if (d <= startOffset + 1) continue;
-    const ux = (hit.point.x - center.x) / d; const uz = (hit.point.z - center.z) / d;
-    const from = { x: center.x + ux * startOffset, z: center.z + uz * startOffset };
     const snap = snapPoint(layout, hit.point.x, hit.point.z);
     if (snap.locked) continue;
     const to = { x: snap.x, z: snap.z };
     const length = Math.hypot(to.x - from.x, to.z - from.z);
-    // 外接正方形的角已经快碰到路（比最短路段还近）：等于挨着路，不补——硬补会是一截过短的路，校验也不收。
-    if (length < MIN_ACCESS) return null;
-    if (length > MAX_ACCESS) continue;
-    const verdict = validateRoadAdd(layout, model, from, to, width);
+    if (length < MIN_ACCESS || length > MAX_ACCESS) continue;
+    if (parts.some((part) => segmentPolygonDistance(lead, to, part) === 0)) continue; // 要穿过建筑本体
+    const verdict = validateRoadAdd(layout, model, from, to, width, undefined, [site.id]);
     if (verdict.blockers.length) continue;
     if (verdict.warnings.some((code) => code.startsWith("bulldoze:") || code.startsWith("relocate:"))) continue;
     return { from, to, length: Math.round(length) };

@@ -11,6 +11,8 @@
 //   (f) 接入路：新位置离路远就补一条最短的、不推平不安置的接入路；挨着路不补；原址断头接入路沿单行链列出，到岔路口为止；
 //   (g) 清除失效修改：只删失效条目，其余重放结果不变；跨档整份失效 → 空补丁；
 //   (i) 提速不改结果（路线图 SPEC P0-1）：网格版净空 = 逐条版；网格邻域不漏路；钉子不变时重排 = 缓存的底层布局；
+//   (j) 自由级设施按模型真实占地：车站是矩形不是预留圆、能贴路（正门朝路、前沿离路肩 ROAD_SETBACK）、贴上后不需要接入路、
+//       [ / ] 转向、接到正门的路不算压到它（穿过它的路才算）——用户截图：车站按圆占地，贴不上路、接入路断在草地上；
 //   (h) 高架下不能有楼：新高架压到的设施推平、会话楼安置；切高架不算新几何；真实城市跨河高架 + 滨海大道干净重放（SPEC §17）。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
@@ -21,12 +23,14 @@ const {
   validateRoadAdd, rectClearOfEdges, buildingRect, buildCityModel, layoutCity, MIAMI_COASTAL,
   accessRoadFor, strandedAccessEdges, pruneStalePatch, appendHighwayOp, validateHighwayAdd, freshViaductGeometry,
   rectClearOfRoads, edgesNear, clearanceRoads, rectClearOfEdgesRaw, nearestOnPolyline,
+  autoPlaceFree, formatFreeTarget, siteTouchesRoad, frontEntrance, worldParts, segmentPolygonDistance, ROAD_SETBACK,
 } = await loadCity({
+  "engine/planFootprint.ts": ["frontEntrance", "worldParts", "segmentPolygonDistance", "ROAD_SETBACK"],
   "engine/planGeometry.ts": ["rectClearOfRoads", "edgesNear", "clearanceRoads", "rectClearOfEdges as rectClearOfEdgesRaw"],
-  "engine/planAccess.ts": ["accessRoadFor", "strandedAccessEdges"],
+  "engine/planAccess.ts": ["accessRoadFor", "strandedAccessEdges", "siteTouchesRoad"],
   "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry", "freshViaductGeometry"],
   "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch", "appendHighwayOp", "nearestOnPolyline"],
-  "engine/planSites.ts": ["listSites", "siteMoveProblem"],
+  "engine/planSites.ts": ["listSites", "siteMoveProblem", "autoPlaceFree", "formatFreeTarget"],
   "engine/planRoadRules.ts": ["validateRoadAdd", "validateHighwayAdd"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
@@ -168,11 +172,13 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   assert.equal(siteMoveProblem(base, wheel, target), null);
   const movedPatch = appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: target }, 1);
   const moved = applyPlanPatch(base, movedPatch).layout;
-  const road = accessRoadFor(moved, model, { x: 200, z: -60 }, wheel.width / 2);
+  const placedAt = (layout, id) => listSites(layout).find((candidate) => candidate.id === id);
+  const road = accessRoadFor(moved, model, placedAt(moved, wheel.id));
   assert.ok(road, "a site moved away from roads gets an access road");
   assert.equal(road.to.z, 0, "…ending on the main road");
   assert.ok(Math.abs(road.to.x - 200) < 1, "…at the nearest point");
-  assert.ok(Math.hypot(road.from.x - 200, road.from.z + 60) >= wheel.width / 2 * Math.SQRT2, "…starting outside the site's own square footprint (else it would 'bulldoze' itself)");
+  // 起笔在正门（占地 +z 面中点），不再在名义预留圆的外接方形外——曾离建筑大半个半径，路像断在草地上（用户截图：车站）。
+  assert.deepEqual(road.from, { x: 200, z: -42 }, "…starting right at the front door, not half a radius out in the grass");
   const withRoad = appendRoadOp(movedPatch, { t: "add", from: road.from, to: road.to, width: 5 }, 2);
   const after = applyPlanPatch(base, withRoad);
   assert.equal(after.stale.length, 0, "move + access road replay cleanly");
@@ -181,16 +187,16 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   assert.deepEqual(stranded, ["60:-60/60:0"], "the old dead-end access road is listed, and the walk stops at the junction with the main road");
   // 挨着路：不补。
   const close = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@200,-22" }, 1)).layout;
-  assert.equal(accessRoadFor(close, model, { x: 200, z: -22 }, wheel.width / 2), null, "a site already beside a road gets no extra road");
+  assert.equal(accessRoadFor(close, model, placedAt(close, wheel.id)), null, "a site whose front door is already at the road gets no extra road");
   // 搬到旧接入路旁：接入路接到断头路口上，它不再是断头路——不列为遗留。
   const reuse = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@60,-110" }, 1)).layout;
-  const reuseRoad = accessRoadFor(reuse, model, { x: 60, z: -110 }, wheel.width / 2);
+  const reuseRoad = accessRoadFor(reuse, model, placedAt(reuse, wheel.id));
   assert.ok(reuseRoad && Math.hypot(reuseRoad.to.x - 60, reuseRoad.to.z + 60) < 1, "moving next to the old access road reuses its dead end");
   const reused = applyPlanPatch(base, appendRoadOp(appendSiteOp(fresh(), { t: "move", id: wheel.id, at: { x: wheel.x, z: wheel.z }, to: "@60,-110" }, 1), { t: "add", from: reuseRoad.from, to: reuseRoad.to, width: 5 }, 2)).layout;
   assert.deepEqual(strandedAccessEdges(reused, { x: 60, z: -80 }, wheel.width / 2, "60:-60", new Set(reuse.roadEdges.map((e) => e.id))), [], "…and it is no longer a leftover (the new road's own end does not start a walk into it)");
   // 远到 160 以外没有路：不补，交给用户画。
   const far = { ...base, roadNodes: [{ id: "0:0", x: 0, z: 0 }, { id: "60:0", x: 60, z: 0 }], roadEdges: [edge("0:0", "60:0")] };
-  assert.equal(accessRoadFor(far, model, { x: 300, z: -120 }, 18), null, "no road within reach → none is invented");
+  assert.equal(accessRoadFor(far, model, { ...placedAt(base, wheel.id), x: 300, z: -120, box: undefined }), null, "no road within reach → none is invented");
 }
 
 // (g) 清除失效修改。
@@ -228,6 +234,52 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   const withDeck = { ...base, highways: [[{ x: -50, z: 30 }, { x: 350, z: 30 }]] };
   const cut = applyPlanPatch(withDeck, appendHighwayOp(fresh(), { t: "cut", at: { x: 100, z: 30 } }, 1)).layout;
   assert.equal(freshViaductGeometry(withDeck, cut).length, 0, "the two halves of a cut viaduct are not new geometry");
+}
+
+// (j) 自由级设施的真实占地与朝向（车站，radius 20）。主路 z=0（0..300）。
+{
+  const base = makeLayout(); base.publicSites = [{ id: "site:station", kind: "station", x: 150, z: -90, yaw: 0, radius: 20 }];
+  const station = listSites(base).find((site) => site.id === "public:site:station");
+  assert.equal(station.footprint.exact, true, "the station has a real footprint");
+  assert.ok(Math.abs(station.width - 30) < 1e-6, `…its width is the platform (1.5r), not the reservation circle (2r): ${station.width}`);
+  assert.ok(station.depth < 2 * 20 + 1 && station.depth > 1.1 * 20, `…and its depth is platform + hall: ${station.depth}`);
+  // 旧规则：路离中心 ≥ 0.75r + 半路宽 = 17.5。真实占地：前沿 + 1 + 半路宽即可。
+  const near = formatFreeTarget({ x: 150, z: -16, yaw: 0 });
+  assert.equal(siteMoveProblem(base, station, near), null, "the station can sit right by the road (front edge 1.5 from the shoulder) — the circle rule forbade anything within 17.5");
+  assert.equal(siteMoveProblem(base, station, formatFreeTarget({ x: 150, z: -12, yaw: 0 })), "site-over-road", "…but not on it");
+  // 自动落位：点在路北侧 30 处 → 转身正门朝路、前沿离路肩 ROAD_SETBACK。
+  const placed = autoPlaceFree(base, station, { x: 150, z: -40 });
+  assert.ok(Math.abs(placed.yaw) < 1e-3, `the front (+z) turns to face the road at z=0, north of the click (yaw 0): ${placed.yaw}`);
+  const moved = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: station.id, at: { x: station.x, z: station.z }, to: formatFreeTarget(placed) }, 1));
+  assert.equal(moved.stale.length, 0, "the auto placement is legal");
+  const there = listSites(moved.layout).find((site) => site.id === station.id);
+  const door = frontEntrance(there.footprint, there, there.yaw);
+  assert.ok(Math.abs(door.at.z - (-(2.5 + ROAD_SETBACK))) < 0.01, `the front door sits ROAD_SETBACK off the road shoulder: ${JSON.stringify(door.at)}`);
+  assert.ok(door.outward.z > 0.99, "…facing the road");
+  assert.equal(siteTouchesRoad(moved.layout, there), true, "a snapped station already touches the road");
+  assert.equal(accessRoadFor(moved.layout, model, there), null, "…so no access road is added");
+  // 转向：[ / ] 在自动朝向上再转 90°。
+  const turned = autoPlaceFree(base, station, { x: 150, z: -40 }, 1);
+  assert.ok(Math.abs(Math.abs(turned.yaw - placed.yaw) - Math.PI / 2) < 1e-3 || Math.abs(Math.abs(turned.yaw - placed.yaw) - 3 * Math.PI / 2) < 1e-3, "a quarter turn rotates by 90°");
+  // 离路远：只转向不平移；接入路从正门起笔，不穿过车站。
+  const far = autoPlaceFree(base, station, { x: 100, z: -110 });
+  assert.deepEqual([far.x, far.z], [100, -110], "far from any road the station is not dragged to it");
+  const farLayout = applyPlanPatch(base, appendSiteOp(fresh(), { t: "move", id: station.id, at: { x: station.x, z: station.z }, to: formatFreeTarget(far) }, 1)).layout;
+  const farSite = listSites(farLayout).find((site) => site.id === station.id);
+  const road = accessRoadFor(farLayout, model, farSite);
+  assert.ok(road, "a station away from roads gets an access road");
+  const farDoor = frontEntrance(farSite.footprint, farSite, farSite.yaw).at;
+  assert.ok(Math.hypot(road.from.x - farDoor.x, road.from.z - farDoor.z) < 0.01, "…from its front door");
+  const parts = worldParts(farSite.footprint, farSite, farSite.yaw);
+  const lead = { x: road.from.x, z: road.from.z + 0.05 };
+  assert.ok(parts.every((part) => segmentPolygonDistance(lead, road.to, part) > 0), "…that does not cross the station itself");
+  // 接到正门的路不算压到；穿过车站的路算（推平）。
+  const withAccess = appendRoadOp(appendSiteOp(fresh(), { t: "move", id: station.id, at: { x: station.x, z: station.z }, to: formatFreeTarget(far) }, 1), { t: "add", from: road.from, to: road.to, width: 5 }, 2);
+  assert.deepEqual(bulldozeForRoads(base, model, farLayout, withAccess).bulldozed, [], "a road ending at the front door connects the station — it does not bulldoze it");
+  const through = appendRoadOp(fresh(), { t: "add", from: { x: 70, z: -110 }, to: { x: 130, z: -110 }, width: 5 }, 1);
+  const crossVerdict = validateRoadAdd(farLayout, model, { x: 70, z: -110 }, { x: 130, z: -110 }, 5);
+  assert.ok(crossVerdict.warnings.includes("bulldoze:1"), `a road straight through the station still hits it — ${crossVerdict.warnings}`);
+  void through;
 }
 
 // (e) 真实城市：一条横穿城区的路。
@@ -283,9 +335,8 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
       if (siteMoveProblem(layout, site, target)) continue;
       const patch = appendSiteOp(emptyPlanPatch(layout.seed, layout.scaleTier), { t: "move", id: site.id, at: { x: site.x, z: site.z }, to: target }, 1);
       const movedLayout = applyPlanPatch(layout, patch).layout;
-      const at = { x: Number(target.slice(1).split(",")[0]), z: Number(target.split(",")[1]) };
       const t1 = performance.now();
-      const road = accessRoadFor(movedLayout, real, at, site.width / 2);
+      const road = accessRoadFor(movedLayout, real, listSites(movedLayout).find((candidate) => candidate.id === site.id));
       const accessMs = Math.round(performance.now() - t1);
       if (!road) continue;
       const full = appendRoadOp(patch, { t: "add", from: road.from, to: road.to, width: 5 }, 2);
@@ -363,4 +414,4 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   console.log(`  真实城市：${movedOne.site} → ${movedOne.target}，补接入路 ${movedOne.length}（求路耗时 ${movedOne.accessMs}ms）`);
 }
 
-console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; moved sites get a non-destructive access road and their old dead-end access road is listed; pruning stale entries leaves the rest unchanged; viaducts clear the ground beneath them like roads do; real-city cross-town road, landmark move, river-crossing viaduct and waterfront boulevard replay cleanly.");
+console.log("City plan bulldozer: roads through buildings are allowed — facilities are bulldozed and session buildings re-homed by the developer (never removed), generator residue is left alone, homeless buildings are reported, split halves are not new geometry; landmarks and public sites can be removed or moved anywhere legal, only the suspension bridge stays locked; moved sites get a non-destructive access road and their old dead-end access road is listed; pruning stale entries leaves the rest unchanged; viaducts clear the ground beneath them like roads do; free-level sites use their real model footprint, snap their front door to the road and are not bulldozed by the road that serves them; real-city cross-town road, landmark move, river-crossing viaduct and waterfront boulevard replay cleanly.");

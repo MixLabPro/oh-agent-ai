@@ -87,6 +87,10 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
     {state.buildingId && state.tool === "build" && <p className="city-repair-sel">选中：<code>{state.buildingId}</code></p>}
     {state.tool === "site" && state.site && <div className="city-repair-site">
       <span>选中：<b>{siteLabel(state.site)}</b></span>
+      {state.site.level === "free" && <span className="city-repair-turn">
+        <button onClick={() => repair.rotateSite(-1)} title="逆时针转 90°（[）">↺</button>
+        <button onClick={() => repair.rotateSite(1)} title="顺时针转 90°（]）">↻</button>
+      </span>}
       <button onClick={repair.removeSelected} title="拆除选中的设施（Delete）">拆除</button>
     </div>}
     {state.tool === "site" && !state.site && state.preview?.kind === "site" && <p className="city-repair-sel">指向：{state.preview.label}（点击选中）</p>}
@@ -115,6 +119,6 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
         </li>)}</ul>
       </>}
     </div>}
-    <p className="city-repair-help">V 移动 · R 画路 · E 橡皮擦 · N 路口 · S 设施 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
+    <p className="city-repair-help">V 移动 · R 画路 · E 橡皮擦 · N 路口 · S 设施 · [ ] 转向 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
   </section>;
 }

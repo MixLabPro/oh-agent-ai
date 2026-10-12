@@ -16,7 +16,8 @@ import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
 import { buildingRect, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
 import { polygonDistance, roadNodeId } from "./cityPlan";
-import { listSites } from "./planSites";
+import { listSites, siteBox } from "./planSites";
+import { frontEntrance } from "./planFootprint";
 
 export type RoadVerdict = { blockers: string[]; warnings: string[] };
 
@@ -58,7 +59,8 @@ function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boole
 }
 
 /** 路会压到的对象：会话楼（只能被安置，不能被拆）与设施（可推平；锁定的不能动）。 */
-export type Obstacle = { kind: "session" | "site"; id: string; rect: BuildingRect; locked: boolean };
+/** door：自由级设施的正门（模型占地 +z 面中点 + 朝外方向）。 */
+export type Obstacle = { kind: "session" | "site"; id: string; rect: BuildingRect; locked: boolean; door?: { at: Vec2; outward: Vec2 } };
 const obstacleCache = new WeakMap<CityLayout, { model: CityModel; obstacles: Obstacle[] }>();
 
 /** 悬停预览每次鼠标移动都要评估，障碍按（布局, 模型）缓存——布局不可变，缓存随布局对象一起回收。 */
@@ -71,7 +73,7 @@ function obstacles(layout: CityLayout, model: CityModel): Obstacle[] {
     const building = buildings.get(id);
     if (building) out.push({ kind: "session", id, rect: buildingRect(building, slot), locked: false });
   }
-  for (const site of listSites(layout)) out.push({ kind: "site", id: site.id, rect: { x: site.x, z: site.z, yaw: site.yaw, width: site.width, depth: site.depth }, locked: !!site.locked });
+  for (const site of listSites(layout)) out.push({ kind: "site", id: site.id, rect: siteBox(site), locked: !!site.locked, ...(site.footprint ? { door: frontEntrance(site.footprint, site, site.yaw) } : {}) });
   obstacleCache.set(layout, { model, obstacles: out });
   return out;
 }
@@ -80,10 +82,21 @@ function obstacles(layout: CityLayout, model: CityModel): Obstacle[] {
 function hitsBy(edge: RoadEdge, list: readonly Obstacle[]): Set<number> {
   const hit = new Set<number>();
   list.forEach((item, index) => {
-    if (distanceToPolyline(item.rect, edge.points) > 60) return;
-    if (!rectClearOfEdges(item.rect, [edge], 0.5)) hit.add(index);
+    if (distanceToPolyline(item.rect, edge.points) > 60 + Math.hypot(item.rect.width, item.rect.depth) / 2) return;
+    if (rectClearOfEdges(item.rect, [edge], 0.5)) return;
+    // 一端落在设施正门、另一端朝门外：这是接到门口的路（接入路），不是压到设施。曾把它算作压到——
+    // 推土机会把接入路服务的那座设施自己推平（verify-plan-bulldozer (f) 抓到）。
+    if (item.door && servesDoor(edge, item.door, item.rect)) return;
+    hit.add(index);
   });
   return hit;
+}
+
+function servesDoor(edge: RoadEdge, door: { at: Vec2; outward: Vec2 }, rect: BuildingRect): boolean {
+  const ends = [[edge.points[0], edge.points[edge.points.length - 1]], [edge.points[edge.points.length - 1], edge.points[0]]] as const;
+  return ends.some(([near, far]) => Math.hypot(near.x - door.at.x, near.z - door.at.z) <= 0.6
+    && (far.x - door.at.x) * door.outward.x + (far.z - door.at.z) * door.outward.z > 0
+    && rectClearOfEdges(rect, [{ ...edge, width: 0, points: [far, far] }], 0));
 }
 
 /** 一组新几何的路段会压到什么：要安置的会话楼、要推平的设施、压到的锁定设施（后者拒绝）。 */
@@ -397,7 +410,7 @@ function minGap(angles: readonly number[]): number {
  * 画路的校验：from/to 是已吸附的坐标。硬阻止：太短/太长、锁定宿主、孤立（两端都没接上路网）、重复/退化、
  * 入水、穿过楼/配套/花园、与现有道路交叉（要在交叉点连接）、新引入的锐角路口。警告：新断头。
  */
-export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2, to: Vec2, width: number, purpose?: "waterfront"): RoadVerdict {
+export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2, to: Vec2, width: number, purpose?: "waterfront", ignoreSites: readonly string[] = []): RoadVerdict {
   const blockers: string[] = []; const warnings: string[] = [];
   const a = quantize(from); const b = quantize(to);
   const length = Math.hypot(b.x - a.x, b.z - a.z);
@@ -418,7 +431,10 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
 
   const next: RoadEdge = { id: "new", from: "a", to: "b", width, kind: width >= 8 ? "arterial" : "local", points: [a, b], structure: "ground-road" };
   if (badSamples(layout, next) > 0 || !layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z)) blockers.push("road-in-water");
-  applyImpact(roadImpact(layout, model, [next]), blockers, warnings);
+  // ignoreSites：接入路从设施自己的门口起笔，路带必然擦到它自己——不算「压到设施」。
+  const ignored = new Set<number>();
+  if (ignoreSites.length) obstacles(layout, model).forEach((item, index) => { if (item.kind === "site" && ignoreSites.includes(item.id)) ignored.add(index); });
+  applyImpact(roadImpact(layout, model, [next], ignored), blockers, warnings);
 
   // 交叉：自动生成路口（planPatch 重放时在交点处把两条路都拆开），这里只数一下告诉用户。
   if (junctions) warnings.push(`auto-junction:${junctions}`);

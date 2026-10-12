@@ -672,4 +672,26 @@ function harness(overrides = {}) {
   assert.ok(timers.at(-1).cancelled || timers.at(-1) === last, "exit cancels a pending settle");
 }
 
-console.log("City plan repair controller: hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (x) 自由级设施转向：[ / ] 只对选中的自由级设施有效，转向次数传给落位试算与搬家；换选另一座设施时归零。
+{
+  const { controller, deps } = harness();
+  const turns = [];
+  deps.siteGhost = (site, x, z, turn) => { turns.push(["ghost", turn]); return { targetId: "@1,1", rect: { x, z, yaw: 0, width: 30, depth: 25 }, blockers: [], warnings: [] }; };
+  deps.siteTargetAt = (site, x, z, turn) => { turns.push(["target", turn]); return "@1,1,0"; };
+  deps.sites["public:station"] = { id: "public:station", kind: "public-site", publicKind: "station", x: 0, z: -200, yaw: 0, width: 30, depth: 25, height: 22, y: 0, level: "free", slotId: "", box: { x: 0, z: -203, yaw: 0, width: 30, depth: 25 } };
+  controller.enter(); controller.setTool("site");
+  controller.click({ pickedId: null, ground: { x: 0, z: -200 }, ray: { hit: "public:station" } });
+  assert.match(controller.snapshot.message.text, /自动贴路、正门朝路/);
+  controller.rotateSite(1); controller.rotateSite(1); controller.rotateSite(-1);
+  assert.equal(controller.snapshot.siteTurn, 1);
+  controller.hover({ x: 50, z: -100 }, { hit: null });
+  assert.deepEqual(turns.at(-1), ["ghost", 1], "the turn reaches the placement preview");
+  controller.click({ pickedId: null, ground: { x: 50, z: -100 }, ray: { hit: null } });
+  assert.ok(turns.some(([what, turn]) => what === "target" && turn === 1), "…and the move");
+  controller.click({ pickedId: null, ground: { x: 100, z: 100 }, ray: { hit: "civic:0" } });
+  assert.equal(controller.snapshot.siteTurn, 0, "selecting another site resets the turn");
+  controller.rotateSite(1);
+  assert.equal(controller.snapshot.siteTurn, 0, "block-level sites do not rotate");
+}
+
+console.log("City plan repair controller: free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
