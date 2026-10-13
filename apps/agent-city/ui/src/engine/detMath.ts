@@ -22,30 +22,37 @@ function kernelCos(x: number): number {
   return 1 - 0.5 * z + z * z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03 + z * (2.48015872894767294178e-05
     + z * (-2.75573143513906633035e-07 + z * (2.08757232129817482790e-09 + z * -1.13596475577881948265e-11)))));
 }
-/** 返回象限与 [-π/4, π/4] 内的余量（Cody–Waite 两段常数）。 */
-function reduce(x: number): [number, number] {
+/** 余量 r 的返回通道：reduce 只产出两个数，返回元组会在每次 sin/cos 都分配一个数组（profile 里的 GC 大头）。
+ *  改为模块级暂存槽：象限由返回值给出、余量写入 reducedRemainder。算术（Cody–Waite 两段常数）逐字不变，结果逐位相同；
+ *  JS 单线程且 reduce 的调用方在下一次 reduce 之前就取走了余量，不存在重入。 */
+let reducedRemainder = 0;
+/** 返回象限，并把 [-π/4, π/4] 内的余量写入 reducedRemainder（Cody–Waite 两段常数）。 */
+function reduce(x: number): number {
   const k = Math.round(x * INV_PIO2);
-  const r = (x - k * PIO2_HI) - k * PIO2_LO;
-  return [((k % 4) + 4) % 4, r];
+  reducedRemainder = (x - k * PIO2_HI) - k * PIO2_LO;
+  // k 是整数值的 double：|k| < 2^31 时 `k & 3` 与 ((k % 4) + 4) % 4 对负数同为 0..3 的补码取模（浮点 fmod 慢得多）；
+  // 更大的 k 走原式，结果逐位相同。
+  return k >= -2147483648 && k <= 2147483647 ? k & 3 : ((k % 4) + 4) % 4;
 }
 function sin(x: number): number {
   if (!Number.isFinite(x)) return NaN;
-  const [q, r] = reduce(x);
+  const q = reduce(x); const r = reducedRemainder;
   return q === 0 ? kernelSin(r) : q === 1 ? kernelCos(r) : q === 2 ? -kernelSin(r) : -kernelCos(r);
 }
 function cos(x: number): number {
   if (!Number.isFinite(x)) return NaN;
-  const [q, r] = reduce(x);
+  const q = reduce(x); const r = reducedRemainder;
   return q === 0 ? kernelCos(r) : q === 1 ? -kernelSin(r) : q === 2 ? -kernelCos(r) : kernelSin(r);
 }
 
 const AT = [3.33333333333329318027e-01, -1.99999999998764832476e-01, 1.42857142725034663711e-01, -1.11111104054623557880e-01,
   9.09088713343650656196e-02, -7.69187620504482999495e-02, 6.66107313738753120669e-02, -5.83357013379057348645e-02,
   4.97687799461593236017e-02, -3.65315727442169155270e-02, 1.62858201153657823623e-02];
+const [AT0, AT1, AT2, AT3, AT4, AT5, AT6, AT7, AT8, AT9, AT10] = AT;
 function atanSmall(x: number): number {
   const z = x * x;
-  let p = AT[AT.length - 1];
-  for (let i = AT.length - 2; i >= 0; i -= 1) p = AT[i] + z * p;
+  // 展开 Horner 循环（系数同 AT[10]→AT[0]，运算顺序不变，结果逐位相同）：省掉数组读取与循环开销，热路径（coastDistance）受益。
+  const p = AT0 + z * (AT1 + z * (AT2 + z * (AT3 + z * (AT4 + z * (AT5 + z * (AT6 + z * (AT7 + z * (AT8 + z * (AT9 + z * AT10)))))))));
   return x - x * z * p;
 }
 const PI = 3.141592653589793;
@@ -106,13 +113,20 @@ function pow(base: number, exponent: number): number {
   if (base < 0) return Number.isInteger(exponent) ? (exponent % 2 ? -1 : 1) * exp(exponent * log(-base)) : NaN;
   return exp(exponent * log(base));
 }
-function hypot(...values: number[]): number {
+function hypot(..._values: number[]): number {
+  // 二元是热路径（走廊采样、坡度、距离）：用 arguments 直读，不物化 rest 数组；累加顺序与通用循环一致
+  // （0 + a² + b²，而 0 + a² 恒等于 a²），结果逐位相同。其余元数走原循环。
+  const n = arguments.length;
+  if (n === 2) return Math.sqrt(arguments[0] * arguments[0] + arguments[1] * arguments[1]);
   let sum = 0;
-  for (const v of values) sum += v * v;
+  for (let i = 0; i < n; i += 1) sum += arguments[i] * arguments[i];
   return Math.sqrt(sum);
 }
 
 /** 全局 Math 的确定性替身：四则与 sqrt/取整/比较类原样沿用（规范要求正确舍入），超越函数换成上面的实现。 */
 const base: Record<string, unknown> = {};
 for (const name of Object.getOwnPropertyNames(Math)) base[name] = (Math as unknown as Record<string, unknown>)[name];
-export const DetMath = Object.assign(base, { sin, cos, atan, atan2, exp, log, log10, pow, hypot }) as unknown as Math;
+// 逐个键赋值 43 个属性会让 V8 把 base 降成字典模式，之后每次 `Math.floor/min/sqrt…` 都是哈希查找，
+// 也无法把内建内联（profile 里 coastDistance 一个函数自占 ~20%）。对象展开重建一份快速属性对象：键值不变，
+// 只改内部表示，运算结果逐位相同。
+export const DetMath = { ...base, sin, cos, atan, atan2, exp, log, log10, pow, hypot } as unknown as Math;
