@@ -266,6 +266,34 @@ function proposeDirectProjection(request: ConnectionRequest, world: ConnectorWor
 
 // ── 阶梯 2：并线（与已有道路节点直连，全程校验）─────────────────────────────────────────
 
+// 并线走廊结果备忘（行为不变的提速）：孤立分量的并线阶梯在严格档与宽角度档各对每个成员×每个节点
+// 跑一遍 corridorFailure（~115 个地形采样/次，多数败在水上）；宽角度档只改后置的 endpointClear，走廊
+// 判定与严格档逐字相同，实测约一半调用是重复。corridorViolation 是纯函数——只读 world.geo / inRiver
+// 与 policy / 端点，不读 network——所以键 = 端点 + 每个影响结果的 policy 字段；而 geo、inRiver、
+// 预留地（函数，规划中会挪动）任一变化就整表清空，条目不可能过期。预留地逐项数值比对而非比引用：
+// reservations() 每次返回新数组。waterfront 不在并线策略里出现，遇到就不备忘（宁可不加速也不猜）。
+const NODE_MERGE_MEMO_LIMIT = 400_000;
+const nodeMergeMemo: {
+  geo: Geography | null; inRiver: ConnectorWorld["inRiver"] | null;
+  sites: Array<{ x: number; z: number; radius: number }>;
+  map: Map<string, ConnectionFailure | null>;
+} = { geo: null, inRiver: null, sites: [], map: new Map() };
+function nodeMergeCorridor(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy): ConnectionFailure | null {
+  if (policy.waterfront) return corridorFailure(world, a, b, policy);
+  const m = nodeMergeMemo;
+  const same = m.geo === world.geo && m.inRiver === world.inRiver && m.sites.length === policy.sites.length
+    && policy.sites.every((s, i) => s.x === m.sites[i].x && s.z === m.sites[i].z && s.radius === m.sites[i].radius);
+  if (!same || m.map.size > NODE_MERGE_MEMO_LIMIT) {
+    m.geo = world.geo; m.inRiver = world.inRiver; m.sites = policy.sites.map((s) => ({ x: s.x, z: s.z, radius: s.radius })); m.map.clear();
+  }
+  const key = `${a.x},${a.z}>${b.x},${b.z}|${policy.roadWidth ?? 0}|${policy.siteMargin}|${policy.maxSlope}|${policy.requireBuildable}`;
+  const hit = m.map.get(key);
+  if (hit !== undefined) return hit;
+  const result = corridorFailure(world, a, b, policy);
+  m.map.set(key, result);
+  return result;
+}
+
 function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, options: LadderOptions): StrategyOutcome {
   const { network } = world;
   const policy = fallbackPolicy(world, request, options.siteMargin);
@@ -277,7 +305,7 @@ function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, opt
     if (id === sourceId || d < CONNECTOR_CONFIG.minLinkDistance) continue;
     if (network.edges.has([sourceId, id].sort().join("/"))) continue; // 已直连的节点（源悬挂边的对端）不是候选
     if (d > request.maxLength) break; // 已按 (d, id) 排序
-    const corridor = corridorFailure(world, request.source, p, policy);
+    const corridor = nodeMergeCorridor(world, request.source, p, policy);
     if (corridor) { note(d, corridor); continue; }
     // 角度从宽档（软成本，设计 §4.1「转弯是软成本」）：只作最后手段，acuteJunctions 度量其质量代价。
     if (!relaxed && (!endpointClear(network, p, request.source) || !endpointClear(network, request.source, p))) { note(d, "junction-angle"); continue; }
