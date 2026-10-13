@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject, assignConnectedSite, JOINT_SITE_CONFIG, stationEntranceLocal, emptyNetwork, addNetworkEdge } = await loadCity({
+const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject, assignConnectedSite, JOINT_SITE_CONFIG, stationEntranceLocal, emptyNetwork, addNetworkEdge, siteInWater, siteFootprint, worldParts, pointInPolygon, ringSamples16 } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/sitespec.ts": ["SITE_SPECS", "specByKind", "coastalSitingKinds", "straddleSitingKinds", "frontageExemptKinds", "nominalAnchorPoint", "SITING_TABLE_VERSION"],
@@ -19,6 +19,9 @@ const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKind
   "engine/planner/jointSite.ts": ["assignConnectedSite", "JOINT_SITE_CONFIG"],
   "engine/models/publicSiteGeometry.ts": ["stationEntranceLocal"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
+  "engine/planner/constraints.ts": ["siteInWater"],
+  "engine/planFootprint.ts": ["siteFootprint", "worldParts", "pointInPolygon"],
+  "engine/planner/footprint.ts": ["ringSamples16"],
 });
 
 // Exact declared model geometry replaces the nominal reservation circle in
@@ -39,6 +42,23 @@ const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKind
     height: () => { terrainSamples += 1; return 1.2; } };
   assert.equal(siteCandidateHardReject(blockedWorld, specByKind("stadium"), candidate), "trunk-clearance-r+8");
   assert.equal(terrainSamples, 0, "cheap physical clearance rejection must happen before terrain sampling");
+}
+
+// Exact inland models use their declared ground footprint for the water measure,
+// matching generator admission instead of rejecting a dry model for wet corners
+// of its larger nominal reservation circle.
+{
+  const owner = { id: "central-station", kind: "station", x: 0, z: 0, yaw: 0, radius: specByKind("station").radius };
+  const footprint = siteFootprint(owner.kind, owner.id, owner.radius), polygons = worldParts(footprint, owner, owner.yaw);
+  assert(footprint.exact, "station fixture must exercise the declared physical footprint path");
+  const outsideRingPoint = ringSamples16(owner, owner.radius).find(point => !polygons.some(polygon => pointInPolygon(point, polygon)));
+  assert(outsideRingPoint, "station's nominal plot circle must contain a point outside the physical ground footprint");
+  const height = (x, z) => Math.hypot(x - outsideRingPoint.x, z - outsideRingPoint.z) < 0.1 ? 0 : 1.2;
+  const plan = { publicSites: [owner], landmarks: [], terrain: { height } };
+  assert.equal(siteInWater.measure(plan).length, 0, "wet area outside the exact inland footprint cannot create a water violation");
+  const proxyOwner = { ...owner, kind: "legacy-proxy" };
+  assert.equal(siteInWater.measure({ ...plan, publicSites: [proxyOwner] }).length, 1,
+    "unknown/nominal footprints retain the conservative reservation-circle water measure");
 }
 
 const frontagePrimaryMax = JOINT_SITE_CONFIG.frontageSegments * (1 + JOINT_SITE_CONFIG.probes.length) * 2;

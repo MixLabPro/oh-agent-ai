@@ -51,6 +51,22 @@ diff-check通过。尚未在固定环境做前后A/B，也未重跑慢tier5样�
 全约束与质量共同选择，而非仅收紧乘数。该方案尚未实现，原30岛/多档/跨引擎/视觉/性能
 门禁、B0–B4与main合并要求均仍未闭合。
 
+随后根因核实：`tier5`样本的central-station绑定入口已保护其移动；规划准入对精确renderer地面外廓判干，
+但`siteInWater`仍按较大的名义圆判湿，两个阶段对同一对象用了不同占地能力。现将精确内陆footprint
+的水约束改为同一4单位地面外廓采样，proxy及岸边规则不变；sitespec反例守卫证明名义圆外、实体外的湿点
+不再拒绝干燥实体，同时未知模型仍保留圆形保护。`verify-city-planning.mjs` 30岛批次终态exit0：急角0、
+路穿用地4、缺入口0、拥挤主干0、松弛断头0，既有批次阈值通过。相同tier5慢样本用1.1面积步长重测：
+32682ms、2718/2700地块、1127道路、340街区、required unmet0、groundFailures空、16项约束全0，
+状态degraded仅因整图物理覆盖与预算取消能力仍pending。这个定点证据证明新口径消除了原水约束冲突，
+但尚不证明全 seed/tier 半径策略安全；生产参数暂未调整，仍需多档普查、跨引擎与性能验收。
+
+同轮`verify-city-survey.mjs`在tier1独立验收集（60 seeds）处exit1，尚未进入调优集与后续tier。
+失败计数：siteWithoutDoorRoad 2/60（上限1）、roadThroughSite 5/60（上限0）、sitesOverlap 2/60
+（上限1）。将六个报告种子在提交前`ecb988fe`基线的临时只读worktree重跑，三类约束逐种子结果一致；
+因此这是分支已有独立样本残留，不是本次水度量变更引入。未提高上限；door-road样本分别为sail-opera
+离路gap43和east-stadium候选/邻居阻挡；道路穿越与重叠样本集中于villa-complex基础/走廊及stadium
+联动，须作为后续独立验收修复。该全survey因首个集合失败而中止，不能宣称四档独立验收通过。
+
 ## 2026-10-12 对象注册表协作接口（B3前置，非整批完成）
 
 生成器现导出cityLayout.checkSitePlacement(layout, footprint, occupied, options?)。

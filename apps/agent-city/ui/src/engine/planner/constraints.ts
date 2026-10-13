@@ -16,7 +16,8 @@
 import type { createCityPlan } from "../cityPlan";
 import { declaredGroundRoadClear } from "./modelEnvelope";
 import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
-import { wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
+import { WATER_LEVEL, wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
+import { pointInPolygon, siteFootprint, worldFootprintSamples } from "../planFootprint";
 import { componentOf, primaryComponentId } from "./intent";
 import { planarAccessAtYaw, resolvePlanarAccess } from "../models/siteAccess";
 import { specByKind } from "./sitespec";
@@ -48,7 +49,15 @@ export const siteInWater: Constraint = {
     const out: Violation[] = [];
     const geo = { height: plan.terrain.height, inRiver: () => false };
     for (const s of planSites(plan)) {
-      const wet = wetCount(geo, s, s.radius); // measure 口径：只看地形高度（河道由 siteNearRiver 单独量）
+      const declaration = specByKind(s.kind);
+      const footprint = declaration?.placement === "inland-frontage" ? siteFootprint(s.kind, s.id ?? `reservation:${s.kind}`, s.radius) : null;
+      // Match generator admission for exact inland footprints. The nominal radius is
+      // only a reservation proxy there; testing its empty corners can reject a dry
+      // station/stadium that was admitted against its declared renderer geometry.
+      const samples = footprint?.exact ? worldFootprintSamples(footprint, s, s.yaw, 4) : null;
+      const wet = samples
+        ? samples.length === 0 ? 1 : samples.filter(point => plan.terrain.height(point.x, point.z) < WATER_LEVEL).length
+        : wetCount(geo, s, s.radius); // legacy/shore proxy: height only; river is measured separately
       if (s.kind !== "harbor" && !s.shore && wet > (SHORE.has(s.kind) ? 4 : 0)) out.push(v("siteInWater", s, `${s.kind} wet=${wet}`));
     }
     return out;
