@@ -21,7 +21,7 @@ const { THREE, BUILDING_MODELS, PHYSICAL_PENDING, declarePhysical, quadInFootpri
   "engine/models/registry.ts": ["BUILDING_MODELS", "PHYSICAL_PENDING"],
   "engine/models/physical.ts": ["declarePhysical", "quadInFootprint", "pointInRegion", "regionArea", "footprintAreaSum", "MAX_FOOTPRINT_PARTS", "MAX_CONVEX_VERTICES"],
   "engine/render/buildingCompiler.ts": ["compileBuilding"],
-  "engine/models/landmarkMaterials.ts": ["createMaterialFactory"],
+  "engine/render/landmarkMaterials.ts": ["createMaterialFactory"],
 });
 
 /** 容差表（spec §3.2「容差按尺度标定、版本化」）：v1 首批标定，调整必须改版本号并在提交说明记录依据。 */

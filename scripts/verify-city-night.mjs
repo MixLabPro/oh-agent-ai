@@ -29,9 +29,9 @@ assert.equal(B.useOfZone("residential"), "residential");
 assert.equal(B.nightFactor(0.05), 0, "daytime selfLit is not night");
 assert.equal(B.nightFactor(1), 1);
 
-// 地标造型已拆到 models/landmarks/*.ts（桥塔霓虹在 suspensionBridge.ts）：夜景代码检查读 cityParts + engine/render/*.ts + engine/systems/*.ts + 全部造型文件。
+// 地标造型：声明化的在 models/landmarks/*.ts，依赖 three 的手写 drawX 在 render/landmarks/*.ts（桥塔霓虹在 suspensionBridge.ts）：夜景代码检查读 cityParts + engine/render/*.ts + engine/systems/*.ts + 全部造型文件。
 const modelsDir = path.join(engine, "models/landmarks");
-const splitDirs = ["render", "systems"].map((d) => path.join(engine, d)).filter((d) => fs.existsSync(d));
+const splitDirs = ["render", "render/landmarks", "systems"].map((d) => path.join(engine, d)).filter((d) => fs.existsSync(d));
 const splitFiles = splitDirs.flatMap((d) => fs.readdirSync(d).filter((f) => f.endsWith(".ts")).map((f) => path.join(d, f)));
 const parts = [path.join(engine, "cityParts.ts"), ...splitFiles, ...fs.readdirSync(modelsDir).map((f) => path.join(modelsDir, f)), ...fs.readdirSync(path.join(engine, "models")).filter((f) => f.endsWith(".ts")).map((f) => path.join(engine, "models", f))].map((f) => fs.readFileSync(f, "utf8")).join("\n");
 const eng = fs.readFileSync(path.join(engine, "CityEngine.ts"), "utf8");

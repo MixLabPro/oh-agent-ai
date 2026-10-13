@@ -1,5 +1,6 @@
 import { DetMath as Math } from "../detMath";
-import { clearsHighways, type Landmark } from "../cityPlan";
+import type { Landmark } from "../cityPlan";
+import { clearsHighways } from "../roadGeometry";
 import type { PublicSite, Vec2 } from "../cityLayout";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount } from "./footprint";
 import { coastalSitingKinds, canRelocateGroundSite } from "./sitespec";

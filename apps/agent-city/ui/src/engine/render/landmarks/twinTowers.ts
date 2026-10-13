@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { LandmarkCtx } from "../landmarkContext";
+import type { LandmarkCtx } from "../../models/landmarkContext";
 import { createRenderCanvas } from "../../renderCanvas";
 import { hashSeed } from "../../../cityModel";
 

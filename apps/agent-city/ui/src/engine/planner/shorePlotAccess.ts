@@ -65,7 +65,7 @@ export function proposeShorePlotAccess(world: ConnectorWorld, owner: PlotOwner, 
     const distance = Math.hypot(mid.x - owner.x, mid.z - owner.z);
     if (!Number.isFinite(distance) || distance <= 0) { failures.set("invalid-gate-direction", (failures.get("invalid-gate-direction") ?? 0) + 1); continue; }
     const gate = keyOf({ x: owner.x + (mid.x - owner.x) * reach / distance, z: owner.z + (mid.z - owner.z) * reach / distance });
-    const network: Network & { version?: number } = { ...world.network,
+    const network: Network = { ...world.network,
       nodes: new Map([...world.network.nodes].map(([id, node]) => [id, { ...node }])),
       edges: new Map([...world.network.edges].map(([id, road]) => [id, { ...road, points: road.points.map((point) => ({ ...point })) }])),
       patchRemaps: (world.network.patchRemaps ?? []).map((remap) => ({ nodes: { ...remap.nodes },

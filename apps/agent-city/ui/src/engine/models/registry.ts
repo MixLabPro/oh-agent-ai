@@ -1,25 +1,17 @@
-import type { LandmarkCtx } from "./landmarkContext";
-import { hashSeed } from "../../cityModel";
-import { compiledBuilder } from "../render/buildingCompiler";
 import type { BuildingModel } from "./model";
 import { tvTowerModel } from "./landmarks/tvTower";
-import { drawTwinTowers } from "./landmarks/twinTowers";
-import { drawTwistTower } from "./landmarks/twistTower";
 import { archModel } from "./landmarks/arch";
 import { sailOperaModel } from "./landmarks/sailOpera";
 import { lighthouseModel } from "./landmarks/lighthouse";
 import { ferrisWheelModel } from "./landmarks/ferrisWheel";
 import { pagodaModel } from "./landmarks/pagoda";
-import { drawVillaComplex } from "./landmarks/villaComplex";
-import { drawSuspensionBridge } from "./landmarks/suspensionBridge";
 import { SITE_CLASSES } from "./siteClasses";
 
-/** 已声明化（BuildingModel）的建筑；其余 kind 仍走下面的手写 drawX（批 1 逐个迁）。守卫 verify-city-models 按这张表驱动。 */
+/** 已声明化（BuildingModel）的建筑；其余 kind 仍走 render/landmarkBuilders.ts 里手写的 drawX（批 1 逐个迁）。守卫 verify-city-models 按这张表驱动。 */
 export const BUILDING_MODELS: BuildingModel[] = [tvTowerModel, pagodaModel, archModel, sailOperaModel, lighthouseModel, ferrisWheelModel];
-const modelBuilder = (model: BuildingModel) => compiledBuilder(model, hashSeed);
 
 /**
- * 豁免白名单（CITY_BUILDING_MODEL_SPEC §9「禁止静默」）：LANDMARK_BUILDERS 里仍走手写 drawX 的 kind，必须在这里登记一行理由。
+ * 豁免白名单（CITY_BUILDING_MODEL_SPEC §9「禁止静默」）：render/landmarkBuilders.ts 的 LANDMARK_BUILDERS 里仍走手写 drawX 的 kind，必须在这里登记一行理由。
  * verify-city-models 断言「每个 kind 要么在 BUILDING_MODELS、要么在这里，不同时」且条数 ≤ 6——不能悄悄变长；转成 model 就从这里删掉。
  */
 export const UNPARADIGMED: Record<string, string> = {
@@ -42,21 +34,11 @@ export const PHYSICAL_PENDING: Record<string, string> = {
 };
 
 /**
- * 建筑模型注册表：每个地标造型一个独立文件（models/landmarks/*.ts），这里是 kind → 造型函数 + 中文名的唯一入口。
- * cityParts 只按 kind 查表调用，cityDecor 的名称表也由这里派生——新增地标 = 加一个文件 + 这里一行。
+ * 建筑模型注册表（纯数据层 L3，不依赖 three/render）：kind → 中文名与声明化模型清单。
+ * 造型函数表 LANDMARK_BUILDERS（kind → 把模型/手写 drawX 编译成 three 对象）在 render/landmarkBuilders.ts——
+ * 它要值导入 three 与 buildingCompiler，放在 models/ 就反向依赖了上层（CITY_ARCHITECTURE §1 / verify-city-import-boundary 规则 3）。
+ * 新增地标 = 加一个 model 文件 + 这里进 BUILDING_MODELS + render/landmarkBuilders.ts 加一行。
  */
-export const LANDMARK_BUILDERS: Record<string, (ctx: LandmarkCtx) => void> = {
-  "tv-tower": modelBuilder(tvTowerModel),
-  "twin-towers": drawTwinTowers,
-  "twist-tower": drawTwistTower,
-  "arch": modelBuilder(archModel),
-  "sail-opera": modelBuilder(sailOperaModel),
-  "lighthouse": modelBuilder(lighthouseModel),
-  "ferris-wheel": modelBuilder(ferrisWheelModel),
-  "pagoda": modelBuilder(pagodaModel),
-  "villa-complex": drawVillaComplex,
-  "suspension-bridge": drawSuspensionBridge,
-};
 
 /** 地标/配套的中文名（点击说明与建筑说明共用；有造型文件的 kind 与「由其它模块建造」的 kind 在同一张表里）。 */
 export const LANDMARK_LABELS: Record<string, string> = {

@@ -213,7 +213,7 @@ export function relineGroundJunction(ctx: RepairContext, ids: [string, string], 
   if (!safeLegDirections(at, parents.flatMap((edge) => edge.points))) return { changes: 0, reason: "junction-angle" };
   const before = groundJunctionFindings([...ctx.network.edges.values()]);
   const preserved = new Set(before.filter((finding) => !finding.edges.some((id) => ids.includes(id))).map((finding) => finding.id));
-  const result = commitNetworkPatch(ctx.network, { baseVersion: (ctx.network as Network & { version?: number }).version ?? 0,
+  const result = commitNetworkPatch(ctx.network, { baseVersion: ctx.network.version,
     addEdges: [], removeEdgeIds: [], splits: [], relineSplits: ids.map((edgeId) => ({ edgeId, at })) }, (draft) => {
     const nodeId = `${at.x}:${at.z}`;
     const legs = [...draft.edges.values()].filter((edge) => edge.from === nodeId || edge.to === nodeId);
@@ -287,7 +287,7 @@ function commitSnap(ctx: RepairContext, source: RoadNode, target: RoadNode, spli
       return splits.some((split) => split.edgeId === id) ? [[from, target.id].sort().join("/"), [target.id, to].sort().join("/")] : [[from, to].sort().join("/")];
     };
     const existingCrossings = new Set(groundJunctionFindings([...ctx.network.edges.values()]).flatMap((finding) => remappedIds(finding.edges[0]).flatMap((a) => remappedIds(finding.edges[1]).map((b) => [a, b].sort().join("|")))));
-    const result = commitNetworkPatch(ctx.network, { baseVersion: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+    const result = commitNetworkPatch(ctx.network, { baseVersion: ctx.network.version,
       removeEdgeIds, splits, addEdges: [], rebindNodes: [{ from: source.id, to: target.id, coalesceStraightGround }] }, (draft) => {
       const legs = [...draft.edges.values()].filter((edge) => edge.from === target.id || edge.to === target.id);
       if (groundJunctionFindings([...draft.edges.values()]).some((finding) => !existingCrossings.has([...finding.edges].sort().join("|")))) return "snap introduced a new crossing";
@@ -385,7 +385,7 @@ export function mergeCoincidentJunctionLegs(ctx: RepairContext, junctionId: stri
     if (!source || !target) continue;
     const bindings: NetworkPatch["rebindNodes"] = [{ from: sourceId, to: targetId }];
     const result = commitNetworkPatch(ctx.network, {
-      baseVersion: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+      baseVersion: ctx.network.version,
       removeEdgeIds: [victim.edge.id], removeNodeIds: [], splits: [], addEdges: [], rebindNodes: bindings,
     }, (draft) => {
       const changedIds = sourceEdges.filter((edge) => edge.id !== victim.edge.id).map((edge) => [edge.from === sourceId ? targetId : edge.from, edge.to === sourceId ? targetId : edge.to].sort().join("/"));
@@ -522,11 +522,12 @@ export function rerouteUnsafeGroundCrossings(ctx: RepairContext): { changes: num
         const source = ctx.network.nodes.get(sourceId), target = ctx.network.nodes.get(targetId);
         if (!source || !target) continue;
         const staged: Network = {
+          version: 0,
           nodes: new Map([...ctx.network.nodes].map(([id, node]) => [id, { ...node }])),
           edges: new Map([...ctx.network.edges].filter(([id]) => id !== edge.id).map(([id, road]) => [id, { ...road, points: road.points.map((point) => ({ ...point })) }])),
         };
-        (staged as Network & { version?: number }).version = (ctx.network as Network & { version?: number }).version ?? 0;
-        const world = { network: staged as Network & { version?: number }, geo: ctx.geo, inRiver: ctx.inRiver,
+        staged.version = ctx.network.version;
+        const world = { network: staged, geo: ctx.geo, inRiver: ctx.inRiver,
           reservations: () => [...ctx.publicSites, ...ctx.landmarks] };
         const result = runConnection({ id: attemptId, source: { x: source.x, z: source.z }, target: { kind: "node", id: targetId },
           purpose: "district-access", allowBridge: false, maxLength: Math.min(700, Math.max(160, Math.hypot(target.x - source.x, target.z - source.z) * 2.5)),
@@ -542,7 +543,7 @@ export function rerouteUnsafeGroundCrossings(ctx: RepairContext): { changes: num
         }
         ctx.network.nodes.clear(); for (const [id, node] of staged.nodes) ctx.network.nodes.set(id, node);
         ctx.network.edges.clear(); for (const [id, road] of staged.edges) ctx.network.edges.set(id, road);
-        (ctx.network as Network & { version?: number }).version = (staged as Network & { version?: number }).version;
+        ctx.network.version = staged.version;
         ctx.connectionLog?.push({ id: attemptId, purpose: "district-access", ok: true, strategy: result.strategy });
         accepted = true; changes += 1;
         break;
@@ -632,7 +633,7 @@ export function trimLeafBeforeUnsafeCrossing(ctx: RepairContext): { changes: num
         const gap = closestSegmentPoints(at, at, other.points[0], other.points[1]).distance;
         if (gap < clearance) continue;
         const result = commitNetworkPatch(ctx.network, {
-          baseVersion: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+          baseVersion: ctx.network.version,
           removeEdgeIds: [edge.id], removeNodeIds: [terminalId], splits: [], rebindNodes: [],
           addEdges: [{ a: { x: retained.x, z: retained.z }, b: at, arterial: edge.kind === "arterial", primary: false, bridge: false }],
         }, (draft) => {

@@ -23,7 +23,7 @@
  * 确定性：无随机、无墙钟；分量按 root id、候选按 (距离, id) 排序；失败零副作用（§5A-7）。
  */
 import { DetMath as Math } from "../detMath";
-import { roadNodeId } from "../cityPlan";
+import { roadNodeId } from "../roadGeometry";
 import type { RoadEdge, RoadNode, Vec2 } from "../cityLayout";
 import { keyOf, type Network } from "./network";
 import { commitConnection, proposeConnection, type ConnectionAttempt, type ConnectorWorld } from "./connect";

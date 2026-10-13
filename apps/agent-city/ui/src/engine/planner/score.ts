@@ -10,7 +10,8 @@
  * doorAlignment 与 stationDoorFacesRoad 同一口径（投影点方向，不再用端点序切向）；shoreHug 用真实岸线折线。
  */
 import { DetMath as Math } from "../detMath";
-import { segmentDistance, targetParcels } from "../cityPlan";
+import { segmentDistance } from "../roadGeometry";
+import { targetParcels } from "../scaleTier";
 import { CONSTRAINTS, stationDoorFacesRoad, type CityPlan } from "./constraints";
 import { polylineClosest } from "./footprint";
 import { coastalSitingKinds, specByKind } from "./sitespec";

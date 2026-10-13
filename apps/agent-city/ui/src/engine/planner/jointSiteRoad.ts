@@ -14,7 +14,7 @@ import { polylineDistance } from "./footprint";
 import { groundJunctionCorridorFailure } from "./civicClearance";
 import { classifyRoadSegments, closestSegmentPoints } from "./relations";
 import { groundJunctionFindings } from "./report";
-import { roadNodeId } from "../cityPlan";
+import { roadNodeId } from "../roadGeometry";
 import { isOwnedIslandGate } from "./endpoints";
 
 /** Bounded node closure; at most 4P2=12 target assignments per proposal. */
@@ -198,7 +198,7 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
   for (const option of alternatives) {
     const byId = new Map(replacements.map(edge => [edge.edgeId, edge]));
     for (const edge of option.edges) byId.set(edge.edgeId, edge);
-    const patch: NetworkPatch = { baseVersion: (ctx.network as Network & { version?: number }).version ?? 0,
+    const patch: NetworkPatch = { baseVersion: ctx.network.version,
       removeEdgeIds: [], addEdges: [], splits: [], relineEdges: [...byId.values()], ...(option.nodes.length ? { rebindNodes: option.nodes } : {}) };
     const preview = previewNetworkPatch(ctx.network, patch);
     if (!preview.ok) { lastFailure = preview.detail ?? preview.reason; continue; }

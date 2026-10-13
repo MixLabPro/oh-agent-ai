@@ -24,7 +24,7 @@
  * 真无地可接时让约束违例如实可见）。
  */
 import { DetMath as Math } from "../detMath";
-import { roadNodeId } from "../cityPlan";
+import { roadNodeId } from "../roadGeometry";
 import type { RoadEdge, Vec2 } from "../cityLayout";
 import { commitNetworkPatch, keyOf, type Network, type NetworkPatch } from "./network";
 import { crosses } from "./footprint";
@@ -47,7 +47,7 @@ export const LANDING_CONFIG = {
 };
 
 export type LandingWorld = {
-  network: Network & { version?: number };
+  network: Network;
   geo: Geography;
   inRiver: (x: number, z: number) => boolean;
   /** 预留地（publicSites + landmarks）：弧段/接杆的用地避让。 */

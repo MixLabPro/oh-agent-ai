@@ -1,6 +1,6 @@
 /** 已由短连接接入同一走廊的终端重复段：保留完整、更宽宿主，重绑独立支路而非降角度门槛。 */
 import { DetMath as Math } from "../detMath";
-import { roadNodeId } from "../cityPlan";
+import { roadNodeId } from "../roadGeometry";
 import type { RepairContext } from "./context";
 import { commitNetworkPatch, keyOf, type NetworkPatch } from "./network";
 import { groundJunctionFindings } from "./report";
@@ -73,7 +73,7 @@ export function consolidateTerminalCorridors(ctx: RepairContext): number {
         .map((f) => f.edges.map((id) => mappedEdgeId(ctx.network.edges.get(id)!)).sort().join("|")));
       const bindings: NetworkPatch["rebindNodes"] = [{ from: source.id, to: target.id }];
       if (relocation) bindings!.push({ from: relocation.from, to: relocation.id, targetAt: { x: relocation.x, z: relocation.z } });
-      const result = commitNetworkPatch(ctx.network, { baseVersion: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+      const result = commitNetworkPatch(ctx.network, { baseVersion: ctx.network.version,
         removeEdgeIds: [...removed], removeNodeIds: [free.id], splits: [], addEdges: [], rebindNodes: bindings }, (draft) => {
       if (groundJunctionFindings([...draft.edges.values()]).some((f) => !existing.has([...f.edges].sort().join("|")))) return "corridor merge introduced crossing";
       const changedNodes = new Set([target.id, ...(relocation ? [relocation.id] : [])]);

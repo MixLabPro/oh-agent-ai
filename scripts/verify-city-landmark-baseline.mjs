@@ -14,8 +14,8 @@ import { installCanvasShim, sceneHash } from "./city-kit/scene-hash.mjs";
 installCanvasShim();
 const { THREE, LANDMARK_BUILDERS, buildAirport, createMaterialFactory } = await loadCity({
   "pkg:three": ["* as THREE"],
-  "engine/models/landmarkMaterials.ts": ["createMaterialFactory"],
-  "engine/models/registry.ts": ["LANDMARK_BUILDERS"],
+  "engine/render/landmarkMaterials.ts": ["createMaterialFactory"],
+  "engine/render/landmarkBuilders.ts": ["LANDMARK_BUILDERS"],
   "engine/cityAirport.ts": ["buildAirport"],
 });
 const goldenPath = path.join(repo, "golden/city-landmark-baseline.json");

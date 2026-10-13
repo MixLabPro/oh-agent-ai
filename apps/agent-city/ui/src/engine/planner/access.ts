@@ -18,7 +18,8 @@
  * 不是本批的行为。
  */
 import { DetMath as Math } from "../detMath";
-import { segmentDistance, type Landmark } from "../cityPlan";
+import type { Landmark } from "../cityPlan";
+import { segmentDistance } from "../roadGeometry";
 import type { PublicSite, RoadEdge, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
 import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";

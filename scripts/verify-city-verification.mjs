@@ -12,9 +12,11 @@ assert(manifest.some((s) => s.env.CITY_SEASIDE_TIER === "10"));
 assert(manifest.some((s) => s.file === "verify-city-cross-engine.mjs" && !s.shared));
 assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // Preserve the existing stages and register the new production causeway guard.
-// 63 + city-opt 的 5 个（villa-placement / model-envelope / site-registry / site-registry-scene / joint-site-road）+ 规划修复的 6 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller / -bulldozer / -remap）。计数锁防的是悄悄增减，
+// 63 + city-opt 的 5 个（villa-placement / model-envelope / site-registry / site-registry-scene / joint-site-road）+ 规划修复的 6 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller / -bulldozer / -remap）+ R2 的 verify-city-import-boundary。计数锁防的是悄悄增减，
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
-assert.equal(manifest.length, 74);
+assert.equal(manifest.length, 75);
+assert(selectStages("fast").some((stage) => stage.id === "verify-city-import-boundary"), "import boundary guard must run in fast mode");
+assert(selectStages("module", "planning").some((stage) => stage.id === "verify-city-import-boundary"));
 for (const id of ["verify-plan-patch", "verify-plan-road-rules", "verify-plan-sites", "verify-plan-repair-controller", "verify-plan-bulldozer", "verify-plan-remap"]) {
   assert(selectStages("module", "planning").some((stage) => stage.id === id), `${id} must run in the planning group`);
 }

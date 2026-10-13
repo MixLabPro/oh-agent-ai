@@ -67,8 +67,15 @@ export function buildGeography(seed: number, R: number, shape: Shape, opts: { me
   const halfWidth = (bbox.maxX - bbox.minX) / 2;
   const riverShift = (bbox.minX + bbox.maxX) / 2 + (random("riverShift") - 0.5) * halfWidth * 0.5;
   const riverAmp = (0.04 + random("riverAmp") * 0.07) * R * (random("riverMirror") < 0.5 ? -1 : 1);
-  const riverX = (z: number) => hasRiver ? riverShift + riverAmp * Math.sin(z * 0.006 + phase) + 0.03 * R * Math.sin(z * 0.014) : riverShift;
-  const riverWidth = (z: number) => hasRiver ? 16 + 4 * Math.cos(z * 0.012) + smoothstep(bbox.minZ + (bbox.maxZ - bbox.minZ) * 0.55, bbox.maxZ, z) * 34 : -1e6;
+  // 河中心/河宽只依赖 z，却含 3 次确定性 sin/cos + smoothstep；一次高度/入河/坡度求值会以同一个 z（坡度还有 z±1）
+  // 反复调用它们。单槽记忆（上一次的 z → 结果）是纯函数的精确复用：命中返回的就是同一表达式上次算出的同一个数，
+  // 未命中走原式，逐位相同；每个 buildGeography 各持一份闭包，互不共享。
+  const riverXRaw = (z: number) => hasRiver ? riverShift + riverAmp * Math.sin(z * 0.006 + phase) + 0.03 * R * Math.sin(z * 0.014) : riverShift;
+  const riverWidthRaw = (z: number) => hasRiver ? 16 + 4 * Math.cos(z * 0.012) + smoothstep(bbox.minZ + (bbox.maxZ - bbox.minZ) * 0.55, bbox.maxZ, z) * 34 : -1e6;
+  let riverXZ = NaN; let riverXV = 0;
+  const riverX = (z: number) => { if (z !== riverXZ) { riverXV = riverXRaw(z); riverXZ = z; } return riverXV; };
+  let riverWidthZ = NaN; let riverWidthV = 0;
+  const riverWidth = (z: number) => { if (z !== riverWidthZ) { riverWidthV = riverWidthRaw(z); riverWidthZ = z; } return riverWidthV; };
   const river = hasRiver ? Array.from({ length: 121 }, (_, i) => { const z = bbox.minZ - 60 + i * ((bbox.maxZ - bbox.minZ + 120) / 120); return { x: riverX(z), z }; }) : [];
   // 离岸距离：岛本就是极坐标函数，变回局部坐标比较「该方位的海岸半径 − 点的半径」即可 O(1) 求得。
   // 曾逐点对 96 段海岸算多边形距离，单岛被调用数十万次（profile 里占 85%）。
@@ -76,7 +83,10 @@ export function buildGeography(seed: number, R: number, shape: Shape, opts: { me
   const radiusTable = Array.from({ length: 721 }, (_, i) => islandRadius((i / 720) * Math.PI * 2) * R);
   const shrink = Math.min(shape.stretch, 1 / shape.stretch) * 0.92;
   const cosSpin = Math.cos(shape.spin); const sinSpin = Math.sin(shape.spin);
-  const coastDistance = field((x: number, z: number) => {
+  // 走廊采样对同一点先后调 height（→landClearance→coastDistance）和 inRiver（→coastDistance），
+  // 单槽记忆（上一次的 x,z → 结果）让第二次直接命中；纯函数的精确复用，未命中走原式，逐位相同。
+  let coastX = NaN; let coastZ = NaN; let coastV = 0;
+  const coastDistanceRaw = (x: number, z: number) => {
     const lx = x * cosSpin + z * sinSpin;
     const lz = -x * sinSpin + z * cosSpin;
     const ux = lx / stretch; const uz = lz * stretch;
@@ -84,6 +94,10 @@ export function buildGeography(seed: number, R: number, shape: Shape, opts: { me
     const f = (theta / (Math.PI * 2)) * 720; const i = Math.floor(f);
     const edge = radiusTable[i] + (radiusTable[Math.min(720, i + 1)] - radiusTable[i]) * (f - i);
     return (edge - Math.hypot(ux, uz)) * shrink;
+  };
+  const coastDistance = field((x: number, z: number) => {
+    if (x !== coastX || z !== coastZ) { coastV = coastDistanceRaw(x, z); coastX = x; coastZ = z; }
+    return coastV;
   });
   const landClearance = field((x: number, z: number) => Math.min(coastDistance(x, z), Math.abs(x - riverX(z)) - riverWidth(z)));
 

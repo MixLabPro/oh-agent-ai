@@ -1,5 +1,5 @@
 import { DetMath as Math } from "../detMath";
-import { segmentDistance } from "../cityPlan";
+import { segmentDistance } from "../roadGeometry";
 import type { RoadEdge, Vec2 } from "../cityLayout";
 import { addNetworkEdge, keyOf } from "./network";
 import { crosses, polylineDistance, safeRoadLink } from "./footprint";

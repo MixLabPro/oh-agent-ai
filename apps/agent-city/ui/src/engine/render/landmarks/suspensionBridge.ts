@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { LandmarkCtx } from "../landmarkContext";
+import type { LandmarkCtx } from "../../models/landmarkContext";
 import { LIGHT_BUDGET } from "../../cityLightBudget";
 
 /** 地标「suspension-bridge」的程序化造型（从 cityParts.buildLandmarks 的 if 链原样搬出，行为不变）。 */

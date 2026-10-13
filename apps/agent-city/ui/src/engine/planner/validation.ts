@@ -74,23 +74,31 @@ export function corridorViolation(world: ConnectorWorld, a: Vec2, b: Vec2, polic
   // 偶数切片保留中心线采样，同时覆盖两侧缘。
   const lateralSteps = width ? 2 * Math.ceil(width / (2 * VALIDATION_CONFIG.sampleSpacing)) : 0;
   const steps = Math.max(1, Math.ceil(distance / (opts.spacing ?? VALIDATION_CONFIG.sampleSpacing)));
+  // 热路径（首次走廊检查约 115 采样/次，大岛上百万次）：属性读取提到循环外，采样点只在失败时才物化成对象
+  // （原先每个采样点都分配 {x,z}，且结果只有失败分支读 at）。坐标表达式与运算顺序逐字不变，浮点结果逐位相同。
+  const geo = world.geo;
+  const terrain = geo.terrain;
+  const waterfront = policy.waterfront;
+  const dxAB = b.x - a.x; const dzAB = b.z - a.z;
   for (let i = 0; i <= steps; i += 1) {
+    const endpoint = !!opts.skipEnds && (i === 0 || i === steps);
     for (let j = 0; j <= lateralSteps; j += 1) {
       const offset = width * (j / (lateralSteps || 1) - 0.5);
-      const p = { x: a.x + (b.x - a.x) * i / steps + nx * offset, z: a.z + (b.z - a.z) * i / steps + nz * offset };
-      const height = world.geo.height(p.x, p.z);
-      if (!Number.isFinite(height)) return { kind: "projection-loss", cause: "invalid-geometry", at: p };
-      if (!(opts.skipEnds && (i === 0 || i === steps)) && (height <= 0.5 || world.inRiver(p.x, p.z))) return { kind: "water-span", cause: "water-envelope", at: p };
-      if (policy.requireBuildable && !world.geo.buildable(p.x, p.z)) return { kind: "slope", cause: "building-setback", at: p };
-      if (policy.waterfront) {
-        const clearance = world.geo.landClearance?.(p.x, p.z);
-        const hillGap = world.geo.hillLine - world.geo.hillProj?.(p.x, p.z);
-        if (!Number.isFinite(clearance) || !Number.isFinite(hillGap)) return { kind: "projection-loss", cause: "invalid-geometry", at: p };
-        if (clearance <= policy.waterfront.minLandClearance || hillGap <= policy.waterfront.hillSetback
-          || height >= policy.waterfront.maxHeight) return { kind: "slope", cause: "roadway-setback", at: p };
+      const px = a.x + dxAB * i / steps + nx * offset;
+      const pz = a.z + dzAB * i / steps + nz * offset;
+      const height = geo.height(px, pz);
+      if (!Number.isFinite(height)) return { kind: "projection-loss", cause: "invalid-geometry", at: { x: px, z: pz } };
+      if (!endpoint && (height <= 0.5 || world.inRiver(px, pz))) return { kind: "water-span", cause: "water-envelope", at: { x: px, z: pz } };
+      if (policy.requireBuildable && !geo.buildable(px, pz)) return { kind: "slope", cause: "building-setback", at: { x: px, z: pz } };
+      if (waterfront) {
+        const clearance = geo.landClearance?.(px, pz);
+        const hillGap = geo.hillLine - geo.hillProj?.(px, pz);
+        if (!Number.isFinite(clearance) || !Number.isFinite(hillGap)) return { kind: "projection-loss", cause: "invalid-geometry", at: { x: px, z: pz } };
+        if (clearance <= waterfront.minLandClearance || hillGap <= waterfront.hillSetback
+          || height >= waterfront.maxHeight) return { kind: "slope", cause: "roadway-setback", at: { x: px, z: pz } };
       }
-      const slope = world.geo.terrain.slope(p.x, p.z);
-      if (!Number.isFinite(slope) || slope > policy.maxSlope) return { kind: "slope", cause: "road-slope", at: p };
+      const slope = terrain.slope(px, pz);
+      if (!Number.isFinite(slope) || slope > policy.maxSlope) return { kind: "slope", cause: "road-slope", at: { x: px, z: pz } };
     }
   }
   return null;
