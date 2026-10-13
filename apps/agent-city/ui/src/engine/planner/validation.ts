@@ -86,20 +86,21 @@ export function corridorViolation(world: ConnectorWorld, a: Vec2, b: Vec2, polic
   for (let i = 0; i <= steps; i += 1) {
     for (let j = 0; j <= lateralSteps; j += 1) {
       const offset = width * (j / (lateralSteps || 1) - 0.5);
-      const p = { x: a.x + (b.x - a.x) * i / steps + nx * offset, z: a.z + (b.z - a.z) * i / steps + nz * offset };
-      const height = world.geo.height(p.x, p.z);
-      if (!Number.isFinite(height)) return { kind: "projection-loss", cause: "invalid-geometry", at: p };
-      if (!(opts.skipEnds && (i === 0 || i === steps)) && (height <= 0.5 || world.inRiver(p.x, p.z))) return { kind: "water-span", cause: "water-envelope", at: p };
-      if (policy.requireBuildable && !world.geo.buildable(p.x, p.z)) return { kind: "slope", cause: "building-setback", at: p };
+      const x = a.x + (b.x - a.x) * i / steps + nx * offset;
+      const z = a.z + (b.z - a.z) * i / steps + nz * offset;
+      const height = world.geo.height(x, z);
+      if (!Number.isFinite(height)) return { kind: "projection-loss", cause: "invalid-geometry", at: { x, z } };
+      if (!(opts.skipEnds && (i === 0 || i === steps)) && (height <= 0.5 || world.inRiver(x, z))) return { kind: "water-span", cause: "water-envelope", at: { x, z } };
+      if (policy.requireBuildable && !world.geo.buildable(x, z)) return { kind: "slope", cause: "building-setback", at: { x, z } };
       if (policy.waterfront) {
-        const clearance = world.geo.landClearance?.(p.x, p.z);
-        const hillGap = world.geo.hillLine - world.geo.hillProj?.(p.x, p.z);
-        if (!Number.isFinite(clearance) || !Number.isFinite(hillGap)) return { kind: "projection-loss", cause: "invalid-geometry", at: p };
+        const clearance = world.geo.landClearance?.(x, z);
+        const hillGap = world.geo.hillLine - world.geo.hillProj?.(x, z);
+        if (!Number.isFinite(clearance) || !Number.isFinite(hillGap)) return { kind: "projection-loss", cause: "invalid-geometry", at: { x, z } };
         if (clearance <= policy.waterfront.minLandClearance || hillGap <= policy.waterfront.hillSetback
-          || height >= policy.waterfront.maxHeight) return { kind: "slope", cause: "roadway-setback", at: p };
+          || height >= policy.waterfront.maxHeight) return { kind: "slope", cause: "roadway-setback", at: { x, z } };
       }
-      const slope = world.geo.terrain.slope(p.x, p.z);
-      if (!Number.isFinite(slope) || slope > policy.maxSlope) return { kind: "slope", cause: "road-slope", at: p };
+      const slope = world.geo.terrain.slope(x, z);
+      if (!Number.isFinite(slope) || slope > policy.maxSlope) return { kind: "slope", cause: "road-slope", at: { x, z } };
     }
   }
   return null;
