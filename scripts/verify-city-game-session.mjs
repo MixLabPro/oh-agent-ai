@@ -13,7 +13,9 @@ const { buildSync } = require("esbuild");
 const THREE = createRequire(new URL("../apps/agent-city/ui/package.json", import.meta.url))("three");
 const load = (file, extraGlobals = {}) => {
   const code = buildSync({ entryPoints: [new URL(`../apps/agent-city/ui/src/${file}`, import.meta.url).pathname],
-    bundle: true, write: false, format: "cjs", platform: "node" }).outputFiles[0].text;
+    // 游戏 BGM 是 Vite 的 `?url` 导入（GameAudio.ts → leonida-nights.m4a）：这里不播放，按空模块处理。
+    // 曾无此项——游戏声音提交（6f2437ec）后本守卫在构建阶段就失败，main 上同样红。
+    bundle: true, write: false, format: "cjs", platform: "node", loader: { ".m4a": "empty" } }).outputFiles[0].text;
   const mod = { exports: {} };
   vm.runInNewContext(code, { module: mod, exports: mod.exports, console, Date, Math, Map, Set, Number, String, Array, Object, JSON,
     performance: { now: () => Date.now() }, ...extraGlobals });

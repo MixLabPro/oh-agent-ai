@@ -13,11 +13,20 @@ import type { FlightParams } from "./FlightSimulation";
 import { DetMath as Math } from "../engine/detMath";
 import { hashSeed } from "../cityModel";
 
-export const COURSE_VERSION = 2;
+// v3（2026-10-12）：环法线改取相邻弦的角平分线 + 走廊验证加转弯可飞性；同一组环心在 v2/v3
+// 下法线不同，courseId 只摘要环心，所以必须升版本，否则旧成绩会挂到几何已变的路线上。
+export const COURSE_VERSION = 3;
 const RING_COUNT = 12;
 const MAX_ATTEMPTS = 8;
 const REACTION_SECONDS_AT_MAX = 1.2;
 const LIMIT_FACTOR = 1.6;
+/**
+ * 单环处航向偏转上限（水平面）。物理上由转弯圆判定兜底；这条是给人留的可玩性余量：
+ * >135° 的折返要求玩家飞过环再大回环找下一环，HUD 上看不出该往哪转（seed 42 环 8 ≈150°）。
+ */
+export const MAX_TURN_RAD = (135 * Math.PI) / 180;
+/** 升降可用比例：留余量给升降平滑与转弯同时进行。 */
+const CLIMB_BUDGET = 0.6;
 
 export type CourseRing = {
   x: number; y: number; z: number;
@@ -57,6 +66,7 @@ export function generateRaceCourse(request: CourseRequest): RaceCourse | null {
     const path = smoothOpen(waypoints);
     const rings = placeRings(path, ringRadius, params);
     if (!rings) continue;
+    orientRingNormals(rings);
     if (!validateCorridor(world, rings, params, clearance)) continue;
     return finalize(citySeed, physicsVersion, variant, rings, params, "generated");
   }
@@ -173,6 +183,7 @@ function generateSeaArc(world: FlightWorld, params: FlightParams, ringRadius: nu
   }
   const closed = smoothClosed(path);
   const rings = placeRings(closed, ringRadius, params);
+  if (rings) orientRingNormals(rings);
   if (!rings || !validateCorridor(world, rings, params, clearance)) return null;
   return { rings };
 }
@@ -272,23 +283,14 @@ function placeRings(path: PathPoint[], ringRadius: number, params: FlightParams)
 /** 整条安全走廊验证。 */
 function validateCorridor(world: FlightWorld, rings: CourseRing[], params: FlightParams, clearance: number): boolean {
   const bounds = world.bounds;
-  const minTurnRadius = params.cruiseSpeed / params.turnRate;
+  if (!courseTurnFeasible(rings, params)) return false;
   for (let index = 0; index < rings.length; index += 1) {
     const ring = rings[index];
-    const prev = rings[(index - 1 + rings.length) % rings.length];
     const next = rings[(index + 1) % rings.length];
     if (!world.isPointClear(ring.x, ring.y, ring.z, ring.radius)) return false;
     if (ring.y < bounds.minY + ring.radius || ring.y > bounds.maxY - ring.radius) return false;
     const spacing = Math.hypot(next.x - ring.x, next.y - ring.y, next.z - ring.z);
     if (spacing < params.maxSpeed * REACTION_SECONDS_AT_MAX) return false;
-    const inX = ring.x - prev.x, inY = ring.y - prev.y, inZ = ring.z - prev.z;
-    const outX = next.x - ring.x, outY = next.y - ring.y, outZ = next.z - ring.z;
-    const inNorm = Math.hypot(inX, inY, inZ) || 1;
-    const outNorm = Math.hypot(outX, outY, outZ) || 1;
-    const dot = (inX * outX + inY * outY + inZ * outZ) / (inNorm * outNorm);
-    const turnAngle = Math.PI - Math.acos(Math.max(-1, Math.min(1, dot)));
-    const reachable = Math.min(inNorm, outNorm) >= turnAngle * minTurnRadius * 0.5;
-    if (!reachable) return false;
     const steps = Math.max(2, Math.ceil(spacing / Math.max(4, ring.radius)));
     for (let step = 1; step < steps; step += 1) {
       const t = step / steps;
@@ -297,6 +299,68 @@ function validateCorridor(world: FlightWorld, rings: CourseRing[], params: Fligh
       const z = ring.z + (next.z - ring.z) * t;
       if (!world.isPointClear(x, y, z, clearance * 0.8)) return false;
     }
+  }
+  return true;
+}
+
+/**
+ * 环法线 = 进/出弦方向的角平分线（首环取出弦、末环取进弦）。
+ * 曾取平滑曲线在采样点的切线：环距比曲线弯折粗时，切线与弦可以几乎反向——seed 42 /
+ * 40 会话的环 8 法线与来向夹角 148°，飞机只能飞过头再掉头回穿，绕环打转直到超时。
+ * 角平分线保证沿弦直飞时与法线夹角 = 偏转角/2（< 90°），始终从背面穿入。
+ */
+function orientRingNormals(rings: CourseRing[]): void {
+  const dirs: PathPoint[] = [];
+  for (let index = 0; index < rings.length - 1; index += 1) {
+    const a = rings[index];
+    const b = rings[index + 1];
+    const length = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) || 1;
+    dirs.push({ x: (b.x - a.x) / length, y: (b.y - a.y) / length, z: (b.z - a.z) / length });
+  }
+  for (let index = 0; index < rings.length; index += 1) {
+    const incoming = dirs[index - 1];
+    const outgoing = dirs[index];
+    let nx = (incoming?.x ?? 0) + (outgoing?.x ?? 0);
+    let ny = (incoming?.y ?? 0) + (outgoing?.y ?? 0);
+    let nz = (incoming?.z ?? 0) + (outgoing?.z ?? 0);
+    let norm = Math.hypot(nx, ny, nz);
+    // 完全折返（平分线退化）：取出弦方向；这种路线随后必被转弯可飞性拒绝。
+    if (!(norm > 1e-6) && outgoing) { nx = outgoing.x; ny = outgoing.y; nz = outgoing.z; norm = 1; }
+    if (!(norm > 1e-6)) continue;
+    rings[index] = { ...rings[index], nx: nx / norm, ny: ny / norm, nz: nz / norm };
+  }
+}
+
+/**
+ * 转弯可飞性（巡航速度、追踪驾驶模型）：飞机沿进弦到达环 i，最坏情况仍朝进弦方向，
+ * 要转 θ 才对准环 i+1。下一环必须落在巡航转弯圆之外并留一个环半径余量：
+ * L ≥ 2R·sin(min(θ, 90°)) + r（R = cruise/turnRate；切点在圆上时 L = 2R·sinθ）。
+ * θ > MAX_TURN_RAD 直接拒绝（可玩性余量，见常量注释）。
+ * 另验证升降：巡航飞完该段的时间内，平滑升降率的 CLIMB_BUDGET 足以补齐高差。
+ *
+ * 曾经的判定把 π−偏转角（内角）当作转角：直线段被当成最难、150° 发卡弯被当成最易，
+ * 方向完全反了——seed 42 的发卡弯就这样通过了验证。
+ */
+export function courseTurnFeasible(rings: CourseRing[], params: FlightParams): boolean {
+  const turnRadius = params.cruiseSpeed / params.turnRate;
+  for (let index = 0; index + 1 < rings.length; index += 1) {
+    const ring = rings[index];
+    const next = rings[index + 1];
+    const outX = next.x - ring.x, outZ = next.z - ring.z;
+    const outLength = Math.hypot(outX, outZ);
+    const legLength = Math.hypot(outX, next.y - ring.y, outZ);
+    const climb = next.y - ring.y;
+    const verticalRate = (climb > 0 ? params.climbRate : params.sinkRate) * CLIMB_BUDGET;
+    if (Math.abs(climb) > (legLength / params.cruiseSpeed) * verticalRate) return false;
+    if (index === 0) continue;
+    const prev = rings[index - 1];
+    const inX = ring.x - prev.x, inZ = ring.z - prev.z;
+    const inLength = Math.hypot(inX, inZ);
+    if (!(inLength > 0) || !(outLength > 0)) return false;
+    const cos = (inX * outX + inZ * outZ) / (inLength * outLength);
+    const turn = Math.acos(Math.max(-1, Math.min(1, cos)));
+    if (turn > MAX_TURN_RAD) return false;
+    if (outLength < 2 * turnRadius * Math.sin(Math.min(turn, Math.PI / 2)) + ring.radius) return false;
   }
   return true;
 }
