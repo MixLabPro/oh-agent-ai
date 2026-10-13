@@ -11,6 +11,7 @@ import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
+import { cornerArc, junctionIndex, roadJunctionPlan, SIDEWALK_BAND } from "./cityRoadJunctions";
 import { polygonDistance } from "./cityPlan";
 import { subtractBlockSurfaceExclusions, traceBlockSurface } from "./blockSurface";
 import { createRenderCanvas, renderContext2D, type RenderCanvas, type RenderContext2D } from "./renderCanvas";
@@ -227,10 +228,36 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   // 沙滩不画进这张贴图：2048px 铺满全岛只有 ~1.3px/单位，沙带与水线边缘糊成一片（真机近景）。
   // 沙滩改成贴地网格（cityParts.buildBeachRibbon），色带边缘由几何决定、与贴图分辨率无关。
   const { runs, junctions } = roadPaintPlan(layout.roadEdges);
+  // 路口几何（圆角/等级/渐变）一次算好，路面、人行道、标线与 roadSystem 的路缘共用同一份（cityRoadJunctions.ts）。
+  const junctionPlan = roadJunctionPlan(layout.roadEdges);
+  const { armOf } = junctionIndex(junctionPlan);
+  const asphaltOf = (kind: string) => (kind === "arterial" ? "#505b60" : "#646c6b");
+  const fillPath = (points: Array<{ x: number; z: number }>, color: string) => {
+    if (points.length < 3) return;
+    ctx.beginPath(); points.forEach((p, i) => { const [x, y] = toPixel(p.x, p.z); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
+    ctx.closePath(); ctx.fillStyle = color; ctx.fill();
+  };
+  /** 渐变段梯形：节点处取宽路半宽、L 处收到窄路半宽；extra 给人行道外扩。 */
+  const taperQuad = (j: (typeof junctionPlan)[number], extra: number) => {
+    const t = j.taper!; const d = t.narrow.dir; const n = { x: -d.z, z: d.x };
+    const hw = t.wide.half + extra; const hn = t.narrow.half + extra;
+    return [
+      { x: j.x + n.x * hw, z: j.z + n.z * hw },
+      { x: j.x + d.x * t.length + n.x * hn, z: j.z + d.z * t.length + n.z * hn },
+      { x: j.x + d.x * t.length - n.x * hn, z: j.z + d.z * t.length - n.z * hn },
+      { x: j.x - n.x * hw, z: j.z - n.z * hw },
+    ];
+  };
   ctx.lineCap="butt"; ctx.lineJoin="round";
   // Paint ALL sidewalks before ANY asphalt: neighboring caps cannot cut white seams into roads.
   for (const road of runs) {
     ctx.strokeStyle="#d4cfc2";ctx.lineWidth=(road.width+2.4)*scale;strokePolyline(ctx,road.points,toPixel,false);
+  }
+  // 转角人行道：沿路面圆弧的同心弧（半径 r−1.2）。直接画人行道描边的直角会在路口留下方角——
+  // 圆角铺装随后盖掉弧内的部分，只剩弧外 1.2 宽的人行道带跟着圆弧走。
+  for (const j of junctionPlan) {
+    for (const corner of j.corners) fillPath([{ x: j.x, z: j.z }, ...cornerArc(corner, SIDEWALK_BAND)], "#d4cfc2");
+    if (j.taper) fillPath(taperQuad(j, SIDEWALK_BAND), "#d4cfc2");
   }
   // 换宽度/换等级的两路交界点（主干 12 → 次干 8 → 支路 5）：roadPaintPlan 在这里把一条路断成两段，平头线帽在拐弯处留
   // 楔形缺口、宽度跳变像「路断了」（用户截图：断断续续的路）。只有 ≥3 路的路口才补过圆——这里补上，人行道与沥青各一盘。
@@ -252,41 +279,78 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     const [x,y]=toPixel(seam.x,seam.z);
     ctx.fillStyle="#d4cfc2";ctx.beginPath();ctx.arc(x,y,(seam.width+2.4)*scale/2,0,Math.PI*2);ctx.fill();
   }
-  for (const road of runs) {
-    ctx.strokeStyle=road.kind==="arterial"?"#505b60":"#646c6b";ctx.lineWidth=road.width*scale;strokePolyline(ctx,road.points,toPixel,false);
+  // 路口铺装先于路段：圆角（窄路色）→ 路口中心圆盘（最宽臂色）→ 路段按宽度升序。宽路最后画，
+  // 它的铺装就直穿路口、盖住窄路伸进来的那截——「小路在大路边缘收口」是绘制顺序的结果，不用逐口裁剪。
+  // 旧做法圆盘画在路段之后、颜色取「任一臂是主干就用主干色」，窄路口也被涂成主干色的圆疙瘩。
+  for (const j of junctionPlan) for (const corner of j.corners) fillPath([{ x: j.x, z: j.z }, ...cornerArc(corner)], asphaltOf(corner.kind));
+  for (const node of layout.roadNodes) if (junctions.has(node.id)) {
+    const incident = layout.roadEdges.filter((edge) => edge.from === node.id || edge.to === node.id);
+    const width = Math.max(...incident.map((edge) => edge.width));
+    const widest = incident.find((edge) => edge.width === width)!;
+    const [x,y] = toPixel(node.x,node.z);
+    ctx.fillStyle=asphaltOf(widest.kind);
+    ctx.beginPath();ctx.arc(x,y,width*scale/2,0,Math.PI*2);ctx.fill();
+  }
+  for (const road of [...runs].sort((p, q) => p.width - q.width)) {
+    ctx.strokeStyle=asphaltOf(road.kind);ctx.lineWidth=road.width*scale;strokePolyline(ctx,road.points,toPixel,false);
   }
   for (const seam of seams) {
     const [x,y]=toPixel(seam.x,seam.z);
     ctx.fillStyle=seam.arterial?"#505b60":"#646c6b";ctx.beginPath();ctx.arc(x,y,seam.width*scale/2,0,Math.PI*2);ctx.fill();
   }
-  // Fill junction centers after pavement passes, without separate round endcaps.
-  for (const node of layout.roadNodes) if (junctions.has(node.id)) {
-    const incident = layout.roadEdges.filter((edge) => edge.from === node.id || edge.to === node.id);
-    const width = Math.max(...incident.map((edge) => edge.width));
-    const [x,y] = toPixel(node.x,node.z);
-    ctx.fillStyle=incident.some((edge)=>edge.kind==="arterial")?"#505b60":"#646c6b";
-    ctx.beginPath();ctx.arc(x,y,width*scale/2,0,Math.PI*2);ctx.fill();
-  }
+  // 渐变段（度 2 换宽）：宽路色梯形从宽路半宽线性收到窄路半宽，长 ≈ 2×宽度差——替代「宽度台阶」。
+  for (const j of junctionPlan) if (j.taper) fillPath(taperQuad(j, 0), asphaltOf(j.taper.wide.edge.kind));
+  /** 一条 run 在某端的中线虚线内缩：主路直穿（0）、次路退到停止线之后、其余沿用旧的 6。 */
+  const dashInset = (edge: (typeof runs)[number]["startEdge"], node: string) => {
+    if (!junctions.has(node)) return 0;
+    const arm = armOf(edge, node);
+    if (arm && !arm.legacy && arm.role === "major") return 0;
+    if (arm && arm.stopAt !== null) return arm.stopAt + 2.6;
+    return 6;
+  };
+  /** 折线两端各裁掉 start / end 的弧长；裁完不剩就返回 null。旧写法只裁第一/最后一段、内缩超过该段就整条
+   *  不画——短边切分的路上，次路的虚线因停止线内缩（> 一段长）整条消失。 */
+  const trimPolyline = (points: Array<{ x: number; z: number }>, start: number, end: number) => {
+    const cut = (pts: Array<{ x: number; z: number }>, distance: number) => {
+      let left = distance;
+      for (let i = 1; i < pts.length; i += 1) {
+        const a = pts[i - 1]; const b = pts[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
+        if (left < len) { const t = left / len; return [{ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t }, ...pts.slice(i)]; }
+        left -= len;
+      }
+      return null;
+    };
+    const head = start > 0 ? cut(points, start) : points;
+    if (!head || head.length < 2) return null;
+    const tail = end > 0 ? cut([...head].reverse(), end) : [...head].reverse();
+    return tail && tail.length >= 2 ? tail.reverse() : null;
+  };
   for (const edge of runs) {
-    const a=edge.points[0];const b=edge.points[edge.points.length-1];
-    const next=edge.points[1];const prev=edge.points[edge.points.length-2];
-    const startLength=Math.hypot(next.x-a.x,next.z-a.z);const endLength=Math.hypot(b.x-prev.x,b.z-prev.z);
-    const startInset=junctions.has(edge.from)?6:0;const endInset=junctions.has(edge.to)?6:0;
-    if(startLength<=startInset || endLength<=endInset)continue;
-    const points=[{x:a.x+(next.x-a.x)*startInset/startLength,z:a.z+(next.z-a.z)*startInset/startLength},...edge.points.slice(1,-1),{x:b.x-(b.x-prev.x)*endInset/endLength,z:b.z-(b.z-prev.z)*endInset/endLength}];
+    const points = trimPolyline(edge.points, dashInset(edge.startEdge, edge.from), dashInset(edge.endEdge, edge.to));
+    if (!points) continue;
     ctx.strokeStyle=edge.kind==="arterial"?"#d6c998":"#b6bdba";ctx.lineWidth=0.22*scale;ctx.setLineDash([3*scale,3*scale]);
     strokePolyline(ctx,points,toPixel,false);ctx.setLineDash([]);
   }
   for (const edge of layout.roadEdges) {
     if(edge.bridge)continue;
     const [a,b]=edge.points;const length=Math.hypot(b.x-a.x,b.z-a.z);
-    if(length<14)continue;
     const dx=(b.x-a.x)/length;const dz=(b.z-a.z)/length;
     for(const end of [a,b]) {
-      if(!junctions.has(end===a?edge.from:edge.to))continue;
-      for(let stripe=-2;stripe<=2;stripe+=1){
+      const node=end===a?edge.from:edge.to;
+      if(!junctions.has(node))continue;
       const sign=end===a?1:-1;
-      orientedRect(end.x+dx*6.5*sign-dz*stripe*0.8,end.z+dz*6.5*sign+dx*stripe*0.8,1.4,0.4,-Math.atan2(dz,dx),"#dbd8cb");
+      const arm=armOf(edge,node);
+      // 次路：停止/让行线画在宽路路面边缘外（只横跨驶入半幅，右侧通行：驶入方向 −dir 的右手 = (dir.z, −dir.x)），
+      // 斑马线退到停止线之后。桥头节点 arm.stopAt 恒为 null——桥面永远不画停止线。
+      if(arm && arm.stopAt!==null){
+        const d=arm.dir;const across=arm.half/2;
+        orientedRect(end.x+d.x*arm.stopAt+d.z*across,end.z+d.z*arm.stopAt-d.x*across,0.5,arm.half-0.3,-Math.atan2(d.z,d.x),"#e9e6da");
+      }
+      if(length<14)continue;
+      const along=arm && arm.stopAt!==null?arm.stopAt+1.6:6.5;
+      if(along>length*0.5)continue;
+      for(let stripe=-2;stripe<=2;stripe+=1){
+      orientedRect(end.x+dx*along*sign-dz*stripe*0.8,end.z+dz*along*sign+dx*stripe*0.8,1.4,0.4,-Math.atan2(dz,dx),"#dbd8cb");
       }
     }
   }
