@@ -129,7 +129,7 @@ export type ConnectionAttempt = {
 export type ConnectorWorld = {
   /** Pure caller-owned acceptance guard, checked on every final search proposal and commit. */
   draftAcceptance?: (draft: Network) => string | null;
-  network: Network & { version?: number };
+  network: Network;
   geo: Geography;
   inRiver: (x: number, z: number) => boolean;
   /** 预留地（publicSites + landmarks，用地位置在规划中会挪动，故为函数）。 */

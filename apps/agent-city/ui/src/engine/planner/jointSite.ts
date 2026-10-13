@@ -87,7 +87,7 @@ export function assignConnectedSite(world: SiteCandidateWorld, connector: Connec
     const site: PublicSite = { id, kind: spec.kind as PublicSite["kind"], x: candidate.x, z: candidate.z, radius: spec.radius, yaw,
       access: { role: "plot-gate", capability: "ground-frontage", nodeId: `${gate.x}:${gate.z}`, ownerX: candidate.x, ownerZ: candidate.z, ownerYaw: yaw,
         entranceId: resolved.access.entranceId, entranceEvidence: door ? "model-position" : "plot-proxy", ...(door ? { doorX: door.x, doorZ: door.z } : {}) } };
-    const network: Network = { nodes: new Map([...connector.network.nodes].map(([key, node]) => [key, { ...node }])), edges: new Map([...connector.network.edges].map(([key, edge]) => [key, { ...edge, points: edge.points.map((p) => ({ ...p })) }])) };
+    const network: Network = { nodes: new Map([...connector.network.nodes].map(([key, node]) => [key, { ...node }])), edges: new Map([...connector.network.edges].map(([key, edge]) => [key, { ...edge, points: edge.points.map((p) => ({ ...p })) }])), version: 0 };
     const strategies: ConnectionStrategy[] = rescue ? recoveredFrontage
       ? ["direct-projection", "node-merge", "detour", "grid-astar"] : ["detour", "grid-astar"] : ["direct-projection", "node-merge"];
     const result = runConnection({ id: `assign:${id}`, source: gate, target: { kind: "primary", isPrimaryNode: (node) => primaryNodes.has(node) }, purpose: "site-access", allowBridge: false, maxLength: spec.radius + 30, roadClass: "local" },

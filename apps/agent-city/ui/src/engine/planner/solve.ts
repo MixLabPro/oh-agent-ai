@@ -350,7 +350,7 @@ function installRepairWorld(ctx: RepairContext, state: RepairWorldState): void {
 }
 function initialRepairWorld(ctx: RepairContext): RepairWorldState {
   const projection = repairWorldProjection(ctx);
-  const versions = { network: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+  const versions = { network: ctx.network.version,
     site: 0, reservation: 0, terrain: 0, policy: 0, model: 0 };
   const world = createPlanningWorld({ versions, demands: projection.demands, demandBindings: projection.demandBindings, reservations: projection.reservations,
     sourceStatus: { network: "observed", site: "observed", reservation: "observed", terrain: "pending", policy: "pending", model: "pending" } });
@@ -366,7 +366,7 @@ export function initializeRepairPlanningWorld(ctx: RepairContext): PlanningWorld
 }
 function worldBaseFailure(ctx: RepairContext, state: RepairWorldState): string | undefined {
   if (ctx.planningWorld && ctx.planningWorld !== state.world) return "repair planning-world authority replaced";
-  const actualVersion = (ctx.network as typeof ctx.network & { version?: number }).version ?? 0;
+  const actualVersion = ctx.network.version;
   if (actualVersion !== state.world.versions.network) return "stale repair world: network version";
   if (ctx.height !== state.height || JSON.stringify(ctx.geo.terrain) !== state.terrain || ctx.inRiver !== state.inRiver ||
       Object.entries(state.terrainFunctions).some(([key, value]) => (ctx.geo.terrain as unknown as Record<string, unknown>)[key] !== value))
@@ -589,7 +589,7 @@ export function repairAcceptance(before: RepairContext, after: RepairContext, re
 function acceptDraft(ctx: RepairContext, draft: RepairContext, remaps: readonly NetworkRemap[], worldState: RepairWorldState): void {
   ctx.network.nodes.clear(); for (const [id, node] of draft.network.nodes) ctx.network.nodes.set(id, node);
   ctx.network.edges.clear(); for (const [id, edge] of draft.network.edges) ctx.network.edges.set(id, edge);
-  const network = ctx.network as typeof ctx.network & { version?: number };
+  const network = ctx.network;
   network.version = worldState.world.versions.network;
   ctx.primaryAnchorNodeId = draft.primaryAnchorNodeId;
   installDemandCatalogue(ctx, draft.demandCatalogue ?? []);
@@ -616,7 +616,7 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
       const pending = updatedRepairWorld(parentWorld, ctx);
       if (!pending.state) return { changes: 0, reason: pending.reason };
       installRepairWorld(ctx, pending.state);
-      (ctx.network as typeof ctx.network & { version?: number }).version = pending.state.world.versions.network;
+      ctx.network.version = pending.state.world.versions.network;
     }
   }
   let baseWorld: RepairWorldState;

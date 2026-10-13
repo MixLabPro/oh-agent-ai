@@ -264,7 +264,7 @@ export function extendLooseEnds(ctx: RepairContext, onlyNodeId?: string): number
         if (!endpointClear(ctx.network, at, target) || !endpointClear(ctx.network, target, at)) continue;
         const host = best.edge;
         const world = { network: ctx.network, geo: ctx.geo, inRiver: ctx.inRiver, reservations: () => [...publicSites, ...landmarks] };
-        const result = commitNetworkPatch(ctx.network, { baseVersion: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+        const result = commitNetworkPatch(ctx.network, { baseVersion: ctx.network.version,
           removeEdgeIds: [], splits: targetIsEndpoint ? [] : [{ edgeId: host.id, at: target }],
           addEdges: [{ a: at, b: target, arterial: own.kind === "arterial", primary: own.width >= 12 }] }, (draft) => {
           const verdict = validateCandidate(world, draft, { id: `extend:${id}`, crossings: true, blockers: [],
