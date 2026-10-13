@@ -158,7 +158,7 @@ export type Part =
 | 批 1：致敬地标 | tv-tower / twin-towers / twist-tower / arch / sail-opera / lighthouse / ferris-wheel / pagoda / villa / airport | 10 |
 | 批 3：城区地标 | district-landmark | 1 |
 
-悬索桥：v1 自相矛盾（既算地标又「不迁」）。v2 定为**不迁**，造型文件留在 `models/landmarks/suspensionBridge.ts`，
+悬索桥：v1 自相矛盾（既算地标又「不迁」）。v2 定为**不迁**，造型文件留在 `render/landmarks/suspensionBridge.ts`，
 从 `LANDMARK_BUILDERS` 移到 roadSystem 侧注册，避免 registry 里出现一个不遵守契约的条目。
 
 ## 8. 实施批次（每批独立可停，视觉零变化）

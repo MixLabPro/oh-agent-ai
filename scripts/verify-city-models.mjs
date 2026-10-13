@@ -12,10 +12,11 @@ import { installCanvasShim } from "./city-kit/scene-hash.mjs";
 installCanvasShim();
 const { THREE, BUILDING_MODELS, LANDMARK_BUILDERS, LANDMARK_LABELS, UNPARADIGMED, PART_ROLES, LIGHT_KINDS, compileBuilding, createMaterialFactory } = await loadCity({
   "pkg:three": ["* as THREE"],
-  "engine/models/registry.ts": ["BUILDING_MODELS", "LANDMARK_BUILDERS", "LANDMARK_LABELS", "UNPARADIGMED"],
+  "engine/models/registry.ts": ["BUILDING_MODELS", "LANDMARK_LABELS", "UNPARADIGMED"],
+  "engine/render/landmarkBuilders.ts": ["LANDMARK_BUILDERS"],
   "engine/models/model.ts": ["PART_ROLES", "LIGHT_KINDS"],
   "engine/render/buildingCompiler.ts": ["compileBuilding"],
-  "engine/models/landmarkMaterials.ts": ["createMaterialFactory"],
+  "engine/render/landmarkMaterials.ts": ["createMaterialFactory"],
 });
 
 const catalog = fs.readFileSync(path.join(citySrc, "cityCatalog.ts"), "utf8");

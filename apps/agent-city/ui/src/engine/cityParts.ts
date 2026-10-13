@@ -23,7 +23,7 @@ import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
 import { buildAirport, planAirport, roadSamples } from "./cityAirport";
-import { LANDMARK_BUILDERS } from "./models/registry";
+import { LANDMARK_BUILDERS } from "./render/landmarkBuilders";
 import type { LandmarkHost } from "./models/landmarkContext";
 import { buildGardens, buildCivics, buildFlags, buildPublicSites, updateCivics, writeCivic, type CivicSystemHost } from "./systems/civicSystem";
 import { applyDistrictLandmarkGrowth, buildDistrictLandmarks, buildLandmarks, type LandmarkSystemHost } from "./systems/landmarkSystem";

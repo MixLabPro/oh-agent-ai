@@ -34,7 +34,7 @@ SPEC 写于 2026-10-08，但引用的数字是更早的快照。
 | cityParts「4379 行」 | main **4670 行**，本分支 **4425 行** | 行号引用（1433、3388、3645…）全部失效，不能照着行号实施。 |
 | 「现 18 个 City 守卫」（§6.6） | 按脚本文件名含 city 计：main **20 个**，本分支 **21 个**（新增 night 守卫） | 吸收映射表少了 night 守卫，且 `verify-city-night` 校验的是源码文本，迁移后断言会断。 |
 | buildLandmarks「10 个 if-else 分支」 | 本分支已拆成 `models/landmarks/*.ts` 10 个文件 + `LANDMARK_BUILDERS` 注册表 + `LANDMARK_LABELS` 名称表 | 批 1 的一半「文件拆分」已完成，SPEC 应从这个状态起算。 |
-| 分类：桥与高架 3 条「不迁」，但悬索桥是 buildLandmarks 分支（§7） | 悬索桥在 `models/landmarks/suspensionBridge.ts`，依赖 `landmark.to`、路网高度、夜灯批次 | SPEC 自相矛盾：它既算地标又算「路径依赖造型」。需明确悬索桥归哪边。 |
+| 分类：桥与高架 3 条「不迁」，但悬索桥是 buildLandmarks 分支（§7） | 悬索桥在 `render/landmarks/suspensionBridge.ts`，依赖 `landmark.to`、路网高度、夜灯批次 | SPEC 自相矛盾：它既算地标又算「路径依赖造型」。需明确悬索桥归哪边。 |
 | 样例 A 的代码 | `size: [t.w*0.95,1.6,-]` 的 `-` 不是合法值；`tiersTop`、`sevenTiers` 未定义 | 样例不能直接作为 PoC 起点，批 0 要重写。 |
 
 ## 3. 必须先解决的冲突：与本分支改动的重叠
