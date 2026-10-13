@@ -4,6 +4,19 @@
 不能把某一小批提交、相关单测通过或截图变好替代整个目标。实施分支 `worktree-city-opt`。
 本表是未完成项台账，不修改原 SPEC 的范围和合并标准。
 
+## 2026-10-13 实际楼体高架净距与当前续作状态（整体未完成）
+
+`planBulldozer` 的会话楼搬迁候选此前只用地块代理通过 `validateBuildingMove` 的高架净距，
+在真实跨河高架复验中，`session:213`、`session:129` 虽已搬迁，实际楼体矩形仍与新桥面冲突。
+现候选还须用 `buildingRect(building, parcel)` 对本次新建高架几何执行 0.5 净距检查；
+不放宽净距，也不删除/隐藏会话楼。`verify-plan-bulldozer.mjs` 通过，真实380城跨河高架
+推平1处设施、搬迁12栋会话楼，终态没有楼体落在新桥面下；地面桥、普通新路及滨海大道
+情形也通过。`verify-plan-repair-controller.mjs`、UI typecheck 与 `git diff --check` 通过。
+
+本次验证仅闭合该编辑器高架搬迁回归，不代表规划生成/全档完成。此前完整planning批次
+因tier5长耗时中止；独立档位、跨引擎、视觉、性能预算与全局约束仍未验收。B0–B4仍有
+登记表记录的未完成项；本工作树仍有未提交文件，本条不记作整体完成或main合并门禁通过。
+
 ## 2026-10-12 对象注册表协作接口（B3前置，非整批完成）
 
 生成器现导出cityLayout.checkSitePlacement(layout, footprint, occupied, options?)。

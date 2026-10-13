@@ -137,6 +137,64 @@ export function worldOverhead(footprint: FootprintSpec, origin: Vec2, yaw: numbe
   return footprint.overhead.map((part) => part.map((p) => toWorld(p, origin, yaw)));
 }
 
+/** Bounded deterministic terrain samples over the actual declared ground shape. */
+export function worldFootprintSamples(footprint: FootprintSpec, origin: Vec2, yaw: number, spacing = 4): Vec2[] {
+  if (!Number.isFinite(spacing) || spacing <= 0) return [];
+  const samples: Vec2[] = [];
+  for (const polygon of worldParts(footprint, origin, yaw)) {
+    const xs = polygon.map((point) => point.x), zs = polygon.map((point) => point.z);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
+    const nx = Math.max(1, Math.ceil((maxX - minX) / spacing)), nz = Math.max(1, Math.ceil((maxZ - minZ) / spacing));
+    // Fail closed rather than allowing malformed model data to create unbounded work.
+    if ((nx + 1) * (nz + 1) + samples.length > 4096) return [];
+    for (let ix = 0; ix <= nx; ix += 1) for (let iz = 0; iz <= nz; iz += 1) {
+      const point = { x: minX + (maxX - minX) * ix / nx, z: minZ + (maxZ - minZ) * iz / nz };
+      if (pointInPolygon(point, polygon)) samples.push(point);
+    }
+  }
+  return samples;
+}
+
+/** Exact distance from model polygons to linework, measured against road centerlines. */
+export function footprintRunsDistance(footprint: FootprintSpec, origin: Vec2, yaw: number, runs: readonly (readonly Vec2[])[]): number {
+  let best = Infinity;
+  for (const polygon of worldParts(footprint, origin, yaw)) for (const run of runs) {
+    if (run.length === 1) {
+      const point = run[0];
+      if (pointInPolygon(point, polygon)) return 0;
+      for (let i = 0; i < polygon.length; i += 1) best = Math.min(best, pointSegment(point, polygon[i], polygon[(i + 1) % polygon.length]));
+    } else for (let i = 1; i < run.length; i += 1) best = Math.min(best, segmentPolygonDistance(run[i - 1], run[i], polygon));
+  }
+  return best;
+}
+
+/** Distance from an exact model polygon to the legacy circular reservation. */
+export function footprintCircleDistance(footprint: FootprintSpec, origin: Vec2, yaw: number, circleCentre: Vec2, circleRadius: number): number {
+  let best = Infinity;
+  for (const polygon of worldParts(footprint, origin, yaw)) {
+    if (pointInPolygon(circleCentre, polygon)) return -circleRadius;
+    for (let i = 0; i < polygon.length; i += 1) best = Math.min(best, pointSegment(circleCentre, polygon[i], polygon[(i + 1) % polygon.length]));
+  }
+  return best - circleRadius;
+}
+
+function polygonDistance(a: Polygon, b: Polygon): number {
+  if (pointInPolygon(a[0], b) || pointInPolygon(b[0], a)) return 0;
+  let best = Infinity;
+  for (let i = 0; i < a.length; i += 1) best = Math.min(best, segmentPolygonDistance(a[i], a[(i + 1) % a.length], b));
+  return best;
+}
+
+/** Separation between physical model shapes, falling back to the nominal circles only when undeclared. */
+export function siteFootprintSeparation(a: { id: string; kind: string; x: number; z: number; yaw: number; radius: number },
+  b: { id: string; kind: string; x: number; z: number; yaw: number; radius: number }): number {
+  const left = siteFootprint(a.kind, a.id, a.radius), right = siteFootprint(b.kind, b.id, b.radius);
+  if (!left.exact && !right.exact) return Math.hypot(a.x - b.x, a.z - b.z) - a.radius - b.radius;
+  if (left.exact && !right.exact) return footprintCircleDistance(left, a, a.yaw, b, b.radius);
+  if (!left.exact && right.exact) return footprintCircleDistance(right, b, b.yaw, a, a.radius);
+  return Math.min(...worldParts(left, a, a.yaw).flatMap(x => worldParts(right, b, b.yaw).map(y => polygonDistance(x, y))));
+}
+
 /** 包围盒在世界里的朝向矩形（叠加层、拾取、障碍物用）。 */
 export function worldBox(footprint: FootprintSpec, origin: Vec2, yaw: number): { x: number; z: number; yaw: number; width: number; depth: number } {
   const c = toWorld({ x: (footprint.min.x + footprint.max.x) / 2, z: (footprint.min.z + footprint.max.z) / 2 }, origin, yaw);

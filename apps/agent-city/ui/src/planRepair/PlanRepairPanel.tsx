@@ -71,7 +71,8 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
     </div>}
     {info.remap && <div className={`city-repair-banner${info.remap.failed.length ? " city-repair-banner-soft" : " city-repair-banner-ok"}`} role="status">
       <p>城市随会话数增长从第 {info.remap.fromTier} 档变到第 {info.remap.toTier} 档（放大 {info.remap.ratio.toFixed(2)} 倍），
-        已把你的 {info.remap.remapped} 处修改搬到新地图上{info.remap.failed.length ? `；${info.remap.failed.length} 处没找到对应位置，已移除（原补丁已存档）` : ""}。</p>
+        已把你的 {info.remap.remapped} 处修改搬到新地图上{info.remap.alreadySatisfied.length ? `；另有 ${info.remap.alreadySatisfied.length} 处目标状态已满足，无需重放` : ""}{info.remap.failed.length ? `；${info.remap.failed.length} 处没找到对应位置，已移除（原补丁已存档）` : ""}。</p>
+      {info.remap.alreadySatisfied.length > 0 && <ul className="city-repair-remap-failed city-repair-remap-satisfied">{info.remap.alreadySatisfied.slice(0, 5).map((item) => <li key={`${item.kind}:${item.id}`}>{item.detail}</li>)}</ul>}
       {info.remap.failed.length > 0 && <ul className="city-repair-remap-failed">{info.remap.failed.slice(0, 5).map((item) => <li key={`${item.kind}:${item.id}`}>{item.detail}</li>)}</ul>}
       <button onClick={repair.dismissRemap}>知道了</button>
     </div>}

@@ -23,6 +23,7 @@ import type { PublicSite, RoadEdge, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
 import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount, isDry } from "./footprint";
+import { footprintCircleDistance, footprintRunsDistance, siteFootprint, worldFootprintSamples } from "../planFootprint";
 
 /** 候选点：坐标 + 朝向 + 稳定 id（排序 tie-break 用）+ 来源说明；shoreAnchor 供海上岛堤道校验。 */
 export type SiteCandidate = {
@@ -50,6 +51,8 @@ export type SiteCandidateWorld = {
   frontageProbeFractions?: readonly number[];
   /** Bounded region candidates tried only after all frontage candidates fail. */
   frontageFallbackPoints?: readonly Vec2[];
+  /** Joint owner/network proposals may defer exact-shape trunk clearance to their atomic validator. */
+  allowGroundCorridorRelocation?: boolean;
   /** 环线高架折线（hard 闸门的净空检查）。 */
   ringRuns: Vec2[][];
   bridges: Array<{ from: Vec2; to: Vec2 }>;
@@ -270,15 +273,35 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
   const geo = { height: world.height, inRiver: world.inRiver, riverBank: world.riverBank };
   const at = { x: candidate.x, z: candidate.z };
   const r = spec.radius;
-  const spacing = (gap: number) => world.placed.some((o) => Math.hypot(o.x - at.x, o.z - at.z) < o.radius + r + gap) ? `site-spacing(+${gap})` : null;
+  const footprint = siteFootprint(spec.kind, `candidate:${spec.kind}`, r);
+  const exactFootprint = footprint.exact ? footprint : null;
+  const shapeDry = () => {
+    if (!exactFootprint) return isDry(geo, at, r) ? null : "dry-footprint";
+    const footprintSamples = worldFootprintSamples(footprint, at, candidate.yaw);
+    return footprintSamples.length && footprintSamples.every((point) => world.height(point.x, point.z) >= 0.8 && !world.inRiver(point.x, point.z)
+      && (world.landClearance(point.x, point.z) >= 4)) ? null : "dry-footprint";
+  };
+  const spacing = (gap: number) => world.placed.some((o) => exactFootprint
+    ? footprintCircleDistance(footprint, at, candidate.yaw, o, o.radius) < gap
+    : Math.hypot(o.x - at.x, o.z - at.z) < o.radius + r + gap) ? `site-spacing(+${gap})` : null;
   const ring = () => (clearsRingRuns(at, r * 2, r * 2, world.ringRuns) ? null : "clear-of-highways");
   switch (spec.placement) {
     case "plaza":
       return world.landClearance(at.x, at.z) >= r + 14 ? null : "snap-land-clearance";
     case "inland-frontage":
-      return (world.buildable(at.x, at.z) ? null : "buildable-center")
-        ?? (isDry(geo, at, r) ? null : "dry-footprint")
-        ?? (world.landClearance(at.x, at.z) >= r + 4 ? null : "land-clearance-r+4")
+      if (!world.buildable(at.x, at.z)) return "buildable-center";
+      if (exactFootprint) {
+        // Keep the complete physical checks, but reject on inexpensive geometry before sampling terrain.
+        if (!world.allowGroundCorridorRelocation && footprintRunsDistance(footprint, at, candidate.yaw, world.trunkRuns) < 8)
+          return "trunk-clearance-r+8";
+        const highwayFailure = ring();
+        if (highwayFailure) return highwayFailure;
+        const spacingFailure = spacing(10);
+        if (spacingFailure) return spacingFailure;
+        return shapeDry();
+      }
+      return (shapeDry())
+        ?? (world.landClearance(at.x, at.z) < r + 4 ? "land-clearance-r+4" : null)
         ?? (polylineDistance(world.trunkRuns, at) >= r + 8 ? null : "trunk-clearance-r+8")
         ?? ring()
         ?? spacing(10);

@@ -60,6 +60,14 @@ export function freshViaductGeometry(before: CityLayout, after: CityLayout): Roa
   }));
 }
 
+/** A session/site already under a viaduct is exempt only from the same pre-existing deck, never from ground-road residue. */
+function alreadyUnderViaduct(before: CityLayout, rect: { x: number; z: number; yaw: number; width: number; depth: number }): boolean {
+  const decks = (before.highways ?? []).flatMap((run) => viaductEdges(run));
+  const near = decks.filter((edge) => edge.points.some((p) => Math.hypot(p.x - rect.x, p.z - rect.z) < 80)
+    || nearestOnPolyline(rect, edge.points).distance < 60);
+  return !rectClearOfEdges(rect, near, 0.5);
+}
+
 /** 编辑前就被地面路压着的矩形（生成器残余）：不该被这一笔顺手拆掉或搬走。 */
 function alreadyHit(before: CityLayout, rect: { x: number; z: number; yaw: number; width: number; depth: number }): boolean {
   const near = clearanceRoads(before).filter((edge) => edge.points.some((p) => Math.hypot(p.x - rect.x, p.z - rect.z) < 80) || nearestOnPolyline(rect, edge.points).distance < 60);
@@ -69,16 +77,22 @@ function alreadyHit(before: CityLayout, rect: { x: number; z: number; yaw: numbe
 export function bulldozeForRoads(generated: CityLayout, model: CityModel, before: CityLayout, patch: PlanPatchV1): BulldozeResult {
   let next = patch;
   let after = applyPlanPatch(generated, next).layout;
-  const fresh = [...freshRoadGeometry(before, after), ...freshViaductGeometry(before, after)];
+  const newRoads = freshRoadGeometry(before, after);
+  const newViaducts = freshViaductGeometry(before, after);
+  const fresh = [...newRoads, ...newViaducts];
   const result: BulldozeResult = { patch: next, bulldozed: [], relocated: [], homeless: [] };
   if (!fresh.length) return result;
   const impact = roadImpact(after, model, fresh);
+  const viaductOnlyImpact = roadImpact(after, model, newViaducts);
+  const viaductImpact = new Set([...viaductOnlyImpact.bulldoze, ...viaductOnlyImpact.relocate, ...viaductOnlyImpact.locked]);
+  const alreadyImpacted = (id: string, rect: { x: number; z: number; yaw: number; width: number; depth: number }) =>
+    viaductImpact.has(id) ? alreadyUnderViaduct(before, rect) : alreadyHit(before, rect);
 
   // 1. 推平设施（锁定设施在校验阶段已拒绝，这里不会出现；万一出现也只是留着）。
   const sites = new Map(listSites(before).map((site) => [site.id, site]));
   for (const id of impact.bulldoze) {
     const site = sites.get(id);
-    if (!site || site.locked || alreadyHit(before, siteBox(site))) continue;
+    if (!site || site.locked || alreadyImpacted(id, siteBox(site))) continue;
     next = appendSiteOp(next, { t: "remove", id, at: { x: site.x, z: site.z }, cls: siteClassOf(site) });
     result.bulldozed.push(id);
   }
@@ -89,7 +103,7 @@ export function bulldozeForRoads(generated: CityLayout, model: CityModel, before
   for (const id of impact.relocate) {
     const building = buildings.get(id);
     const home = before.districts.flatMap((district) => [...district.slots]).find(([key]) => key === id)?.[1];
-    if (!building || !home || alreadyHit(before, buildingRect(building, home))) continue;
+    if (!building || !home || alreadyImpacted(id, buildingRect(building, home))) continue;
     const candidates = after.blocks.flatMap((block) => block.parcels)
       .map((parcel) => ({ parcel, d: Math.hypot(parcel.x - home.x, parcel.z - home.z) }))
       .filter(({ parcel, d }) => d <= SEARCH_RADIUS && parcel.id !== home.id)
@@ -97,7 +111,15 @@ export function bulldozeForRoads(generated: CityLayout, model: CityModel, before
     // 先用 O(1) 的占用集合筛（被占的地块完整校验必然报 parcel-occupied，结果不变），再对剩下的做完整校验。
     const taken = reservedParcelIdsShared(after, next.suppressedContext);
     const pending = new Set(Object.entries(next.buildingMoves).filter(([other]) => other !== id).map(([, parcelId]) => parcelId));
-    const target = candidates.find(({ parcel }) => !taken.has(parcel.id) && !pending.has(parcel.id) && validateBuildingMove(after, model, next, id, parcel.id).blockers.length === 0)?.parcel;
+    const target = candidates.find(({ parcel }) => {
+      if (taken.has(parcel.id) || pending.has(parcel.id)) return false;
+      if (validateBuildingMove(after, model, next, id, parcel.id).blockers.length > 0) return false;
+      // Generic move validation protects the parcel proxy against highways. For a
+      // newly drawn deck, also validate the renderer-sized building rectangle:
+      // a parcel can clear the deck while the actual session building still sits
+      // beneath it.
+      return rectClearOfEdges(buildingRect(building, parcel), newViaducts, 0.5);
+    })?.parcel;
     if (!target) { result.homeless.push(id); continue; }
     next = { ...next, buildingMoves: { ...next.buildingMoves, [id]: target.id }, moveAnchors: { ...next.moveAnchors, [id]: { x: target.x, z: target.z } } };
     after = applyPlanPatch(generated, next).layout;

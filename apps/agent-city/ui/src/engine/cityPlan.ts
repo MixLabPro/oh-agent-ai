@@ -17,6 +17,7 @@ import type { RepairContext } from "./planner/context";
 import { initializeRepairPlanningWorld, runRepairDerivedFinalization, solvePlan } from "./planner/solve";
 import { CONSTRAINTS, type CityPlan as ConstraintPlan } from "./planner/constraints";
 import { closestPolylineSegment, polylineDistance } from "./planner/footprint";
+import { footprintRunsDistance, siteFootprint, siteFootprintSeparation } from "./planFootprint";
 import { canRelocateGroundSite, coastalSitingKinds, specByKind } from "./planner/sitespec";
 import { candidatesFor, siteCandidateHardReject } from "./planner/access";
 import { assignConnectedSite } from "./planner/jointSite";
@@ -392,17 +393,24 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       type RelocationPatch = { publicSites: PublicSite[]; landmarks: Landmark[]; opera: typeof sailOperaCandidateSets };
       const patches = new Map<string, RelocationPatch>();
       const currentSites = [...publicSites, ...landmarks].filter((site) => site.radius);
+      const separation = (a: typeof currentSites[number], b: typeof currentSites[number]) => siteFootprintSeparation(a, b);
       const overlapCount = (sites: typeof currentSites) => {
         let count = 0;
         for (let i = 0; i < sites.length; i += 1) for (let j = i + 1; j < sites.length; j += 1) {
-          if (Math.hypot(sites[i].x - sites[j].x, sites[i].z - sites[j].z) < sites[i].radius + sites[j].radius) count += 1;
+          if (separation(sites[i], sites[j]) < 0) count += 1;
         }
         return count;
       };
       const baselineOverlaps = overlapCount(currentSites);
-      const currentRoads = [...network.edges.values()].map((edge) => edge.points);
-      const baselineRoadOverlaps = currentSites.filter((site) => site.kind !== "civic" && site.kind !== "arch"
-        && polylineDistance(currentRoads, site) < site.radius * 0.7).length;
+      const siteHasRoadOverlap = (site: typeof currentSites[number], candidateNetwork: Network) => {
+        if (site.kind === "civic" || site.kind === "arch") return false;
+        const footprint = siteFootprint(site.kind, site.id, site.radius);
+        if (footprint.exact) return [...candidateNetwork.edges.values()].some((edge) =>
+          footprintRunsDistance(footprint, site, site.yaw, [edge.points]) < edge.width / 2 + 3);
+        return polylineDistance([...candidateNetwork.edges.values()].map((edge) => edge.points), site) < site.radius * 0.7;
+      };
+      const countRoadOverlaps = (sites: typeof currentSites, candidateNetwork: Network) => sites.filter((site) => siteHasRoadOverlap(site, candidateNetwork)).length;
+      const baselineRoadOverlaps = countRoadOverlaps(currentSites, network);
       const relocationRejects = new Map<string, number>();
       const noteRelocationReject = (reason: string) => relocationRejects.set(reason, (relocationRejects.get(reason) ?? 0) + 1);
       const ownerRules = CONSTRAINTS.filter((constraint) => ["siteInWater", "siteWithoutDoorRoad", "roadThroughSite",
@@ -424,8 +432,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         const initialOwner = initialSites.find((site) => site.id === ownerId)!;
         const candidateRoads = [...candidateNetwork.edges.values()].map((edge) => edge.points);
         const blockerIds = new Set(initialSites.filter((site) => site !== initialOwner && (
-          Math.hypot(site.x - initialOwner.x, site.z - initialOwner.z) < site.radius + initialOwner.radius + 10
-          || (site.kind !== "civic" && site.kind !== "arch" && polylineDistance(candidateRoads, site) < site.radius * 0.7)
+          separation(site, initialOwner) < 10
+          || siteHasRoadOverlap(site, candidateNetwork)
         )).map((site) => site.id));
         if (blockerIds.size > 0) {
           const fixedBlocker = initialSites.find((site) => blockerIds.has(site.id)
@@ -503,7 +511,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
                 for (const entry of selected) { entry.site.x = entry.candidate.x; entry.site.z = entry.candidate.z; entry.site.yaw = entry.candidate.yaw; }
                 const trialSites = [...stagedPublic, ...stagedLandmarks].filter((site) => site.radius);
                 const spacingConflict = trialSites.some((site) => site !== requiredOwner
-                  && Math.hypot(site.x - requiredOwner.x, site.z - requiredOwner.z) < site.radius + requiredOwner.radius + 10);
+                  && separation(site, requiredOwner) < 10);
                 const introducedFinding = spacingConflict ? null : ownerRules.flatMap((constraint) => constraint.measure(ownerView(candidateNetwork, stagedPublic, stagedLandmarks))
                   .filter((violation) => !previousOwnerFailures.get(constraint.id)!.has(ownerIdentity(violation, trialSites)))
                   .map((violation) => ({ constraint, violation })))[0] ?? null;
@@ -520,10 +528,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
           const stagedSites = [...stagedPublic, ...stagedLandmarks].filter((site) => site.radius);
           const stagedOwner = stagedSites.find((site) => site.id === ownerId)!;
           const ownerSpacingBlockers = stagedSites.filter((site) => site !== stagedOwner
-            && Math.hypot(site.x - stagedOwner.x, site.z - stagedOwner.z) < site.radius + stagedOwner.radius + 10);
+            && separation(site, stagedOwner) < 10);
           const ownerSpacingConflict = ownerSpacingBlockers.length > 0;
-          const roadOverlaps = stagedSites.filter((site) => site.kind !== "civic" && site.kind !== "arch"
-            && polylineDistance(candidateRoads, site) < site.radius * 0.7).length;
+          const roadOverlaps = countRoadOverlaps(stagedSites, candidateNetwork);
           if (ownerSpacingConflict || overlapCount(stagedSites) > baselineOverlaps || roadOverlaps > baselineRoadOverlaps) {
             const evidence = [...relocationRejects].sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",");
             return `site-relocation-refused(ownerSpacing=${ownerSpacingConflict},siteOverlaps=${overlapCount(stagedSites)}>${baselineOverlaps},roadOverlaps=${roadOverlaps}>${baselineRoadOverlaps}) blockers=[${ownerSpacingBlockers.map((site) => site.id).join(",")}] relocation=[${evidence}]`;

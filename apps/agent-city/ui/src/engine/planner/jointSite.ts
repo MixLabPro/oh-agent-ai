@@ -9,6 +9,12 @@ import { keyOf, type Network } from "./network";
 import { resolvePlanarAccess, planarAccessPose } from "../models/siteAccess";
 import type { SiteSpec } from "./sitespec";
 import { nominalAnchorPoint } from "./sitespec";
+import type { LocalFootprint } from "../models/physical";
+import { declaredOwnerDetour } from "./jointSiteRoad";
+import { previewNetworkPatch } from "./network";
+import { groundJunctionCorridorFailure } from "./civicClearance";
+import { groundJunctionFindings } from "./report";
+import { footprintRunsDistance, siteFootprint, worldParts } from "../planFootprint";
 
 export type PlotAccess = { role: "plot-gate"; capability?: "ground-frontage" | "island-causeway" | "shore-plot-boundary"; nodeId: string; ownerX: number; ownerZ: number; ownerYaw: number; entranceId?: string;
   entranceEvidence?: "model-position" | "plot-proxy"; doorX?: number; doorZ?: number };
@@ -24,6 +30,8 @@ export const JOINT_SITE_CONFIG = {
   /** Add only after the previous tiers are exhausted; does not reorder existing successful placements. */
   outerRegionRadii: [192, 216, 240, 264, 288, 312, 336, 360] as const,
   outerRegionDirections: 24,
+  /** Maximum exact-model corridor reline proposals per required owner. */
+  maxCorridorRelineEvaluations: 48,
   /** Per required owner: 512 primary frontage + 640 fallback frontage + 113 inner + 192 outer points. */
   maxCandidateEvaluations: 1457,
 };
@@ -45,10 +53,45 @@ export function assignConnectedSite(world: SiteCandidateWorld, connector: Connec
   const frontage = [...connector.network.edges.values()].filter((edge) => !edge.bridge && edge.width >= 8 && primaryNodes.has(edge.from)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const routeRetries: SiteCandidate[] = [];
   const routeFailureEvidence = new Map<string, string>();
+  let corridorRelineEvaluations = 0;
   const evaluateCandidate = (candidate: SiteCandidate, accepted: Map<string, { site: PublicSite; network: Network }>, rescue = false): string | null => {
-    if ([...connector.network.edges.values()].some((edge) => polylineDistance([edge.points], candidate) < spec.radius + edge.width / 2)) return "road-intersects-site-footprint";
+    let candidateBaseNetwork = connector.network;
+    const modelFootprint = siteFootprint(spec.kind, id, spec.radius);
+    if (modelFootprint.exact) {
+      const worldPolygons = worldParts(modelFootprint, candidate, candidate.yaw);
+      const footprint: LocalFootprint = { parts: worldPolygons.map((vertices) => ({ shape: "convex", vertices })) };
+      const blockers = [...connector.network.edges.values()].filter((edge) => {
+        const required = Math.max(edge.width / 2 + 3, edge.width >= 8 ? 8 : 0);
+        return footprintRunsDistance(modelFootprint, candidate, candidate.yaw, [edge.points]) < required;
+      });
+      if (blockers.length) {
+        if (corridorRelineEvaluations >= JOINT_SITE_CONFIG.maxCorridorRelineEvaluations) return "corridor-reline-budget-exhausted";
+        corridorRelineEvaluations += 1;
+        const oldFindings = new Set(groundJunctionFindings([...connector.network.edges.values()]).map((finding) => finding.id));
+        const relineEdges: NonNullable<import("./network").NetworkPatch["relineEdges"]> = [];
+        for (const edge of blockers) {
+          const required = Math.max(edge.width / 2 + 3, edge.width >= 8 ? 8 : 0);
+          if (edge.bridge || edge.structure !== "ground-road"
+            || footprintRunsDistance(modelFootprint, candidate, candidate.yaw, [[edge.points[0]]]) < required
+            || footprintRunsDistance(modelFootprint, candidate, candidate.yaw, [[edge.points[edge.points.length - 1]]]) < required)
+            return "site-clearance-protected-road-endpoint";
+          const points = declaredOwnerDetour(footprint, edge, (a, b) =>
+            groundJunctionCorridorFailure(connector, a, b, edge.width, edge) === null);
+          if (!points) return "site-clearance-no-safe-trunk-detour";
+          relineEdges.push({ edgeId: edge.id, points });
+        }
+        const preview = previewNetworkPatch(connector.network, { baseVersion: connector.network.version ?? 0,
+          addEdges: [], removeEdgeIds: [], splits: [], relineEdges });
+        if (!preview.ok) return `site-clearance-reline-${preview.detail ?? preview.reason}`;
+        if (groundJunctionFindings([...preview.network.edges.values()]).some((finding) => !oldFindings.has(finding.id)))
+          return "site-clearance-reline-introduced-junction";
+        candidateBaseNetwork = preview.network;
+      }
+    } else if ([...connector.network.edges.values()].some((edge) => polylineDistance([edge.points], candidate) < spec.radius + edge.width / 2)) {
+      return "road-intersects-site-footprint";
+    }
     let best: { x: number; z: number; distance: number; id: string } | null = null;
-    for (const edge of connector.network.edges.values()) {
+    for (const edge of candidateBaseNetwork.edges.values()) {
       if (edge.bridge || !primaryNodes.has(edge.from)) continue;
       const closest = closestPolylineSegment(edge.points, candidate);
       if (!closest) continue;
@@ -62,7 +105,7 @@ export function assignConnectedSite(world: SiteCandidateWorld, connector: Connec
     if (rescue && candidate.frontage) {
       const evidence = candidate.frontage;
       const same = (a: Vec2, b: Vec2) => a.x === b.x && a.z === b.z;
-      const host = [...connector.network.edges.values()].find((edge) => !edge.bridge && primaryNodes.has(edge.from)
+      const host = [...candidateBaseNetwork.edges.values()].find((edge) => !edge.bridge && primaryNodes.has(edge.from)
         && edge.points.some((point, i) => i > 0 && ((same(edge.points[i - 1], evidence.a) && same(point, evidence.b))
           || (same(edge.points[i - 1], evidence.b) && same(point, evidence.a)))));
       if (!host || polylineDistance([[evidence.a, evidence.b]], evidence.at) > 0.01) return "stale-frontage-evidence";
@@ -87,7 +130,7 @@ export function assignConnectedSite(world: SiteCandidateWorld, connector: Connec
     const site: PublicSite = { id, kind: spec.kind as PublicSite["kind"], x: candidate.x, z: candidate.z, radius: spec.radius, yaw,
       access: { role: "plot-gate", capability: "ground-frontage", nodeId: `${gate.x}:${gate.z}`, ownerX: candidate.x, ownerZ: candidate.z, ownerYaw: yaw,
         entranceId: resolved.access.entranceId, entranceEvidence: door ? "model-position" : "plot-proxy", ...(door ? { doorX: door.x, doorZ: door.z } : {}) } };
-    const network: Network = { nodes: new Map([...connector.network.nodes].map(([key, node]) => [key, { ...node }])), edges: new Map([...connector.network.edges].map(([key, edge]) => [key, { ...edge, points: edge.points.map((p) => ({ ...p })) }])) };
+    const network: Network = { nodes: new Map([...candidateBaseNetwork.nodes].map(([key, node]) => [key, { ...node }])), edges: new Map([...candidateBaseNetwork.edges].map(([key, edge]) => [key, { ...edge, points: edge.points.map((p) => ({ ...p })) }])) };
     const strategies: ConnectionStrategy[] = rescue ? recoveredFrontage
       ? ["direct-projection", "node-merge", "detour", "grid-astar"] : ["detour", "grid-astar"] : ["direct-projection", "node-merge"];
     const result = runConnection({ id: `assign:${id}`, source: gate, target: { kind: "primary", isPrimaryNode: (node) => primaryNodes.has(node) }, purpose: "site-access", allowBridge: false, maxLength: spec.radius + 30, roadClass: "local" },
@@ -105,6 +148,7 @@ export function assignConnectedSite(world: SiteCandidateWorld, connector: Connec
   const tryCandidates = (limit: number, probes: readonly number[], fallbackPoints: readonly Vec2[] = []) => {
     const accepted = new Map<string, { site: PublicSite; network: Network }>();
     const assignment = assignSite({ ...world, trunkRuns: frontage.map((edge) => edge.points), frontageCandidateLimit: limit, frontageProbeFractions: probes,
+      allowGroundCorridorRelocation: true,
       ...(fallbackPoints.length ? { frontageFallbackPoints: fallbackPoints } : {}) }, spec, nominalAnchorPoint(spec, world), ASSIGN_WEIGHTS,
       (candidate) => evaluateCandidate(candidate, accepted));
     return { accepted, assignment };

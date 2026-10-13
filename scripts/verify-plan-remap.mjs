@@ -100,7 +100,7 @@ const model = { windowStartMs: 0, windowEndMs: 1, windowLabel: "t", generatedAt:
   assert.deepEqual(report.failed.map((f) => f.kind), ["building-move"], "a legacy building move has no anchor and fails honestly");
 }
 
-// (c) 找不到 / 新档失效 → 单条失败；全部失败 → null。
+// (c) 找不到 / 新档失效 → 单条失败；删除目标已不存在则标记为已满足；全部无待重放操作 → null。
 {
   const t2 = makeLayout(1.5, 2);
   let p = { ...k.emptyPlanPatch(7, 1), islandRadius: 400 };
@@ -108,8 +108,9 @@ const model = { windowStartMs: 0, windowEndMs: 1, windowLabel: "t", generatedAt:
   p = k.appendSiteOp(p, { t: "remove", id: "civic:3", at: { x: 500, z: 500 }, cls: "civic/school" }, 2); // 没有同类设施
   p = { ...p, suppressedContext: ["context:A1/0"] };
   const { patch, report } = k.remapPlanPatch(t2, model, p);
-  assert.equal(patch, null, "nothing maps → no patch");
-  assert.equal(report.failed.length, 3); assert.equal(report.remapped, 0);
+  assert.equal(patch, null, "no operation remains to replay");
+  assert.deepEqual(report.alreadySatisfied.map((entry) => entry.kind), ["road-drop"], "deleting a corridor that is already absent is a satisfied no-op");
+  assert.equal(report.failed.length, 2); assert.equal(report.remapped, 0);
 }
 
 // (d) 存档宽容读取。
@@ -167,7 +168,8 @@ function mixedPatch(layout, model) {
   return { patch: p, made };
 }
 
-for (const [from, to] of [[380, 420], [1600, 2000]]) {
+const tierTransitions = process.env.CITY_REMAP_LARGE_ONLY === "1" ? [[1600, 2000]] : [[380, 420], [1600, 2000]];
+for (const [from, to] of tierTransitions) {
   const before = cityOf(from);
   const { patch, made } = mixedPatch(before.layout, before.model);
   const total = patch.roadOps.length + patch.siteOps.length + Object.keys(patch.buildingMoves).length;
@@ -179,9 +181,10 @@ for (const [from, to] of [[380, 420], [1600, 2000]]) {
   const ms = Math.round(performance.now() - t0);
   assert.ok(remapped, "something survives the tier change");
   assert.equal(k.applyPlanPatch(after.layout, remapped).stale.length, 0, "the remapped patch replays cleanly on the new tier");
-  const rate = report.remapped / report.total;
+  const survived = report.remapped + report.alreadySatisfied.length;
+  const rate = survived / report.total;
   const byKind = {}; for (const f of report.failed) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
-  console.log(`  ${from} → ${to} 楼（${report.fromTier} → ${report.toTier} 档，×${report.ratio.toFixed(3)}）：${report.remapped}/${report.total} 处重定位（${Math.round(rate * 100)}%），失败 ${JSON.stringify(byKind)}，耗时 ${ms}ms`);
+  console.log(`  ${from} → ${to} 楼（${report.fromTier} → ${report.toTier} 档，×${report.ratio.toFixed(3)}）：${report.remapped} 搬迁 + ${report.alreadySatisfied.length} 已满足 / ${report.total}（${Math.round(rate * 100)}%），失败 ${JSON.stringify(byKind)} ${JSON.stringify(report.failed)}，耗时 ${ms}ms`);
   assert.ok(rate >= 0.8, `≥ 80% of edits survive a tier change (spec P0-2 acceptance) (${Math.round(rate * 100)}%)`);
 }
 

@@ -133,7 +133,7 @@ export type ConnectorWorld = {
   geo: Geography;
   inRiver: (x: number, z: number) => boolean;
   /** 预留地（publicSites + landmarks，用地位置在规划中会挪动，故为函数）。 */
-  reservations: () => Array<{ x: number; z: number; radius: number }>;
+  reservations: () => Array<{ id?: string; kind?: string; yaw?: number; x: number; z: number; radius: number }>;
 };
 
 // ── 共享校验（§5B：连接器与骨架共用 corridor validator，skeleton.ts 出口弦不再当特例）──────────────

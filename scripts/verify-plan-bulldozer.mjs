@@ -25,7 +25,7 @@ const {
   validateRoadAdd, rectClearOfEdges, buildingRect, buildCityModel, layoutCity, MIAMI_COASTAL,
   accessRoadFor, strandedAccessEdges, pruneStalePatch, appendHighwayOp, validateHighwayAdd, freshViaductGeometry,
   rectClearOfRoads, edgesNear, clearanceRoads, rectClearOfEdgesRaw, nearestOnPolyline,
-  validateRestyle, autoPlaceFree, formatFreeTarget, siteTouchesRoad, frontEntrance, worldParts, segmentPolygonDistance, ROAD_SETBACK, siteFootprint,
+  validateRestyle, autoPlaceFree, formatFreeTarget, siteTouchesRoad, frontEntrance, worldParts, segmentPolygonDistance, ROAD_SETBACK, siteFootprint, roadImpact,
 } = await loadCity({
   "engine/planFootprint.ts": ["frontEntrance", "worldParts", "segmentPolygonDistance", "ROAD_SETBACK", "siteFootprint"],
   "engine/planGeometry.ts": ["rectClearOfRoads", "edgesNear", "clearanceRoads", "rectClearOfEdges as rectClearOfEdgesRaw"],
@@ -33,7 +33,7 @@ const {
   "engine/planBulldozer.ts": ["bulldozeForRoads", "freshRoadGeometry", "freshViaductGeometry"],
   "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "appendRoadOp", "appendSiteOp", "reservedParcelIds", "rectClearOfEdges", "buildingRect", "pruneStalePatch", "appendHighwayOp", "nearestOnPolyline"],
   "engine/planSites.ts": ["listSites", "siteMoveProblem", "autoPlaceFree", "formatFreeTarget"],
-  "engine/planRoadRules.ts": ["validateRoadAdd", "validateHighwayAdd", "validateRestyle"],
+  "engine/planRoadRules.ts": ["validateRoadAdd", "validateHighwayAdd", "validateRestyle", "roadImpact"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
@@ -450,7 +450,7 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   assert.equal(vApplied.layout.highways.length, (layout.highways ?? []).length + 1, "…as one more viaduct run");
   const deck = freshViaductGeometry(layout, vApplied.layout);
   const stillUnder = vApplied.layout.districts.flatMap((d) => [...d.slots]).filter(([id, slot]) => !vResult.homeless.includes(id) && !rectClearOfEdges(buildingRect(buildings.get(id), slot), deck, 0.5));
-  assert.deepEqual(stillUnder.map(([id]) => id), [], "no session building is left under the new deck");
+  assert.deepEqual(stillUnder.map(([id]) => id), [], `no session building is left under the new deck — ${JSON.stringify({ relocated: vResult.relocated, homeless: vResult.homeless, affected: roadImpact(vApplied.layout, real, deck).relocate })}`);
   console.log(`  真实城市：跨河高架 ${Math.round(Math.hypot(crossing.b.x - crossing.a.x, crossing.b.z - crossing.a.z))} 长 ${crossing.verdict.warnings.join("、") || "无提示"} → 推平 ${vResult.bulldozed.length}、安置 ${vResult.relocated.length}`);
 
   // 地面桥（路线图 P1-5）：找一笔恰好跨一段河的直路——校验给 bridge 提示、不拦；套用后多一座锁定的桥面、桥登记进 bridges、补丁干净重放。

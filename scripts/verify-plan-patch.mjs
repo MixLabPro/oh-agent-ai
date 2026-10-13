@@ -32,7 +32,7 @@ globalThis.window ??= globalThis;
 const {
   applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
   appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
-  auditLayout, buildCityModel, layoutCity, MIAMI_COASTAL,
+  auditLayout, buildCityModel, createCityPlan, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
   "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP"],
   "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "roadRun", "validateRestyle"],
@@ -40,6 +40,7 @@ const {
   "engine/planAudit.ts": ["auditLayout"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
+  "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
 });
 const fresh = () => emptyPlanPatch(74031, 1);
@@ -458,15 +459,21 @@ const snap = (layout) => JSON.stringify({
   // pins：把一栋楼搬进一个空置街区——落位阶段生效、街区长出路、刷新/新会话不挤掉。
   const real = modelOf(rows(380));
   const base = layoutCity(real, null, undefined, MIAMI_COASTAL);
+  const plannedRoadIds = new Set(createCityPlan(base.seed, base.scaleTier, MIAMI_COASTAL).roadEdges.map((edge) => edge.id));
+  const displayedRoadIds = new Set(base.roadEdges.map((edge) => edge.id));
   const builtBlocks = new Set(base.districts.flatMap((d) => [...d.slots.values()].map((p) => p.blockId)));
   const mover = [...base.districts[0].slots.keys()].sort()[0];
   let target = null;
   for (const block of base.blocks) {
     if (builtBlocks.has(block.id) || block.parcels.length === 0) continue;
-    const parcel = block.parcels.find((candidate) => validateBuildingMove(base, real, emptyPlanPatch(base.seed, base.scaleTier), mover, candidate.id).blockers.length === 0);
+    // Choose an actually pruned, but accepted, parcel frontage; other valid empty blocks may already
+    // have all their roads retained for nearby sites, making a citywide road-count assertion vacuous.
+    const parcel = block.parcels.find((candidate) => candidate.frontage
+      && plannedRoadIds.has(candidate.frontage.hostEdgeId) && !displayedRoadIds.has(candidate.frontage.hostEdgeId)
+      && validateBuildingMove(base, real, emptyPlanPatch(base.seed, base.scaleTier), mover, candidate.id).blockers.length === 0);
     if (parcel) { target = { block, parcel }; break; }
   }
-  assert.ok(target, "the generated city must have at least one empty block with a valid parcel");
+  assert.ok(target, "the generated city must have an empty valid parcel whose proved frontage road is pruned before pinning");
   const patch = emptyPlanPatch(base.seed, base.scaleTier); patch.buildingMoves = { [mover]: target.parcel.id };
   // 只做后处理（旧行为）：楼搬过去了，但新家街区的支路早被生长剪枝剪掉。
   const postOnly = applyPlanPatch(base, patch);
@@ -476,10 +483,10 @@ const snap = (layout) => JSON.stringify({
   assert.equal(slotOf(pinned, mover).id, target.parcel.id, "pins must place the building at its target during layout");
   const applied = applyPlanPatch(pinned, patch);
   assert.equal(applied.stale.length, 0, "apply after a pinned layout is a no-op for the move");
-  // 判别断言是路段数：orphanedBlock 的 40 阈值在这个样本上两边都不报（剪掉的是街区自己的支路，干道仍在 40 内），
-  // 真正的差别是生长剪枝因为街区「有楼」而保留了服务它的支路。
+  // 判别断言是实际服务边身份：移出旧街区也可能同时剪掉旧路，故全城净路段数不必增长。
   const grewRoads = pinned.roadEdges.length - base.roadEdges.length;
-  assert.ok(grewRoads > 0, "pinning a building into an empty block must keep that block's roads from being pruned");
+  assert.ok(pinned.roadEdges.some((edge) => edge.id === target.parcel.frontage.hostEdgeId), "pinning must retain the target parcel's proved frontage host");
+  assert.ok(!base.roadEdges.some((edge) => edge.id === target.parcel.frontage.hostEdgeId), "the selected target frontage must be pruned in the unpinned baseline");
   assert.equal(postOnly.layout.roadEdges.length, base.roadEdges.length, "post-processing alone cannot regrow pruned roads (the defect pins fix)");
   assert.ok(!orphaned(applied.layout), "the formerly empty block must be served by a road");
   console.log(`  pins: ${mover} → ${target.parcel.id}；生长剪枝多保留 ${grewRoads} 条路段（post-only 孤立街区=${orphaned(postOnly.layout)}，pins=${orphaned(applied.layout)}）`);

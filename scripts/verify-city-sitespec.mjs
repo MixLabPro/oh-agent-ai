@@ -21,6 +21,26 @@ const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKind
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
 });
 
+// Exact declared model geometry replaces the nominal reservation circle in
+// generator admission; legacy-only classes keep their existing proxy checks.
+{
+  const candidate = { id: "stadium:shape", x: 0, z: 0, yaw: 0, source: "shape fixture" };
+  const world = { core: { x: 0, z: 0 }, R: 300, turn: 0, coast: [],
+    trunkRuns: [[{ x: -100, z: 40 }, { x: 100, z: 40 }]], ringRuns: [], bridges: [],
+    placed: [{ x: 50, z: 0, radius: 5 }], height: (_x, z) => z > 30 && Math.abs(_x) < 5 ? 0.2 : 1.2,
+    inRiver: () => false, riverBank: () => false, coastDistance: () => 200, landClearance: () => 100, buildable: () => true,
+    hasRiver: false, riverX: () => 9999, riverWidth: () => 0, hillDir: { x: 1, z: 0 }, hillLine: 9999, hillProj: () => 0 };
+  assert.equal(siteCandidateHardReject(world, specByKind("stadium"), candidate), null,
+    "65x50 stadium fits beside a road, on dry model ground, and beside a small plot even when its legacy radius would reject it");
+  assert.equal(siteCandidateHardReject({ ...world, trunkRuns: [[{ x: -100, z: 32 }, { x: 100, z: 32 }]], placed: [] },
+    specByKind("stadium"), candidate), "trunk-clearance-r+8", "real footprint must still reject a road corridor within its 8-unit setback");
+  let terrainSamples = 0;
+  const blockedWorld = { ...world, trunkRuns: [[{ x: -100, z: 32 }, { x: 100, z: 32 }]], placed: [],
+    height: () => { terrainSamples += 1; return 1.2; } };
+  assert.equal(siteCandidateHardReject(blockedWorld, specByKind("stadium"), candidate), "trunk-clearance-r+8");
+  assert.equal(terrainSamples, 0, "cheap physical clearance rejection must happen before terrain sampling");
+}
+
 const frontagePrimaryMax = JOINT_SITE_CONFIG.frontageSegments * (1 + JOINT_SITE_CONFIG.probes.length) * 2;
 const frontageFallbackMax = JOINT_SITE_CONFIG.fallbackCandidateLimit * (1 + JOINT_SITE_CONFIG.fallbackProbes.length) * 2;
 const regionFallbackMax = 1 + (JOINT_SITE_CONFIG.fallbackRegionRadii.length - 1) * JOINT_SITE_CONFIG.fallbackRegionDirections
