@@ -326,7 +326,11 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   const towerR = Math.max(...tower.parts.flat().map((p) => Math.hypot(p.x, p.z)));
   assert.ok(towerR >= 8.5 && towerR < 9, `…its ground footprint is the podium (Ø17, sampled circumscribed), not the nominal r 22: ${towerR}`);
   assert.ok(tower.overhead.flat().every((p) => Math.hypot(p.x, p.z) < 9), "…and nothing above (pod, ring, deck) reaches past the podium");
-  for (const kind of ["pagoda", "lighthouse"]) assert.equal(siteFootprint(kind, `landmark:${kind}`, 18).source, "projected", `${kind} is projected too`);
+  for (const kind of ["pagoda", "lighthouse"]) {
+    const projected = siteFootprint(kind, `landmark:${kind}`, 18);
+    assert.equal(projected.source, "projected", `${kind} is projected too`);
+    assert.strictEqual(siteFootprint(kind, `landmark:${kind}`, 18), projected, `${kind} projection is reused for repeated corridor checks`);
+  }
   assert.equal(siteFootprint("twin-towers", "landmark:twin-towers", 20).source, "nominal", "hand-drawn models without a part list stay nominal");
 
   const base = makeLayout(); base.landmarks[0] = { ...base.landmarks[0], x: 150, z: -60 };

@@ -82,12 +82,40 @@ const DECLARED: Record<string, PhysicalDeclaration | undefined> = Object.fromEnt
 /** 声明式模型里物理声明还没补的：从件表俯视投影（registry 的 PHYSICAL_PENDING——补了声明就会走 DECLARED）。 */
 const PROJECTABLE: Record<string, BuildingModel> = Object.fromEntries([tvTowerModel, pagodaModel, lighthouseModel].map((model) => [model.id, model]));
 
+// corridorViolation asks for a site's footprint once per candidate road segment.
+// For projected models that used to rebuild every mesh sample and convex hull on
+// every call. Geometry is a pure function of model id, hashed instance seed and
+// radius, so retain a small LRU of projection results.
+const PROJECTED_FOOTPRINT_CACHE_LIMIT = 64;
+const projectedFootprints = new Map<string, FootprintSpec | null>();
+
 /** 件表投影（默认 sizing：塔高取上限——XZ 外廓与高度无关或随高度只增不减，取上限是保守方向）。 */
 function fromProjection(model: BuildingModel, id: string, radius: number): FootprintSpec | null {
+  const seed = hashSeed(id);
+  const key = `${model.id}\u0000${seed}\u0000${radius}`;
+  if (Number.isFinite(radius) && projectedFootprints.has(key)) {
+    const cached = projectedFootprints.get(key)!;
+    projectedFootprints.delete(key);
+    projectedFootprints.set(key, cached);
+    return cached;
+  }
   try {
-    const projected = projectParts(model.geometry({ seed: hashSeed(id), radius }));
-    return projected ? spec(projected.ground, "projected", projected.overhead.slice(projected.ground.length)) : null;
-  } catch { return null; }
+    const projected = projectParts(model.geometry({ seed, radius }));
+    const result = projected ? spec(projected.ground, "projected", projected.overhead.slice(projected.ground.length)) : null;
+    if (Number.isFinite(radius)) {
+      projectedFootprints.set(key, result);
+      if (projectedFootprints.size > PROJECTED_FOOTPRINT_CACHE_LIMIT)
+        projectedFootprints.delete(projectedFootprints.keys().next().value!);
+    }
+    return result;
+  } catch {
+    if (Number.isFinite(radius)) {
+      projectedFootprints.set(key, null);
+      if (projectedFootprints.size > PROJECTED_FOOTPRINT_CACHE_LIMIT)
+        projectedFootprints.delete(projectedFootprints.keys().next().value!);
+    }
+    return null;
+  }
 }
 
 /** 声明 → 两层投影。运动包络是多个输入变体的联合（摩天轮按 cap 有两种半径），全取——保守方向。 */

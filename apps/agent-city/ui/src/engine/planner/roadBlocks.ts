@@ -52,10 +52,25 @@ const area = (ring: Vec2[]) => Math.abs(ring.reduce((sum, p, i) => { const q = r
 const rectangleOverlap = (a: Vec2[], b: Vec2[]) => {
   for (const ring of [a, b]) for (let i = 0; i < ring.length; i++) {
     const p = ring[i], q = ring[(i + 1) % ring.length], nx = -(q.z - p.z), nz = q.x - p.x;
-    const pa = a.map(v => v.x * nx + v.z * nz), pb = b.map(v => v.x * nx + v.z * nz);
-    if (Math.max(...pa) <= Math.min(...pb) + 1e-9 || Math.max(...pb) <= Math.min(...pa) + 1e-9) return false;
+    let aMin = Infinity, aMax = -Infinity, bMin = Infinity, bMax = -Infinity;
+    for (const v of a) { const projection = v.x * nx + v.z * nz; aMin = Math.min(aMin, projection); aMax = Math.max(aMax, projection); }
+    for (const v of b) { const projection = v.x * nx + v.z * nz; bMin = Math.min(bMin, projection); bMax = Math.max(bMax, projection); }
+    if (aMax <= bMin + 1e-9 || bMax <= aMin + 1e-9) return false;
   }
   return true;
+};
+const RECTANGLE_INDEX_CELL = 32;
+type RectangleBounds = { minX: number; maxX: number; minZ: number; maxZ: number };
+const rectangleBounds = (corners: readonly Vec2[]): RectangleBounds => ({
+  minX: Math.min(...corners.map(p => p.x)), maxX: Math.max(...corners.map(p => p.x)),
+  minZ: Math.min(...corners.map(p => p.z)), maxZ: Math.max(...corners.map(p => p.z)),
+});
+const rectangleCells = (bounds: RectangleBounds) => {
+  const minX = Math.floor(bounds.minX / RECTANGLE_INDEX_CELL), maxX = Math.floor(bounds.maxX / RECTANGLE_INDEX_CELL);
+  const minZ = Math.floor(bounds.minZ / RECTANGLE_INDEX_CELL), maxZ = Math.floor(bounds.maxZ / RECTANGLE_INDEX_CELL);
+  const keys: string[] = [];
+  for (let x = minX; x <= maxX; x++) for (let z = minZ; z <= maxZ; z++) keys.push(`${x}:${z}`);
+  return keys;
 };
 const segmentGap = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
   if (cross(a, b, c) * cross(a, b, d) < 0 && cross(c, d, a) * cross(c, d, b) < 0) return 0;
@@ -180,6 +195,28 @@ export function generateRoadBlocks(input: RoadBlockInput): RoadBlockResult {
     prepared.push({ face, polygon, holes, outerConvex, sides }); report.supportedFaces += 1;
   }
   const blocks: RoadDerivedBlock[] = [], access: ParcelFrontageProof[] = [], acceptedRectangles: Vec2[][] = [];
+  const acceptedBounds: RectangleBounds[] = [], rectangleGrid = new Map<string, number[]>(), visitedRectangles: number[] = [];
+  let overlapQuery = 0;
+  const overlapsAcceptedRectangle = (corners: Vec2[]): boolean => {
+    const bounds = rectangleBounds(corners), query = ++overlapQuery;
+    for (const cell of rectangleCells(bounds)) for (const index of rectangleGrid.get(cell) ?? []) {
+      if (visitedRectangles[index] === query) continue;
+      visitedRectangles[index] = query;
+      const other = acceptedBounds[index];
+      if (bounds.maxX < other.minX - 1e-9 || other.maxX < bounds.minX - 1e-9
+        || bounds.maxZ < other.minZ - 1e-9 || other.maxZ < bounds.minZ - 1e-9) continue;
+      if (rectangleOverlap(corners, acceptedRectangles[index])) return true;
+    }
+    return false;
+  };
+  const indexAcceptedRectangle = (corners: Vec2[]) => {
+    const index = acceptedRectangles.length, bounds = rectangleBounds(corners);
+    acceptedRectangles.push(corners); acceptedBounds.push(bounds);
+    for (const cell of rectangleCells(bounds)) {
+      const entries = rectangleGrid.get(cell);
+      if (entries) entries.push(index); else rectangleGrid.set(cell, [index]);
+    }
+  };
   const reject = (reason: string) => { report.rejected[reason] = (report.rejected[reason] ?? 0) + 1; };
   const checkedBuildable = (p: Vec2) => { report.geometryChecks += 1; return input.buildable(p.x, p.z) && !input.reserved?.(p); };
   const sampleLine = (a: Vec2, b: Vec2) => { const count = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z))); for (let i = 0; i <= count; i++) if (!checkedBuildable({ x: a.x + (b.x - a.x) * i / count, z: a.z + (b.z - a.z) * i / count })) return false; return true; };
@@ -219,10 +256,10 @@ export function generateRoadBlocks(input: RoadBlockInput): RoadBlockResult {
           || !sampleLine(frontagePoint, shoulderPoint) || input.sites.some(site => distance(site, frontagePoint, shoulderPoint) < site.radius)
           || hosts.some(h => h.edge.id !== host.edge.id && segmentGap(frontagePoint, shoulderPoint, h.a, h.b) < h.edge.width / 2)
           || input.highways.some(run => run.slice(1).some((b, i) => segmentGap(frontagePoint, shoulderPoint, run[i], b) < ROAD_BLOCK_POLICY.highwayHalfWidth + ROAD_BLOCK_POLICY.highwayMargin))) { reject("frontage-corridor-blocked"); continue; }
-        if (acceptedRectangles.some(other => rectangleOverlap(corners, other))) { reject("parcel-overlap"); continue; }
+        if (overlapsAcceptedRectangle(corners)) { reject("parcel-overlap"); continue; }
         const parcelId = `${id}/${side}:${index}`;
         parcels.push({ ...p, id: parcelId, blockId: id, yaw: -Math.atan2(tangent.z, tangent.x), zone, width: ROAD_BLOCK_POLICY.width, depth: ROAD_BLOCK_POLICY.depth });
-        acceptedRectangles.push(corners);
+        indexAcceptedRectangle(corners);
         const primaryNodePath = [host.edge.from], primaryEdgePath: string[] = []; let node = host.edge.from;
         while (node !== root) { const next = parent.get(node)!; primaryEdgePath.push(next.edge); primaryNodePath.push(next.node); node = next.node; }
         access.push({ parcelId, blockId: id, sourceFaceId: item.face.id, networkVersion: input.networkVersion, scope: "parcel-frontage", terrainCoverage: "one-unit-sampling",
