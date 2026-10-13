@@ -15,6 +15,8 @@
 //   (l) 存档宽容读取：null/错型字段不抛、单条坏条目丢弃、缺必填 → 整条丢弃；
 //   (m) 道路日志按顺序重放：引用当前 id（移后再移、移后再删）、拆路段后再删其中一半、画路端点吸附（路口/路段中间/新建）、失败操作不留半截改动；
 //   (n) 跨档位：整份补丁 tier-changed，布局不动；
+//   (n2) 生成器换代（generatorVersion.ts）：整份 generator-changed、钉子不认、清除即空；新补丁带当前版本、
+//        旧存档无版本按 1 读且指纹不变、坏版本值按缺省；跨档与换代同时发生时报 tier-changed（旧文案不变）；
 //   (o) 真实城市：空补丁不改布局；占地重叠不误报（曾 1600 楼 1111 条）；layoutCity pins 让移楼在落位阶段生效、
 //       空置街区随之长出路、刷新后不被新会话挤掉；pins=null / 跨档 pins 时落位与无 pins 一致；
 //   (p) 拐角倒圆：从路尽头接着画并拐弯 → 拐点挪到弧中点、两段各带半段弧、切线连续；直行/回折/路口处不倒；
@@ -31,10 +33,11 @@ import { loadCity } from "./city-kit/index.mjs";
 globalThis.window ??= globalThis;
 const {
   applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
+  pruneStalePatch, patchGeneratorVersion, patchMatchesLayout, CITY_GENERATOR_VERSION,
   appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
   auditLayout, buildCityModel, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
-  "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP"],
+  "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP", "pruneStalePatch", "patchGeneratorVersion", "patchMatchesLayout", "CITY_GENERATOR_VERSION"],
   "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "roadRun", "validateRestyle"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_WIDTH", "EXPRESSWAY_RAMP"],
   "engine/planAudit.ts": ["auditLayout"],
@@ -411,6 +414,32 @@ const snap = (layout) => JSON.stringify({
   const { layout, stale } = applyPlanPatch(base, patch);
   assert.equal(layout, base, "a cross-tier patch must not touch the layout");
   assert.deepEqual(stale.map((s) => `${s.kind}:${s.reason}`), ["building-move:tier-changed", "road-drop:tier-changed"]);
+}
+
+// (n2) 生成器换代：档位不变、生成器版本变了——补丁里的 id 指向上一版地图，整份不套用（会话层先 planRemap 重定位）。
+{
+  assert.equal(fresh().generatorVersion, CITY_GENERATOR_VERSION, "new patches are stamped with the current generator version");
+  const legacyRaw = { version: 1, seed: 74031, scaleTier: 1, buildingMoves: { b1: "p3" }, roadOps: [{ t: "drop", edge: "100:0/100:100" }] };
+  const legacy = coercePlanPatch(legacyRaw);
+  assert.equal(legacy.generatorVersion, undefined, "an old save without a stamp loads without one");
+  assert.equal(patchGeneratorVersion(legacy), 1, "...and is read as generator version 1");
+  assert.equal(coercePlanPatch({ ...legacyRaw, generatorVersion: 3 }).generatorVersion, 3, "a valid stamp survives the round trip");
+  for (const bad of [0, -1, 1.5, "2", null]) assert.equal(coercePlanPatch({ ...legacyRaw, generatorVersion: bad }).generatorVersion, undefined, `a malformed stamp (${JSON.stringify(bad)}) falls back to the default, it does not drop the patch`);
+  assert.equal(hashPlanPatch(legacy), hashPlanPatch({ ...legacy, generatorVersion: 1 }), "stamping version 1 does not change an old patch's fingerprint");
+  const other = { ...legacy, generatorVersion: CITY_GENERATOR_VERSION + 1 };
+  assert.notEqual(hashPlanPatch(other), hashPlanPatch(legacy), "a different generator version is a different patch");
+  assert.equal(patchMatchesLayout(legacy, 1), CITY_GENERATOR_VERSION === 1);
+  assert.equal(patchMatchesLayout(other, 1), false);
+  const base = makeLayout();
+  const { layout, stale } = applyPlanPatch(base, other);
+  assert.equal(layout, base, "a patch from another generator version must not touch the layout");
+  assert.deepEqual(stale.map((s) => `${s.kind}:${s.reason}`), ["building-move:generator-changed", "road-drop:generator-changed"]);
+  assert.match(stale[0].detail, /生成器/);
+  assert.equal(pruneStalePatch(other, stale), null, "clearing a generator-changed patch empties it, like tier-changed");
+  assert.equal(layoutPinsFor(other), null, "building pins from another generator version are ignored by layoutCity");
+  assert.ok(layoutPinsFor({ ...other, generatorVersion: CITY_GENERATOR_VERSION }), "...and honoured for the current one");
+  const both = { ...other, scaleTier: 2 };
+  assert.deepEqual(applyPlanPatch(base, both).stale.map((s) => s.reason), ["tier-changed", "tier-changed"], "tier change takes precedence so the existing tier-changed reporting is unchanged");
 }
 
 // (o) 真实城市（同 verify-city-culdesac-bulbs 的固定伪随机数据）。
