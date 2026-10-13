@@ -29,7 +29,7 @@ import { extractRoadFaces } from "./planner/roadFaces";
 import { generateRoadBlocks, type RoadBlockReport } from "./planner/roadBlocks";
 import { componentOf, diagnoseNetwork, type ConnectionDemand } from "./planner/intent";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
-import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
+import { addNetworkEdge, commitNetwork, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, parseFailure, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import { connectServiceLoops } from "./planner/loop";
 import { connectGroundJunctions } from "./planner/junctions";
@@ -490,9 +490,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     siteObligations.push({ ownerId, placed: !!assigned.site, ...(assigned.routeRetries ? { routeRetries: assigned.routeRetries } : {}),
       ...(!assigned.site ? { reason: [assigned.reason, relocationFailure].filter(Boolean).join("; ") } : {}) });
     if (!assigned.site || !assigned.network) continue;
-    nodes.clear(); for (const [id, node] of assigned.network.nodes) nodes.set(id, node);
-    edges.clear(); for (const [id, edge] of assigned.network.edges) edges.set(id, edge);
-    const versioned = network as Network & { version?: number }; versioned.version = (versioned.version ?? 0) + 1;
+    commitNetwork(network, assigned.network);
     if (!publicSites.some((site) => site.id === assigned.site!.id)) publicSites.push(assigned.site);
   }
   const ringIndex = new SegmentIndex(ringRuns);
@@ -967,7 +965,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         const l = Math.hypot(site.x - candidate.shore.x, site.z - candidate.shore.z) || 1;
         const edgePt = key({ x: site.x - ((site.x - candidate.shore.x) / l) * site.radius * 0.9, z: site.z - ((site.z - candidate.shore.z) / l) * site.radius * 0.9 });
         const shorePt = key(candidate.shore);
-        const staged: Network = { nodes: new Map([...network.nodes].map(([id, node]) => [id, { ...node }])), edges: new Map([...network.edges].map(([id, edge]) => [id, { ...edge, points: edge.points.map((p) => ({ ...p })) }])) };
+        const staged: Network = { nodes: new Map([...network.nodes].map(([id, node]) => [id, { ...node }])), edges: new Map([...network.edges].map(([id, edge]) => [id, { ...edge, points: edge.points.map((p) => ({ ...p })) }])), version: 0 };
         const stagedConnector: ConnectorWorld = { ...connectorWorld, network: staged, reservations: () => reservations().filter((reserved) => reserved !== site) };
         const causeway = commitFixedLink(stagedConnector, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
         if (!causeway.ok) { failed.push(`causeway:${causeway.detail ?? causeway.reason}`); continue; }
@@ -991,7 +989,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         site.access = { role: "plot-gate", capability: "island-causeway", nodeId: roadNodeId(edgePt), ownerX: site.x, ownerZ: site.z, ownerYaw: site.yaw };
         nodes.clear(); for (const [id, node] of staged.nodes) nodes.set(id, node);
         edges.clear(); for (const [id, edge] of staged.edges) edges.set(id, edge);
-        (network as Network & { version?: number }).version = (staged as Network & { version?: number }).version;
+        network.version = staged.version;
         bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
         for (const span of access.bridgeSpans) bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
         accepted = true;
@@ -1043,10 +1041,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         if (!proposal.ok) connectionLog.push({ id: `gate:${site.id}`, purpose: "site-access", ok: false,
           reason: "no-target", detail: proposal.reason });
         else {
-          nodes.clear(); for (const [id, node] of proposal.network.nodes) nodes.set(id, node);
-          edges.clear(); for (const [id, edge] of proposal.network.edges) edges.set(id, edge);
+          commitNetwork(network, proposal.network);
           network.patchRemaps = proposal.network.patchRemaps;
-          const versioned = network as Network & { version?: number }; versioned.version = (versioned.version ?? 0) + 1;
           site.access = binding(proposal.gate);
           for (const span of proposal.bridgeSpans) bridges.push({ from: span.from, to: span.to,
             angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
@@ -1333,9 +1329,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       obligation.reason = `${obligation.reason ?? "initial placement failed"}; post-growth: ${assigned.reason ?? "no connected candidate"}`;
       continue;
     }
-    nodes.clear(); for (const [id, node] of assigned.network.nodes) nodes.set(id, node);
-    edges.clear(); for (const [id, edge] of assigned.network.edges) edges.set(id, edge);
-    const versioned = network as Network & { version?: number }; versioned.version = (versioned.version ?? 0) + 1;
+    commitNetwork(network, assigned.network);
     publicSites.push(assigned.site);
     obligation.placed = true; delete obligation.reason;
     // Trees are presentation drafts, not accepted parcels or service owners.
@@ -1383,7 +1377,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }, 0), 0);
     const generated = generateRoadBlocks({ faces, roads,
       primaryAnchorNodeId: draft.primaryAnchorNodeId ?? null,
-      networkVersion: (draft.network as Network & { version?: number }).version ?? 0,
+      networkVersion: draft.network.version,
       districtFor: () => "", zoneFor, buildable, sites: [...draft.publicSites, ...draft.landmarks], highways: draft.ringRuns,
       reserved: (point) => !!seaside && seasideStripContains(seaside, point, 1), maxCandidates,
       presentationSupportsHoles: true });
@@ -1524,7 +1518,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     planningOutcome: derivedFinalization.outcome,
     parcelSource: legacyGridParcels ? "legacy-grid" as const : "accepted-road-faces" as const, roadBlockReport,
     derivedFinalization: { ok: derivedFinalization.ok, ...(derivedFinalization.reason ? { reason: derivedFinalization.reason } : {}) },
-    derivedNetworkVersion: (network as Network & { version?: number }).version ?? 0, skeletonDiagnostics, skeletonReservationIds, roadGenerationDiagnostics,
+    derivedNetworkVersion: network.version, skeletonDiagnostics, skeletonReservationIds, roadGenerationDiagnostics,
     parcelGeneration: { generated: generatedParcels, roadClearanceRejected: generatedParcels - blocks.reduce((sum, block) => sum + block.parcels.length, 0) } };
   const culDeSacEnds: Vec2[] = (diagnoseNetwork(plan)?.endpoints ?? [])
     .filter((endpoint) => endpoint.role.kind === "cul-de-sac")

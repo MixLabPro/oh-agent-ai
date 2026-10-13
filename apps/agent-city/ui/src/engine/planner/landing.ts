@@ -47,7 +47,7 @@ export const LANDING_CONFIG = {
 };
 
 export type LandingWorld = {
-  network: Network & { version?: number };
+  network: Network;
   geo: Geography;
   inRiver: (x: number, z: number) => boolean;
   /** 预留地（publicSites + landmarks）：弧段/接杆的用地避让。 */

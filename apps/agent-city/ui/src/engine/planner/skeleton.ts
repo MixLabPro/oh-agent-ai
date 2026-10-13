@@ -285,7 +285,7 @@ export function buildSkeleton(opts: {
       if (hosts.length) {
         // One atomic topological refinement preserves arbitrary host widths,
         // structure, curve and ordered lineage. Never delete then recreate as8.
-        const split = commitNetworkPatch(network, { baseVersion: (network as Network & { version?: number }).version ?? 0,
+        const split = commitNetworkPatch(network, { baseVersion: network.version,
           removeEdgeIds: [], addEdges: [], splits: hosts.map((edge) => ({ edgeId: edge.id, at })) });
         if (!split.ok) {
           diagnostics.push({ trunk: -1, phase: "route", reason: split.reason, cause: `ring-exit-split:${split.detail ?? split.reason}` });

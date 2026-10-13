@@ -12,6 +12,8 @@ import { classifyRoadSegments } from "./relations";
 export type Network = {
   nodes: Map<string, RoadNode>;
   edges: Map<string, RoadEdge>;
+  /** 事务版本号：每次 commitNetwork / commitNetworkPatch 递增；缺省语义恒为 0（旧代码 `version ?? 0`）。 */
+  version: number;
   /** Scoped transaction evidence; the solver consumes and clears this journal. */
   patchRemaps?: NetworkRemap[];
 };
@@ -23,7 +25,7 @@ export type NetworkRemap = {
   positions: Record<string, Vec2>;
 };
 
-export const emptyNetwork = (): Network => ({ nodes: new Map(), edges: new Map() });
+export const emptyNetwork = (): Network => ({ nodes: new Map(), edges: new Map(), version: 0 });
 /** Input guard for the new quadratic self-contact check; not the whole-plan
  * candidate/terrain/clone/cancellation ledger required by U5. */
 export const NETWORK_RELINE_CONFIG = { version: 1, maxEdgesPerPatch: 16, maxPointsPerEdge: 256 } as const;
@@ -71,7 +73,9 @@ export type NetworkPatch = {
 
 export type PatchResult = { ok: true; version: number; remap: NetworkRemap } | { ok: false; reason: "stale-base" | "unknown-edge" | "validation" | "self-loop" | "off-line-split" | "node-in-use"; detail?: string };
 
+// clone 不继承 version：草稿的版本号旧代码里是 undefined（读作 0），显式写 0 保持同一读数。
 const clone = (network: Network): Network => ({
+  version: 0,
   nodes: new Map([...network.nodes].map(([k, n]) => [k, { ...n }])),
   edges: new Map([...network.edges].map(([k, e]) => [k, { ...e, points: e.points.map((p) => ({ ...p })) }])),
 });
@@ -223,11 +227,11 @@ function applyOps(draft: Network, patch: NetworkPatch, remap: NetworkRemap): Pat
  * validate 在草稿上跑（连通/净空等调用方语义）；拆边保留原边属性是原语承诺。
  */
 export function commitNetworkPatch(
-  network: Network & { version?: number },
+  network: Network,
   patch: NetworkPatch,
   validate?: (draft: Network) => string | null,
 ): PatchResult {
-  if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: `base ${patch.baseVersion} != current ${network.version ?? 0}` };
+  if (network.version !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: `base ${patch.baseVersion} != current ${network.version}` };
   const draft = clone(network);
   const remap: NetworkRemap = {
     nodes: Object.fromEntries([...network.nodes.keys()].map((id) => [id, id])),
@@ -261,19 +265,30 @@ export function commitNetworkPatch(
   const problem = validate?.(draft) ?? null;
   if (problem) return { ok: false, reason: "validation", detail: problem };
   // §4.3「版本匹配后一次替换」：交换前复核（validate 回调不得重入提交同一网络——契约见函数头）。
-  if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: "version changed during validation" };
+  if (network.version !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: "version changed during validation" };
   // 批次 4-2：就地清写而非换 Map——buildPlan 顶部解构的 { nodes, edges } 引用在事务提交后仍指向正式网络。
   network.nodes.clear(); for (const [k, n] of draft.nodes) network.nodes.set(k, n);
   network.edges.clear(); for (const [k, e] of draft.edges) network.edges.set(k, e);
-  network.version = (network.version ?? 0) + 1;
+  network.version = network.version + 1;
   network.patchRemaps?.push(remap);
   return { ok: true, version: network.version, remap };
 }
 
+/**
+ * 暂存网络整体提交：就地清写 nodes/edges（先清 nodes 再填、再清 edges 再填，Map 迭代序与逐项手写完全一致——
+ * 确定性 I2），再把 version 加一。就地而非换 Map：buildPlan 顶部解构的 { nodes, edges } 引用提交后仍指向正式网络。
+ * 不碰 patchRemaps，也不复核 baseVersion（那是 commitNetworkPatch 的职责）。
+ */
+export function commitNetwork(network: Network, staged: Network): void {
+  network.nodes.clear(); for (const [id, node] of staged.nodes) network.nodes.set(id, node);
+  network.edges.clear(); for (const [id, edge] of staged.edges) network.edges.set(id, edge);
+  network.version += 1;
+}
+
 /** Apply the identical transaction rules without publishing or recording a journal. */
-export function previewNetworkPatch(network: Network & { version?: number }, patch: NetworkPatch):
+export function previewNetworkPatch(network: Network, patch: NetworkPatch):
   { ok: true; network: Network } | Exclude<PatchResult, { ok: true }> {
-  if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base" };
+  if (network.version !== patch.baseVersion) return { ok: false, reason: "stale-base" };
   const draft = clone(network);
   const result = applyOps(draft, patch, { nodes: {}, edges: {}, paths: [], positions: {} });
   return result.ok ? { ok: true, network: draft } : result;

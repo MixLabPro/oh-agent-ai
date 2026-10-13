@@ -73,7 +73,7 @@ export function consolidateTerminalCorridors(ctx: RepairContext): number {
         .map((f) => f.edges.map((id) => mappedEdgeId(ctx.network.edges.get(id)!)).sort().join("|")));
       const bindings: NetworkPatch["rebindNodes"] = [{ from: source.id, to: target.id }];
       if (relocation) bindings!.push({ from: relocation.from, to: relocation.id, targetAt: { x: relocation.x, z: relocation.z } });
-      const result = commitNetworkPatch(ctx.network, { baseVersion: (ctx.network as typeof ctx.network & { version?: number }).version ?? 0,
+      const result = commitNetworkPatch(ctx.network, { baseVersion: ctx.network.version,
         removeEdgeIds: [...removed], removeNodeIds: [free.id], splits: [], addEdges: [], rebindNodes: bindings }, (draft) => {
       if (groundJunctionFindings([...draft.edges.values()]).some((f) => !existing.has([...f.edges].sort().join("|")))) return "corridor merge introduced crossing";
       const changedNodes = new Set([target.id, ...(relocation ? [relocation.id] : [])]);
