@@ -1372,3 +1372,9 @@ RoadEdge 新增可选structure（ground-road/ground-approach/deck），由addNet
 在 `192d721a` 的端点保留折线修复上，真实断点仍是实体包络内的路口端点。现允许最多两个非主锚点、非桥接、非已声明岛门节点在同一 NetworkPatch 中迁移；受影响节点的所有关联地面边必须完整重定线，端点/edge lineage/remap 随事务提交。超过节点/边预算、存在保护状态或任何关联边无法通过道路净距、地形、地块与桥面检查则拒绝。未扩大吸附阈值。
 
 原两个失败种子 `1703350391/t2`、`2003037141/t1` 均已从 ground violation 1、规划 failed 恢复为 ground violation 0、无 groundFailures、规划 degraded；剩余 degraded 原因是完整模型覆盖与全局预算/取消尚未实现。`verify-city-joint-site-road.mjs` 加入这两项真实种子回归及综合网络/地面专项断言；typecheck与该专项通过。节点迁移后的 `verify-city-solve.mjs` 终态exit0：28策略、10约束、6岛均未恶化且重复确定。30岛主批、独立四档、跨引擎/场景视觉与完整预算门禁仍未完成；不据具名样本恢复宣称整体完成。
+
+### 联合重定线补充：禁止组合路由制造新地面关系（2026-10-13）
+
+联合站点/道路迁移此前只在每条新路径搜索时避开未迁移道路；同一补丁中的两条迁移路径可能分别通过单边检查、组合后仍产生新的未接地面关系。现增加两层检查：路径搜索对静止地面路提前拒绝近接/交叉；完整候选补丁预览时只对本次共同重定线的道路对复核新关系，避免将全图扫描放入每个候选循环。已有共享图节点的端点接触及既存关系按原口径保留。合成回归覆盖组合候选产生新关系时拒绝，原子事务/线路属性和既有具名失败种子回归继续通过。
+
+当前指纹验证：typecheck、`verify-city-joint-site-road.mjs`、`verify-city-planning.mjs`（30岛，锐角0、道路穿地4、缺门路0、拥挤0、断头0）和 `git diff --check` 通过。但具名 `4001256748/t1` 仍为 `failed`，villa-complex 的 `foundation-gap,foundation-water,foundation-relief` 未修复；本改动是拒绝不安全联合路由，不是该失败的恢复方案。最近一次独立普查仍在 tier1 有超限项，tier3/tier5/tier10 未验证；全局预算/取消、R0–R5余项、完整构建/套件、跨引擎、视觉/golden及合并门禁仍未闭环，不能宣称分支完成或可合并。

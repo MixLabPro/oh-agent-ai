@@ -4,10 +4,11 @@ import { citySrc, loadCity } from "./city-kit/index.mjs";
 const { declaredOwnerDetour, prepareJointSiteRoadRelocation, relocateSiteWithGroundRoads, runRepairTransaction,
   createCityPlan, MIAMI_COASTAL,
   emptyNetwork, addNetworkEdge, localResiteCandidates, inspectModelGround, footprintPolylineDistance, resolveModelEnvelope,
-  declaredGroundRoadClear, roadThroughSite, nudgeSitesOffRoads, polylineDistance } = await loadCity({
+  declaredGroundRoadClear, roadThroughSite, nudgeSitesOffRoads, polylineDistance, previewNetworkPatch, groundJunctionFindings } = await loadCity({
   "engine/planner/constraints.ts": ["roadThroughSite"], "engine/planner/repairs.ts": ["nudgeSitesOffRoads"], "engine/planner/footprint.ts": ["polylineDistance"],
   "engine/planner/jointSiteRoad.ts": ["declaredOwnerDetour", "prepareJointSiteRoadRelocation", "relocateSiteWithGroundRoads"],
-  "engine/planner/solve.ts": ["runRepairTransaction"], "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
+  "engine/planner/solve.ts": ["runRepairTransaction"], "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge", "previewNetworkPatch"],
+  "engine/planner/report.ts": ["groundJunctionFindings"],
   "engine/planner/siting.ts": ["localResiteCandidates"], "engine/planner/modelGround.ts": ["inspectModelGround"],
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/modelEnvelope.ts": ["footprintPolylineDistance", "resolveModelEnvelope", "declaredGroundRoadClear"],
@@ -41,6 +42,30 @@ function fixture(half = 60) {
     ringRuns: [], coast: [], core: { x: 100, z: 0 }, trunkRuns: [road.points], carPaths: [road.points, [...road.points].reverse()],
     bridges: [], SHORE_SITE_KINDS: new Set(["villa-complex", "lighthouse"]), seaside: null, coastRoadRunEnds: [], coastRoadRuns: [], riverRoadRuns: [], connectionLog: [] };
 }
+// An unrelated ground road blocks the shortest owner detour. Search must pick
+// the other safe side rather than proposing a new unjoined at-grade contact.
+const contactCtx = fixture(), contactOwner = contactCtx.landmarks[0], contactRoad = [...contactCtx.network.edges.values()][0];
+const contactTarget = { x: target.x, z: target.z };
+const contactEnvelope = resolveModelEnvelope({ ...contactOwner, ...contactTarget }).conservativeProjection;
+const shortestDetour = declaredOwnerDetour(contactEnvelope, contactRoad); assert(shortestDetour && shortestDetour.length > 2);
+let obstruction = null;
+for (let i = 1; i < shortestDetour.length && !obstruction; i += 1) {
+  const a = shortestDetour[i - 1], b = shortestDetour[i], dx = b.x - a.x, dz = b.z - a.z, length = Math.hypot(dx, dz);
+  const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+  if (length < 35 || polylineDistance([contactRoad.points], mid) < 18) continue;
+  obstruction = { a: { x: mid.x - dz / length * 12, z: mid.z + dx / length * 12 },
+    b: { x: mid.x + dz / length * 12, z: mid.z - dx / length * 12 } };
+}
+assert(obstruction, "fixture must expose a clear detour segment away from the original road");
+addNetworkEdge(contactCtx.network, obstruction.a, obstruction.b, false, false, false);
+const contactBefore = groundJunctionFindings([...contactCtx.network.edges.values()]).map(finding => finding.id);
+const contactProposal = prepareJointSiteRoadRelocation(contactCtx, contactOwner.id, contactTarget);
+if (contactProposal.ok) {
+  const contactPreview = previewNetworkPatch(contactCtx.network, contactProposal.patch); assert(contactPreview.ok);
+  assert.deepEqual(groundJunctionFindings([...contactPreview.network.edges.values()]).map(finding => finding.id), contactBefore,
+    "joint relocation must find a route that does not introduce a ground contact");
+} else assert.match(contactProposal.reason, /ground-contact/,
+  "an unusable combination of individually clear replacement routes must be rejected before publication");
 const snapshot = ctx => JSON.stringify([ctx.landmarks, ctx.blocks, [...ctx.network.nodes], [...ctx.network.edges], ctx.network.version ?? 0,
   ctx.trunkRuns, ctx.carPaths, ctx.connectionLog]);
 const ctx = fixture(), ownerId = ctx.landmarks[0].id, originalRoad = [...ctx.network.edges.values()][0], before = snapshot(ctx);

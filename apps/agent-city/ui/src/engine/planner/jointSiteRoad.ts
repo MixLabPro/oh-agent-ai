@@ -12,7 +12,7 @@ import { canRelocateGroundSite } from "./sitespec";
 import { localResiteCandidates } from "./siting";
 import { polylineDistance } from "./footprint";
 import { groundJunctionCorridorFailure } from "./civicClearance";
-import { classifyRoadSegments, closestSegmentPoints } from "./relations";
+import { classifyRoadSegments, closestSegmentPoints, ROAD_RELATION_CONFIG } from "./relations";
 import { groundJunctionFindings } from "./report";
 import { roadNodeId } from "../cityPlan";
 import { isOwnedIslandGate } from "./endpoints";
@@ -66,6 +66,45 @@ function declaredOwnerDetourBetween(footprint: LocalFootprint, road: RoadEdge, a
 export function declaredOwnerDetour(footprint: LocalFootprint, road: RoadEdge,
   allowed: (a: Vec2, b: Vec2) => boolean = () => true): Vec2[] | null {
   return declaredOwnerDetourBetween(footprint, road, road.points[0], road.points[road.points.length - 1], allowed);
+}
+
+/** Reject new at-grade contacts while a replacement corridor is being searched.
+ * Existing graph-node contacts at this road's fixed endpoints remain legal. */
+function routeIntroducesGroundContact(network: Network, road: RoadEdge, a: Vec2, b: Vec2, excluded: ReadonlySet<string>): boolean {
+  const same = (p: Vec2, q: Vec2) => p.x === q.x && p.z === q.z;
+  for (const other of network.edges.values()) {
+    if (excluded.has(other.id) || other.bridge) continue;
+    const shared = [road.from, road.to].filter(node => node === other.from || node === other.to);
+    for (let i = 1; i < other.points.length; i++) {
+      const c = other.points[i - 1], d = other.points[i];
+      const relation = classifyRoadSegments(a, b, c, d);
+      if (relation.distance > ROAD_RELATION_CONFIG.nearDistance) continue;
+      const existingSharedEndpoint = relation.kind === "endpoint-contact" && shared.some(node => {
+        const point = node === road.from ? road.points[0] : road.points[road.points.length - 1];
+        return (same(a, point) || same(b, point)) && (same(c, point) || same(d, point))
+          && same(relation.a.point, point) && same(relation.b.point, point);
+      });
+      if (!existingSharedEndpoint) return true;
+    }
+  }
+  return false;
+}
+
+function routesHaveUnjoinedContact(left: RoadEdge, leftPoints: readonly Vec2[], right: RoadEdge, rightPoints: readonly Vec2[]): boolean {
+  if (left.bridge || right.bridge) return false;
+  const same = (a: Vec2, b: Vec2) => a.x === b.x && a.z === b.z;
+  const shared = [left.from, left.to].filter(node => node === right.from || node === right.to);
+  for (let i = 1; i < leftPoints.length; i++) for (let j = 1; j < rightPoints.length; j++) {
+    const relation = classifyRoadSegments(leftPoints[i - 1], leftPoints[i], rightPoints[j - 1], rightPoints[j]);
+    if (relation.distance > ROAD_RELATION_CONFIG.nearDistance) continue;
+    const sharedGraphEndpoint = shared.some(node => {
+      const leftPoint = node === left.from ? leftPoints[0] : leftPoints[leftPoints.length - 1];
+      const rightPoint = node === right.from ? rightPoints[0] : rightPoints[rightPoints.length - 1];
+      return same(leftPoint, rightPoint) && same(relation.a.point, leftPoint) && same(relation.b.point, rightPoint);
+    });
+    if (!sharedGraphEndpoint) return true;
+  }
+  return false;
 }
 
 type Proposal = { ok: true; patch: NetworkPatch } | { ok: false; reason: string };
@@ -130,6 +169,9 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
     };
     enumerate(0, []);
     const routeAllowed = (road: RoadEdge, a: Vec2, b: Vec2, blockedBy: { value: string }) => {
+      if (routeIntroducesGroundContact(ctx.network, road, a, b, new Set([...roads, ...affected].map(edge => edge.id)))) {
+        blockedBy.value = "unjoined-ground-contact"; return false;
+      }
       const corridor = groundJunctionCorridorFailure(world, a, b, road.width, road);
       if (corridor) { blockedBy.value = `corridor-${corridor}`; return false; }
       if (ctx.blocks.some(block => block.parcels.some(parcel => polylineDistance([[a, b]], parcel)
@@ -170,6 +212,7 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
   }
   const replacements: NonNullable<NetworkPatch["relineEdges"]> = [];
   const routedEdges = relocationOptions[0]?.edges ?? [];
+  const movingEdgeIds = new Set(roads.map(road => road.id));
   for (const road of roads) {
     if (endpointsInside.size && routedEdges.some(route => route.edgeId === road.id)) {
       replacements.push(...routedEdges.filter(route => route.edgeId === road.id));
@@ -177,6 +220,7 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
     }
     let blockedBy = "path-length-or-visibility";
     const shape = declaredOwnerDetour(envelope.conservativeProjection, road, (a, b) => {
+      if (routeIntroducesGroundContact(ctx.network, road, a, b, movingEdgeIds)) { blockedBy = "unjoined-ground-contact"; return false; }
       const corridor = groundJunctionCorridorFailure(world, a, b, road.width, road);
       if (corridor) { blockedBy = `corridor-${corridor}`; return false; }
       if (ctx.blocks.some(block => block.parcels.some(parcel => polylineDistance([[a, b]], parcel)
@@ -202,6 +246,16 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
       removeEdgeIds: [], addEdges: [], splits: [], relineEdges: [...byId.values()], ...(option.nodes.length ? { rebindNodes: option.nodes } : {}) };
     const preview = previewNetworkPatch(ctx.network, patch);
     if (!preview.ok) { lastFailure = preview.detail ?? preview.reason; continue; }
+    const replacementEdges = [...byId.values()];
+    let introducedContact = false;
+    for (let i = 0; i < replacementEdges.length && !introducedContact; i++) for (let j = i + 1; j < replacementEdges.length; j++) {
+      const left = ctx.network.edges.get(replacementEdges[i].edgeId), right = ctx.network.edges.get(replacementEdges[j].edgeId);
+      if (left && right && !routesHaveUnjoinedContact(left, left.points, right, right.points)
+        && routesHaveUnjoinedContact(left, replacementEdges[i].points, right, replacementEdges[j].points)) {
+        introducedContact = true; break;
+      }
+    }
+    if (introducedContact) { lastFailure = "joint-route-introduced-ground-contact"; continue; }
     const final = relocatedSitePositionFailure({ ...ctx, network: preview.network }, owner, at, true);
     if (final) { lastFailure = final; continue; }
     return { ok: true, patch };
