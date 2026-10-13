@@ -1,5 +1,6 @@
 /** Road-derived, fixed-size frontage parcels. No candidate edge becomes a road here. */
 import { DetMath as Math } from "../detMath";
+import { spendPlanningWork, spendPlanningUnit } from "./operationBudget";
 import type { CityBlock, Parcel, RoadEdge, Vec2, Zone } from "../cityLayout";
 import type { RoadFace, RoadFaceResult } from "./roadFaces";
 
@@ -218,7 +219,7 @@ export function generateRoadBlocks(input: RoadBlockInput): RoadBlockResult {
     }
   };
   const reject = (reason: string) => { report.rejected[reason] = (report.rejected[reason] ?? 0) + 1; };
-  const checkedBuildable = (p: Vec2) => { report.geometryChecks += 1; return input.buildable(p.x, p.z) && !input.reserved?.(p); };
+  const checkedBuildable = (p: Vec2) => { spendPlanningUnit("parcel:terrain-query", "terrainSample"); report.geometryChecks += 1; return input.buildable(p.x, p.z) && !input.reserved?.(p); };
   const sampleLine = (a: Vec2, b: Vec2) => { const count = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z))); for (let i = 0; i <= count; i++) if (!checkedBuildable({ x: a.x + (b.x - a.x) * i / count, z: a.z + (b.z - a.z) * i / count })) return false; return true; };
   const parcelRadius = Math.hypot(ROAD_BLOCK_POLICY.width, ROAD_BLOCK_POLICY.depth) / 2;
   for (const item of prepared) {
@@ -229,6 +230,7 @@ export function generateRoadBlocks(input: RoadBlockInput): RoadBlockResult {
       for (let index = 0; index < row.count; index++) {
         if (input.cancelled?.()) return empty("cancelled", "cancelled-during-generation");
         if (report.evaluated >= input.maxCandidates) return empty("budget-exhausted", "candidate-budget-exhausted");
+        spendPlanningWork("parcel:candidate", { candidate: 1 });
         report.evaluated += 1;
         const along = ROAD_BLOCK_POLICY.endMargin + (length - 2 * ROAD_BLOCK_POLICY.endMargin) * (index + 0.5) / row.count;
         const roadPoint = { x: row.a.x + tangent.x * along, z: row.a.z + tangent.z * along };
@@ -258,6 +260,7 @@ export function generateRoadBlocks(input: RoadBlockInput): RoadBlockResult {
           || input.highways.some(run => run.slice(1).some((b, i) => segmentGap(frontagePoint, shoulderPoint, run[i], b) < ROAD_BLOCK_POLICY.highwayHalfWidth + ROAD_BLOCK_POLICY.highwayMargin))) { reject("frontage-corridor-blocked"); continue; }
         if (overlapsAcceptedRectangle(corners)) { reject("parcel-overlap"); continue; }
         const parcelId = `${id}/${side}:${index}`;
+        spendPlanningWork("parcel:derived-row", { derivedRow: 1 });
         parcels.push({ ...p, id: parcelId, blockId: id, yaw: -Math.atan2(tangent.z, tangent.x), zone, width: ROAD_BLOCK_POLICY.width, depth: ROAD_BLOCK_POLICY.depth });
         indexAcceptedRectangle(corners);
         const primaryNodePath = [host.edge.from], primaryEdgePath: string[] = []; let node = host.edge.from;

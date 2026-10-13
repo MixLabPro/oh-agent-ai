@@ -1,4 +1,5 @@
 import type { RepairContext } from "./context";
+import { isPlanningInterrupted, spendPlanningWork, checkPlanningWork } from "./operationBudget";
 import { CONSTRAINTS } from "./constraints";
 import { componentOf, diagnoseNetwork, primaryComponentId, remapDemandNode, retainRepairDemands } from "./intent";
 import type { NetworkRemap } from "./network";
@@ -287,6 +288,7 @@ export type SolveReport = Array<{ constraint: string; name: string; changes: num
 /** 草稿只复制数据；地形函数保持只读，不复制或调用外部副作用。 */
 function copyData<T>(value: T): T {
   if (value && typeof value === "object" && Object.isFrozen(value)) return value;
+  if (value && typeof value === "object") spendPlanningWork("repair:clone-row", { cloneRow: 1 });
   if (Array.isArray(value)) return value.map(copyData) as T;
   if (value instanceof Map) return new Map([...value].map(([key, item]) => [key, copyData(item)])) as T;
   if (value instanceof Set) return new Set(value) as T;
@@ -451,6 +453,7 @@ export function runRepairDerivedFinalization(ctx: RepairContext, derive: (draft:
 } {
   try { return repairDerivedFinalizationDraft(ctx, derive); }
   catch (error) {
+    if (isPlanningInterrupted(error)) throw error;
     const reason = error instanceof Error ? error.message : "invalid derived finalization", outcome = repairPlanningOutcome(ctx);
     return { ok: false, reason, outcome: { ...outcome, status: "failed", reasons: [...outcome.reasons, `derived finalization rejected: ${reason}`] } };
   }
@@ -467,7 +470,7 @@ function repairDerivedFinalizationDraft(ctx: RepairContext, derive: (draft: Repa
   installRepairWorld(draft, makeWorldState(draft, base.world));
   installDemandCatalogue(draft, diagnoseNetwork(planView(ctx))?.demands.map(entry => entry.demand) ?? ctx.demandCatalogue ?? []);
   try { derive(draft); }
-  catch (error) { return fail(error instanceof Error ? error.message : "derived finalization failed"); }
+  catch (error) { if (isPlanningInterrupted(error)) throw error; return fail(error instanceof Error ? error.message : "derived finalization failed"); }
   if (draft.planningWorld !== repairWorldStates.get(draft)?.world || draft.demandCatalogue !== protectedCatalogues.get(draft))
     return fail("derived finalization replaced protected authority");
   const projection = repairWorldProjection(draft);
@@ -618,6 +621,7 @@ function acceptDraft(ctx: RepairContext, draft: RepairContext, remaps: readonly 
 }
 
 export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrategy): { changes: number; reason?: string } {
+  spendPlanningWork("repair:transaction", { transaction: 1 });
   const parentFailure = flushDraftReferences(ctx);
   if (parentFailure) return { changes: 0, reason: parentFailure };
   // Nested strategies may have already edited the parent's private draft. Bind
@@ -637,6 +641,7 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
     const baseFailure = worldBaseFailure(ctx, baseWorld);
     if (baseFailure) return { changes: 0, reason: baseFailure };
   } catch (error) {
+    if (isPlanningInterrupted(error)) throw error;
     // Reject invalid observed inputs before running candidate/strategy code.
     // Do not invent missing polygons, dimensions or a verified authority.
     return { changes: 0, reason: `planning-world-initialization-refused: ${error instanceof Error ? error.message : "invalid source projection"}` };
@@ -682,6 +687,7 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
   const stale = worldBaseFailure(ctx, baseWorld);
   if (stale) return { changes: 0, reason: stale };
   const publication = updatedRepairWorld(baseWorld, draft);
+  checkPlanningWork("repair:publication");
   if (!publication.state) return { changes: 0, reason: publication.reason };
   acceptDraft(ctx, draft, draft.network.patchRemaps, publication.state);
   return { changes, ...(diagnostic ? { reason: diagnostic } : {}) };

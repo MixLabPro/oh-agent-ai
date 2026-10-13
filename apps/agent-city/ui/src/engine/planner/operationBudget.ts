@@ -9,6 +9,7 @@ export type PlanningStop =
   | { readonly status: "budget-exhausted"; readonly stage: string; readonly unit: PlanningWorkUnit;
       readonly requested: number; readonly consumed: number; readonly limit: number };
 export class PlanningInterrupted extends Error {
+  readonly code = "city-planning-interrupted";
   readonly detail: PlanningStop;
   constructor(detail: PlanningStop) {
     super(detail.status === "cancelled" ? `planning-cancelled:${detail.stage}`
@@ -31,6 +32,15 @@ export type PlanningWorkLedger = {
 };
 const count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const stageValid = (stage: string) => typeof stage === "string" && stage.length > 0 && stage.length <= 128;
+/** Tests/adapters may load separate bundles; terminal stops must not be
+ * swallowed merely because their Error constructor has a different identity. */
+export function isPlanningInterrupted(error: unknown): error is PlanningInterrupted {
+  if (!error || typeof error !== "object") return false;
+  const value = error as Partial<PlanningInterrupted>, detail = value.detail;
+  if (value.code !== "city-planning-interrupted" || !detail || !stageValid(detail.stage)) return false;
+  return detail.status === "cancelled" || (detail.status === "budget-exhausted"
+    && PLANNING_WORK_UNITS.includes(detail.unit) && count(detail.requested) && count(detail.consumed) && count(detail.limit));
+}
 
 export function createPlanningWorkLedger(input: PlanningWorkCounts, isCancelled: () => boolean = () => false): PlanningWorkLedger {
   const limits = Object.freeze({ ...input });
@@ -50,20 +60,46 @@ export function createPlanningWorkLedger(input: PlanningWorkCounts, isCancelled:
       || (Object.getPrototypeOf(charge) !== Object.prototype && Object.getPrototypeOf(charge) !== null))
       throw new Error("invalid-planning-work-charge");
     const charges = { ...charge };
-    if (Object.keys(charges).some(unit => !PLANNING_WORK_UNITS.includes(unit as PlanningWorkUnit) || !count(charges[unit as PlanningWorkUnit])))
+    const units = Object.keys(charges) as PlanningWorkUnit[];
+    if (units.some(unit => !PLANNING_WORK_UNITS.includes(unit) || !count(charges[unit])))
       throw new Error("invalid-planning-work-charge");
     // Fixed dimension order makes the reported first exhausted unit independent
     // of caller property ordering, without changing the candidate ordering.
-    for (const unit of PLANNING_WORK_UNITS) {
-      const amount = charges[unit] ?? 0;
+    units.sort((a, b) => PLANNING_WORK_UNITS.indexOf(a) - PLANNING_WORK_UNITS.indexOf(b));
+    for (const unit of units) {
+      const amount = charges[unit]!;
       if (amount > limits[unit] - consumed[unit]) {
         stop = new PlanningInterrupted({ status: "budget-exhausted", stage, unit,
           requested: amount, consumed: consumed[unit], limit: limits[unit] });
         throw stop;
       }
     }
-    for (const unit of PLANNING_WORK_UNITS) consumed[unit] += charges[unit] ?? 0;
+    for (const unit of units) consumed[unit] += charges[unit]!;
   };
   return Object.freeze({ check, spend, snapshot: () => Object.freeze({ limits,
     consumed: Object.freeze({ ...consumed }), ...(stop ? { stop: stop.detail } : {}) }) });
+}
+
+// Existing planning is synchronous. Scope the one job ledger without adding it
+// to cloned geometry or letting nested retries install a fresh allowance.
+let activeLedger: PlanningWorkLedger | undefined;
+export function withPlanningWorkLedger<T>(ledger: PlanningWorkLedger, run: () => T): T {
+  if (activeLedger && activeLedger !== ledger) throw new Error("planning-work-ledger-replacement-refused");
+  const previous = activeLedger; activeLedger = ledger;
+  try {
+    ledger.check("job:start");
+    const result = run();
+    if (result && typeof (result as { then?: unknown }).then === "function") throw new Error("async-planning-work-scope-unsupported");
+    ledger.check("job:publication");
+    return result;
+  } finally { activeLedger = previous; }
+}
+export function spendPlanningWork(stage: string, charge: Partial<Record<PlanningWorkUnit, number>>): void {
+  activeLedger?.spend(stage, charge);
+}
+export function checkPlanningWork(stage: string): void { activeLedger?.check(stage); }
+export function hasPlanningWorkLedger(): boolean { return activeLedger !== undefined; }
+/** No charge-object allocation when a compatibility caller has no job ledger. */
+export function spendPlanningUnit(stage: string, unit: PlanningWorkUnit, amount = 1): void {
+  activeLedger?.spend(stage, { [unit]: amount });
 }

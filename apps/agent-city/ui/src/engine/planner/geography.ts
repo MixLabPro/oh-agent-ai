@@ -11,6 +11,7 @@ import { fbm, smoothstep } from "../cityNoise";
 import type { TerrainField, Vec2 } from "../cityLayout";
 import type { Shape } from "../cityPlan";
 import { exactFieldCache } from "./exactFieldCache";
+import { spendPlanningUnit } from "./operationBudget";
 
 export type Geography = {
   R: number;
@@ -35,8 +36,10 @@ export type Geography = {
 export function buildGeography(seed: number, R: number, shape: Shape, opts: { memoize?: boolean } = {}): Geography {
   // Each radius attempt owns its caches. Only the original exact scalar result
   // is reused, and eviction affects cost rather than planning decisions.
-  const field = <T extends number | boolean>(evaluate: (x: number, z: number) => T) =>
-    opts.memoize === true ? exactFieldCache(evaluate).query : evaluate;
+  const field = <T extends number | boolean>(evaluate: (x: number, z: number) => T) => {
+    const query = opts.memoize === true ? exactFieldCache(evaluate).query : evaluate;
+    return (x: number, z: number): T => { spendPlanningUnit("terrain:field-query", "terrainSample"); return query(x, z); };
+  };
   const stretch = shape.stretch; // Field closures must not depend on mutable caller-owned scalars.
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   const phase = random("river") * 3;

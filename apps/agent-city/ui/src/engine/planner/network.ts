@@ -8,6 +8,7 @@
 import { roadNodeId } from "../cityPlan";
 import type { RoadEdge, RoadNode, Vec2 } from "../cityLayout";
 import { classifyRoadSegments } from "./relations";
+import { spendPlanningWork, checkPlanningWork, hasPlanningWorkLedger } from "./operationBudget";
 
 export type Network = {
   nodes: Map<string, RoadNode>;
@@ -71,10 +72,14 @@ export type NetworkPatch = {
 
 export type PatchResult = { ok: true; version: number; remap: NetworkRemap } | { ok: false; reason: "stale-base" | "unknown-edge" | "validation" | "self-loop" | "off-line-split" | "node-in-use"; detail?: string };
 
-const clone = (network: Network): Network => ({
-  nodes: new Map([...network.nodes].map(([k, n]) => [k, { ...n }])),
-  edges: new Map([...network.edges].map(([k, e]) => [k, { ...e, points: e.points.map((p) => ({ ...p })) }])),
-});
+const clone = (network: Network): Network => {
+  if (hasPlanningWorkLedger()) spendPlanningWork("network:clone", { cloneRow: 1 + network.nodes.size + network.edges.size
+    + [...network.edges.values()].reduce((total, edge) => total + edge.points.length, 0) });
+  return {
+    nodes: new Map([...network.nodes].map(([k, n]) => [k, { ...n }])),
+    edges: new Map([...network.edges].map(([k, e]) => [k, { ...e, points: e.points.map((p) => ({ ...p })) }])),
+  };
+};
 
 /** 在草稿上应用补丁操作（只动草稿）。 */
 function applyOps(draft: Network, patch: NetworkPatch, remap: NetworkRemap): PatchResult {
@@ -227,6 +232,7 @@ export function commitNetworkPatch(
   patch: NetworkPatch,
   validate?: (draft: Network) => string | null,
 ): PatchResult {
+  spendPlanningWork("network:patch", { transaction: 1 });
   if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: `base ${patch.baseVersion} != current ${network.version ?? 0}` };
   const draft = clone(network);
   const remap: NetworkRemap = {
@@ -263,6 +269,7 @@ export function commitNetworkPatch(
   // §4.3「版本匹配后一次替换」：交换前复核（validate 回调不得重入提交同一网络——契约见函数头）。
   if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: "version changed during validation" };
   // 批次 4-2：就地清写而非换 Map——buildPlan 顶部解构的 { nodes, edges } 引用在事务提交后仍指向正式网络。
+  checkPlanningWork("network:publication");
   network.nodes.clear(); for (const [k, n] of draft.nodes) network.nodes.set(k, n);
   network.edges.clear(); for (const [k, e] of draft.edges) network.edges.set(k, e);
   network.version = (network.version ?? 0) + 1;

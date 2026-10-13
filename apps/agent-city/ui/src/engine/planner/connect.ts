@@ -17,6 +17,7 @@
  * 兜底的替代路径（批次 4-3，行为变更），用地避让沿用旧 tolerance=1 档的 r+3。
  */
 import { DetMath as Math } from "../detMath";
+import { spendPlanningWork } from "./operationBudget";
 import { roadNodeId, segmentDistance } from "../cityPlan";
 import type { RoadEdge, Vec2 } from "../cityLayout";
 import { commitNetworkPatch, previewNetworkPatch, keyOf, type Network, type NetworkPatch, type PatchResult } from "./network";
@@ -495,6 +496,7 @@ function proposeGridAStar(request: ConnectionRequest, world: ConnectorWorld): St
       best.set(key, 0); prev.set(key, "");
       push({ f: heuristic(sourceCell.x, sourceCell.z), g: 0, seq: seq++, cx: sourceCell.x, cz: sourceCell.z, dir });
     }
+    spendPlanningWork("connection:astar-expand", { expandedState: 1 });
     const s = pop();
     expansions += 1;
     if (s.g !== best.get(keyOf3(s.cx, s.cz, s.dir))) continue;
@@ -925,6 +927,7 @@ export function runConnection(request: ConnectionRequest, world: ConnectorWorld,
   let attempted = 0;
   const rejections: string[] = [];
   for (const strategy of ladder) {
+    spendPlanningWork("connection:strategy", { candidate: 1 });
     const proposed = proposeConnection(request, world, { ...options, strategies: [strategy] });
     attempted += proposed.ok ? 1 : proposed.attempted;
     if (!proposed.ok) { last = proposed; rejections.push(`${strategy}:${proposed.detail ?? proposed.reason}`); continue; }

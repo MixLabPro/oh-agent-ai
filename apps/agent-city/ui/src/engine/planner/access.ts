@@ -21,6 +21,7 @@ import { DetMath as Math } from "../detMath";
 import { segmentDistance, type Landmark } from "../cityPlan";
 import type { PublicSite, RoadEdge, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
+import { spendPlanningWork } from "./operationBudget";
 import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount, isDry } from "./footprint";
 import { footprintCircleDistance, footprintRunsDistance, siteFootprint, siteFootprintSeparation, siteRoadClear, worldFootprintSamples } from "../planFootprint";
@@ -275,6 +276,7 @@ export function candidatesFor(world: SiteCandidateWorld, spec: SiteSpec, current
  * 返回首个不过的判据名（诊断用；null = 全过）。
  */
 export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpec, candidate: SiteCandidate): string | null {
+  spendPlanningWork("site:hard-candidate", { candidate: 1 });
   const geo = { height: world.height, inRiver: world.inRiver, riverBank: world.riverBank };
   const at = { x: candidate.x, z: candidate.z };
   const r = spec.radius;
