@@ -11,7 +11,7 @@ import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
-import { cornerArc, junctionIndex, roadJunctionPlan, SIDEWALK_BAND } from "./cityRoadJunctions";
+import { cornerArc, roadJunctionPlan, SIDEWALK_BAND } from "./cityRoadJunctions";
 import { polygonDistance } from "./cityPlan";
 import { subtractBlockSurfaceExclusions, traceBlockSurface } from "./blockSurface";
 import { createRenderCanvas, renderContext2D, type RenderCanvas, type RenderContext2D } from "./renderCanvas";
@@ -228,9 +228,12 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   // 沙滩不画进这张贴图：2048px 铺满全岛只有 ~1.3px/单位，沙带与水线边缘糊成一片（真机近景）。
   // 沙滩改成贴地网格（cityParts.buildBeachRibbon），色带边缘由几何决定、与贴图分辨率无关。
   const { runs, junctions } = roadPaintPlan(layout.roadEdges);
+  // 人行道与沥青都只画成路面网格（roadSurfaceSystem）下面的「垫底」：每侧内缩 UNDERLAY_INSET（> 半个贴图像素 ≈ 0.4），
+  // 图集双线性插值的模糊边就藏在清晰的网格边缘里面，不在边缘外留一圈暗晕 / 白晕。
+  // 垫底不能省：地面细节 shader 按图集颜色分类材质，网格万一漏一条缝，露出来的仍是同色的路，而不是草。
+  const UNDERLAY_INSET = 0.8;
   // 路口几何（圆角/等级/渐变）一次算好，路面、人行道、标线与 roadSystem 的路缘共用同一份（cityRoadJunctions.ts）。
   const junctionPlan = roadJunctionPlan(layout.roadEdges);
-  const { armOf } = junctionIndex(junctionPlan);
   const asphaltOf = (kind: string) => (kind === "arterial" ? "#505b60" : "#646c6b");
   const fillPath = (points: Array<{ x: number; z: number }>, color: string) => {
     if (points.length < 3) return;
@@ -251,13 +254,13 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   ctx.lineCap="butt"; ctx.lineJoin="round";
   // Paint ALL sidewalks before ANY asphalt: neighboring caps cannot cut white seams into roads.
   for (const road of runs) {
-    ctx.strokeStyle="#d4cfc2";ctx.lineWidth=(road.width+2.4)*scale;strokePolyline(ctx,road.points,toPixel,false);
+    ctx.strokeStyle="#d4cfc2";ctx.lineWidth=(road.width+2.4-2*UNDERLAY_INSET)*scale;strokePolyline(ctx,road.points,toPixel,false);
   }
   // 转角人行道：沿路面圆弧的同心弧（半径 r−1.2）。直接画人行道描边的直角会在路口留下方角——
   // 圆角铺装随后盖掉弧内的部分，只剩弧外 1.2 宽的人行道带跟着圆弧走。
   for (const j of junctionPlan) {
-    for (const corner of j.corners) fillPath([{ x: j.x, z: j.z }, ...cornerArc(corner, SIDEWALK_BAND)], "#d4cfc2");
-    if (j.taper) fillPath(taperQuad(j, SIDEWALK_BAND), "#d4cfc2");
+    for (const corner of j.corners) fillPath([{ x: j.x, z: j.z }, ...cornerArc(corner, SIDEWALK_BAND - UNDERLAY_INSET)], "#d4cfc2");
+    if (j.taper) fillPath(taperQuad(j, SIDEWALK_BAND - UNDERLAY_INSET), "#d4cfc2");
   }
   // 换宽度/换等级的两路交界点（主干 12 → 次干 8 → 支路 5）：roadPaintPlan 在这里把一条路断成两段，平头线帽在拐弯处留
   // 楔形缺口、宽度跳变像「路断了」（用户截图：断断续续的路）。只有 ≥3 路的路口才补过圆——这里补上，人行道与沥青各一盘。
@@ -277,83 +280,31 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   }
   for (const seam of seams) {
     const [x,y]=toPixel(seam.x,seam.z);
-    ctx.fillStyle="#d4cfc2";ctx.beginPath();ctx.arc(x,y,(seam.width+2.4)*scale/2,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="#d4cfc2";ctx.beginPath();ctx.arc(x,y,((seam.width+2.4)/2-UNDERLAY_INSET)*scale,0,Math.PI*2);ctx.fill();
   }
   // 路口铺装先于路段：圆角（窄路色）→ 路口中心圆盘（最宽臂色）→ 路段按宽度升序。宽路最后画，
   // 它的铺装就直穿路口、盖住窄路伸进来的那截——「小路在大路边缘收口」是绘制顺序的结果，不用逐口裁剪。
   // 旧做法圆盘画在路段之后、颜色取「任一臂是主干就用主干色」，窄路口也被涂成主干色的圆疙瘩。
-  for (const j of junctionPlan) for (const corner of j.corners) fillPath([{ x: j.x, z: j.z }, ...cornerArc(corner)], asphaltOf(corner.kind));
+  for (const j of junctionPlan) for (const corner of j.corners) fillPath([{ x: j.x, z: j.z }, ...cornerArc(corner, -UNDERLAY_INSET)], asphaltOf(corner.kind));
   for (const node of layout.roadNodes) if (junctions.has(node.id)) {
     const incident = layout.roadEdges.filter((edge) => edge.from === node.id || edge.to === node.id);
     const width = Math.max(...incident.map((edge) => edge.width));
     const widest = incident.find((edge) => edge.width === width)!;
     const [x,y] = toPixel(node.x,node.z);
     ctx.fillStyle=asphaltOf(widest.kind);
-    ctx.beginPath();ctx.arc(x,y,width*scale/2,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(x,y,Math.max(0,width/2-UNDERLAY_INSET)*scale,0,Math.PI*2);ctx.fill();
   }
   for (const road of [...runs].sort((p, q) => p.width - q.width)) {
-    ctx.strokeStyle=asphaltOf(road.kind);ctx.lineWidth=road.width*scale;strokePolyline(ctx,road.points,toPixel,false);
+    ctx.strokeStyle=asphaltOf(road.kind);ctx.lineWidth=Math.max(0.5,road.width-2*UNDERLAY_INSET)*scale;strokePolyline(ctx,road.points,toPixel,false);
   }
   for (const seam of seams) {
     const [x,y]=toPixel(seam.x,seam.z);
-    ctx.fillStyle=seam.arterial?"#505b60":"#646c6b";ctx.beginPath();ctx.arc(x,y,seam.width*scale/2,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=seam.arterial?"#505b60":"#646c6b";ctx.beginPath();ctx.arc(x,y,Math.max(0,seam.width/2-UNDERLAY_INSET)*scale,0,Math.PI*2);ctx.fill();
   }
   // 渐变段（度 2 换宽）：宽路色梯形从宽路半宽线性收到窄路半宽，长 ≈ 2×宽度差——替代「宽度台阶」。
-  for (const j of junctionPlan) if (j.taper) fillPath(taperQuad(j, 0), asphaltOf(j.taper.wide.edge.kind));
-  /** 一条 run 在某端的中线虚线内缩：主路直穿（0）、次路退到停止线之后、其余沿用旧的 6。 */
-  const dashInset = (edge: (typeof runs)[number]["startEdge"], node: string) => {
-    if (!junctions.has(node)) return 0;
-    const arm = armOf(edge, node);
-    if (arm && !arm.legacy && arm.role === "major") return 0;
-    if (arm && arm.stopAt !== null) return arm.stopAt + 2.6;
-    return 6;
-  };
-  /** 折线两端各裁掉 start / end 的弧长；裁完不剩就返回 null。旧写法只裁第一/最后一段、内缩超过该段就整条
-   *  不画——短边切分的路上，次路的虚线因停止线内缩（> 一段长）整条消失。 */
-  const trimPolyline = (points: Array<{ x: number; z: number }>, start: number, end: number) => {
-    const cut = (pts: Array<{ x: number; z: number }>, distance: number) => {
-      let left = distance;
-      for (let i = 1; i < pts.length; i += 1) {
-        const a = pts[i - 1]; const b = pts[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
-        if (left < len) { const t = left / len; return [{ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t }, ...pts.slice(i)]; }
-        left -= len;
-      }
-      return null;
-    };
-    const head = start > 0 ? cut(points, start) : points;
-    if (!head || head.length < 2) return null;
-    const tail = end > 0 ? cut([...head].reverse(), end) : [...head].reverse();
-    return tail && tail.length >= 2 ? tail.reverse() : null;
-  };
-  for (const edge of runs) {
-    const points = trimPolyline(edge.points, dashInset(edge.startEdge, edge.from), dashInset(edge.endEdge, edge.to));
-    if (!points) continue;
-    ctx.strokeStyle=edge.kind==="arterial"?"#d6c998":"#b6bdba";ctx.lineWidth=0.22*scale;ctx.setLineDash([3*scale,3*scale]);
-    strokePolyline(ctx,points,toPixel,false);ctx.setLineDash([]);
-  }
-  for (const edge of layout.roadEdges) {
-    if(edge.bridge)continue;
-    const [a,b]=edge.points;const length=Math.hypot(b.x-a.x,b.z-a.z);
-    const dx=(b.x-a.x)/length;const dz=(b.z-a.z)/length;
-    for(const end of [a,b]) {
-      const node=end===a?edge.from:edge.to;
-      if(!junctions.has(node))continue;
-      const sign=end===a?1:-1;
-      const arm=armOf(edge,node);
-      // 次路：停止/让行线画在宽路路面边缘外（只横跨驶入半幅，右侧通行：驶入方向 −dir 的右手 = (dir.z, −dir.x)），
-      // 斑马线退到停止线之后。桥头节点 arm.stopAt 恒为 null——桥面永远不画停止线。
-      if(arm && arm.stopAt!==null){
-        const d=arm.dir;const across=arm.half/2;
-        orientedRect(end.x+d.x*arm.stopAt+d.z*across,end.z+d.z*arm.stopAt-d.x*across,0.5,arm.half-0.3,-Math.atan2(d.z,d.x),"#e9e6da");
-      }
-      if(length<14)continue;
-      const along=arm && arm.stopAt!==null?arm.stopAt+1.6:6.5;
-      if(along>length*0.5)continue;
-      for(let stripe=-2;stripe<=2;stripe+=1){
-      orientedRect(end.x+dx*along*sign-dz*stripe*0.8,end.z+dz*along*sign+dx*stripe*0.8,1.4,0.4,-Math.atan2(dz,dx),"#dbd8cb");
-      }
-    }
-  }
+  for (const j of junctionPlan) if (j.taper) fillPath(taperQuad(j, -UNDERLAY_INSET), asphaltOf(j.taper.wide.edge.kind));
+  // 路面标线（中线 / 车道线 / 边线 / 斑马线 / 停止线）不再画进这张图：≈1.3 px/单位下 0.22 宽的线是 0.3 个像素，
+  // 由路面网格（systems/roadSurfaceSystem.ts）在片元里按世界坐标解析绘制。
   for(const site of layout.publicSites){
     const [x,y]=toPixel(site.x,site.z);
     if(site.kind==="park"){

@@ -1,6 +1,6 @@
 {
  "380/day": {
-  "all": "bdbdd55fde468ddb",
+  "all": "a3c8efd79287c681",
   "sections": {
    "city-beach": "1:ef6ab491f41f",
    "city-beach-furniture": "3:4f930ee69984",
@@ -37,6 +37,8 @@
    "city-public-sites-boxes": "1:a3bbfa49b960",
    "city-public-sites-cylinders": "1:14e24b8307fe",
    "city-public-sites-glow": "1:870fc9225078",
+   "city-road-surface": "1:06ee7f4845e4",
+   "city-road-surface-base": "1:3a3499064934",
    "city-roof-profile-1": "1:d8e2ce845687",
    "city-roof-profile-2": "1:d021cdbae086",
    "city-roof-profile-3": "1:24c96a01ab6a",
@@ -59,7 +61,7 @@
   }
  },
  "380/night": {
-  "all": "3ef0aaf300bfcd27",
+  "all": "96eedf069f4c5feb",
   "sections": {
    "city-beach": "1:ef6ab491f41f",
    "city-beach-furniture": "3:4f930ee69984",
@@ -96,6 +98,8 @@
    "city-public-sites-boxes": "1:a3bbfa49b960",
    "city-public-sites-cylinders": "1:14e24b8307fe",
    "city-public-sites-glow": "1:6e6699356705",
+   "city-road-surface": "1:06ee7f4845e4",
+   "city-road-surface-base": "1:3a3499064934",
    "city-roof-profile-1": "1:d8e2ce845687",
    "city-roof-profile-2": "1:d021cdbae086",
    "city-roof-profile-3": "1:24c96a01ab6a",
@@ -118,7 +122,7 @@
   }
  },
  "1600/day": {
-  "all": "a8ebd7ffc7b34b01",
+  "all": "055e4c0b3fe044ba",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -158,6 +162,8 @@
    "city-public-sites-boxes": "1:edc0bc9efc1e",
    "city-public-sites-cylinders": "1:e2055c4551e2",
    "city-public-sites-glow": "1:14d87f53000e",
+   "city-road-surface": "1:c05f83350787",
+   "city-road-surface-base": "1:34003aa632bf",
    "city-roof-profile-1": "1:153e48ab6e94",
    "city-roof-profile-2": "1:748770f64ace",
    "city-roof-profile-3": "1:3661cd81207d",
@@ -180,7 +186,7 @@
   }
  },
  "1600/night": {
-  "all": "6ac4579b553c9e33",
+  "all": "e3e87815fdc33b55",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -220,6 +226,8 @@
    "city-public-sites-boxes": "1:edc0bc9efc1e",
    "city-public-sites-cylinders": "1:e2055c4551e2",
    "city-public-sites-glow": "1:90b13d403739",
+   "city-road-surface": "1:c05f83350787",
+   "city-road-surface-base": "1:34003aa632bf",
    "city-roof-profile-1": "1:153e48ab6e94",
    "city-roof-profile-2": "1:748770f64ace",
    "city-roof-profile-3": "1:3661cd81207d",

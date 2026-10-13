@@ -239,12 +239,14 @@ export function roadJunctionPlan(edges: readonly RoadEdge[]): RoadJunction[] {
         if (arm.edge.width === majorWidth) { arm.role = "major"; continue; }
         arm.role = "minor";
         if (arm.legacy || touchesDeck) continue;
-        // 停止线 = 次路中线与宽路路面边线的交点：沿次路走 s，满足 |sin(夹角)|·s = 宽路半宽。
+        // 停止线 = 次路整幅（不只是中线）都走出宽路路面的位置：s·|sin θ| = 宽路半宽 + 次路半宽·|cos θ|。
+        // 只按中线算（h/|sin|）在斜交口会让停止线 / 斑马线的一角落进主路路面、被主路盖掉（真机 50° T 口实测）。
         // 取最近的那条主臂；主臂与次路近平行（|sin| < 0.2，T 的「另一侧」）时那条主臂不构成收口边。
         let stop = Infinity;
         for (const major of majors) {
           const sin = Math.abs(cross(major.dir, arm.dir));
-          if (sin >= 0.2) stop = Math.min(stop, major.half / sin);
+          const cos = Math.abs(major.dir.x * arm.dir.x + major.dir.z * arm.dir.z);
+          if (sin >= 0.2) stop = Math.min(stop, (major.half + arm.half * cos) / sin);
         }
         if (!Number.isFinite(stop)) stop = majorWidth / 2;
         stop += 0.35;

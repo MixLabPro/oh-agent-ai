@@ -267,3 +267,105 @@ for (const seed of [1927, 42]) {
   assert.equal(intrusions, 0, `seed ${seed}: ${intrusions} curb ends sit on road pavement (${where.slice(0, 5).join(" ")})`);
 }
 console.log("City road paint: no curb lands on road pavement across whole generated cities (seeds 1927, 42).");
+
+// ── 路面网格（systems/roadSurfaceSystem.ts，docs/CITY_ROAD_SURFACE_RENDER_SPEC.md）────────────────
+// 沥青 / 人行道 / 标线从 2048² 地面图集（≈1.3 px/单位）搬到贴地网格 + 片元解析标线。守的是网格本身的不变量：
+// 贴着「渲染出来的」地形三角面、全部朝上（第一版整片绕反被背面剔除、路面不可见）、层次对、口门参数对、无漏洞。
+const surfaceKit = await loadCity({
+  "engine/systems/roadSurfaceSystem.ts": ["roadSurfaceGeometry", "runEndMarkings", "roadLayerOf", "ROAD_SURFACE_LIFT", "ZEBRA_HALF"],
+  "engine/systems/terrainSystem.ts": ["terrainSurfaceHeight", "TERRAIN_SEGMENTS"],
+  "engine/cityRoadJunctions.ts": ["roadJunctionPlan", "junctionIndex"],
+  "engine/cityRoadPaint.ts": ["roadPaintPlan"],
+  "pkg:three": ["* as THREE"],
+});
+{
+  const { THREE: T3, terrainSurfaceHeight, TERRAIN_SEGMENTS, roadSurfaceGeometry, runEndMarkings, roadLayerOf, ROAD_SURFACE_LIFT, ZEBRA_HALF } = surfaceKit;
+  // 1) terrainSurfaceHeight == 真实 PlaneGeometry（同 buildTerrain 的构造）上的射线交点：起伏地形上逐点比对。
+  const extent = 400;
+  const wavy = { height: (x, z) => 2 + Math.sin(x * 0.07) * 3 + Math.cos(z * 0.05) * 2 + x * 0.01 };
+  const plane = new T3.PlaneGeometry(extent, extent, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS).rotateX(-Math.PI / 2);
+  const pos = plane.attributes.position;
+  for (let i = 0; i < pos.count; i += 1) pos.setY(i, wavy.height(pos.getX(i), pos.getZ(i)));
+  const terrainMesh = new T3.Mesh(plane, new T3.MeshBasicMaterial({ side: T3.DoubleSide }));
+  const caster = new T3.Raycaster(); let worst = 0;
+  for (let k = 0; k < 400; k += 1) {
+    const x = -180 + ((k * 37) % 360) + 0.37; const z = -180 + ((k * 91) % 360) + 0.61;
+    caster.set(new T3.Vector3(x, 100, z), new T3.Vector3(0, -1, 0));
+    const hit = caster.intersectObject(terrainMesh, false)[0];
+    worst = Math.max(worst, Math.abs(hit.point.y - terrainSurfaceHeight({ extent, terrain: wavy }, x, z)));
+  }
+  assert(worst < 1e-4, `terrainSurfaceHeight follows the rendered terrain triangles (max error ${worst})`);
+
+  // 2) 合成 T（主干 12 直行 + 支路 5）放在起伏地形上：三角形全部朝上、顶点 = 渲染地形 + 抬升、分层正确。
+  const tEdges = [road("w", "W", 12), road("e", "E", 12), road("n", "N", 5)];
+  const layout = { roadEdges: tEdges, extent, terrain: wavy };
+  const layers = roadSurfaceGeometry(layout);
+  assert.equal(layers.length, 5, "five layers: sidewalk / junction fill / local / secondary / main");
+  assert.deepEqual([roadLayerOf(5), roadLayerOf(8), roadLayerOf(12)], [2, 3, 4], "wider roads sit on higher polygon-offset layers");
+  assert(layers[4].index.length > 0 && layers[2].index.length > 0 && layers[0].index.length > 0 && layers[1].index.length > 0, "main / local ribbons, sidewalks and junction fills all present");
+  assert.equal(layers[3].index.length, 0, "no secondary road in this scene");
+  const tris = (b) => Array.from({ length: b.index.length / 3 }, (_, t) => [0, 1, 2].map((k) => { const i = b.index[t * 3 + k]; return { x: b.positions[i * 3], y: b.positions[i * 3 + 1], z: b.positions[i * 3 + 2] }; }));
+  for (const b of layers) {
+    for (const [a, c, d] of tris(b)) {
+      const ny = (c.z - a.z) * (d.x - a.x) - (c.x - a.x) * (d.z - a.z);
+      assert(ny > 0, "every road-surface triangle faces up (counter-clockwise seen from above)");
+    }
+    for (let i = 0; i < b.positions.length; i += 3) {
+      const [x, y, z] = [b.positions[i], b.positions[i + 1], b.positions[i + 2]];
+      assert(Math.abs(y - terrainSurfaceHeight(layout, x, z) - ROAD_SURFACE_LIFT) < 1e-6, "vertices sit exactly LIFT above the rendered terrain");
+    }
+  }
+  // 2b) 自适应细分（只在地形不平处切）不能让网格在两个顶点之间钻到地形下面：起伏地形上逐三角形采样内部点。
+  let dip = Infinity;
+  for (const b of layers) for (const [a, c, d] of tris(b)) for (const [wa, wc, wd] of [[1 / 3, 1 / 3, 1 / 3], [0.5, 0.5, 0], [0.5, 0, 0.5], [0, 0.5, 0.5], [0.7, 0.15, 0.15], [0.15, 0.7, 0.15], [0.15, 0.15, 0.7]]) {
+    const x = a.x * wa + c.x * wc + d.x * wd; const z = a.z * wa + c.z * wc + d.z * wd; const y = a.y * wa + c.y * wc + d.y * wd;
+    dip = Math.min(dip, y - terrainSurfaceHeight(layout, x, z));
+  }
+  assert(dip > 0.01, `road surface stays above the rendered terrain between vertices (min clearance ${dip.toFixed(4)})`);
+  // 3) 覆盖无洞：主路 / 支路路面带内的采样点都落在 ≥1 层（填充或路段带）的三角形里；人行道带内的点落在第 0 层。
+  const covered = (bs, p) => bs.some((b) => tris(b).some(([a, c, d]) => {
+    const s = (u, v, w) => (v.x - u.x) * (w.z - u.z) - (v.z - u.z) * (w.x - u.x);
+    const d1 = s(a, c, p); const d2 = s(c, d, p); const d3 = s(d, a, p);
+    return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+  }));
+  const asphaltLayers = layers.slice(1); let holes = 0; let walkHoles = 0;
+  for (let x = -70; x <= 70; x += 2.5) for (const z of [-5.8, -3, 0, 3, 5.8]) if (!covered(asphaltLayers, { x, z })) holes += 1;
+  for (let z = -50; z <= -1; z += 2.5) for (const x of [-2.3, 0, 2.3]) if (!covered(asphaltLayers, { x, z })) holes += 1;
+  for (let x = -70; x <= 70; x += 5) for (const z of [-6.6, 6.6]) if (Math.abs(x) > 20 || z > 0) { if (!covered([layers[0]], { x, z })) walkHoles += 1; }
+  assert.equal(holes, 0, `asphalt has no holes over the T (${holes})`);
+  assert.equal(walkHoles, 0, `sidewalk band has no holes along the main road (${walkHoles})`);
+
+  // 4) run 端标线参数：支路收口（停止线 6.35，斑马线在停止线之后），主路中线直穿（0）；等宽路口不画停止线。
+  const plan = surfaceKit.roadJunctionPlan(tEdges); const index = surfaceKit.junctionIndex(plan);
+  const nodes = surfaceKit.roadPaintPlan(tEdges).junctions;
+  const stemEnd = runEndMarkings(index, nodes, tEdges[2], "o", true);
+  assert(near(stemEnd.stop, 6.35, 1e-9), "minor approach stop line just outside the main road");
+  assert(near(stemEnd.zebra, 6.35 + 0.25 + 0.4 + ZEBRA_HALF, 1e-9), "minor crosswalk sits behind the stop line");
+  assert(stemEnd.center > stemEnd.zebra + ZEBRA_HALF, "minor centre line starts behind the crosswalk");
+  const mainEnd = runEndMarkings(index, nodes, tEdges[0], "o", true);
+  assert.equal(mainEnd.center, 0, "main road centre line runs straight through");
+  assert.equal(mainEnd.stop, -1, "main road gets no stop line");
+  // 斜交（50°）：停止线按次路整幅清出主路——(6 + 2.5·cos50°)/sin50° + 0.35，而不是只看中线的 6/sin50°。
+  const skew = [road("w", "W", 12), road("e", "E", 12), { id: "s", from: "o", to: "S", points: [O, { x: Math.cos(-50 * DEG) * 60, z: Math.sin(-50 * DEG) * 60 }], width: 5, kind: "local" }];
+  const skewPlan = surfaceKit.roadJunctionPlan(skew);
+  const skewArm = skewPlan[0].arms.find((arm) => arm.edge.id === "s");
+  assert(near(skewArm.stopAt, (6 + 2.5 * Math.cos(50 * DEG)) / Math.sin(50 * DEG) + 0.35, 1e-9), "oblique stop line clears the full minor width, not just its centreline");
+  const plain = [road("w", "W", 8), road("e", "E", 8), road("n", "N", 8)];
+  const plainEnds = plain.map((edge) => runEndMarkings(surfaceKit.junctionIndex(surfaceKit.roadJunctionPlan(plain)), surfaceKit.roadPaintPlan(plain).junctions, edge, "o", true));
+  assert(plainEnds.every((end) => end.stop === -1), "equal-width junction: no stop lines");
+  const legacy = [road("w", "W", 12, { purpose: "waterfront" }), road("e", "E", 12, { purpose: "waterfront" }), road("n", "N", 5)];
+  const legacyEnd = runEndMarkings(surfaceKit.junctionIndex(surfaceKit.roadJunctionPlan(legacy)), surfaceKit.roadPaintPlan(legacy).junctions, legacy[0], "o", true);
+  assert.deepEqual([legacyEnd.center, legacyEnd.zebra], [6, 6.5], "waterfront arms keep the legacy 6 / 6.5 marking insets");
+
+  // 5) 整城：seed 1927 档 2 的路面网格全部朝上、无 NaN、体量有界。
+  const cityPlan = cachedPlan(kit.createCityPlan, 1927, 2);
+  const cityLayers = roadSurfaceGeometry(cityPlan);
+  let vertices = 0;
+  for (const b of cityLayers) {
+    vertices += b.positions.length / 3;
+    assert(b.positions.every(Number.isFinite), "no NaN in city road surface");
+    for (const [a, c, d] of tris(b)) assert((c.z - a.z) * (d.x - a.x) - (c.x - a.x) * (d.z - a.z) > 0, "city road-surface triangles face up");
+  }
+  assert(vertices > 1000 && vertices < 40000, `city road surface stays a few-thousand-vertex mesh (${vertices})`);
+  console.log(`City road paint: road-surface mesh follows rendered terrain, faces up, layers by width, no holes, junction marking params, city ${vertices} vertices.`);
+}
