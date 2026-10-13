@@ -235,6 +235,11 @@ export const looseInlandRoadEnds: Constraint = {
   },
 };
 
+/** 锐角路口阈值（相邻两条路夹角下限）。导出是为了让编辑器（planRoadRules.ts::ACUTE_LIMIT）直接导入，
+ *  不再靠注释「同步」两份魔数；表达式保持 `(30 * Math.PI) / 180` 原样，浮点结果逐位不变。
+ *  改值是产品决策（会改变所有种子布局，见 CITY_PLANNER_REFACTOR_SPEC R3/R6），不在此随手改。 */
+export const ACUTE_JUNCTION_RAD = (30 * Math.PI) / 180;
+
 export const acuteJunctions: Constraint = {
   id: "acuteJunctions", description: "三路及以上的路口，相邻两条路夹角 ≥ 30°",
   measure(plan) {
@@ -248,7 +253,7 @@ export const acuteJunctions: Constraint = {
       const angles = list.map((edge: Site) => { const pts = edge.from === id ? edge.points : [...edge.points].reverse(); return Math.atan2(pts[1].z - node.z, pts[1].x - node.x); }).sort((a: number, b: number) => a - b);
       for (let k = 0; k < angles.length; k += 1) {
         const gap = (k + 1 < angles.length ? angles[k + 1] : angles[0] + Math.PI * 2) - angles[k];
-        if (gap < (30 * Math.PI) / 180) { out.push({ constraint: "acuteJunctions", at: { x: node.x, z: node.z }, detail: `node ${id}` }); break; }
+        if (gap < ACUTE_JUNCTION_RAD) { out.push({ constraint: "acuteJunctions", at: { x: node.x, z: node.z }, detail: `node ${id}` }); break; }
       }
     }
     return out;
