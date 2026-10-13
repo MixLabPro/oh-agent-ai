@@ -24,7 +24,9 @@
 //   (t) 改路型（路线图 P1-4）：目标状态幂等、id 不变、kind 随宽度、滨海景观带随 purpose 增撤、桥面/缺失如实失效、存档读回、
 //       「一整段」沿度 2 路口走、遇岔路/换路型停；校验 unchanged/locked/提示码；
 //   (u) 地面桥（路线图 P1-5）：一笔跨一段河 → 引道 + 桥面（bridge/deck）+ 引道，桥登记进 bridges；端点在水里/连跨两河 → road-in-water；
-//       水面太宽 → bridge-too-long；桥上不能有路口；桥面锁定；校验与重放同一个判定。
+//       水面太宽 → bridge-too-long；桥上不能有路口；桥面锁定；校验与重放同一个判定；
+//   (v) 弧线路：起点 → 经过点 → 终点，铺成过经过点的折线（与校验同一条 curvePoints）；穿过现有路自动开路口并断开；
+//       弯太急（按路型的最小半径）拒绝、过水拒绝（过河用直线架桥）；存档读回 via。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
@@ -32,10 +34,11 @@ globalThis.window ??= globalThis;
 const {
   applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
   appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
-  auditLayout, buildCityModel, createCityPlan, layoutCity, MIAMI_COASTAL,
+  curvePoints, polylineMinRadius, minCurveRadius, auditLayout, buildCityModel, createCityPlan, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
   "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP"],
   "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "roadRun", "validateRestyle"],
+  "engine/planGeometry.ts": ["curvePoints", "polylineMinRadius", "minCurveRadius"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_WIDTH", "EXPRESSWAY_RAMP"],
   "engine/planAudit.ts": ["auditLayout"],
   "cityModel.ts": ["buildCityModel"],
@@ -626,6 +629,40 @@ const snap = (layout) => JSON.stringify({
   assert.ok(validateRoadAdd(forked, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers.includes("junction-on-bridge"), "no junctions on a bridge");
   const dropDeck = fresh(); dropDeck.roadOps = [{ t: "add", from: { x: 150, z: -100 }, to: { x: 280, z: -100 }, width: 8 }, { t: "drop", edge: deck.id }];
   assert.deepEqual(applyPlanPatch(river(), dropDeck).stale.map((x) => x.reason), ["locked-edge"], "the new deck cannot be erased");
+}
+
+// (v) 弧线路。
+{
+  const arc = (from, via, to, width = 5) => { const patch = fresh(); patch.roadOps = [{ t: "add", from, to, width, via }]; return applyPlanPatch(makeLayout(), patch); };
+  // 一段不碰任何路的弧线：(-150,150) → 经过 (-120,190) → (-90,150)。
+  const free = arc({ x: -150, z: 150 }, { x: -120, z: 190 }, { x: -90, z: 150 });
+  assert.equal(free.stale.length, 0, `a free arc replays cleanly — ${JSON.stringify(free.stale)}`);
+  const laid = free.layout.roadEdges.filter((e) => !makeLayout().roadEdges.some((o) => o.id === e.id));
+  assert.equal(laid.length, 1, "one edge, laid as a polyline");
+  const expected = curvePoints({ x: -150, z: 150 }, { x: -120, z: 190 }, { x: -90, z: 150 });
+  assert.deepEqual(laid[0].points, expected, "…exactly the curve validation previews");
+  assert.ok(laid[0].points.some((q) => Math.hypot(q.x + 120, q.z - 190) < 0.5), "…and it passes through the clicked bend point");
+  // 穿过 E4（x=100 的南北向路）：弧线 (60,40) → 经过 (100,70) → (140,40)，交点处自动开路口、断成两段。
+  const crossing = arc({ x: 60, z: 40 }, { x: 100, z: 70 }, { x: 140, z: 40 });
+  assert.equal(crossing.stale.length, 0, `an arc over an existing road replays — ${JSON.stringify(crossing.stale)}`);
+  const pieces = crossing.layout.roadEdges.filter((e) => e.points.length > 2);
+  assert.equal(pieces.length, 2, "the arc is cut at the junction it makes");
+  const junction = pieces[0].to === pieces[1].from || pieces[0].to === pieces[1].to ? pieces[0].to : pieces[0].from;
+  assert.ok(crossing.layout.roadEdges.filter((e) => e.from === junction || e.to === junction).length === 4, "…a real 4-way junction with the host road split too");
+  const arcWarnings = validateRoadAdd(makeLayout(), model, { x: 60, z: 40 }, { x: 140, z: 40 }, 5, undefined, [], { x: 100, z: 70 }).warnings;
+  assert.ok(arcWarnings.includes("auto-junction:1"), `validation agrees: one auto junction (the bend point sits on the road) — ${arcWarnings}`);
+  // 弯太急：同一个弯，小路（最小半径 15）能画，主干道（36）不行。
+  const tight = [{ x: -150, z: 150 }, { x: -130, z: 158 }, { x: -110, z: 150 }]; // 抛物线顶点半径 L²/2h = 20²/16 = 25
+  const r = polylineMinRadius(curvePoints(...tight));
+  assert.ok(r > minCurveRadius(5) && r < minCurveRadius(12), `fixture bend radius sits between the lane and main-road limits: ${r}`);
+  assert.deepEqual(validateRoadAdd(makeLayout(), model, tight[0], tight[2], 5, undefined, [], tight[1]).blockers, [], "a lane can take the tight bend");
+  assert.ok(validateRoadAdd(makeLayout(), model, tight[0], tight[2], 12, undefined, [], tight[1]).blockers.includes("curve-too-tight"), "…a main road cannot");
+  // 过水：弧线鼓到岛外（半径 380 外不可建）。
+  assert.ok(validateRoadAdd(makeLayout(), model, { x: 300, z: 150 }, { x: 300, z: 220 }, 5, undefined, [], { x: 360, z: 185 }).blockers.includes("curve-over-water"), "an arc that bulges into the sea is refused");
+  const wet = fresh(); wet.roadOps = [{ t: "add", from: { x: 300, z: 150 }, to: { x: 300, z: 220 }, width: 5, via: { x: 360, z: 185 } }];
+  assert.deepEqual(applyPlanPatch(makeLayout(), wet).stale.map((x) => x.reason), ["road-in-water"], "…and goes stale on replay");
+  const read = coercePlanPatch({ ...fresh(), roadOps: [{ t: "add", from: { x: 0, z: 0 }, to: { x: 9, z: 0 }, width: 5, via: { x: 4, z: 3 } }, { t: "add", from: { x: 0, z: 0 }, to: { x: 9, z: 0 }, width: 5, via: "bad" }] });
+  assert.deepEqual([read.roadOps[0].via, read.roadOps[1].via], [{ x: 4, z: 3 }, undefined], "storage reads via back; a bad via degrades to a straight road");
 }
 
 // (r) 高架日志。底层高架：(-50,20) → (250,20)。

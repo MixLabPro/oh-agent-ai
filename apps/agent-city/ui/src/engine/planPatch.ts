@@ -28,7 +28,7 @@ import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { clearsHighways, roadNodeId } from "./cityPlan";
 import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 import { applySiteOps, type SiteOp } from "./planSites";
-import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan } from "./planGeometry";
+import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan, curvePoints } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
 
@@ -42,7 +42,8 @@ export type RoadOp =
   /** 新增一段直路。端点吸附规则见 resolveEndpoint：靠近路口 → 接到路口；落在路段中间 → 把该路段拆成两半；否则新建路口。
    *  purpose=waterfront：滨海大道（与生成器的环岛滨海路同级，沿它铺滨海景观带）。
    *  起点是一条路的尽头且新路拐弯时，重放会在拐角处自动倒圆（filletAt，SPEC §17.3）。 */
-  | { t: "add"; from: Vec2; to: Vec2; width: number; purpose?: "waterfront" }
+  /** via：弧线经过点（二次贝塞尔，planGeometry.curvePoints）；缺省是直路。弧线不倒圆、不架桥（过河用直线）。 */
+  | { t: "add"; from: Vec2; to: Vec2; width: number; purpose?: "waterfront"; via?: Vec2 }
   /** 改已有路段的路型（路线图 P1-4）：宽度 5/8/12 与用途（purpose 缺省 = 普通路，写了 waterfront = 滨海大道）。
    *  记的是**目标状态**不是增量，重放幂等；同一条路的一整段（run）在编辑器里一步写成几条、同一步撤销。桥面不能改。 */
   | { t: "restyle"; edge: string; width: number; purpose?: "waterfront"; anchor?: Vec2 };
@@ -115,7 +116,7 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     if (op.t === "drop" && typeof op.edge === "string") roadOps.push({ t: "drop", edge: op.edge, ...(anchor ? { anchor } : {}) });
     else if (op.t === "move" && typeof op.node === "string") { const to = point(op.to); if (to) roadOps.push({ t: "move", node: op.node, to, ...(anchor ? { anchor } : {}) }); }
     else if (op.t === "restyle" && typeof op.edge === "string" && isFiniteNumber(op.width) && op.width > 0) roadOps.push({ t: "restyle", edge: op.edge, width: op.width, ...(op.purpose === "waterfront" ? { purpose: "waterfront" as const } : {}), ...(anchor ? { anchor } : {}) });
-    else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); if (from && to) roadOps.push({ t: "add", from, to, width: op.width, ...(op.purpose === "waterfront" ? { purpose: "waterfront" as const } : {}) }); }
+    else if (op.t === "add" && isFiniteNumber(op.width)) { const from = point(op.from); const to = point(op.to); const via = point(op.via); if (from && to) roadOps.push({ t: "add", from, to, width: op.width, ...(op.purpose === "waterfront" ? { purpose: "waterfront" as const } : {}), ...(via ? { via } : {}) }); }
   }
   const highwayOps: HighwayOp[] = [];
   if (Array.isArray(raw.highwayOps)) for (const op of raw.highwayOps) {
@@ -436,6 +437,47 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
       if ("error" in b) { stale.push({ kind: "road-add", id: label, reason: b.error, detail: "终点落在桥/引道/滨海段上，不能从这里接路" }); return; }
       if (a.id === b.id) { stale.push({ kind: "road-add", id: label, reason: "degenerate", detail: "起点和终点是同一个路口" }); return; }
       let na = trial.nodes.find((node) => node.id === a.id)!; const nb = trial.nodes.find((node) => node.id === b.id)!;
+      if (op.via) {
+        // 弧线：按 curvePoints 铺折线，逐小段找与现有路的交点（自动路口，同直路）；交点处断开成几条折线路段。
+        const pts = curvePoints(na, op.via, nb);
+        for (let i = 1; i < pts.length; i += 1) {
+          if (wetSpan(layout, pts[i - 1], pts[i]).kind !== "dry") { stale.push({ kind: "road-add", id: label, reason: "road-in-water", detail: "弧线不能过水——过河请用直线（会自动架桥）" }); return; }
+        }
+        const kind = op.width >= 8 ? "arterial" as const : "local" as const;
+        const mine = new Set<string>();
+        let prev = na.id; let run: Vec2[] = [{ x: na.x, z: na.z }]; let laid = 0;
+        const close = (to: string, at: Vec2) => {
+          run.push(at);
+          const id = edgeIdOf(prev, to);
+          if (prev !== to && !trial.edges.some((edge) => edge.id === id)) {
+            trial.edges.push({ id, from: prev, to, width: op.width, kind, points: run, structure: "ground-road", ...(op.purpose ? { purpose: op.purpose } : {}) });
+            mine.add(id); laid += 1;
+          }
+          prev = to; run = [at];
+        };
+        for (let i = 1; i < pts.length; i += 1) {
+          for (const p of crossingsOf(trial.edges.filter((edge) => !mine.has(edge.id)), pts[i - 1], pts[i])) {
+            const hit = resolveEndpoint(trial, p);
+            if ("error" in hit) { stale.push({ kind: "road-add", id: label, reason: hit.error, detail: "弧线要穿过桥面，桥上不能开路口" }); return; }
+            const node = trial.nodes.find((candidate) => candidate.id === hit.id)!;
+            close(hit.id, { x: node.x, z: node.z });
+          }
+          if (i === pts.length - 1) break;
+          // 采样点正好落在现有路上（经过点点在路上时必然如此）：crossingsOf 排除离端点 1 以内的交点，两侧小段都看不见它——
+          // 曾因此弧线从路上压过去却不开路口。这里按「路上的点」补一个路口。
+          const onRoad = trial.edges.some((edge) => !mine.has(edge.id) && !edge.bridge && nearestOnPolyline(pts[i], edge.points).distance < 1);
+          if (onRoad) {
+            const hit = resolveEndpoint(trial, pts[i]);
+            if ("error" in hit) { stale.push({ kind: "road-add", id: label, reason: hit.error, detail: "弧线要穿过桥面，桥上不能开路口" }); return; }
+            const node = trial.nodes.find((candidate) => candidate.id === hit.id)!;
+            close(hit.id, { x: node.x, z: node.z });
+          } else run.push(pts[i]);
+        }
+        close(nb.id, { x: nb.x, z: nb.z });
+        if (!laid) { stale.push({ kind: "road-add", id: label, reason: "edge-exists", detail: "这条弧线与已有路重合" }); return; }
+        state = trial;
+        return;
+      }
       // 拐角倒圆：起点是一条地面路的尽头（度为 1）且这一笔拐了弯——把拐点挪到圆弧中点，旧路尾段与新路首段各带半段弧。
       let lead: Vec2[] = []; // 新路首段在起点之后、交叉检测之前要经过的弧点（含 P2）
       const incident = trial.edges.filter((edge) => edge.from === na.id || edge.to === na.id);

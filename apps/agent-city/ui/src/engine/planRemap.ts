@@ -62,7 +62,7 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
   patch.roadOps.forEach((op, index) => {
     const label = `${index + 1}:${op.t}`;
     if (op.t === "add") {
-      next = appendRoadOp(next, { t: "add", from: scale(op.from), to: scale(op.to), width: op.width, ...(op.purpose ? { purpose: op.purpose } : {}) }, next.updatedAt); touched();
+      next = appendRoadOp(next, { t: "add", from: scale(op.from), to: scale(op.to), width: op.width, ...(op.purpose ? { purpose: op.purpose } : {}), ...(op.via ? { via: scale(op.via) } : {}) }, next.updatedAt); touched();
       return;
     }
     if (op.t === "restyle") {

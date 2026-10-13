@@ -12,6 +12,9 @@ import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRe
 import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
 import { worldBox, worldOverhead, worldParts } from "../engine/planFootprint";
+import { curvePoints } from "../engine/planGeometry";
+
+const quantizePoint = (p: Vec2): Vec2 => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
 import { remapPlanPatch, type RemapReport } from "../engine/planRemap";
 import type { RepairRay } from "../engine/CityEngine";
 import { bulldozeForRoads } from "../engine/planBulldozer";
@@ -187,12 +190,13 @@ export class PlanRepairSession {
   }
 
   /** 画路：from/to 是已吸附的坐标（snap() 的结果）。端点落在路段中间会把该路段拆成两半。purpose=waterfront 为滨海大道。 */
-  addRoad(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose): EditResult {
+  addRoad(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, via?: Vec2): EditResult {
     const base = this.working();
     if (!base.ok) return base;
-    const verdict = validateRoadAdd(this.engine.currentLayout!, this.engine.currentModel!, from, to, width, purpose);
+    const bend = via ? quantizePoint(via) : undefined;
+    const verdict = validateRoadAdd(this.engine.currentLayout!, this.engine.currentModel!, from, to, width, purpose, [], bend);
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
-    return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "add", from, to, width, ...(purpose ? { purpose } : {}) }), verdict.warnings);
+    return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "add", from, to, width, ...(purpose ? { purpose } : {}), ...(bend ? { via: bend } : {}) }), verdict.warnings);
   }
 
   // ── 高架（SPEC §17.2）──
@@ -350,12 +354,14 @@ export class PlanRepairSession {
     return layout && model ? validateEdgeDrop(layout, model, edgeId) : { blockers: ["city-not-ready"], warnings: [] };
   }
 
-  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, exact = true): RoadPreview {
+  validateAdd(from: Vec2, to: Vec2, width: number, purpose?: RoadPurpose, exact = true, via?: Vec2): RoadPreview {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
     if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
-    const op = { t: "add" as const, from, to, width, ...(purpose ? { purpose } : {}) };
-    const preview = this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateRoadAdd(layout, model, from, to, width, purpose), exact);
-    const path = this.bendPath(from, to, width);
+    const bend = via ? quantizePoint(via) : undefined;
+    const op = { t: "add" as const, from, to, width, ...(purpose ? { purpose } : {}), ...(bend ? { via: bend } : {}) };
+    const preview = this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateRoadAdd(layout, model, from, to, width, purpose, [], bend), exact);
+    // 弧线：预览画重放会铺的同一条折线；直路：起点是路尽头且拐弯时画倒圆后的折线。
+    const path = bend ? curvePoints(quantizePoint(from), bend, quantizePoint(to)) : this.bendPath(from, to, width);
     return path ? { ...preview, path } : preview;
   }
 
