@@ -29,6 +29,7 @@ import { extractRoadFaces } from "./planner/roadFaces";
 import { generateRoadBlocks, type RoadBlockReport } from "./planner/roadBlocks";
 import { componentOf, diagnoseNetwork, type ConnectionDemand } from "./planner/intent";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
+import { buildSeasideBoulevard } from "./planner/seasideBoulevard";
 import { addNetworkEdge, commitNetwork, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, parseFailure, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import { connectServiceLoops } from "./planner/loop";
@@ -498,61 +499,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const ringIndex = new SegmentIndex(ringRuns);
   const distanceToRing = (p: Vec2) => polylineDistance(ringRuns, p);
 
-  // ── 海滨带（VICE B1）：选段避开港口与河口朝向；街区/地块避开保留带。
-  // 港口已按「离核心最近海岸」放置，其方位由站点位置推出；河口 = 海岸点中离河中线近的两侧。
-  let seaside: SeasideBand | null = null;
-  if (config) {
-    const blockedAzimuths: Array<{ at: number; halfWidth: number; weight?: number }> = [];
-    const azimuthOf = (p: Vec2) => { let a = Math.atan2(p.z - core.z, p.x - core.x); if (a < 0) a += Math.PI * 2; return a; };
-    for (const site of publicSites) if (site.kind === "harbor") blockedAzimuths.push({ at: azimuthOf(site), halfWidth: (30 * Math.PI) / 180, weight: 3 });
-    if (hasRiver) {
-      for (const point of coast) {
-        if (Math.abs(point.x - riverX(point.z)) < riverWidth(point.z) + 30) blockedAzimuths.push({ at: azimuthOf(point), halfWidth: (14 * Math.PI) / 180 });
-      }
-    }
-    const world: SeasideWorld = {
-      landSignedDistance: coastDistance,
-      height,
-      slope: (x, z) => Math.hypot(height(x + 1, z) - height(x - 1, z), height(x, z + 1) - height(x, z - 1)) / 2,
-      riverDistance: (x, z) => (hasRiver ? Math.abs(x - riverX(z)) - riverWidth(z) : Infinity),
-      reservations: [...publicSites, ...landmarks].map((site) => ({ x: site.x, z: site.z, radius: site.radius })),
-      blockedAzimuths,
-    };
-    seaside = buildSeasideBand(coast, core, world, config, seed);
-  }
-
-  // 滨海大道位于酒店排与棕榈步道之间。只消费合法连续岸段；无效样本处断开，
-  // 不把水口/陡岸/港区缺口直线跨接。路段复用主干道宽度、路面纹理与路缘批次。
-  const coastalRoadRuns = seaside && !seaside.degraded ? boulevardSegments(seaside).map((segment) => segment.map(key)) : [];
-  for (const segment of coastalRoadRuns) {
-    for (let k = 1; k < segment.length; k += 1) {
-      const a = key(segment[k - 1]); const b = key(segment[k]);
-      addEdge(a, b, true, false, true);
-      const aId = roadNodeId(a); const bId = roadNodeId(b);
-      coastalRoadNodeIds.add(aId); coastalRoadNodeIds.add(bId);
-      coastalRoadEdgeIds.add([aId, bId].sort().join("/"));
-    }
-  }
-  const trimmedTrunkEnds: Vec2[] = []; // 下方 connectToNetwork 定义后接入大道
-  // 主干道先于海滨带生成，可能恰好沿着后来的海滨大道走到海边（两条宽路叠在一起，seed 1703326634 1 档）。
-  // 大道铺好后，删去两端都在 18 内的主干道段，主干道新的断头再接入大道。
-  if (coastalRoadRuns.length) {
-    const boulevardIndex = new SegmentIndex(coastalRoadRuns);
-    const loose: Vec2[] = [];
-    for (const edge of [...edges.values()]) {
-      if (edge.bridge || coastalRoadEdgeIds.has(edge.id) || edge.width < 12) continue;
-      const [a, b] = edge.points;
-      if (!boulevardIndex.closerThan(a, 18) || !boulevardIndex.closerThan(b, 18)) continue;
-      edges.delete(edge.id); loose.push(a, b);
-    }
-    const degree = (p: Vec2) => { const id = roadNodeId(key(p)); let d = 0; for (const e of edges.values()) if (e.from === id || e.to === id) d += 1; return d; };
-    for (const p of loose) {
-      if (coastalRoadNodeIds.has(roadNodeId(key(p)))) continue;
-      const d = degree(p);
-      if (d === 0) { nodes.delete(roadNodeId(key(p))); continue; }
-      if (d === 1) trimmedTrunkEnds.push(p);
-    }
-  }
+  // ── 海滨带 + 滨海大道（R5 步 3：逐字迁至 planner/seasideBoulevard.ts）──
+  const { seaside, coastalRoadRuns, trimmedTrunkEnds } = buildSeasideBoulevard({ network, publicSites, landmarks, coast, hasRiver, riverX, riverWidth,
+    coastDistance, height, coastalRoadEdgeIds, coastalRoadNodeIds }, { config, seed, core });
 
   // ── 环岛滨海路（规划总纲 S1，Lynch「边界要被路径看见」）：沿整条海岸、离水线 22 单位一条连续道路。
   // 曾只有海滨景观那 85° 一段有大道，其余海岸没有路（真机：住宅区一直延伸到海边却没有沿海道路）。
