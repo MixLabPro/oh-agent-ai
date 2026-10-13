@@ -8,9 +8,9 @@ import type { CityLayout } from "../cityLayout";
 import { activeTheme } from "../cityTheme";
 import { paletteFor } from "../cityTextures";
 import { createRenderCanvas } from "../renderCanvas";
-import { LANDMARK_BUILDERS } from "../models/registry";
+import { LANDMARK_BUILDERS } from "../render/landmarkBuilders";
 import type { LandmarkHost } from "../models/landmarkContext";
-import { createMaterialFactory } from "../models/landmarkMaterials";
+import { createMaterialFactory } from "../render/landmarkMaterials";
 import type { NightLights } from "../render/types";
 import { DISTRICT_LANDMARK_RENDER_GEOMETRY } from "../models/layoutPlacementGeometry";
 
@@ -39,7 +39,7 @@ export function buildLandmarks(city: LandmarkSystemHost): void {
   const tallest = Math.max(30, ...city.model.buildings.map((building) => building.height));
   const cap = Math.max(70, tallest * 0.9);
   const neon = activeTheme().neon;
-  // 批 0a：按 (color, emissive, side) 缓存；需要事后改动的材质传 { private: true }（见 models/landmarkMaterials.ts）。
+  // 批 0a：按 (color, emissive, side) 缓存；需要事后改动的材质传 { private: true }（见 render/landmarkMaterials.ts）。
   const material = createMaterialFactory((m) => city.disposables.push(m));
   const mesh = (geometry: THREE.BufferGeometry, mat: THREE.Material, parent: THREE.Object3D, x: number, y: number, z: number, ry = 0) => {
     const m = new THREE.Mesh(geometry, mat);

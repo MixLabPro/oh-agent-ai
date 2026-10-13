@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { MaterialFactory } from "../models/landmarkMaterials";
+import type { MaterialFactory } from "./landmarkMaterials";
 import type { BuildingModel, BuildingPlan, GeometryInput, GroupPart, Part } from "../models/model";
 
 /**

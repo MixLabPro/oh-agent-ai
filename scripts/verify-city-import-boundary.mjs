@@ -34,16 +34,11 @@ const EDITOR_PLANNER_WHITELIST = new Set([
   // "engine/planRoadRules.ts -> engine/planner/constraints.ts",  // R3 落地后启用
 ]);
 
-// 规则 3 的既有违例（棘轮）：models/ 里的地标建模文件本来就直接用 three 搭网格，
-// registry.ts 反向依赖 render/buildingCompiler.ts。这是 R2 落地时实测到的现状，守卫不修引擎代码，
-// 只把它们钉成「只许减不许增」：新增违例失败；清掉某条后若不从这里删除也失败（防止白名单悄悄变成死配置）。
+// 规则 3 的既有违例（棘轮）：只许减不许增；清掉某条后若不从这里删除也失败（防止白名单悄悄变成死配置）。
+// 已清零：原 6 条（models/ 里四个地标 drawX、landmarkMaterials 值导入 three，registry 值导入 render/buildingCompiler）
+// 随「three 依赖的造型构建代码移到 render/」一并消除——render/landmarks/{twinTowers,twistTower,villaComplex,suspensionBridge}.ts、
+// render/landmarkMaterials.ts、render/landmarkBuilders.ts（LANDMARK_BUILDERS 从 models/registry.ts 迁出）。
 const KNOWN_RULE3_VIOLATIONS = new Set([
-  "engine/models/landmarkMaterials.ts 值导入 three",
-  "engine/models/landmarks/suspensionBridge.ts 值导入 three",
-  "engine/models/landmarks/twinTowers.ts 值导入 three",
-  "engine/models/landmarks/twistTower.ts 值导入 three",
-  "engine/models/landmarks/villaComplex.ts 值导入 three",
-  "engine/models/registry.ts 值导入 engine/render/buildingCompiler.ts",
 ]);
 
 const rel = (f) => path.relative(srcRoot, f).split(path.sep).join("/");
