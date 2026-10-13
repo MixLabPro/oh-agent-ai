@@ -27,12 +27,22 @@
 import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { clearsHighways, roadNodeId } from "./cityPlan";
 import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
+import { CITY_GENERATOR_VERSION } from "./generatorVersion";
 import { applySiteOps, type SiteOp } from "./planSites";
 import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan, curvePoints } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
 
 export const PLAN_PATCH_VERSION = 1;
+
+export { CITY_GENERATOR_VERSION } from "./generatorVersion";
+
+/** 补丁写下时的生成器版本。旧存档没有这一项——它们都写于引入版本戳之前的同一代生成器，按 1 读。 */
+export const patchGeneratorVersion = (patch: Pick<PlanPatchV1, "generatorVersion">): number => patch.generatorVersion ?? 1;
+
+/** 补丁的 id 是否还对得上当前生成器：档位与生成器版本都一致。不一致时整份不套用，先重定位（planRemap.ts）。 */
+export const patchMatchesLayout = (patch: Pick<PlanPatchV1, "scaleTier" | "generatorVersion">, scaleTier: number): boolean =>
+  patch.scaleTier === scaleTier && patchGeneratorVersion(patch) === CITY_GENERATOR_VERSION;
 
 /** 道路操作日志的一项。node/edge 是**执行当时**的当前 id。 */
 export type RoadOp =
@@ -62,6 +72,9 @@ export type PlanPatchV1 = {
   /** 补丁写下时的规模档位。跨档（岛放大、地块与节点重排）后按坐标重定位到新档（planRemap.ts，路线图 SPEC P0-2）；
    *  未重定位前套用时整份报 tier-changed。 */
   scaleTier: number;
+  /** 写下时的生成器版本（generatorVersion.ts）。路口/路段/地块 id 是「某版生成器在某档」的产物，版本不符同跨档：
+   *  先重定位再套用。旧存档没有，按 1 读（patchGeneratorVersion）。 */
+  generatorVersion?: number;
   /** 写下时的岛半径（重定位的缩放比 = 新半径 / 旧半径）。旧存档没有，退回 √(新档/旧档)。 */
   islandRadius?: number;
   updatedAt: number;
@@ -83,14 +96,14 @@ export type PlanPatchV1 = {
 export type PatchStaleEntry = {
   kind: "building-move" | "road-drop" | "road-move" | "road-add" | "road-restyle" | "site-remove" | "site-move" | "context-suppress" | "highway-add" | "highway-cut";
   id: string;
-  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway" | "road-in-water";
+  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "generator-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway" | "road-in-water";
   detail: string;
 };
 
 export type PatchedLayout = { layout: CityLayout; stale: PatchStaleEntry[]; patchHash: string };
 
 export function emptyPlanPatch(seed: number, scaleTier: number): PlanPatchV1 {
-  return { version: PLAN_PATCH_VERSION, seed, scaleTier, updatedAt: 0, roadOps: [], siteOps: [], buildingMoves: {}, suppressedContext: [] };
+  return { version: PLAN_PATCH_VERSION, seed, scaleTier, generatorVersion: CITY_GENERATOR_VERSION, updatedAt: 0, roadOps: [], siteOps: [], buildingMoves: {}, suppressedContext: [] };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -144,6 +157,8 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : 0,
     roadOps, siteOps, buildingMoves, suppressedContext: strings(raw.suppressedContext),
     ...(highwayOps.length ? { highwayOps } : {}),
+    // 只保留正整数；坏值按缺省（=1）读，不能因为一个错型字段把整份补丁判成「别的生成器写的」。
+    ...(Number.isInteger(raw.generatorVersion) && (raw.generatorVersion as number) >= 1 ? { generatorVersion: raw.generatorVersion as number } : {}),
     ...(isFiniteNumber(raw.islandRadius) && raw.islandRadius > 0 ? { islandRadius: raw.islandRadius } : {}),
     ...(Object.keys(moveAnchors).length ? { moveAnchors } : {}),
   };
@@ -157,6 +172,8 @@ export function hashPlanPatch(patch: PlanPatchV1): string {
     roadOps: patch.roadOps,
     // 只在有高架操作时进指纹：没有高架编辑的旧补丁指纹不变（activityKey 不变，静态城缓存不白白重画）。
     ...(patch.highwayOps?.length ? { highwayOps: patch.highwayOps } : {}),
+    // 同理：只有非 1 的生成器版本进指纹——引入版本戳前后的同一份补丁指纹不变，静态城缓存不白白重画。
+    ...(patchGeneratorVersion(patch) !== 1 ? { generatorVersion: patchGeneratorVersion(patch) } : {}),
     siteOps: patch.siteOps,
     buildingMoves: Object.keys(patch.buildingMoves).sort().map((id) => [id, patch.buildingMoves[id]]),
     suppressedContext: [...patch.suppressedContext].sort(),
@@ -224,6 +241,8 @@ export function buildingIndex(model: CityModel): ReadonlyMap<string, CityBuildin
  *  补丁随即以 parcel-occupied 失效、用户的修改悄悄消失。layoutCity 只在档位一致时认钉子。 */
 export function layoutPinsFor(patch: PlanPatchV1 | null | undefined): { scaleTier: number; parcels: ReadonlyMap<string, string> } | null {
   if (!patch || !Object.keys(patch.buildingMoves).length) return null;
+  // 别的生成器版本写下的地块 id 指向的是另一张地图上的位置：钉子整份不认（与跨档一致，由 applyPlanPatch 报失效）。
+  if (patchGeneratorVersion(patch) !== CITY_GENERATOR_VERSION) return null;
   return { scaleTier: patch.scaleTier, parcels: new Map(Object.keys(patch.buildingMoves).sort().map((id) => [id, patch.buildingMoves[id]])) };
 }
 
@@ -253,11 +272,11 @@ export function planPatchEmpty(patch: PlanPatchV1): boolean {
 /**
  * 删掉已失效的条目（用户在面板上点「清除失效修改」）。失效条目重放时本来就没生效（道路/设施操作先在试算副本上跑，
  * 失败即丢弃），删掉它们不改变其余条目的重放结果——后面的操作引用的是 id，不是序号。
- * 跨档失效（tier-changed）是整份作废，清掉后等于空补丁，返回 null。
+ * 跨档失效（tier-changed）与生成器换代（generator-changed）是整份作废，清掉后等于空补丁，返回 null。
  */
 export function pruneStalePatch(patch: PlanPatchV1, stale: readonly PatchStaleEntry[], now = Date.now()): PlanPatchV1 | null {
   if (!stale.length) return patch;
-  if (stale.some((entry) => entry.reason === "tier-changed")) return null;
+  if (stale.some((entry) => entry.reason === "tier-changed" || entry.reason === "generator-changed")) return null;
   const roadLabels = new Set(stale.filter((entry) => entry.kind.startsWith("road-")).map((entry) => entry.id));
   const siteLabels = new Set(stale.filter((entry) => entry.kind.startsWith("site-")).map((entry) => entry.id));
   const highwayLabels = new Set(stale.filter((entry) => entry.kind.startsWith("highway-")).map((entry) => entry.id));
@@ -671,14 +690,20 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   const stale: PatchStaleEntry[] = [];
   const patchHash = hashPlanPatch(patch);
 
-  // ── 0. 跨档位：岛放大后地块/节点全部重排，整份补丁失效（不做坐标重定位，SPEC §4）──
-  if (patch.scaleTier !== layout.scaleTier) {
-    const detail = `补丁写于第 ${patch.scaleTier} 档，城市已扩容到第 ${layout.scaleTier} 档`;
-    for (const id of Object.keys(patch.buildingMoves).sort()) stale.push({ kind: "building-move", id, reason: "tier-changed", detail });
-    patch.roadOps.forEach((op, index) => stale.push({ kind: roadStaleKind(op), id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
-    patch.siteOps.forEach((op, index) => stale.push({ kind: op.t === "remove" ? "site-remove" : "site-move", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
-    (patch.highwayOps ?? []).forEach((op, index) => stale.push({ kind: op.t === "add" ? "highway-add" : "highway-cut", id: `${index + 1}:${op.t}`, reason: "tier-changed", detail }));
-    for (const id of [...patch.suppressedContext].sort()) stale.push({ kind: "context-suppress", id, reason: "tier-changed", detail });
+  // ── 0. 跨档位 / 生成器换代：地块/节点全部重排，整份补丁失效（套用这里不做坐标重定位，SPEC §4；
+  //       重定位由会话层先调 planRemap 完成，之后补丁的档位与版本都对得上，不会走到这里）──
+  // 档位优先：两者都不符时报 tier-changed，与引入版本戳前的上报逐字相同（界面文案、守卫断言都依赖它）。
+  if (!patchMatchesLayout(patch, layout.scaleTier)) {
+    const tierChanged = patch.scaleTier !== layout.scaleTier;
+    const reason = tierChanged ? "tier-changed" as const : "generator-changed" as const;
+    const detail = tierChanged
+      ? `补丁写于第 ${patch.scaleTier} 档，城市已扩容到第 ${layout.scaleTier} 档`
+      : `补丁写于第 ${patchGeneratorVersion(patch)} 版生成器，当前是第 ${CITY_GENERATOR_VERSION} 版`;
+    for (const id of Object.keys(patch.buildingMoves).sort()) stale.push({ kind: "building-move", id, reason, detail });
+    patch.roadOps.forEach((op, index) => stale.push({ kind: roadStaleKind(op), id: `${index + 1}:${op.t}`, reason, detail }));
+    patch.siteOps.forEach((op, index) => stale.push({ kind: op.t === "remove" ? "site-remove" : "site-move", id: `${index + 1}:${op.t}`, reason, detail }));
+    (patch.highwayOps ?? []).forEach((op, index) => stale.push({ kind: op.t === "add" ? "highway-add" : "highway-cut", id: `${index + 1}:${op.t}`, reason, detail }));
+    for (const id of [...patch.suppressedContext].sort()) stale.push({ kind: "context-suppress", id, reason, detail });
     return { layout, stale, patchHash };
   }
 

@@ -8,7 +8,7 @@
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, type PlanIssue } from "../engine/planAudit";
-import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
+import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, patchGeneratorVersion, patchMatchesLayout, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
 import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
 import { worldBox, worldOverhead, worldParts } from "../engine/planFootprint";
@@ -98,6 +98,8 @@ export class PlanRepairSession {
     // 岛半径随补丁记下（跨档重定位的缩放比，路线图 SPEC P0-2）；旧补丁在同档的下一次编辑时补上。
     if (!existing) return { ok: true, patch: { ...emptyPlanPatch(layout.seed, layout.scaleTier), islandRadius: layout.islandRadius } };
     if (existing.scaleTier !== layout.scaleTier) return { ok: false, reason: `patch-tier-${existing.scaleTier}-vs-city-tier-${layout.scaleTier}: reset() first` };
+    // 生成器换代同理：旧补丁的 id 指向上一版地图，在它上面追加新操作会混出两代 id，不静默覆盖。
+    if (!patchMatchesLayout(existing, layout.scaleTier)) return { ok: false, reason: `patch-generator-${patchGeneratorVersion(existing)}-vs-city-generator: reset() first` };
     return { ok: true, patch: existing.islandRadius ? existing : { ...existing, islandRadius: layout.islandRadius } };
   }
 
@@ -481,13 +483,16 @@ export class PlanRepairSession {
   /**
    * 跨档重定位（路线图 SPEC P0-2）：当前补丁写于别的档位时，把它逐条搬到新档并提交（不可撤销，见下），原补丁归档到存档的
    * archive[种子][旧档]。没有档位差时什么都不做、返回 null。数据刷新后由界面胶水调用（城市一升档就搬，用户不必进修复模式）。
+   * 生成器换代（generatorVersion.ts）走同一条路：档位没变而地图被新版生成器重排，同样按锚点搬到新地图；
+   * 归档键带上旧版本（`<档>@g<版本>`），不覆盖同档的跨档归档。
    */
   remapForTier(): RemapReport | null {
     const patch = this.engine.planPatch; const layout = this.engine.generatedLayout; const model = this.engine.currentModel;
-    if (!patch || !layout || !model || patch.seed !== layout.seed || patch.scaleTier === layout.scaleTier) return null;
+    if (!patch || !layout || !model || patch.seed !== layout.seed || patchMatchesLayout(patch, layout.scaleTier)) return null;
     const { patch: next, report } = remapPlanPatch(layout, model, patch);
     const seed = String(layout.seed);
-    this.store.archive = { ...this.store.archive, [seed]: { ...this.store.archive?.[seed], [String(patch.scaleTier)]: patch } };
+    const archiveKey = patch.scaleTier === layout.scaleTier ? `${patch.scaleTier}@g${patchGeneratorVersion(patch)}` : String(patch.scaleTier);
+    this.store.archive = { ...this.store.archive, [seed]: { ...this.store.archive?.[seed], [archiveKey]: patch } };
     // 不进撤销栈：撤销回旧档补丁在新地图上画不出来，下一次同步又会自动重定位——撤销等于空转。原补丁已在存档里。
     // 旧档的撤销历史同理作废（那些补丁都是旧地图上的）。
     this.undoStack = []; this.redoStack = [];
@@ -620,7 +625,10 @@ export class PlanRepairSession {
     return {
       ready: !!layout, seed: layout?.seed ?? null, cityTier: layout?.scaleTier ?? null, patchTier: patch?.scaleTier ?? null,
       patch, stale: this.engine.planPatched?.stale ?? [], saveFailed: this.saveFailed,
-      tierChanged: !!patch && !!layout && patch.scaleTier !== layout.scaleTier,
+      // tierChanged = 「补丁对不上当前地图、需要重定位」：跨档或生成器换代都算（界面胶水据此自动调 remapForTier）。
+      // generatorChanged 只用来选文案：档位没变、是生成器换了。
+      tierChanged: !!patch && !!layout && !patchMatchesLayout(patch, layout.scaleTier),
+      generatorChanged: !!patch && !!layout && patch.scaleTier === layout.scaleTier && !patchMatchesLayout(patch, layout.scaleTier),
       remap: this.lastRemap,
       canUndo: this.undoStack.length > 0, canRedo: this.redoStack.length > 0,
       counts: patch ? { buildingMoves: Object.keys(patch.buildingMoves).length, roadOps: patch.roadOps.length, highwayOps: patch.highwayOps?.length ?? 0, roadAdds: patch.roadOps.filter((op) => op.t === "add").length, roadDrops: patch.roadOps.filter((op) => op.t === "drop").length, siteOps: patch.siteOps.length, suppressedContext: patch.suppressedContext.length } : null,

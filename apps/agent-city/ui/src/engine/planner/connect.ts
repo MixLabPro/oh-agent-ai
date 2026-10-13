@@ -22,7 +22,7 @@ import type { RoadEdge, Vec2 } from "../cityLayout";
 import { commitNetworkPatch, previewNetworkPatch, keyOf, type Network, type NetworkPatch, type PatchResult } from "./network";
 import { crosses, closestPolylineSegment } from "./footprint";
 import type { Geography } from "./geography";
-import { corridorFailure, validateCandidate, VALIDATION_CONFIG, type CorridorPolicy, type RouteCandidate, type RouteSegment } from "./validation";
+import { corridorBlocked, corridorFailure, validateCandidate, VALIDATION_CONFIG, type CorridorPolicy, type RouteCandidate, type RouteSegment } from "./validation";
 import { ROAD_RELATION_CONFIG, classifyRoadSegments } from "./relations";
 import { CONNECTION_BUDGET } from "./connectionBudget";
 
@@ -277,18 +277,28 @@ const nodeMergeMemo: {
   geo: Geography | null; inRiver: ConnectorWorld["inRiver"] | null;
   sites: Array<{ x: number; z: number; radius: number }>;
   map: Map<string, ConnectionFailure | null>;
-} = { geo: null, inRiver: null, sites: [], map: new Map() };
-function nodeMergeCorridor(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy): ConnectionFailure | null {
+  /** 只知「拒/不拒」的条目（corridorBlocked 的结果）；与 map 同键、同失效规则。 */
+  blocked: Map<string, boolean>;
+} = { geo: null, inRiver: null, sites: [], map: new Map(), blocked: new Map() };
+/** reasonNeeded=false：调用方只看「拒/不拒」（返回值的 truthy 与原函数一致，原因可能是占位的 "water-span"）。 */
+function nodeMergeCorridor(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy, reasonNeeded = true): ConnectionFailure | null {
   if (policy.waterfront) return corridorFailure(world, a, b, policy);
   const m = nodeMergeMemo;
   const same = m.geo === world.geo && m.inRiver === world.inRiver && m.sites.length === policy.sites.length
     && policy.sites.every((s, i) => s.x === m.sites[i].x && s.z === m.sites[i].z && s.radius === m.sites[i].radius);
-  if (!same || m.map.size > NODE_MERGE_MEMO_LIMIT) {
-    m.geo = world.geo; m.inRiver = world.inRiver; m.sites = policy.sites.map((s) => ({ x: s.x, z: s.z, radius: s.radius })); m.map.clear();
+  if (!same || m.map.size + m.blocked.size > NODE_MERGE_MEMO_LIMIT) {
+    m.geo = world.geo; m.inRiver = world.inRiver; m.sites = policy.sites.map((s) => ({ x: s.x, z: s.z, radius: s.radius })); m.map.clear(); m.blocked.clear();
   }
   const key = `${a.x},${a.z}>${b.x},${b.z}|${policy.roadWidth ?? 0}|${policy.siteMargin}|${policy.maxSlope}|${policy.requireBuildable}`;
   const hit = m.map.get(key);
   if (hit !== undefined) return hit;
+  if (!reasonNeeded) {
+    // 原因不被观察：用二分细化顺序的布尔判定（validation.ts corridorBlocked，与 corridorViolation 的
+    // 拒/不拒逐点等价）。占位原因只用于真值，调用方不读它。
+    let blocked = m.blocked.get(key);
+    if (blocked === undefined) { blocked = corridorBlocked(world, a, b, policy); m.blocked.set(key, blocked); }
+    return blocked ? "water-span" : null;
+  }
   const result = corridorFailure(world, a, b, policy);
   m.map.set(key, result);
   return result;
@@ -305,7 +315,10 @@ function proposeNodeMerge(request: ConnectionRequest, world: ConnectorWorld, opt
     if (id === sourceId || d < CONNECTOR_CONFIG.minLinkDistance) continue;
     if (network.edges.has([sourceId, id].sort().join("/"))) continue; // 已直连的节点（源悬挂边的对端）不是候选
     if (d > request.maxLength) break; // 已按 (d, id) 排序
-    const corridor = nodeMergeCorridor(world, request.source, p, policy);
+    // 已记下最近拒绝后，后续候选（d 不小于它，note 用严格 <）的拒绝原因不会再被读到——成功/失败输出
+    // （connectionLog 的 reason/detail、首个被接受的目标）只取决于「拒/不拒」，走廊改用布尔快判
+    // （隔水走廊几个采样即否决；孤立分量过水并线阶梯曾占 tier 5 规划的 ~40%）。首个拒绝仍算原因。
+    const corridor = nodeMergeCorridor(world, request.source, p, policy, rejected.nearest === null);
     if (corridor) { note(d, corridor); continue; }
     // 角度从宽档（软成本，设计 §4.1「转弯是软成本」）：只作最后手段，acuteJunctions 度量其质量代价。
     if (!relaxed && (!endpointClear(network, p, request.source) || !endpointClear(network, request.source, p))) { note(d, "junction-angle"); continue; }

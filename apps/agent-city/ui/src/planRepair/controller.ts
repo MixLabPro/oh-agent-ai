@@ -167,6 +167,7 @@ const BLOCKER_TEXT: Record<string, string> = {
   "viaduct-end-in-water": "匝道落地点在水里——高架两端要落在陆地上，或接到已有高架上",
   "missing-highway": "这里没有高架",
   "tier-changed": "城市已随数据增长扩大了一档，旧修改已失效——请先在面板上点「清除失效修改」",
+  "generator-changed": "城市生成规则更新了，旧修改已失效——请先在面板上点「清除失效修改」",
 };
 const WARNING_TEXT: Record<string, string> = {
   "cross-district": "已搬出它所属的小区",
@@ -202,7 +203,8 @@ const COUNTED_TEXT: Record<string, (n: number) => string> = {
   bridge: (n) => `水面段将架成一座 ${n} 长的桥`,
 };
 
-export const blockerText = (code: string): string => (code.startsWith("patch-tier-") ? BLOCKER_TEXT["tier-changed"] : BLOCKER_TEXT[code] ?? code);
+export const blockerText = (code: string): string =>
+  code.startsWith("patch-tier-") ? BLOCKER_TEXT["tier-changed"] : code.startsWith("patch-generator-") ? BLOCKER_TEXT["generator-changed"] : BLOCKER_TEXT[code] ?? code;
 /** 编辑失败的说明：优先逐条翻译阻断码，其次翻译 reason（跨档的补丁会以 reason 形式回来）。 */
 const failText = (verb: string, result: { reason: string; blockers?: string[] }) =>
   `${verb}：${result.blockers?.length ? result.blockers.map(blockerText).join("；") : blockerText(result.reason)}`;
