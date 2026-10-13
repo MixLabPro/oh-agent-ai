@@ -17,7 +17,7 @@ import type { createCityPlan } from "../cityPlan";
 import { declaredGroundRoadClear } from "./modelEnvelope";
 import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
 import { WATER_LEVEL, wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
-import { pointInPolygon, siteFootprint, worldFootprintSamples } from "../planFootprint";
+import { pointInPolygon, siteFootprint, siteFootprintSeparation, worldFootprintSamples } from "../planFootprint";
 import { componentOf, primaryComponentId } from "./intent";
 import { planarAccessAtYaw, resolvePlanarAccess } from "../models/siteAccess";
 import { specByKind } from "./sitespec";
@@ -99,11 +99,16 @@ export const roadThroughSite: Constraint = {
 };
 
 export const sitesOverlap: Constraint = {
-  id: "sitesOverlap", description: "用地两两中心距 ≥ 半径和",
+  id: "sitesOverlap", description: "用地实体投影不重叠；未声明模型及海上岛保留名义圆",
   measure(plan) {
     const out: Violation[] = [];
-    const sites = planSites(plan);
-    for (const s of sites) for (const o of sites) if (o !== s && o.kind > s.kind && Math.hypot(o.x - s.x, o.z - s.z) < o.radius + s.radius) out.push(v("sitesOverlap", s, `${s.kind} x ${o.kind}`));
+    const sites = planSites(plan).sort((a, b) => a.kind < b.kind ? -1 : a.kind > b.kind ? 1
+      : (a.id ?? "") < (b.id ?? "") ? -1 : (a.id ?? "") > (b.id ?? "") ? 1 : 0);
+    for (let i = 0; i < sites.length; i += 1) for (let j = i + 1; j < sites.length; j += 1) {
+      const s = sites[i], o = sites[j];
+      if (siteFootprintSeparation(s, o) < 0) out.push({ ...v("sitesOverlap", s, `${s.kind} x ${o.kind}`),
+        identity: [s.id ?? `${s.kind}:${s.x}:${s.z}`, o.id ?? `${o.kind}:${o.x}:${o.z}`].sort().join("/") });
+    }
     return out;
   },
 };

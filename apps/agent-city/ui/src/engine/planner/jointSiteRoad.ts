@@ -68,6 +68,33 @@ export function declaredOwnerDetour(footprint: LocalFootprint, road: RoadEdge,
   return declaredOwnerDetourBetween(footprint, road, road.points[0], road.points[road.points.length - 1], allowed);
 }
 
+/** Visibility edges touching a fixed graph endpoint must also fit the existing
+ * junction. Check during search so a rejected shortest side does not conceal
+ * a longer legal detour. Existing acute pairs may improve, never get worse. */
+export function detourEndpointAnglesClear(network: Network, road: RoadEdge, a: Vec2, b: Vec2,
+  excluded: ReadonlySet<string> = new Set()): boolean {
+  const same = (p: Vec2, q: Vec2) => p.x === q.x && p.z === q.z;
+  const gap = (origin: Vec2, p: Vec2, q: Vec2) => {
+    const delta = Math.atan2(p.z - origin.z, p.x - origin.x) - Math.atan2(q.z - origin.z, q.x - origin.x);
+    return Math.abs(Math.atan2(Math.sin(delta), Math.cos(delta)));
+  };
+  for (const [id, endpoint, previous] of [
+    [road.from, road.points[0], road.points[1]],
+    [road.to, road.points[road.points.length - 1], road.points[road.points.length - 2]],
+  ] as const) {
+    const next = same(a, endpoint) ? b : same(b, endpoint) ? a : null;
+    if (!next) continue;
+    const incident = [...network.edges.values()].filter(edge => edge.from === id || edge.to === id);
+    if (incident.length < 2) continue;
+    for (const other of incident) {
+      if (other.id === road.id || excluded.has(other.id)) continue;
+      const outward = other.from === id ? other.points[1] : other.points[other.points.length - 2];
+      if (gap(endpoint, next, outward) + 1e-9 < Math.min(Math.PI / 6, gap(endpoint, previous, outward))) return false;
+    }
+  }
+  return true;
+}
+
 /** Reject new at-grade contacts while a replacement corridor is being searched.
  * Existing graph-node contacts at this road's fixed endpoints remain legal. */
 function routeIntroducesGroundContact(network: Network, road: RoadEdge, a: Vec2, b: Vec2, excluded: ReadonlySet<string>): boolean {
@@ -220,6 +247,7 @@ export function prepareJointSiteRoadRelocation(ctx: RepairContext, ownerId: stri
     }
     let blockedBy = "path-length-or-visibility";
     const shape = declaredOwnerDetour(envelope.conservativeProjection, road, (a, b) => {
+      if (!detourEndpointAnglesClear(ctx.network, road, a, b, movingEdgeIds)) { blockedBy = "junction-angle"; return false; }
       if (routeIntroducesGroundContact(ctx.network, road, a, b, movingEdgeIds)) { blockedBy = "unjoined-ground-contact"; return false; }
       const corridor = groundJunctionCorridorFailure(world, a, b, road.width, road);
       if (corridor) { blockedBy = `corridor-${corridor}`; return false; }

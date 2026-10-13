@@ -118,29 +118,35 @@ function repairExposedSiteEnds(ctx: RepairContext, previous: ReadonlySet<string>
 
 /** An otherwise dry coastal owner with a failed service route is still an
  * obligation. Reuse the existing coastal candidate budget, not a wider snap. */
-function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoorRoad" | "siteInWater" = "siteWithoutDoorRoad"): RepairStrategy[] {
+function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoorRoad" | "siteInWater" | "roadThroughSite" | "sitesOverlap" = "siteWithoutDoorRoad"): RepairStrategy[] {
   const plan = planView(ctx), diagnostics = diagnoseNetwork(plan);
   const unmet = new Set(diagnostics?.demands.filter((entry) => entry.demand.required && !entry.satisfied
     && entry.demand.class === "site-access").map((entry) => entry.demand.anchor) ?? []);
-  const wetFindings = constraint === "siteInWater" ? CONSTRAINTS.find((entry) => entry.id === "siteInWater")!.measure(plan) : [];
+  const wetFindings = constraint !== "siteWithoutDoorRoad" ? CONSTRAINTS.find((entry) => entry.id === constraint)!.measure(plan) : [];
   const groundGeo = { height: ctx.height, inRiver: ctx.inRiver };
-  const groundFailed = new Set([...ctx.publicSites, ...ctx.landmarks].filter(owner => registeredModelGroundFailure(owner, groundGeo)).map(owner => owner.id));
+  const groundFailed = new Set(constraint === "siteInWater" ? [...ctx.publicSites, ...ctx.landmarks]
+    .filter(owner => registeredModelGroundFailure(owner, groundGeo)).map(owner => owner.id) : []);
   const isWetOwner = (owner: { id: string; kind: string; x: number; z: number }) => groundFailed.has(owner.id) || wetFindings.some((finding) =>
-    finding.site === owner.kind && finding.at?.x === owner.x && finding.at?.z === owner.z);
-  if (constraint === "siteInWater" ? !wetFindings.length && !groundFailed.size : !unmet.size) return [];
+    (constraint === "sitesOverlap" && finding.identity?.split("/").includes(owner.id))
+    || (finding.site === owner.kind && finding.at?.x === owner.x && finding.at?.z === owner.z));
+  if (constraint !== "siteWithoutDoorRoad" ? !wetFindings.length && !groundFailed.size : !unmet.size) return [];
   const comp = componentOf(plan), primary = primaryComponentId(plan, comp);
   const primaryRoads = plan.roadEdges.filter((edge) => !edge.bridge && comp.get(edge.from) === primary).map((edge) => edge.points);
   const sites = [...ctx.publicSites, ...ctx.landmarks];
   const candidates: RepairStrategy[] = [];
   for (const owner of sites) {
-    if (!owner.id || !(constraint === "siteInWater" ? isWetOwner(owner) : unmet.has(owner.id))
+    if (!owner.id || !(constraint !== "siteWithoutDoorRoad" ? isWetOwner(owner) : unmet.has(owner.id))
       || !canRelocateGroundSite(owner) || !ctx.SHORE_SITE_KINDS.has(owner.kind)) continue;
     const others = sites.filter((site) => site !== owner && site.radius);
-    const positions = constraint === "siteInWater" ? localResiteCandidates(owner)
-      : shoreRelocationCandidates(ctx, owner, siteGeometry(ctx, owner.id), others);
-    for (const at of positions) {
+    // Wet/foundation failures need the same declared coastal fallback as a
+    // road-blocked owner, after its original local candidates are exhausted.
+    function* positions() {
+      if (constraint !== "siteWithoutDoorRoad") yield* localResiteCandidates(owner);
+      yield* shoreRelocationCandidates(ctx, owner, siteGeometry(ctx, owner.id), others);
+    }
+    for (const at of positions()) {
       const placementFailure = relocatedSitePositionFailure(ctx, owner, at, true);
-      const joint = constraint === "siteInWater" && placementFailure === "owner-road-envelope";
+      const joint = constraint !== "siteWithoutDoorRoad" && placementFailure === "owner-road-envelope";
       if ((placementFailure && !joint) || polylineDistance(primaryRoads, at) > owner.radius + 20) continue;
       if (ctx.blocks.some((block) => block.parcels.some((parcel) => Math.hypot(parcel.x - at.x, parcel.z - at.z)
         < owner.radius + 9 + Math.hypot(parcel.width, parcel.depth) / 2))) continue;
@@ -152,9 +158,10 @@ function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoo
       }
       candidates.push({ constraint, name: `${constraint === "siteInWater" ? "resiteWetShore" : "resiteUnservedShore"}:${owner.id}:${at.x}:${at.z}`, run: (draft) => {
         const site = [...draft.publicSites, ...draft.landmarks].find((entry) => entry.id === owner.id);
-        const missing = constraint === "siteInWater" ? !!site && (registeredModelGroundFailure(site, { height: draft.height, inRiver: draft.inRiver })
-          || CONSTRAINTS.find((entry) => entry.id === "siteInWater")!.measure(planView(draft))
-            .some((finding) => finding.site === site.kind && finding.at?.x === site.x && finding.at?.z === site.z))
+        const missing = constraint !== "siteWithoutDoorRoad" ? !!site && ((constraint === "siteInWater" && registeredModelGroundFailure(site, { height: draft.height, inRiver: draft.inRiver }))
+          || CONSTRAINTS.find((entry) => entry.id === constraint)!.measure(planView(draft))
+            .some((finding) => (constraint === "sitesOverlap" && finding.identity?.split("/").includes(site.id))
+              || (finding.site === site.kind && finding.at?.x === site.x && finding.at?.z === site.z)))
           : diagnoseNetwork(planView(draft))?.demands.some((entry) => entry.demand.anchor === owner.id
             && entry.demand.class === "site-access" && !entry.satisfied);
         if (!missing || !site || !canRelocateGroundSite(site)) return 0;
@@ -228,6 +235,10 @@ export const REPAIR_STRATEGIES: RepairStrategy[] = [
       .flatMap((violation) => [...ctx.publicSites, ...ctx.landmarks].filter((site) => site.kind === violation.site
         && site.x === violation.at?.x && site.z === violation.at?.z && site.id).map((site) => site.id!)).sort()
       .map((id) => ({ constraint: "roadThroughSite", name: `nudgeSiteWithAccess:${id}`, run: (draft) => nudgeSiteWithAccessRepair(draft, id) })) },
+  { constraint: "roadThroughSite", name: "resiteRoadBlockedShoreSites", run: () => 0,
+    candidates: ctx => unservedShoreCandidates(ctx, "roadThroughSite") },
+  { constraint: "sitesOverlap", name: "resiteOverlappingShoreSites", run: () => 0,
+    candidates: ctx => unservedShoreCandidates(ctx, "sitesOverlap") },
   { constraint: "looseInlandRoadEnds", name: "detourAroundSites", run: detourAroundSites },
   { constraint: "looseInlandRoadEnds", name: "extendLooseEnds", run: extendLooseEnds,
     candidates: (ctx) => CONSTRAINTS.find((constraint) => constraint.id === "looseInlandRoadEnds")!.measure(planView(ctx))

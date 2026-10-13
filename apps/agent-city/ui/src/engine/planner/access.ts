@@ -23,7 +23,7 @@ import type { PublicSite, RoadEdge, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
 import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount, isDry } from "./footprint";
-import { footprintCircleDistance, footprintRunsDistance, siteFootprint, worldFootprintSamples } from "../planFootprint";
+import { footprintCircleDistance, footprintRunsDistance, siteFootprint, siteFootprintSeparation, worldFootprintSamples } from "../planFootprint";
 
 /** 候选点：坐标 + 朝向 + 稳定 id（排序 tie-break 用）+ 来源说明；shoreAnchor 供海上岛堤道校验。 */
 export type SiteCandidate = {
@@ -53,11 +53,14 @@ export type SiteCandidateWorld = {
   frontageFallbackPoints?: readonly Vec2[];
   /** Joint owner/network proposals may defer exact-shape trunk clearance to their atomic validator. */
   allowGroundCorridorRelocation?: boolean;
+  /** Joint neighbour placement may consume complete owner shapes; legacy
+   * callers without that contract keep their conservative plot proxies. */
+  usePlacedFootprints?: boolean;
   /** 环线高架折线（hard 闸门的净空检查）。 */
   ringRuns: Vec2[][];
   bridges: Array<{ from: Vec2; to: Vec2 }>;
   /** 已放置用地（间距 hard 判据；assign 按序追加）。 */
-  placed: Array<{ x: number; z: number; radius: number }>;
+  placed: Array<{ x: number; z: number; radius: number; id?: string; kind?: string; yaw?: number; shore?: Vec2 }>;
   height: (x: number, z: number) => number;
   inRiver: (x: number, z: number) => boolean;
   riverBank: (x: number, z: number, bank: number) => boolean;
@@ -281,9 +284,11 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
     return footprintSamples.length && footprintSamples.every((point) => world.height(point.x, point.z) >= 0.8 && !world.inRiver(point.x, point.z)
       && (world.landClearance(point.x, point.z) >= 4)) ? null : "dry-footprint";
   };
-  const spacing = (gap: number) => world.placed.some((o) => exactFootprint
-    ? footprintCircleDistance(footprint, at, candidate.yaw, o, o.radius) < gap
-    : Math.hypot(o.x - at.x, o.z - at.z) < o.radius + r + gap) ? `site-spacing(+${gap})` : null;
+  const spacing = (gap: number) => world.placed.some((o) => world.usePlacedFootprints && o.kind && o.id && Number.isFinite(o.yaw)
+    ? siteFootprintSeparation({ ...at, id: candidate.id, kind: spec.kind, yaw: candidate.yaw, radius: r },
+      { ...o, id: o.id, kind: o.kind, yaw: o.yaw! }) < gap
+    : exactFootprint ? footprintCircleDistance(footprint, at, candidate.yaw, o, o.radius) < gap
+      : Math.hypot(o.x - at.x, o.z - at.z) < o.radius + r + gap) ? `site-spacing(+${gap})` : null;
   const ring = () => (clearsRingRuns(at, r * 2, r * 2, world.ringRuns) ? null : "clear-of-highways");
   switch (spec.placement) {
     case "plaza":

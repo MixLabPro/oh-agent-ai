@@ -386,8 +386,9 @@ for (const turns of [0, 1, 2, 3]) {
   assert.equal(snapshot(real), realBytes);
   const tiny = fixture("villa-complex", 11), tinyBytes = snapshot(tiny);
   const tinyCandidate = strategy.candidates(tiny).find((entry) => entry.name.endsWith(":shore"));
-  assert.ok(tinyCandidate);
-  const tinyResult = runRepairTransaction(tiny, tinyCandidate);
+  assert.equal(tinyCandidate, undefined, "unsupported foundation dimensions must be rejected during candidate enumeration");
+  const tinyResult = runRepairTransaction(tiny, { constraint: "siteInWater", name: "unsupported-ground-pose",
+    run: draft => { draft.landmarks[0].yaw = 0.25; return 1; } });
   assert.equal(tinyResult.changes, 0); assert.match(tinyResult.reason, /registered-model-ground-unsupported-parameters/);
   assert.equal(snapshot(tiny), tinyBytes, "unsupported villa radius11 cannot publish a false physical success");
   // Explicitly test only the preexisting proxy layer here. This alias has no

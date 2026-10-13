@@ -10,19 +10,52 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject, assignConnectedSite, JOINT_SITE_CONFIG, stationEntranceLocal, emptyNetwork, addNetworkEdge, siteInWater, siteFootprint, worldParts, pointInPolygon, ringSamples16 } = await loadCity({
+const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject, assignConnectedSite, connectRelocatedPlotAccess, JOINT_SITE_CONFIG, stationEntranceLocal, emptyNetwork, addNetworkEdge, siteInWater, sitesOverlap, siteFootprintSeparation, siteFootprint, worldParts, pointInPolygon, ringSamples16 } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/sitespec.ts": ["SITE_SPECS", "specByKind", "coastalSitingKinds", "straddleSitingKinds", "frontageExemptKinds", "nominalAnchorPoint", "SITING_TABLE_VERSION"],
   "engine/planner/assign.ts": ["runAssignment"],
   "engine/planner/access.ts": ["siteCandidateHardReject"],
-  "engine/planner/jointSite.ts": ["assignConnectedSite", "JOINT_SITE_CONFIG"],
+  "engine/planner/jointSite.ts": ["assignConnectedSite", "connectRelocatedPlotAccess", "JOINT_SITE_CONFIG"],
   "engine/models/publicSiteGeometry.ts": ["stationEntranceLocal"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
-  "engine/planner/constraints.ts": ["siteInWater"],
-  "engine/planFootprint.ts": ["siteFootprint", "worldParts", "pointInPolygon"],
+  "engine/planner/constraints.ts": ["siteInWater", "sitesOverlap"],
+  "engine/planFootprint.ts": ["siteFootprint", "siteFootprintSeparation", "worldParts", "pointInPolygon"],
   "engine/planner/footprint.ts": ["ringSamples16"],
 });
+
+// Shared collision facts: empty nominal-circle corners may fit beside a
+// rectangle, but real overlap (including two instances of one class) may not.
+{
+  const stadium = { id: "stadium:a", kind: "stadium", x: 0, z: 0, yaw: 0, radius: 49 };
+  const proxy = { id: "small-plot", kind: "unknown-model", x: 50, z: 0, yaw: 0, radius: 5 };
+  assert.equal(siteFootprintSeparation(stadium, proxy), 12.5);
+  assert.equal(siteFootprintSeparation(proxy, stadium), 12.5);
+  assert.equal(sitesOverlap.measure({ publicSites: [stadium, proxy], landmarks: [] }).length, 0);
+  const overlapping = { ...stadium, id: "stadium:b", x: 20 };
+  assert(siteFootprintSeparation(stadium, overlapping) < 0, "polygon penetration must have a negative sign, not the contact distance zero");
+  assert.equal(sitesOverlap.measure({ publicSites: [stadium, overlapping], landmarks: [] }).length, 1);
+  assert.equal(siteFootprintSeparation(stadium, { ...overlapping, x: 65 }), 0, "touching edges have zero separation");
+  assert.equal(siteFootprintSeparation(stadium, { ...overlapping, x: 70 }), 5);
+  assert.equal(siteFootprintSeparation({ ...stadium, kind: "unknown-a" }, proxy), -4,
+    "undeclared shapes retain their full circular reservation");
+  assert.equal(siteFootprintSeparation({ ...stadium, yaw: NaN }, proxy), -Infinity);
+}
+
+// A neighbour may need a new frontage route after a joint move. Only a proved
+// primary connection makes the formerly-too-far candidate usable.
+{
+  const network = emptyNetwork(); addNetworkEdge(network, { x: -100, z: 0 }, { x: 100, z: 0 }, true);
+  const owner = { id: "relocated-park", kind: "park", x: 0, z: 60, yaw: 0, radius: 20 };
+  const geo = { height: () => 1.2, buildable: () => true, terrain: { slope: () => 0 } };
+  assert.equal(connectRelocatedPlotAccess({ network, geo, inRiver: () => false, reservations: () => [owner] }, owner, "-100:0"), true);
+  assert(network.edges.size > 1, "a successful neighbour relocation must retain its actual new route");
+  const wet = emptyNetwork(); addNetworkEdge(wet, { x: -100, z: 0 }, { x: 100, z: 0 }, true);
+  const before = JSON.stringify([...wet.edges]);
+  assert.equal(connectRelocatedPlotAccess({ network: wet, geo: { ...geo, height: () => -1 }, inRiver: () => false,
+    reservations: () => [owner] }, owner, "-100:0"), false);
+  assert.equal(JSON.stringify([...wet.edges]), before, "failed neighbour access publishes no route");
+}
 
 // Exact declared model geometry replaces the nominal reservation circle in
 // generator admission; legacy-only classes keep their existing proxy checks.

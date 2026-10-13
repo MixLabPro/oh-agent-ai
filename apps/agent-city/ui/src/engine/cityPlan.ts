@@ -20,7 +20,7 @@ import { closestPolylineSegment, polylineDistance } from "./planner/footprint";
 import { footprintRunsDistance, siteFootprint, siteFootprintSeparation } from "./planFootprint";
 import { canRelocateGroundSite, coastalSitingKinds, specByKind } from "./planner/sitespec";
 import { candidatesFor, siteCandidateHardReject } from "./planner/access";
-import { assignConnectedSite } from "./planner/jointSite";
+import { assignConnectedSite, connectRelocatedPlotAccess, JOINT_SITE_CONFIG } from "./planner/jointSite";
 import { proposeShorePlotAccess } from "./planner/shorePlotAccess";
 import { frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, groundFrontageSegments, type FrontageMoveContext } from "./planner/access";
 import { localResiteCandidates, retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, SAIL_OPERA_CONFIG, type ShoreMoveContext } from "./planner/siting";
@@ -412,6 +412,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const countRoadOverlaps = (sites: typeof currentSites, candidateNetwork: Network) => sites.filter((site) => siteHasRoadOverlap(site, candidateNetwork)).length;
       const baselineRoadOverlaps = countRoadOverlaps(currentSites, network);
       const relocationRejects = new Map<string, number>();
+      let neighbourAccessEvaluations = 0;
       const noteRelocationReject = (reason: string) => relocationRejects.set(reason, (relocationRejects.get(reason) ?? 0) + 1);
       const ownerRules = CONSTRAINTS.filter((constraint) => ["siteInWater", "siteWithoutDoorRoad", "roadThroughSite",
         "sitesOverlap", "stationStadiumSetback", "stationDoorFacesRoad", "archStraddlesRoad"].includes(constraint.id));
@@ -420,7 +421,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         blocks: [], terrain, core, coast, river, seaside: null, coastRoads: [], riverRoadRuns: [], primaryAnchorNodeId,
       } as unknown as ConstraintPlan);
       const ownerIdentity = (violation: ReturnType<typeof ownerRules[number]["measure"]>[number], sites: typeof currentSites) =>
-        sites.find((site) => site.kind === violation.site && site.x === violation.at?.x && site.z === violation.at?.z)?.id
+        violation.identity ?? sites.find((site) => site.kind === violation.site && site.x === violation.at?.x && site.z === violation.at?.z)?.id
         ?? JSON.stringify([violation.site, violation.at, violation.detail]);
       const previousOwnerFailures = new Map(ownerRules.map((constraint) => [constraint.id,
         new Set(constraint.measure(ownerView(network, publicSites, landmarks)).map((violation) => ownerIdentity(violation, currentSites)))]));
@@ -472,7 +473,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
               const spec = specByKind(blocker.kind);
               if (!canRelocateGroundSite(blocker) || !spec) { noteRelocationReject(`${blocker.id}:immovable-or-unregistered`); invalidBlocker = true; break; }
               const placementWorld = { ...geo, core, turn, trunkRuns: actualTrunks, ringRuns, bridges, inRiver, riverBank: footprintGeo.riverBank,
-                placed: fixedPlaced.map((site) => ({ x: site.x, z: site.z, radius: site.radius })) };
+                placed: fixedPlaced, usePlacedFootprints: true };
               const generated = [...candidatesFor(placementWorld, spec, blocker),
                 ...[...localResiteCandidates(blocker)].map((at, index) => ({ ...at, yaw: blocker.yaw,
                   id: `required-owner-relocation:${blocker.id}:${index}`, source: "declared-local-resite" }))];
@@ -481,7 +482,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
                 const hardFailure = siteCandidateHardReject(placementWorld, spec, candidate);
                 if (hardFailure) { noteRelocationReject(`${blocker.id}:${hardFailure}`); continue; }
                 const roadDistance = Math.min(...candidateRoads.map((run) => polylineDistance([run], candidate)));
-                if (roadDistance > spec.radius + 20) { noteRelocationReject(`${blocker.id}:door-road-distance`); continue; }
+                if (roadDistance > spec.radius + 8 + spec.radius + 30) { noteRelocationReject(`${blocker.id}:door-road-distance`); continue; }
                 admitted.push({ site: blocker, spec, candidate });
               }
               admitted.sort((a, b) => Math.hypot(a.candidate.x - blocker.x, a.candidate.z - blocker.z)
@@ -497,28 +498,48 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
                 if (accepted) return;
                 if (index < options.length) { for (const option of options[index]) { selected.push(option); search(index + 1); selected.pop(); if (accepted) break; } return; }
                 const targetById = new Map(selected.map((entry) => [entry.site.id, entry.candidate]));
-                const completePlaced = actualPlaced.filter((site) => !movableIds.has(site.id)).map((site) => ({ x: site.x, z: site.z, radius: site.radius }));
-                for (const entry of selected) completePlaced.push({ x: entry.candidate.x, z: entry.candidate.z, radius: entry.spec.radius });
+                const completePlaced = actualPlaced.filter((site) => !movableIds.has(site.id));
+                for (const entry of selected) completePlaced.push({ ...entry.site, x: entry.candidate.x, z: entry.candidate.z,
+                  yaw: entry.candidate.yaw, radius: entry.spec.radius });
                 for (const entry of selected) {
                   const world = { ...geo, core, turn, trunkRuns: actualTrunks, ringRuns, bridges, inRiver, riverBank: footprintGeo.riverBank,
+                    usePlacedFootprints: true,
                     placed: completePlaced.filter((site) => site.x !== targetById.get(entry.site.id)!.x || site.z !== targetById.get(entry.site.id)!.z) };
                   if (siteCandidateHardReject(world, entry.spec, entry.candidate)) { noteRelocationReject(`${entry.site.id}:joint-final-hard-check`); return; }
-                  if (Math.min(...candidateRoads.map((run) => polylineDistance([run], entry.candidate))) > entry.spec.radius + 20) {
+                  if (Math.min(...candidateRoads.map((run) => polylineDistance([run], entry.candidate))) > entry.spec.radius + 8 + entry.spec.radius + 30) {
                     noteRelocationReject(`${entry.site.id}:joint-final-door-road`); return;
                   }
                 }
                 const prior = selected.map(({ site }) => ({ site, x: site.x, z: site.z, yaw: site.yaw }));
                 for (const entry of selected) { entry.site.x = entry.candidate.x; entry.site.z = entry.candidate.z; entry.site.yaw = entry.candidate.yaw; }
                 const trialSites = [...stagedPublic, ...stagedLandmarks].filter((site) => site.radius);
+                const trialNetwork: Network = { ...candidateNetwork,
+                  ...(candidateNetwork.patchRemaps ? { patchRemaps: [...candidateNetwork.patchRemaps] } : {}),
+                  nodes: new Map([...candidateNetwork.nodes].map(([id, node]) => [id, { ...node }])),
+                  edges: new Map([...candidateNetwork.edges].map(([id, edge]) => [id, { ...edge, points: edge.points.map(point => ({ ...point })) }])) };
                 const spacingConflict = trialSites.some((site) => site !== requiredOwner
                   && separation(site, requiredOwner) < 10);
-                const introducedFinding = spacingConflict ? null : ownerRules.flatMap((constraint) => constraint.measure(ownerView(candidateNetwork, stagedPublic, stagedLandmarks))
+                const served = !spacingConflict && selected.every(entry => {
+                  if (Math.min(...candidateRoads.map(run => polylineDistance([run], entry.site))) > entry.site.radius + 20
+                    && ++neighbourAccessEvaluations > JOINT_SITE_CONFIG.maxNeighbourAccessEvaluations) {
+                    noteRelocationReject("joint-neighbour-access-budget-exhausted"); return false;
+                  }
+                  return connectRelocatedPlotAccess({ network: trialNetwork, geo, inRiver,
+                    reservations: () => trialSites }, entry.site, primaryAnchorNodeId);
+                });
+                const introducedFinding = spacingConflict || !served ? null : ownerRules.flatMap((constraint) => constraint.measure(ownerView(trialNetwork, stagedPublic, stagedLandmarks))
                   .filter((violation) => !previousOwnerFailures.get(constraint.id)!.has(ownerIdentity(violation, trialSites)))
                   .map((violation) => ({ constraint, violation })))[0] ?? null;
                 const introducedConstraint = introducedFinding?.constraint ?? null;
                 const newViolation = !!introducedConstraint;
-                if (!spacingConflict && !newViolation) { accepted = true; return; }
-                noteRelocationReject(spacingConflict ? "joint-blockers:owner-spacing" : `joint-blockers:new-${introducedConstraint?.id ?? "owner-constraint"}:${introducedFinding ? ownerIdentity(introducedFinding.violation, trialSites) : "unknown"}`);
+                if (!spacingConflict && served && !newViolation) {
+                  candidateNetwork.nodes.clear(); for (const [id, node] of trialNetwork.nodes) candidateNetwork.nodes.set(id, node);
+                  candidateNetwork.edges.clear(); for (const [id, edge] of trialNetwork.edges) candidateNetwork.edges.set(id, edge);
+                  candidateNetwork.patchRemaps = trialNetwork.patchRemaps;
+                  accepted = true; return;
+                }
+                noteRelocationReject(spacingConflict ? "joint-blockers:owner-spacing" : !served ? "joint-blockers:service-route-refused"
+                  : `joint-blockers:new-${introducedConstraint?.id ?? "owner-constraint"}:${introducedFinding ? ownerIdentity(introducedFinding.violation, trialSites) : "unknown"}`);
                 for (const entry of prior) { entry.site.x = entry.x; entry.site.z = entry.z; entry.site.yaw = entry.yaw; }
               };
               search(0);

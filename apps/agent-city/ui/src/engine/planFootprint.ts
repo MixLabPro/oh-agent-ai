@@ -207,6 +207,17 @@ export function footprintCircleDistance(footprint: FootprintSpec, origin: Vec2, 
 }
 
 function polygonDistance(a: Polygon, b: Polygon): number {
+  if (polygonsOverlap(a, b)) {
+    let penetration = Infinity;
+    for (const polygon of [a, b]) for (let i = 0; i < polygon.length; i += 1) {
+      const p = polygon[i], q = polygon[(i + 1) % polygon.length], nx = -(q.z - p.z), nz = q.x - p.x;
+      const length = Math.hypot(nx, nz); if (!length) continue;
+      const left = a.map(point => (point.x * nx + point.z * nz) / length);
+      const right = b.map(point => (point.x * nx + point.z * nz) / length);
+      penetration = Math.min(penetration, Math.max(...left) - Math.min(...right), Math.max(...right) - Math.min(...left));
+    }
+    return -penetration;
+  }
   if (pointInPolygon(a[0], b) || pointInPolygon(b[0], a)) return 0;
   let best = Infinity;
   for (let i = 0; i < a.length; i += 1) best = Math.min(best, segmentPolygonDistance(a[i], a[(i + 1) % a.length], b));
@@ -214,9 +225,15 @@ function polygonDistance(a: Polygon, b: Polygon): number {
 }
 
 /** Separation between physical model shapes, falling back to the nominal circles only when undeclared. */
-export function siteFootprintSeparation(a: { id: string; kind: string; x: number; z: number; yaw: number; radius: number },
-  b: { id: string; kind: string; x: number; z: number; yaw: number; radius: number }): number {
-  const left = siteFootprint(a.kind, a.id, a.radius), right = siteFootprint(b.kind, b.id, b.radius);
+export function siteFootprintSeparation(a: { id: string; kind: string; x: number; z: number; yaw: number; radius: number; shore?: Vec2 },
+  b: { id: string; kind: string; x: number; z: number; yaw: number; radius: number; shore?: Vec2 }): number {
+  if (![a.x, a.z, a.radius, b.x, b.z, b.radius].every(Number.isFinite) || a.radius < 0 || b.radius < 0) return -Infinity;
+  const projection = (owner: typeof a) => {
+    const footprint = siteFootprint(owner.kind, owner.id ?? `reservation:${owner.kind}`, owner.radius, !!owner.shore);
+    return { ...footprint, parts: footprint.overhead };
+  };
+  const left = projection(a), right = projection(b);
+  if ((left.exact && !Number.isFinite(a.yaw)) || (right.exact && !Number.isFinite(b.yaw))) return -Infinity;
   if (!left.exact && !right.exact) return Math.hypot(a.x - b.x, a.z - b.z) - a.radius - b.radius;
   if (left.exact && !right.exact) return footprintCircleDistance(left, a, a.yaw, b, b.radius);
   if (!left.exact && right.exact) return footprintCircleDistance(right, b, b.yaw, a, a.radius);

@@ -1,18 +1,29 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { citySrc, loadCity } from "./city-kit/index.mjs";
-const { declaredOwnerDetour, prepareJointSiteRoadRelocation, relocateSiteWithGroundRoads, runRepairTransaction,
+const { declaredOwnerDetour, detourEndpointAnglesClear, prepareJointSiteRoadRelocation, relocateSiteWithGroundRoads, runRepairTransaction,
   createCityPlan, MIAMI_COASTAL,
   emptyNetwork, addNetworkEdge, localResiteCandidates, inspectModelGround, footprintPolylineDistance, resolveModelEnvelope,
   declaredGroundRoadClear, roadThroughSite, nudgeSitesOffRoads, polylineDistance, previewNetworkPatch, groundJunctionFindings } = await loadCity({
   "engine/planner/constraints.ts": ["roadThroughSite"], "engine/planner/repairs.ts": ["nudgeSitesOffRoads"], "engine/planner/footprint.ts": ["polylineDistance"],
-  "engine/planner/jointSiteRoad.ts": ["declaredOwnerDetour", "prepareJointSiteRoadRelocation", "relocateSiteWithGroundRoads"],
+  "engine/planner/jointSiteRoad.ts": ["declaredOwnerDetour", "detourEndpointAnglesClear", "prepareJointSiteRoadRelocation", "relocateSiteWithGroundRoads"],
   "engine/planner/solve.ts": ["runRepairTransaction"], "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge", "previewNetworkPatch"],
   "engine/planner/report.ts": ["groundJunctionFindings"],
   "engine/planner/siting.ts": ["localResiteCandidates"], "engine/planner/modelGround.ts": ["inspectModelGround"],
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/modelEnvelope.ts": ["footprintPolylineDistance", "resolveModelEnvelope", "declaredGroundRoadClear"],
 });
+{
+  const network = emptyNetwork();
+  addNetworkEdge(network, { x: -20, z: 0 }, { x: 0, z: 0 }, true);
+  addNetworkEdge(network, { x: 0, z: 0 }, { x: 20, z: 0 }, true);
+  const road = [...network.edges.values()].find(edge => edge.to === "20:0");
+  assert.equal(detourEndpointAnglesClear(network, road, { x: 0, z: 0 }, { x: -10, z: 1 }), false,
+    "even a two-leg continuation cannot fold backwards into its incoming road");
+  assert.equal(detourEndpointAnglesClear(network, road, { x: 0, z: 0 }, { x: 10, z: 10 }), true);
+  addNetworkEdge(network, { x: 0, z: 0 }, { x: 0, z: -20 }, false);
+  assert.equal(detourEndpointAnglesClear(network, road, { x: 0, z: 0 }, { x: 10, z: 10 }), true);
+}
 const footprint = { parts: [{ shape: "rect", center: { x: 0, z: 0 }, width: 20, depth: 20 }] };
 for (const width of [5, 8, 12]) {
   const road = { width, points: [{ x: -50, z: 0 }, { x: 50, z: 0 }] };

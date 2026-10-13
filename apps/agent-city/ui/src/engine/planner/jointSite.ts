@@ -10,7 +10,7 @@ import { resolvePlanarAccess, planarAccessPose } from "../models/siteAccess";
 import type { SiteSpec } from "./sitespec";
 import { nominalAnchorPoint } from "./sitespec";
 import type { LocalFootprint } from "../models/physical";
-import { declaredOwnerDetour } from "./jointSiteRoad";
+import { declaredOwnerDetour, detourEndpointAnglesClear } from "./jointSiteRoad";
 import { previewNetworkPatch } from "./network";
 import { groundJunctionCorridorFailure } from "./civicClearance";
 import { groundJunctionFindings } from "./report";
@@ -19,7 +19,7 @@ import { footprintRunsDistance, siteFootprint, worldParts } from "../planFootpri
 export type PlotAccess = { role: "plot-gate"; capability?: "ground-frontage" | "island-causeway" | "shore-plot-boundary"; nodeId: string; ownerX: number; ownerZ: number; ownerYaw: number; entranceId?: string;
   entranceEvidence?: "model-position" | "plot-proxy"; doorX?: number; doorZ?: number };
 export const JOINT_SITE_CONFIG = {
-  version: 8,
+  version: 9,
   frontageSegments: 64,
   probes: [0.25, 0.5, 0.75] as const,
   fallbackProbes: [0.125, 0.375, 0.625, 0.875] as const,
@@ -32,9 +32,44 @@ export const JOINT_SITE_CONFIG = {
   outerRegionDirections: 24,
   /** Maximum exact-model corridor reline proposals per required owner. */
   maxCorridorRelineEvaluations: 48,
+  /** Shared by all neighbour-route attempts for one required owner. */
+  maxNeighbourAccessEvaluations: 64,
   /** Per required owner: 512 primary frontage + 640 fallback frontage + 113 inner + 192 outer points. */
   maxCandidateEvaluations: 1457,
 };
+
+/** A joint neighbour move includes its service corridor. Distance to an old
+ * street is only a prefilter; a short new plot-frontage route may make a dry,
+ * separated candidate usable. No model doorway is inferred for this proxy. */
+export function connectRelocatedPlotAccess(connector: ConnectorWorld, owner: PublicSite | import("../cityPlan").Landmark,
+  primaryAnchor: string | null): boolean {
+  if (!primaryAnchor || !connector.network.nodes.has(primaryAnchor)) return false;
+  const reachable = new Set([primaryAnchor]), queue = [primaryAnchor];
+  const adjacent = new Map<string, string[]>();
+  for (const road of connector.network.edges.values()) {
+    (adjacent.get(road.from) ?? adjacent.set(road.from, []).get(road.from)!).push(road.to);
+    (adjacent.get(road.to) ?? adjacent.set(road.to, []).get(road.to)!).push(road.from);
+  }
+  for (let i = 0; i < queue.length; i += 1) for (const next of adjacent.get(queue[i]) ?? []) if (!reachable.has(next)) {
+    reachable.add(next); queue.push(next);
+  }
+  let nearest: ReturnType<typeof closestPolylineSegment> = null;
+  for (const road of connector.network.edges.values()) {
+    if (road.bridge || !reachable.has(road.from)) continue;
+    const at = closestPolylineSegment(road.points, owner);
+    if (at && (!nearest || at.d < nearest.d)) nearest = at;
+  }
+  if (!nearest) return false;
+  if (nearest.d <= owner.radius + 20) return true;
+  const reach = owner.radius + 8, maxLength = owner.radius + 30;
+  if (nearest.d > reach + maxLength) return false;
+  const source = keyOf({ x: owner.x + (nearest.q.x - owner.x) * reach / nearest.d,
+    z: owner.z + (nearest.q.z - owner.z) * reach / nearest.d });
+  return runConnection({ id: `relocate-plot:${owner.id}`, source,
+    target: { kind: "primary", isPrimaryNode: id => reachable.has(id) }, purpose: "site-access",
+    allowBridge: false, maxLength, roadClass: "local", minAngleDeg: 35 }, connector,
+    { strategies: ["direct-projection", "node-merge", "detour", "grid-astar"] }).ok;
+}
 
 export function assignConnectedSite(world: SiteCandidateWorld, connector: ConnectorWorld, spec: SiteSpec, id: string, primaryAnchor: string | null,
   validateProposal?: (site: PublicSite, network: Network) => string | null): { site: PublicSite | null; network?: Network; reason?: string; rejected: number; routeRetries?: number } {
@@ -76,7 +111,8 @@ export function assignConnectedSite(world: SiteCandidateWorld, connector: Connec
             || footprintRunsDistance(modelFootprint, candidate, candidate.yaw, [[edge.points[edge.points.length - 1]]]) < required)
             return "site-clearance-protected-road-endpoint";
           const points = declaredOwnerDetour(footprint, edge, (a, b) =>
-            groundJunctionCorridorFailure(connector, a, b, edge.width, edge) === null);
+            detourEndpointAnglesClear(connector.network, edge, a, b)
+            && groundJunctionCorridorFailure(connector, a, b, edge.width, edge) === null);
           if (!points) return "site-clearance-no-safe-trunk-detour";
           relineEdges.push({ edgeId: edge.id, points });
         }
@@ -121,6 +157,12 @@ export function assignConnectedSite(world: SiteCandidateWorld, connector: Connec
     const toRoad = { x: (best.x - candidate.x) / best.distance, z: (best.z - candidate.z) / best.distance };
     const { yaw, door, gate: declaredGate } = planarAccessPose(resolved.access, candidate, toRoad, spec.radius + 8);
     if (!declaredGate) return "invalid-planar-gate-geometry";
+    const finalPose = { ...candidate, yaw };
+    const poseFailure = siteCandidateHardReject({ ...world, allowGroundCorridorRelocation: true }, spec, finalPose);
+    if (poseFailure) return `final-pose-${poseFailure}`;
+    if (modelFootprint.exact && [...candidateBaseNetwork.edges.values()].some(edge =>
+      footprintRunsDistance(modelFootprint, finalPose, yaw, [edge.points]) < Math.max(edge.width / 2 + 3, edge.width >= 8 ? 8 : 0)))
+      return "final-pose-road-clearance";
     const gate = keyOf(declaredGate);
     // Use the actual quantized gate, not the ideal r+8 radius: rounding can
     // move it slightly outward. This conservative lower bound only prunes
