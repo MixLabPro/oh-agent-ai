@@ -10,6 +10,7 @@ import type { LoadedFlora } from "../cityFlora";
 import { SegmentIndex } from "../cityPlan";
 import { promenadeSegments } from "../citySeaside";
 import { roadPaintPlan } from "../cityRoadPaint";
+import { renderRoadEdges } from "../cityRoadJunctions";
 import { activeTheme } from "../cityTheme";
 import { EXPRESSWAY_DECK_WIDTH, mergeGeometries } from "../render/shared";
 
@@ -73,13 +74,15 @@ export function treeSpots(host: NatureHost): Array<{ x: number; z: number; y: nu
     // 曾逐条路段种且跳过 <20 的段（多数路已被切成 ~15 的短段），净空又统一按最宽路（7.2）算——
     // 5 宽支路旁的树（离中线 4.9）全被拒，城市里几乎看不到行道树（多视角评估「像沙漠」）。
     const byWidth = new Map<number, Vec2[][]>();
-    for (const edge of host.layout.roadEdges) if (!edge.bridge) (byWidth.get(edge.width) ?? byWidth.set(edge.width, []).get(edge.width)!).push(edge.points);
+    // 净空与行道树都按渲染路网（窄短桩按接续宽路画）：否则树会种在加宽后的路面上。
+    const roadEdges = renderRoadEdges(host.layout.roadEdges);
+    for (const edge of roadEdges) if (!edge.bridge) (byWidth.get(edge.width) ?? byWidth.set(edge.width, []).get(edge.width)!).push(edge.points);
     const widthIndex = [...byWidth].map(([width, runs]) => ({ clearance: width / 2 + 1.2, index: new SegmentIndex(runs) }));
     const clearOfRoads = (p: Vec2) => widthIndex.every(({ clearance, index }) => !index.closerThan(p, clearance));
     const slots = host.layout.districts.flatMap((district) => [...district.slots.values()]);
     const buildings = new SegmentIndex(slots.map((slot) => [slot, slot]));
     const buildingClearance = slots.reduce((radius, slot) => Math.max(radius, Math.hypot(slot.width, slot.depth) / 2 + 1.2), 0);
-    for (const run of roadPaintPlan(host.layout.roadEdges).runs) {
+    for (const run of roadPaintPlan(roadEdges).runs) {
       const spacing = theme.streetTreeSpacing * (run.kind === "arterial" ? 0.8 : 1);
       let walked = 0; let next = 9; let index = 0;
       for (let i = 1; i < run.points.length; i += 1) {

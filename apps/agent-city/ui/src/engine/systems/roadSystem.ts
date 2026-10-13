@@ -5,7 +5,7 @@
 
 import * as THREE from "three";
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
-import { cornerArc, curbClearance, junctionIndex, pavementIndex, roadJunctionPlan, STRAIGHT_GAP } from "../cityRoadJunctions";
+import { cornerArc, curbClearance, junctionIndex, pavementIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../render/shared";
 
@@ -32,7 +32,9 @@ export function buildInfrastructure(host: RoadHost): void {
   const parts: Part[] = [];
   const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0, yaw = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt, yaw });
   // Curbs and street lights are real geometry; asphalt and markings share the atlas.
-  const junctions = roadJunctionPlan(host.layout.roadEdges);
+  // 画路一律用渲染路网（窄短桩按接续宽路画，与贴图 / 路面网格同一份）。
+  const roadEdges = renderRoadEdges(host.layout.roadEdges);
+  const junctions = roadJunctionPlan(roadEdges);
   const { byNode, armOf } = junctionIndex(junctions);
   /** 路缘在某端的退让距离。sideAtNode 是相对「从节点出发」方向的侧：+1 = 逆时针侧（+n）。 */
   const ownTrim = (edge: RoadEdge, node: string, sideAtNode: number): number => {
@@ -64,7 +66,7 @@ export function buildInfrastructure(host: RoadHost): void {
       }
     }
   }
-  const pavement = pavementIndex(host.layout.roadEdges);
+  const pavement = pavementIndex(roadEdges);
   /** 一段路缘：减去它穿过的别的路面带后逐段落盒（< 0.5 的碎段丢弃），高度按每段中点取地形。 */
   const curb = (p: Vec2, q: Vec2, own: RoadEdge | undefined, overlap: number) => {
     const length = Math.hypot(q.x - p.x, q.z - p.z);
@@ -80,7 +82,7 @@ export function buildInfrastructure(host: RoadHost): void {
   };
   const curbTrim = (edge: RoadEdge, node: string, sideAtNode: number) =>
     Math.max(ownTrim(edge, node, sideAtNode), spill.get(spillKey(edge, node, sideAtNode)) ?? 0);
-  for (const edge of host.layout.roadEdges) {
+  for (const edge of roadEdges) {
     // Bridge spans need actual geometry; the terrain atlas is below the river surface.
     if (edge.bridge) {
       const [a, b] = edge.points;
@@ -140,13 +142,9 @@ export function buildInfrastructure(host: RoadHost): void {
   }
   // 渐变段两侧的斜路缘：从宽路路缘（节点处）斜接到窄路路缘（渐变段末端）。
   for (const junction of junctions) if (junction.taper) {
-    const { wide, narrow, length } = junction.taper;
-    const d = narrow.dir; const n = { x: -d.z, z: d.x };
-    for (const side of [-1, 1]) {
-      const p = { x: junction.x + n.x * side * (wide.half + 0.25), z: junction.z + n.z * side * (wide.half + 0.25) };
-      const q = { x: junction.x + d.x * length + n.x * side * (narrow.half + 0.25), z: junction.z + d.z * length + n.z * side * (narrow.half + 0.25) };
-      curb(p, q, undefined, 0.12);
-    }
+    const [wideLeft, narrowLeft, narrowRight, wideRight] = taperOutline(junction, 0.25);
+    curb(wideLeft, narrowLeft, undefined, 0.12);
+    curb(wideRight, narrowRight, undefined, 0.12);
   }
   // 城北高架与城南港口曾按常量坐标（urbanBounds.north − 12 / right − 80、south + 58）摆放、与地理无关：
   // G2 起高架是规划层的环线（buildDistrictExpressways 渲染），港口是 harbor 公共用地（buildPublicSites）。
@@ -173,7 +171,7 @@ export function buildInfrastructure(host: RoadHost): void {
  *  不是一口一 Mesh；喇叭抬 0.035（路漆 0.02–0.05 的既有 z-fighting 规避惯例，
  *  路缘盒基面 0.02 / 沙滩带 0.05 之间）。 */
 export function buildChannelizedJunctions(host: RoadHost): void {
-  const mouths = channelizedTPlan(host.layout.roadEdges);
+  const mouths = channelizedTPlan(renderRoadEdges(host.layout.roadEdges));
   if (!mouths.length) return;
   const terrain = host.layout.terrain;
   // 与地面贴图（cityTextures 路漆盘）同色的沥青：喇叭就是「路口变宽」本身，不另配色。
@@ -357,7 +355,7 @@ export function buildCulDeSacBulbs(host: RoadHost): void {
   if (!ends.length) return;
   // 所在点最宽的 incident 路段决定回车圈半径（找到的多为唯一悬挂边）。
   const widthAt = new Map<string, number>();
-  for (const edge of host.layout.roadEdges) {
+  for (const edge of renderRoadEdges(host.layout.roadEdges)) {
     if (edge.bridge) continue;
     for (const id of [edge.from, edge.to]) widthAt.set(id, Math.max(widthAt.get(id) ?? 0, edge.width));
   }

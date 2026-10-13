@@ -11,7 +11,7 @@ import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
-import { cornerArc, roadJunctionPlan, SIDEWALK_BAND } from "./cityRoadJunctions";
+import { cornerArc, renderRoadEdges, roadJunctionPlan, SIDEWALK_BAND, taperOutline } from "./cityRoadJunctions";
 import { polygonDistance } from "./cityPlan";
 import { subtractBlockSurfaceExclusions, traceBlockSurface } from "./blockSurface";
 import { createRenderCanvas, renderContext2D, type RenderCanvas, type RenderContext2D } from "./renderCanvas";
@@ -227,30 +227,22 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   if (blockLayer) { subtractBlockSurfaceExclusions(blockCtx, layout.blocks, toPixel, scale); ctx.drawImage(blockLayer.canvas, 0, 0); }
   // 沙滩不画进这张贴图：2048px 铺满全岛只有 ~1.3px/单位，沙带与水线边缘糊成一片（真机近景）。
   // 沙滩改成贴地网格（cityParts.buildBeachRibbon），色带边缘由几何决定、与贴图分辨率无关。
-  const { runs, junctions } = roadPaintPlan(layout.roadEdges);
+  // 画路用渲染路网：窄短桩按接续宽路画（cityRoadJunctions.renderRoadEdges），与路面网格 / 路缘同一份。
+  const roadEdges = renderRoadEdges(layout.roadEdges);
+  const { runs, junctions } = roadPaintPlan(roadEdges);
   // 人行道与沥青都只画成路面网格（roadSurfaceSystem）下面的「垫底」：每侧内缩 UNDERLAY_INSET（> 半个贴图像素 ≈ 0.4），
   // 图集双线性插值的模糊边就藏在清晰的网格边缘里面，不在边缘外留一圈暗晕 / 白晕。
   // 垫底不能省：地面细节 shader 按图集颜色分类材质，网格万一漏一条缝，露出来的仍是同色的路，而不是草。
   const UNDERLAY_INSET = 0.8;
   // 路口几何（圆角/等级/渐变）一次算好，路面、人行道、标线与 roadSystem 的路缘共用同一份（cityRoadJunctions.ts）。
-  const junctionPlan = roadJunctionPlan(layout.roadEdges);
+  const junctionPlan = roadJunctionPlan(roadEdges);
   const asphaltOf = (kind: string) => (kind === "arterial" ? "#505b60" : "#646c6b");
   const fillPath = (points: Array<{ x: number; z: number }>, color: string) => {
     if (points.length < 3) return;
     ctx.beginPath(); points.forEach((p, i) => { const [x, y] = toPixel(p.x, p.z); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
     ctx.closePath(); ctx.fillStyle = color; ctx.fill();
   };
-  /** 渐变段梯形：节点处取宽路半宽、L 处收到窄路半宽；extra 给人行道外扩。 */
-  const taperQuad = (j: (typeof junctionPlan)[number], extra: number) => {
-    const t = j.taper!; const d = t.narrow.dir; const n = { x: -d.z, z: d.x };
-    const hw = t.wide.half + extra; const hn = t.narrow.half + extra;
-    return [
-      { x: j.x + n.x * hw, z: j.z + n.z * hw },
-      { x: j.x + d.x * t.length + n.x * hn, z: j.z + d.z * t.length + n.z * hn },
-      { x: j.x + d.x * t.length - n.x * hn, z: j.z + d.z * t.length - n.z * hn },
-      { x: j.x - n.x * hw, z: j.z - n.z * hw },
-    ];
-  };
+  const taperQuad = (j: (typeof junctionPlan)[number], extra: number) => taperOutline(j, extra);
   ctx.lineCap="butt"; ctx.lineJoin="round";
   // Paint ALL sidewalks before ANY asphalt: neighboring caps cannot cut white seams into roads.
   for (const road of runs) {
@@ -267,7 +259,7 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   const seams: Array<{ x: number; z: number; width: number; arterial: boolean }> = [];
   {
     const incident = new Map<string, typeof layout.roadEdges>();
-    for (const edge of layout.roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) (incident.get(id) ?? incident.set(id, []).get(id)!).push(edge);
+    for (const edge of roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) (incident.get(id) ?? incident.set(id, []).get(id)!).push(edge);
     const nodeById = new Map(layout.roadNodes.map((node) => [node.id, node]));
     for (const [id, list] of incident) {
       if (list.length !== 2 || junctions.has(id)) continue;
@@ -287,7 +279,7 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   // 旧做法圆盘画在路段之后、颜色取「任一臂是主干就用主干色」，窄路口也被涂成主干色的圆疙瘩。
   for (const j of junctionPlan) for (const corner of j.corners) fillPath([{ x: j.x, z: j.z }, ...cornerArc(corner, -UNDERLAY_INSET)], asphaltOf(corner.kind));
   for (const node of layout.roadNodes) if (junctions.has(node.id)) {
-    const incident = layout.roadEdges.filter((edge) => edge.from === node.id || edge.to === node.id);
+    const incident = roadEdges.filter((edge) => edge.from === node.id || edge.to === node.id);
     const width = Math.max(...incident.map((edge) => edge.width));
     const widest = incident.find((edge) => edge.width === width)!;
     const [x,y] = toPixel(node.x,node.z);
@@ -302,7 +294,7 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     ctx.fillStyle=seam.arterial?"#505b60":"#646c6b";ctx.beginPath();ctx.arc(x,y,Math.max(0,seam.width/2-UNDERLAY_INSET)*scale,0,Math.PI*2);ctx.fill();
   }
   // 渐变段（度 2 换宽）：宽路色梯形从宽路半宽线性收到窄路半宽，长 ≈ 2×宽度差——替代「宽度台阶」。
-  for (const j of junctionPlan) if (j.taper) fillPath(taperQuad(j, -UNDERLAY_INSET), asphaltOf(j.taper.wide.edge.kind));
+  for (const j of junctionPlan) if (j.taper) fillPath(taperQuad(j, -UNDERLAY_INSET), asphaltOf(j.taper.narrow.edge.kind));
   // 路面标线（中线 / 车道线 / 边线 / 斑马线 / 停止线）不再画进这张图：≈1.3 px/单位下 0.22 宽的线是 0.3 个像素，
   // 由路面网格（systems/roadSurfaceSystem.ts）在片元里按世界坐标解析绘制。
   for(const site of layout.publicSites){

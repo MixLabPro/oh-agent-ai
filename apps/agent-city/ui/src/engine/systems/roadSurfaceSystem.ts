@@ -20,7 +20,7 @@
 import * as THREE from "three";
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { roadPaintPlan } from "../cityRoadPaint";
-import { cornerArc, junctionIndex, roadJunctionPlan, STRAIGHT_GAP, type JunctionArm, type RoadJunction } from "../cityRoadJunctions";
+import { cornerArc, junctionIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline, type JunctionArm, type RoadJunction } from "../cityRoadJunctions";
 import { LIGHT_BUDGET } from "../cityLightBudget";
 import { terrainSurfaceHeight } from "./terrainSystem";
 
@@ -108,8 +108,9 @@ function pushUpTriangle(b: Builder, i: number, j: number, k: number): void {
 
 /** 路面几何（纯数据，不建 THREE 对象）：按层返回各自的顶点 / 属性，供 buildRoadSurface 与守卫共用。 */
 export function roadSurfaceGeometry(layout: Pick<CityLayout, "roadEdges" | "extent" | "terrain">) {
-  const { runs, junctions } = roadPaintPlan(layout.roadEdges);
-  const plan = roadJunctionPlan(layout.roadEdges);
+  const roadEdges = renderRoadEdges(layout.roadEdges); // 窄短桩按接续宽路画（cityRoadJunctions.renderRoadEdges）
+  const { runs, junctions } = roadPaintPlan(roadEdges);
+  const plan = roadJunctionPlan(roadEdges);
   const index = junctionIndex(plan);
   const layers = [newBuilder(), newBuilder(), newBuilder(), newBuilder(), newBuilder()];
   const color = new THREE.Color();
@@ -248,17 +249,11 @@ export function roadSurfaceGeometry(layout: Pick<CityLayout, "roadEdges" | "exte
       fan(node, circle(node, narrow.half + SIDEWALK), true, SIDEWALK_COLOR, true);
     }
     if (junction.taper) {
-      const { wide, narrow, length } = junction.taper;
-      const d = narrow.dir; const n = { x: -d.z, z: d.x };
-      const quad = (extra: number) => [
-        { x: node.x + n.x * (wide.half + extra), z: node.z + n.z * (wide.half + extra) },
-        { x: node.x + d.x * length + n.x * (narrow.half + extra), z: node.z + d.z * length + n.z * (narrow.half + extra) },
-        { x: node.x + d.x * length - n.x * (narrow.half + extra), z: node.z + d.z * length - n.z * (narrow.half + extra) },
-        { x: node.x - n.x * (wide.half + extra), z: node.z - n.z * (wide.half + extra) },
-      ];
-      const mid = { x: node.x + d.x * length * 0.5, z: node.z + d.z * length * 0.5 };
-      fan(mid, quad(0), true, asphaltOf(narrow.edge.kind));
-      fan(mid, quad(SIDEWALK), true, SIDEWALK_COLOR, true);
+      const { narrow } = junction.taper;
+      const outline = taperOutline(junction, 0);
+      const mid = { x: outline.reduce((sum, p) => sum + p.x, 0) / 4, z: outline.reduce((sum, p) => sum + p.z, 0) / 4 };
+      fan(mid, outline, true, asphaltOf(narrow.edge.kind));
+      fan(mid, taperOutline(junction, SIDEWALK), true, SIDEWALK_COLOR, true);
     }
   }
   return layers;

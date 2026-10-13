@@ -369,3 +369,42 @@ const surfaceKit = await loadCity({
   assert(vertices > 1000 && vertices < 40000, `city road surface stays a few-thousand-vertex mesh (${vertices})`);
   console.log(`City road paint: road-surface mesh follows rendered terrain, faces up, layers by width, no holes, junction marking params, city ${vertices} vertices.`);
 }
+
+// ── 衔接（真机截图「道路衔接的地方很奇怪」）：窄短桩按接续宽路画 + 路口→拐点短臂的圆角份额 ─────────
+// 场景按真机复刻：8 宽路 →（折 57°）→ 13.9 长的 5 宽桩 → 12 宽主路的十字口。
+{
+  const stubKit = await loadCity({ "engine/cityRoadJunctions.ts": ["renderRoadEdges", "roadJunctionPlan", "pavementIndex"] });
+  const P = (x, z) => ({ x, z });
+  const e = (id, from, to, a, b, width, extra = {}) => ({ id, from, to, points: [a, b], width, kind: width >= 8 ? "arterial" : "local", ...extra });
+  const J = P(0, 0); const B = P(-9.4, 10.1); // 桩：J → B 长 13.9
+  const bend = P(B.x + 11.6, B.z + 47.2);   // 8 宽路从 B 折 57° 离开
+  const dogleg = [
+    e("mw", "J", "W", J, P(-60, 12), 12), e("me", "J", "E", J, P(60, -12), 12),
+    e("stub", "J", "B", J, B, 5), e("arterial", "B", "C", B, bend, 8),
+  ];
+  const harmonized = stubKit.renderRoadEdges(dogleg);
+  const stub = harmonized.find((edge) => edge.id === "stub");
+  assert.equal(stub.width, 8, "a short narrow dog-leg between a wider road and a junction renders at the wider road's width");
+  assert.equal(stub.kind, "arterial", "…and its class");
+  assert.equal(dogleg[2].width, 5, "renderRoadEdges never mutates the layout's edges");
+  assert.equal(stubKit.renderRoadEdges(dogleg), harmonized, "result is cached per edge array");
+  // 真正的收窄：窄路继续往外延伸（另一端是度 2 同宽续接）→ 不动。
+  const narrowing = [e("wide", "A", "B", P(-60, 0), P(0, 0), 8), e("narrow1", "B", "C", P(0, 0), P(12, 0), 5), e("narrow2", "C", "D", P(12, 0), P(60, 0), 5)];
+  assert(stubKit.renderRoadEdges(narrowing).every((edge, i) => edge.width === narrowing[i].width), "a genuine narrowing that continues on is left alone");
+  // 桥头：路口端挂桥面 → 不动。
+  const bridgehead = [...dogleg.slice(0, 1), e("deck", "J", "E", J, P(60, -12), 8, { bridge: true, structure: "deck" }), ...dogleg.slice(2)];
+  assert.equal(stubKit.renderRoadEdges(bridgehead).find((edge) => edge.id === "stub").width, 5, "stubs at a bridgehead keep their data width");
+  // 路口 → 度 2 拐点的短臂：路口端可占 70%，圆角做得出来（对称 40% 时 90° 口要切点 ≥ 6，13.9·0.4 = 5.6 做不出）。
+  const square = [e("mw", "J", "W", J, P(-60, 0), 12), e("me", "J", "E", J, P(60, 0), 12), e("s", "J", "B", J, P(0, 10), 8), e("t", "B", "C", P(0, 10), P(40, 40), 8)];
+  const jPlan = stubKit.roadJunctionPlan(square).find((j) => j.id === "J");
+  const sArm = jPlan.arms.find((arm) => arm.edge.id === "s");
+  assert(near(sArm.cornerShare, 0.7, 1e-9), "junction end of a junction→bend arm gets the 70% corner share");
+  assert(jPlan.corners.some((corner) => corner.armA === jPlan.arms.indexOf(sArm) || corner.armB === jPlan.arms.indexOf(sArm)), "the short dog-leg arm gets a curb return at the junction");
+  const bPlan = stubKit.roadJunctionPlan(square).find((j) => j.id === "B");
+  assert(near(bPlan.arms.find((arm) => arm.edge.id === "s").cornerShare, 0.3, 1e-9), "bend end of the same arm yields (30%), so both ends sum to ≤ 100%");
+  for (const corner of [...jPlan.corners, ...bPlan.corners]) assert(corner.ta >= 0 && corner.tb >= 0, "corner tangents stay on their arms");
+  // 路面覆盖判定（路灯跳过路面上的灯位用）：路中心在、路缘外不在、节点圆盘在。
+  const pave = stubKit.pavementIndex(square);
+  assert(pave.covers(P(-30, 0)) && !pave.covers(P(-30, 7.5)) && pave.covers(P(0.5, 0.5)), "pavementIndex.covers matches road strips and node discs");
+  console.log("City road paint: dog-leg stubs harmonized (not genuine narrowings, not bridgeheads), junction→bend corner share, pavement covers.");
+}

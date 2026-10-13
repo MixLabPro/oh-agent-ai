@@ -19,8 +19,9 @@ export const SIDEWALK_BAND = 1.2;
 export const CORNER_EDGE_SHARE = 0.4;
 /** 夹角 ≥ 177° 视为直行（两条边线平行或背离），这一侧不需要圆角。 */
 export const STRAIGHT_GAP = Math.PI - 0.05;
-/** 度为 2 的换宽节点：两臂夹角离 180° 不超过 25° 才按「渐变段」画，弯得更厉害的交给圆角。 */
-const TAPER_MAX_BEND = (25 * Math.PI) / 180;
+/** 度为 2 的换宽节点：转角 ≤ 60° 都按「渐变段」画（梯形底边对齐宽路的平头端）。最初只认 25° 以内的近直行，
+ *  折角处换宽（真机：悬索桥头 12 → 5）就只剩一个窄路宽的补缝圆盘，宽路的平头两角支出窄路之外。 */
+const TAPER_MAX_BEND = Math.PI / 3;
 
 /** 路缘转角半径：r = 1.1 × 路宽 → 支路(5) 5.5 / 次干(8) 8.8 / 主干(12) 13.2。
  *  真实城市里路缘半径按道路等级取（居住区 5–6 m、次干 8–10 m、主干 12–15 m），
@@ -47,6 +48,8 @@ export type JunctionArm = {
   /** 可用直路长度：沿本臂穿过度 2、同宽、近共线（转角 < 12°）的续接边一直走到下一个真路口/拐点为止。
    *  40% 约束按它算——生成器把一条直路切成 10–15 长的短边（度 2 节点），按单条边算圆角会被压没。 */
   length: number;
+  /** 圆角可占用臂长的比例（见 cornerShareOf）。 */
+  cornerShare: number;
   /** 上面那条直路的逐边分解（从路口往外），路缘退让超出第一条边时顺延到后续边。 */
   chain: Array<{ edge: RoadEdge; near: string; start: number; length: number }>;
   legacy: boolean;
@@ -125,7 +128,7 @@ function cornerBetween(node: Vec2, a: JunctionArm, b: JunctionArm, gap: number, 
   if (!s0 || !s1) return null;
   const ta1 = s1.t - s0.t; const tb1 = s1.u - s0.u;
   let r = radius;
-  const limA = CORNER_EDGE_SHARE * a.length; const limB = CORNER_EDGE_SHARE * b.length;
+  const limA = a.cornerShare * a.length; const limB = b.cornerShare * b.length;
   if (ta1 > 1e-9) r = Math.min(r, (limA - s0.t) / ta1);
   if (tb1 > 1e-9) r = Math.min(r, (limB - s0.u) / tb1);
   if (!(r >= 0.5)) return null;
@@ -185,6 +188,22 @@ function straightChain(incident: Map<string, RoadEdge[]>, first: RoadEdge, start
   return chain;
 }
 
+/** 直路链远端节点的度（链最后一条边离开路口那一端）。 */
+function farDegree(incident: Map<string, RoadEdge[]>, chain: JunctionArm["chain"]): number {
+  const last = chain[chain.length - 1];
+  const far = last.edge.from === last.near ? last.edge.to : last.edge.from;
+  return (incident.get(far) ?? []).length;
+}
+
+/** 圆角可占用臂长的比例：两端都是路口（或尽端）各 40%；路口 → 度 2 拐点的短臂，路口端 70%、拐点端 30%（两端合计仍 ≤ 100%）。
+ *  对称的 40% 在规划层掰出来的 10–14 长「狗腿」臂上做不出路口圆角：90° 口要切点 ≥ 主路半宽 6 才有圆弧，40%·10 = 4，
+ *  转角只剩直角（真机截图）；拐点那头的内侧圆角本来就小，让出份额给路口端。 */
+function cornerShareOf(degreeHere: number, degreeFar: number): number {
+  if (degreeHere >= 3 && degreeFar === 2) return 0.7;
+  if (degreeHere === 2 && degreeFar >= 3) return 0.3;
+  return CORNER_EDGE_SHARE;
+}
+
 /** 全图路口计划：度 ≥ 2 的地面节点逐个出圆角、等级与渐变段。结果按节点 id 排序（确定性）。 */
 export function roadJunctionPlan(edges: readonly RoadEdge[]): RoadJunction[] {
   const incident = new Map<string, RoadEdge[]>();
@@ -207,6 +226,7 @@ export function roadJunctionPlan(edges: readonly RoadEdge[]): RoadJunction[] {
       arms.push({
         edge, dir: { x: dx / step, z: dz / step }, angle: Math.atan2(dz, dx), half: edge.width / 2,
         length: chain.reduce((sum, link) => sum + link.length, 0), chain, legacy: isLegacyArm(edge),
+        cornerShare: cornerShareOf(list.length, farDegree(incident, chain)),
         ccwTrim: null, cwTrim: null, ccwNeighbor: null, ccwGap: 0, cwNeighbor: null, cwGap: 0, role: "plain", stopAt: null,
       });
     }
@@ -266,6 +286,22 @@ export function roadJunctionPlan(edges: readonly RoadEdge[]): RoadJunction[] {
     result.push({ id, x: node.x, z: node.z, arms, corners, maxWidth, maxKind, hierarchical, touchesDeck, taper });
   }
   return result.sort((p, q) => (p.id < q.id ? -1 : p.id > q.id ? 1 : 0));
+}
+
+/** 渐变段轮廓（贴图 / 路面网格 / 路缘共用）：[宽侧左, 窄侧左, 窄侧右, 宽侧右]，extra = 向外加宽（人行道 1.2 等）。
+ *  底边对齐宽路的平头端（宽路方向的法线），顶边对齐窄路（窄路方向的法线）——直行时两者重合，与旧梯形一致；
+ *  折角处这样才不会在宽路平头的两角漏出楔形缺口。 */
+export function taperOutline(junction: RoadJunction, extra: number): Vec2[] {
+  const { wide, narrow, length } = junction.taper!;
+  const w = { x: -wide.dir.x, z: -wide.dir.z }; // 沿宽路驶向节点的方向
+  const nW = { x: -w.z, z: w.x }; const d = narrow.dir; const nN = { x: -d.z, z: d.x };
+  const hw = wide.half + extra; const hn = narrow.half + extra;
+  return [
+    { x: junction.x + nW.x * hw, z: junction.z + nW.z * hw },
+    { x: junction.x + d.x * length + nN.x * hn, z: junction.z + d.z * length + nN.z * hn },
+    { x: junction.x + d.x * length - nN.x * hn, z: junction.z + d.z * length - nN.z * hn },
+    { x: junction.x - nW.x * hw, z: junction.z - nW.z * hw },
+  ];
 }
 
 /** 按节点 / （边, 节点）查路口与臂：roadSystem 的路缘与 cityTextures 的标线都经由它取同一份几何，避免两边各算一遍。 */
@@ -389,5 +425,78 @@ export function pavementIndex(edges: readonly RoadEdge[], cell = 40) {
     if (from < 1) keep.push([from, 1]);
     return keep;
   };
-  return { outside };
+  /** 点是否落在任一地面路的路面上（矩形带或节点圆盘，容差同 outside）。 */
+  const covers = (p: Vec2): boolean => {
+    const key = `${Math.floor(p.x / cell)}:${Math.floor(p.z / cell)}`;
+    for (const strip of grid.get(key) ?? []) {
+      const w = { x: p.x - strip.a.x, z: p.z - strip.a.z };
+      const along = w.x * strip.u.x + w.z * strip.u.z;
+      if (along > 0.05 && along < strip.length - 0.05 && Math.abs(cross(strip.u, w)) < strip.half - 0.05) return true;
+    }
+    for (let gx = Math.floor(p.x / cell) - 1; gx <= Math.floor(p.x / cell) + 1; gx += 1)
+      for (let gz = Math.floor(p.z / cell) - 1; gz <= Math.floor(p.z / cell) + 1; gz += 1)
+        for (const disc of discGrid.get(`${gx}:${gz}`) ?? []) if (Math.hypot(p.x - disc.c.x, p.z - disc.c.z) < disc.radius - 0.05) return true;
+    return false;
+  };
+  return { outside, covers };
+}
+
+/** 短桩最长长度与续接最大转角（渲染层宽度协调用）。 */
+const STUB_MAX_LENGTH = 16;
+/** 续接转角上限 90°：度 2 节点没有分岔，桩与续接路就是同一条路。真机里的桩是规划层为了以更好的角度接主路
+ *  掰出来的「狗腿」（实测 34°、57°），最初按 25° 的共线门槛一个都没认出来。 */
+const STUB_MAX_TURN = Math.PI / 2;
+const harmonizedCache = new WeakMap<readonly RoadEdge[], RoadEdge[]>();
+
+/** 渲染用路网：把生成器留下的「窄短桩」按它接续的宽路宽度来画（数据不改，返回替换过宽度/等级的新边对象）。
+ *  短桩 = 长 ≤ 16 的地面边，一端是度 2 节点（转角 ≤ 90°）接一条更宽的路，另一端是路口（度 ≥ 3）或同样接更宽的路。
+ *  为什么要做：生成器在宽路接主路的最后一截常留下 10–14 长、折一个角的 5 宽边（8 宽路 → 5 宽桩 → 12 宽主路），
+ *  照数据画就是路口前一块浅色窄路面 + 渐变、短到做不出路缘圆角——真机截图「道路衔接的地方很奇怪」。
+ *  真正的收窄（窄路继续往外延伸）不在此列：另一端必须是路口或更宽的路；桥头路口也不在此列。所有画路的消费方（贴图、路面网格、路缘、
+ *  渠化、回车圈、行道树、路灯）都取这一份，保持一致。结果按输入数组缓存。 */
+export function renderRoadEdges(edges: readonly RoadEdge[]): RoadEdge[] {
+  const cached = harmonizedCache.get(edges);
+  if (cached) return cached;
+  let current = edges.slice();
+  for (let pass = 0; pass < 3; pass += 1) {
+    const incident = new Map<string, RoadEdge[]>();
+    for (const edge of current) for (const id of [edge.from, edge.to]) {
+      const list = incident.get(id) ?? []; list.push(edge); incident.set(id, list);
+    }
+    const direction = (edge: RoadEdge, from: string) => {
+      const pts = edge.from === from ? edge.points : [...edge.points].reverse();
+      const a = pts[0]; const b = pts[1]; const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+      return { x: (b.x - a.x) / len, z: (b.z - a.z) / len };
+    };
+    /** 从 node 离开 edge 之后近共线接上的更宽地面路（没有则 null）。 */
+    const widerContinuation = (edge: RoadEdge, node: string): RoadEdge | null => {
+      const list = incident.get(node) ?? [];
+      if (list.length !== 2) return null;
+      const next = list[0] === edge ? list[1] : list[0];
+      if (isLegacyArm(next) || next.width <= edge.width || next.points.length < 2) return null;
+      const arriving = direction(edge, node); // 从 node 指回 edge 内部
+      const leaving = direction(next, node);
+      const turn = Math.acos(Math.max(-1, Math.min(1, -(arriving.x * leaving.x + arriving.z * leaving.z))));
+      return turn <= STUB_MAX_TURN ? next : null;
+    };
+    let changed = false;
+    current = current.map((edge) => {
+      if (isLegacyArm(edge) || edge.points.length < 2) return edge;
+      let length = 0;
+      for (let k = 1; k < edge.points.length; k += 1) length += Math.hypot(edge.points[k].x - edge.points[k - 1].x, edge.points[k].z - edge.points[k - 1].z);
+      if (length > STUB_MAX_LENGTH) return edge;
+      const ends = [edge.from, edge.to].map((node) => ({ node, degree: (incident.get(node) ?? []).length, wider: widerContinuation(edge, node) }));
+      const anchor = ends.filter((end) => end.wider).sort((p, q) => q.wider!.width - p.wider!.width)[0];
+      if (!anchor) return edge;
+      const other = ends.find((end) => end !== anchor)!;
+      // 桥头不动：路口端挂着桥面时，桥面宽度另有来历（造型 / 主塔间距），把桩加宽到接续路的宽度会在桥头铺出一块比桥面还宽的沥青（真机悬索桥头）。
+      const atDeck = (incident.get(other.node) ?? []).some(isDeckEdge);
+      if (atDeck || !(other.degree >= 3 || other.wider)) return edge;
+      changed = true;
+      return { ...edge, width: anchor.wider!.width, kind: anchor.wider!.kind };
+    });
+    if (!changed) break;
+  }
+  harmonizedCache.set(edges, current);
+  return current;
 }

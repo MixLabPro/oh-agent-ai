@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { LIGHT_BUDGET, lampTier, nightFactor, windowRate } from "../cityLightBudget";
 import { activeTheme } from "../cityTheme";
 import { roadPaintPlan } from "../cityRoadPaint";
+import { pavementIndex, renderRoadEdges } from "../cityRoadJunctions";
 import { createRenderCanvas } from "../renderCanvas";
 import type { CityLayout } from "../cityLayout";
 import { culDeSacBulbRadius } from "../systems/roadSystem";
@@ -113,7 +114,11 @@ export function buildNightLights(host: NightHost): NightLights {
   };
   // 沿合并后的整条路（roadPaintPlan 的 run）按弧长每 30 放一盏，间距跨路段累计。曾逐条路段放、
   // 且跳过 <18 的段：滨海大道细分成 ~15 的短段，整条一盏灯都没有（真机夜景：海滨道路漆黑）。
-  for (const run of roadPaintPlan(host.layout.roadEdges).runs) {
+  const roadEdges = renderRoadEdges(host.layout.roadEdges);
+  // 灯位落在别的路面上（路口内、折角外侧——灯沿本路偏移线走，过弯 / 进路口时会跑到相邻路面中间）就跳过这一盏，
+  // 间距照常累计。真机：路口沥青正中立着灯杆。
+  const pavement = pavementIndex(roadEdges);
+  for (const run of roadPaintPlan(roadEdges).runs) {
     if (run.kind !== "arterial") continue;
     const tier = lampTier(run.width);
     let walked = 0; let next = spacing / 2; let index = 0;
@@ -129,7 +134,7 @@ export function buildNightLights(host: NightHost): NightLights {
         const side = index % 2 === 0 ? 1 : -1; // 两侧交错
         const x = a.x + dx * t + nx * side * (run.width / 2 + 0.9);
         const z = a.z + dz * t + nz * side * (run.width / 2 + 0.9);
-        lamp(x, z, nx * side, nz * side, Math.max(0, host.layout.terrain.height(x, z)), yaw, 3.2, 9.5, tier);
+        if (!pavement.covers({ x, z })) lamp(x, z, nx * side, nz * side, Math.max(0, host.layout.terrain.height(x, z)), yaw, 3.2, 9.5, tier);
         next += spacing * (tier >= 1 ? 1 : tier >= 0.6 ? 1.2 : 1.5); index += 1;
       }
       walked += length;
