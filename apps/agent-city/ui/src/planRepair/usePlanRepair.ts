@@ -16,8 +16,10 @@ import type { RemapReport } from "../engine/planRemap";
 export type RepairInfo = {
   counts: { buildingMoves: number; roadOps: number; highwayOps: number; roadAdds: number; roadDrops: number; siteOps: number; suppressedContext: number } | null;
   staleCount: number;
-  /** 补丁写于更小的档位（城市随数据增长扩大过）：整份失效。重定位成功后为 false，改由 remap 报告。 */
+  /** 补丁对不上当前地图（写于别的档位，或别的生成器版本）：整份失效。重定位成功后为 false，改由 remap 报告。 */
   tierChanged: boolean;
+  /** 档位没变、是生成器换了版本（generatorVersion.ts）——只决定提示文案。 */
+  generatorChanged: boolean;
   /** 最近一次跨档重定位的结果。 */
   remap: RemapReport | null;
   canUndo: boolean;
@@ -26,7 +28,7 @@ export type RepairInfo = {
 };
 
 const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], siteTurn: 0, preview: null, message: null };
-const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false };
+const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, generatorChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
   const enabled = planDevEnabled();
@@ -43,9 +45,9 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     const session = installed.current?.session;
     if (!session) return;
     let status = session.status();
-    // 城市升/降了一档：自动把补丁搬到新档（路线图 SPEC P0-2），不等用户进修复模式。
+    // 城市升/降了一档，或生成器换了版本：自动把补丁搬到新地图（路线图 SPEC P0-2），不等用户进修复模式。
     if (status.tierChanged && session.remapForTier()) { status = session.status(); controllerRef.current?.refresh(); }
-    setInfo({ counts: status.counts, staleCount: status.stale.length, tierChanged: status.tierChanged, remap: status.remap, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed });
+    setInfo({ counts: status.counts, staleCount: status.stale.length, tierChanged: status.tierChanged, generatorChanged: status.generatorChanged, remap: status.remap, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed });
     if (auditOpen.current) setIssues(session.audit());
   }, []);
 
