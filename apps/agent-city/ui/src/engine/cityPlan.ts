@@ -35,6 +35,8 @@ import { addNetworkEdge, commitNetwork, emptyNetwork, keyOf, type Network } from
 import { runConnection, endpointClear, commitFixedLink, parseFailure, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import { frontSitesAndAssignJointSites } from "./planner/siteFrontage";
 import { buildSectorBlocks } from "./planner/sectorBlocks";
+import { connectSiteEntrances } from "./planner/siteEntrances";
+import { stitchStreetNetwork } from "./planner/streetStitch";
 import { connectServiceLoops } from "./planner/loop";
 import { mergeFragmentEdges } from "./planner/fragmentEdges";
 import { finishDeadEnds } from "./planner/deadEnds";
@@ -360,90 +362,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const { zoneFor, blocks, roadGenerationDiagnostics, parcelBuilders, frontNodes } = buildSectorBlocks({ R, core, trunks, random, network,
     connectorWorld, seaside, buildable, coastDistance, reservations, key, trunkIndex, ringIndex, coastRoadIndex });
 
-  // 沿海路 / 河岸路的断头互接：一段的端点 80 内有另一段（或同段另一端）的断头，就直连成一条（不过水、不穿用地）。
-  // 河岸路在入海口附近停下、环岛路在河口另一侧停下，两端都是断头却互不相接（真机截图）。
-  // 批次 4-2：互接的加边改走连接器 node-merge（目标 = 指名节点），校验口径保留历史档
-  // （safeRoadLink 同判据 + 两端净空角，不查交叉），经 commitNetworkPatch 事务提交。
-  {
-    let coastalJoinSeq = 0;
-    const deg = () => { const d = new Map<string, number>(); for (const e of edges.values()) for (const n of [e.from, e.to]) d.set(n, (d.get(n) ?? 0) + 1); return d; };
-    const ends = coastRoadRuns.flatMap((run, r) => [{ p: run[0], r }, { p: run[run.length - 1], r }]);
-    const joined = new Set<string>();
-    for (const a of ends) {
-      const d = deg(); const ida = roadNodeId(key(a.p));
-      if ((d.get(ida) ?? 0) !== 1 || joined.has(ida)) continue;
-      const mate = ends
-        .filter((b) => b !== a && (d.get(roadNodeId(key(b.p))) ?? 0) === 1 && !joined.has(roadNodeId(key(b.p))))
-        .map((b) => ({ b, dist: Math.hypot(b.p.x - a.p.x, b.p.z - a.p.z) }))
-        .filter(({ dist, b }) => dist > 1 && dist < 80 && safeRoadLink(a.p, b.p) && endpointClear(network, a.p, b.p) && endpointClear(network, b.p, a.p))
-        .sort((x, y) => x.dist - y.dist)[0];
-      if (!mate) continue;
-      runConnection({
-        id: `coastal-join:${coastalJoinSeq += 1}`,
-        source: a.p,
-        target: { kind: "node", id: roadNodeId(key(mate.b.p)) },
-        purpose: "coastal-link",
-        allowBridge: false,
-        maxLength: 80,
-        roadClass: "arterial",
-        primary: true,
-      }, connectorWorld, { strategies: ["node-merge"], siteMargin: 5, crossings: true });
-      joined.add(ida); joined.add(roadNodeId(key(mate.b.p)));
-    }
-  }
-  // 环岛滨海路段端接入路网；离它 ≤16 的街网节点以 T 路口接上（街区一直排到沿海路）。
-  for (const runPts of coastRoadRuns) for (const end of [runPts[0], runPts[runPts.length - 1]]) {
-    if (Math.hypot(end.x - runPts[0].x, end.z - runPts[0].z) < 0.01 && end !== runPts[0]) continue;
-    connectToNetwork(end, 160, false, (edge) => coastRoadRuns.some((r) => r.some((q) => Math.hypot(q.x - edge.points[0].x, q.z - edge.points[0].z) < 0.01) && r.some((q) => Math.hypot(q.x - edge.points[1].x, q.z - edge.points[1].z) < 0.01)));
-  }
-  for (const node of [...nodes.values()]) {
-    if (!coastRoadIndex.closerThan(node, 16) || coastRoadIndex.closerThan(node, 0.5)) continue;
-    connectToNetwork(node, 18, false, (edge) => edge.width < 12 || !coastRoadIndex.closerThan(edge.points[0], 0.5));
-  }
-  // 节点落在别的路段中间时把那条路段切开（S4 裁切块的边沿网格线只走到裁切点，与相邻整格的同线整边重叠成 0° 「锐角」）：
-  // 重叠的共线边因此变成共享路段，T 接点成为真正的路口。按 60 分桶避免 O(N·E)。
-  {
-    for (let pass = 0; pass < 3; pass += 1) {
-      const CELL = 60; const buckets = new Map<string, RoadEdge[]>();
-      for (const edge of edges.values()) {
-        if (edge.bridge) continue;
-        const [a, b] = edge.points;
-        for (let gx = Math.floor(Math.min(a.x, b.x) / CELL); gx <= Math.floor(Math.max(a.x, b.x) / CELL); gx += 1)
-          for (let gz = Math.floor(Math.min(a.z, b.z) / CELL); gz <= Math.floor(Math.max(a.z, b.z) / CELL); gz += 1) {
-            const k = `${gx}:${gz}`; (buckets.get(k) ?? buckets.set(k, []).get(k)!).push(edge);
-          }
-      }
-      let split = 0;
-      for (const node of [...nodes.values()]) {
-        const host = (buckets.get(`${Math.floor(node.x / CELL)}:${Math.floor(node.z / CELL)}`) ?? []).find((edge) =>
-          edges.has(edge.id) && edge.from !== node.id && edge.to !== node.id && segmentDistance(node, edge.points[0], edge.points[1]) < 0.05
-          && Math.hypot(node.x - edge.points[0].x, node.z - edge.points[0].z) > 0.5 && Math.hypot(node.x - edge.points[1].x, node.z - edge.points[1].z) > 0.5);
-        if (!host) continue;
-        edges.delete(host.id);
-        const primary = host.width >= 12; const art = host.kind === "arterial";
-        addEdge(host.points[0], node, art, false, primary); addEdge(node, host.points[1], art, false, primary);
-        split += 1;
-      }
-      if (!split) break;
-    }
-  }
-
-  // 横街接入主干道：首排街区的角点（及离主干道 ≤16 的街网节点）垂直接到主干道上，形成 T 路口。
-  {
-    const seen = new Set<string>();
-    const candidates = [...frontNodes, ...[...nodes.values()].filter((n) => trunkIndex.closerThan(n, 16))];
-    for (const p of candidates) {
-      const id = roadNodeId(key(p));
-      if (seen.has(id)) continue; seen.add(id);
-      if (!nodes.has(id)) continue; // 角点上没有任何街道（整条边都贴主干道）就不必接
-      connectToNetwork(p, 18, false, (edge) => edge.kind !== "arterial" || edge.width < 12);
-    }
-  }
-  // 街网生成后再给大道两端各补一条到街区街道的接入路（同一套 localConstraints）。
-  for (const segment of coastalRoadRuns) {
-    if (segment.length < 2) continue;
-    for (const endpoint of [segment[0], segment[segment.length - 1]]) connectToNetwork(endpoint, 160, false, (edge) => coastalRoadEdgeIds.has(edge.id));
-  }
+  // 街网缝合（R5 步 6s：逐字迁至 planner/streetStitch.ts）：沿海路断头互接 → 环岛路 T 接 → 中途节点切边 → 首排角点接主干道 → 大道端接入。
+  // 网络原地改（经 connectToNetwork / runConnection / addEdge），顺序不变。
+  stitchStreetNetwork({ network, connectorWorld, connectToNetwork, addEdge, key, safeRoadLink, coastRoadRuns, coastalRoadRuns, coastRoadIndex,
+    trunkIndex, coastalRoadEdgeIds, frontNodes });
 
   // 入口路（R2）：仍离路较远的用地/地标（岸边对象，或找不到临街位置的）从朝向最近道路的边缘
   // 拉一条支路接入路网——门前要有路（真机：双子塔、摩天轮、港口门前无路）。
@@ -451,130 +373,11 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 三段、桥头干地与跨距校验、候选按距离前 40 个投影点），经事务补丁提交；判据逐字保留。
   // 批 A：堤道/门路的失败都如实进 connectionLog（诊断面，不进基线哈希）。
   const connectionLog: ConnectionAttempt[] = [];
-  // Close the generated ground network before accepting a site's entrance.
-  // Otherwise a valid shore attachment can be committed to a component whose
-  // main-network route has not even been attempted yet.
-  const junctionReport = connectGroundJunctions(connectorWorld);
-  connectGeneratedComponents();
-  for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius) continue;
-    // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。落位期已验证
-    // （占地圈全深水、岸点在实地 ≥0.3），此处仅事务化提交（commitFixedLink）。
-    const landmarkSite = site as typeof site & { shore?: Vec2 };
-    const ref: Vec2 = landmarkSite.shore ?? site;
-    if (landmarkSite.shore) {
-      const candidateSet = sailOperaCandidateSets.find((set) => set.siteId === (site.id ?? site.kind));
-      const candidates = candidateSet?.candidates.slice(0, SAIL_OPERA_CONFIG.jointCandidates) ?? [{ x: site.x, z: site.z, yaw: site.yaw, shore: ref }];
-      const original = { x: site.x, z: site.z, zShore: ref.z, shoreX: ref.x, yaw: site.yaw };
-      const failed: string[] = [];
-      let accepted = false;
-      for (const candidate of candidates) {
-        site.x = candidate.x; site.z = candidate.z; site.yaw = candidate.yaw; landmarkSite.shore = candidate.shore;
-        const l = Math.hypot(site.x - candidate.shore.x, site.z - candidate.shore.z) || 1;
-        const edgePt = key({ x: site.x - ((site.x - candidate.shore.x) / l) * site.radius * 0.9, z: site.z - ((site.z - candidate.shore.z) / l) * site.radius * 0.9 });
-        const shorePt = key(candidate.shore);
-        const staged: Network = { nodes: new Map([...network.nodes].map(([id, node]) => [id, { ...node }])), edges: new Map([...network.edges].map(([id, edge]) => [id, { ...edge, points: edge.points.map((p) => ({ ...p })) }])), version: 0 };
-        const stagedConnector: ConnectorWorld = { ...connectorWorld, network: staged, reservations: () => reservations().filter((reserved) => reserved !== site) };
-        const causeway = commitFixedLink(stagedConnector, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
-        if (!causeway.ok) { failed.push(`causeway:${causeway.detail ?? causeway.reason}`); continue; }
-        // 连接器的 owner-revalidation 必须能重新找到设施；路径候选本身仍从 blockers 中排除 owner。
-        stagedConnector.reservations = reservations;
-        const stagedComponents = componentOf({ roadNodes: [...staged.nodes.values()], roadEdges: [...staged.edges.values()] } as ConstraintPlan);
-        const primaryAnchor = primaryAnchorNodeIds.find((id) => staged.nodes.has(id));
-        const primaryComponent = primaryAnchor ? stagedComponents.get(primaryAnchor) : undefined;
-        if (!primaryComponent || ![...staged.edges.values()].some((edge) => !edge.bridge && stagedComponents.get(edge.from) === primaryComponent)) {
-          failed.push("no-primary-ground-network-target"); continue;
-        }
-        const access = runConnection({ id: `causeway-access:${site.id ?? site.kind}`, source: shorePt,
-          target: { kind: "primary", isPrimaryNode: (id) => stagedComponents.get(id) === primaryComponent }, purpose: "site-access", allowBridge: true, maxLength: 1000, roadClass: "local", minAngleDeg: 35 },
-        stagedConnector, { strategies: ["direct-projection", "node-merge", "detour", "bridge-candidate"],
-          bridge: { self: site, blockers: reservations().filter((reserved) => reserved !== site), siteGate: true } });
-        if (!access.ok) { failed.push(`shore:${access.detail ?? access.reason}`); continue; }
-        const acceptedComponents = componentOf({ roadNodes: [...staged.nodes.values()], roadEdges: [...staged.edges.values()] } as ConstraintPlan);
-        if (acceptedComponents.get(roadNodeId(edgePt)) !== acceptedComponents.get(primaryAnchor!)) {
-          failed.push("causeway-not-attached-to-primary"); continue;
-        }
-        site.access = { role: "plot-gate", capability: "island-causeway", nodeId: roadNodeId(edgePt), ownerX: site.x, ownerZ: site.z, ownerYaw: site.yaw };
-        nodes.clear(); for (const [id, node] of staged.nodes) nodes.set(id, node);
-        edges.clear(); for (const [id, edge] of staged.edges) edges.set(id, edge);
-        network.version = staged.version;
-        bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
-        for (const span of access.bridgeSpans) bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
-        accepted = true;
-        break;
-      }
-      if (accepted) continue; // 堤道及岸侧主网引道已经作为同一草稿提交。
-      site.x = original.x; site.z = original.z; site.yaw = original.yaw;
-      landmarkSite.shore = { x: original.shoreX, z: original.zShore };
-      const detail = `no joint causeway/shore-access candidate among ${candidates.length}: ${failed.slice(-4).join("; ")}`;
-      connectionLog.push({ id: `causeway:${site.id ?? site.kind}`, purpose: "site-access", ok: false, reason: parseFailure(detail), detail });
-      continue;
-    }
-    let nearest: { p: Vec2; d: number; edge: RoadEdge } | null = null;
-    for (const edge of edges.values()) {
-      if (edge.bridge) continue;
-      const closest = closestPolylineSegment(edge.points, ref);
-      if (!closest) continue;
-      const p = closest.q; const d = closest.d;
-      if (!nearest || d < nearest.d) nearest = { p, d, edge };
-    }
-    if (!nearest || nearest.d <= (landmarkSite.shore ? 6 : site.radius + 14)) continue;
-    const ux = (nearest.p.x - ref.x) / nearest.d; const uz = (nearest.p.z - ref.z) / nearest.d;
-    // 岸边地标（灯塔在岬角尖上）门口常是不可建的岸滩：沿朝路方向往里走到可建地面再起路。
-    let reach = landmarkSite.shore ? 0 : site.radius + 6;
-    // 不再向内陆走到可建地：岬角灯塔会走 100+，入口路从远处的路边起步、根本到不了地标（用户：门前要有路）。
-    // 门口在不可建岸滩时，由下方的显式桥候选兜底（全程在陆上或 ≤84 连续水段成桥）。
-    const gate = key({ x: ref.x + ux * reach, z: ref.z + uz * reach });
-    if (!connectToNetwork(gate, 240, false) && !connectToNetwork(gate, 700, false, () => false, 35)) {
-      const spec = specByKind(site.kind);
-      if (spec?.plotBoundaryAccess) {
-        const view = (candidate: Network, access?: PublicSite["access"]) => ({
-          roadEdges: [...candidate.edges.values()], roadNodes: [...candidate.nodes.values()],
-          publicSites: publicSites.map((owner) => owner === site && access ? { ...owner, access } : owner),
-          landmarks, blocks: [], terrain, core, coast, river, seaside,
-          coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount),
-          primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => candidate.nodes.has(id)) ?? null,
-          siteObligations, demandCatalogue: declaredSiteDemands } as unknown as ConstraintPlan);
-        const identity = (finding: { site?: string; at?: Vec2; detail?: string }) => JSON.stringify([finding.site, finding.at, finding.detail]);
-        const baseline = new Map(CONSTRAINTS.map((rule) => [rule.id, new Set(rule.measure(view(network)).map(identity))]));
-        const binding = (point: Vec2): NonNullable<PublicSite["access"]> => ({ role: "plot-gate", capability: "shore-plot-boundary",
-          nodeId: roadNodeId(point), ownerX: site.x, ownerZ: site.z, ownerYaw: site.yaw,
-          entranceId: "shore-plot-boundary", entranceEvidence: "plot-proxy" });
-        const proposal = proposeShorePlotAccess(connectorWorld, site, spec,
-          primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, (candidate, point) => {
-            for (const rule of CONSTRAINTS) if (rule.measure(view(candidate, binding(point)))
-              .some((finding) => !baseline.get(rule.id)!.has(identity(finding)))) return `shore-plot-new-${rule.id}`;
-            return null;
-          });
-        if (!proposal.ok) connectionLog.push({ id: `gate:${site.id}`, purpose: "site-access", ok: false,
-          reason: "no-target", detail: proposal.reason });
-        else {
-          commitNetwork(network, proposal.network);
-          network.patchRemaps = proposal.network.patchRemaps;
-          site.access = binding(proposal.gate);
-          for (const span of proposal.bridgeSpans) bridges.push({ from: span.from, to: span.to,
-            angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
-        }
-        continue; // Replace, rather than duplicate, the original 40-host bridge tier.
-      }
-      // 兜底（批次 5-1 起统一走 bridge-candidate）：门口 → 近岸 → 桥 → 对岸 → 接入点（无水时纯地面引道）。
-      // 地面引道不查 buildable/坡度（门前引道穿过不可建前滩带是历史口径，TerrainPatch 批次前的已知豁免）。
-      const blockers = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
-      const bridged = runConnection({
-        id: `gate:${site.id ?? site.kind}`,
-        source: gate,
-        target: { kind: "edges", include: () => true },
-        purpose: "site-access",
-        allowBridge: true,
-        maxLength: 1e4, // 桥候选的界限是候选数（前 40 个投影点），不是半径（历史口径）
-        roadClass: "local",
-      }, connectorWorld, { strategies: ["bridge-candidate"], bridge: { self: site, blockers, siteGate: true }, crossings: true });
-      for (const span of bridged.ok ? bridged.bridgeSpans : []) {
-        bridges.push({ from: span.from, to: span.to, angle: Math.atan2(span.to.z - span.from.z, span.to.x - span.from.x), length: Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z) });
-      }
-      if (!bridged.ok) connectionLog.push({ id: `gate:${site.id ?? site.kind}`, purpose: "site-access", ok: false, reason: bridged.reason, detail: bridged.detail });
-    }
-  }
+  // 地面路口收口 → 孤立分量接入 → 逐用地入口路/堤道（R5 步 6e：逐字迁至 planner/siteEntrances.ts）。
+  // connectionLog 须先于调用建好（connectGeneratedComponents 也写它）；network/publicSites/landmarks/bridges/connectionLog 原地改。
+  const { junctionReport } = connectSiteEntrances({ geo, core, network, connectorWorld, connectToNetwork, connectGeneratedComponents,
+    publicSites, landmarks, bridges, connectionLog, sailOperaCandidateSets, primaryAnchorNodeIds, reservations, seaside,
+    coastRoadRuns, coastalRunCount, siteObligations, declaredSiteDemands });
 
   // ── 连通（网络优先批次 4-3）：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含
   // 主网的分量经统一连接器接入。主网目标 = intent.primaryComponentId 的分量（离核心最近路端所在，
