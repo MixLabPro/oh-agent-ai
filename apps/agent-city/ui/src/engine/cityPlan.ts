@@ -32,6 +32,8 @@ import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, commitNetwork, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, parseFailure, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
 import { connectServiceLoops } from "./planner/loop";
+import { mergeFragmentEdges } from "./planner/fragmentEdges";
+import { finishDeadEnds } from "./planner/deadEnds";
 import { connectGroundJunctions } from "./planner/junctions";
 import { buildLandingCircles } from "./planner/landing";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
@@ -1183,36 +1185,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     if ((edgeBuckets.get(`${Math.floor(x / CELL)}:${Math.floor(z / CELL)}`) ?? []).some((e) => segmentDistance({ x, z }, e.points[0], e.points[1]) < e.width / 2 + 3)) continue;
     parkTrees.push({ x, z, y: height(x, z), seed: random(`tree${i}`) });
   }
-  // ── 碎边合并：长度 <5 的非桥路段把两端并成一个节点。接入路吸附到离已有路口几单位处时会留下 0–4 长的碎边，
-  // 与广场环路等形成 <30° 的「锐角路口」（30 岛中 10 个锐角全部是这种形状）。
-  const sliverSkip = new Set<string>();
-  const declaredEntranceNodes = new Set(publicSites.flatMap((site) => site.access ? [site.access.nodeId] : []));
-  for (let pass = 0; pass < 50; pass += 1) {
-    // 宽 12 的骨架（海滨大道按 ~15 细分、段间可能 <5）不合并：并掉会打断大道的车流回路（seaside 守卫）。
-    const sliver = [...edges.values()].find((e) => !sliverSkip.has(e.id) && !declaredEntranceNodes.has(e.from) && !declaredEntranceNodes.has(e.to) && !e.bridge && e.width < 12 && Math.hypot(e.points[1].x - e.points[0].x, e.points[1].z - e.points[0].z) < 5);
-    if (!sliver) break;
-    // 保留挂着骨架（宽 12）的那一端：并掉海滨大道端点会让大道车流回路引用不存在的节点（seaside 守卫 10 档）。
-    const touchesPrimary = (id: string) => [...edges.values()].some((e) => e !== sliver && e.width >= 12 && (e.from === id || e.to === id));
-    const fromPrimary = touchesPrimary(sliver.from); const toPrimary = touchesPrimary(sliver.to);
-    const fromPinned = primaryAnchorNodeIds.includes(sliver.from); const toPinned = primaryAnchorNodeIds.includes(sliver.to);
-    const touchesBridge = (id: string) => [...edges.values()].some((e) => e.bridge && (e.from === id || e.to === id));
-    const fromBridge = touchesBridge(sliver.from); const toBridge = touchesBridge(sliver.to);
-    if ((fromPrimary && toPrimary) || ((fromPinned || fromBridge) && (toPinned || toBridge))) { sliverSkip.add(sliver.id); continue; }
-    edges.delete(sliver.id);
-    // Rebinding a deck endpoint shifts the bridge geometry while its bridge registry remains fixed.
-    // Keep the primary anchor first, then a bridge endpoint; otherwise use the established trunk rule.
-    const keepId = fromPinned ? sliver.from : toPinned ? sliver.to
-      : fromBridge ? sliver.from : toBridge ? sliver.to
-        : toPrimary ? sliver.to : sliver.from;
-    const keepNode = nodes.get(keepId)!; const dropId = keepId === sliver.from ? sliver.to : sliver.from;
-    for (const e of [...edges.values()]) {
-      if (e.from !== dropId && e.to !== dropId) continue;
-      edges.delete(e.id);
-      const other = e.from === dropId ? e.points[1] : e.points[0];
-      addEdge(keepNode, other, e.kind === "arterial", e.bridge ?? false, e.width >= 12);
-    }
-    nodes.delete(dropId);
-  }
+  // 碎边合并（planner/fragmentEdges.ts）：原地改写 network，见该文件头注。
+  mergeFragmentEdges(network,{ publicSites, primaryAnchorNodeIds });
 
   const carPaths: Vec2[][] = [];
   const buildTrafficPaths = (blocks: CityBlock[], carPaths: Vec2[][]) => {
@@ -1268,37 +1242,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const urbanBounds = { left: bbox.minX + 30, right: bbox.maxX - 30, north: bbox.minZ + 30, south: bbox.maxZ - 30 };
   const boundsRadius = Math.max(bbox.maxX - bbox.minX, bbox.maxZ - bbox.minZ) / 2 + 40;
   const extent = Math.ceil((Math.max(Math.abs(bbox.minX), Math.abs(bbox.maxX), Math.abs(bbox.minZ), Math.abs(bbox.maxZ)) + 260) * 2 / 100) * 100;
-  // ── 断头路收尾（30 岛实测 ~390 个断头，多为环岛/河岸路段端与被切断的碎段）：
-  // 每个非入口、非岸边自然终点的断头：沿其悬挂链走到最近的路口，先尝试按 localConstraints 接回路网，
-  // 接不上且整条悬挂链很短（主干 <40、其余 <30）就删掉——不留通往空地的小尾巴。
-  {
-    const sitesForGate = [...publicSites, ...landmarks].filter((site) => site.radius);
-    const degree = () => { const d = new Map<string, number>(); for (const e of edges.values()) for (const n of [e.from, e.to]) d.set(n, (d.get(n) ?? 0) + 1); return d; };
-    for (let pass = 0; pass < 3; pass += 1) {
-      const deg = degree();
-      const ends = [...nodes.values()].filter((n) => deg.get(n.id) === 1);
-      for (const end of ends) {
-        if (!nodes.has(end.id) || degree().get(end.id) !== 1) continue;
-        if (sitesForGate.some((site) => Math.hypot(site.x - end.x, site.z - end.z) < site.radius + 60)) continue; // 用地入口（门前接入点可能内移到岸滩以外，60 内都算）
-        if (coastDistance(end.x, end.z) < 30 || inRiver(end.x, end.z)) continue;                              // 通到海边/河边的自然终点
-        // 悬挂链：从断头一路走到度 ≠ 2 的节点。
-        const chain: RoadEdge[] = []; let cursor = end.id; let length = 0; const d2 = degree();
-        for (let guard = 0; guard < 64; guard += 1) {
-          const next = [...edges.values()].find((e) => (e.from === cursor || e.to === cursor) && !chain.includes(e));
-          if (!next) break;
-          chain.push(next); length += Math.hypot(next.points[1].x - next.points[0].x, next.points[1].z - next.points[0].z);
-          cursor = next.from === cursor ? next.to : next.from;
-          if (d2.get(cursor) !== 2) break;
-        }
-        const wide = chain.some((e) => e.width >= 12);
-        if (connectToNetwork(end, wide ? 120 : 60, false, (edge) => chain.includes(edge), 45)) continue;
-        if (chain.some((e) => e.bridge || [...edges.values()].some((b) => b.bridge && [b.from, b.to].some((id) => id === e.from || id === e.to))) || length >= (wide ? 40 : 30)) continue;
-        for (const e of chain) edges.delete(e.id);
-        nodes.delete(end.id);
-      }
-    }
-    for (const id of [...nodes.keys()]) if (![...edges.values()].some((e) => e.from === id || e.to === id)) nodes.delete(id);
-  }
+  // 断头路收尾（planner/deadEnds.ts）：原地改写 network，接入路闭包原样传入。
+  finishDeadEnds(network, { publicSites, landmarks, coastDistance, inRiver, connectToNetwork });
 
   // A failed skeleton placement remains a commitment. Road growth can expose
   // new legal frontage, so revisit only missing owners before any parcels are
