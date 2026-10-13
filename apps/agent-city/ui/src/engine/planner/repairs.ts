@@ -1,5 +1,5 @@
 import { DetMath as Math } from "../detMath"; // 跨引擎确定性：与 cityPlan.ts 同一份 Math（见 detMath.ts）
-import { clearsHighways, roadNodeId, segmentDistance } from "../cityPlan";
+import { clearsHighways, roadNodeId, segmentDistance } from "../roadGeometry";
 import type { RoadEdge, Vec2 } from "../cityLayout";
 import { polylineClosest, wetCount } from "./footprint";
 import { addNetworkEdge, keyOf, commitNetworkPatch } from "./network";

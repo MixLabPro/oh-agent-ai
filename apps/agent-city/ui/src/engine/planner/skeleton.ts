@@ -6,7 +6,8 @@
  */
 import { DetMath as Math } from "../detMath";
 import { fbm } from "../cityNoise";
-import { segmentDistance, type Landmark } from "../cityPlan";
+import type { Landmark } from "../cityPlan";
+import { segmentDistance } from "../roadGeometry";
 import type { CityLayout, PublicSite, Vec2 } from "../cityLayout";
 import { addNetworkEdge, keyOf, commitNetworkPatch, previewNetworkPatch, type Network, type NetworkPatch } from "./network";
 import { chordClearsDisc, reStickClearance, walkableCorridor } from "./connect";

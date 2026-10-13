@@ -10,7 +10,7 @@
  * 不得「顺手统一」——统一口径是行为变更，需单独一步、单独审。
  */
 import { DetMath as Math } from "../detMath";
-import { segmentDistance } from "../cityPlan";
+import { segmentDistance } from "../roadGeometry";
 import type { Vec2 } from "../cityLayout";
 import { roadSegmentsCrossInterior } from "./relations";
 

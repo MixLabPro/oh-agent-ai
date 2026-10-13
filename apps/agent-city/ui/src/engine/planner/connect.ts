@@ -17,7 +17,7 @@
  * 兜底的替代路径（批次 4-3，行为变更），用地避让沿用旧 tolerance=1 档的 r+3。
  */
 import { DetMath as Math } from "../detMath";
-import { roadNodeId, segmentDistance } from "../cityPlan";
+import { roadNodeId, segmentDistance } from "../roadGeometry";
 import type { RoadEdge, Vec2 } from "../cityLayout";
 import { commitNetworkPatch, previewNetworkPatch, keyOf, type Network, type NetworkPatch, type PatchResult } from "./network";
 import { crosses, closestPolylineSegment } from "./footprint";

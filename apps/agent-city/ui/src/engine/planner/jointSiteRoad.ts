@@ -14,7 +14,7 @@ import { polylineDistance } from "./footprint";
 import { groundJunctionCorridorFailure } from "./civicClearance";
 import { classifyRoadSegments, closestSegmentPoints } from "./relations";
 import { groundJunctionFindings } from "./report";
-import { roadNodeId } from "../cityPlan";
+import { roadNodeId } from "../roadGeometry";
 import { isOwnedIslandGate } from "./endpoints";
 
 /** Bounded node closure; at most 4P2=12 target assignments per proposal. */

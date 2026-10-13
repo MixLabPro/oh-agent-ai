@@ -35,60 +35,10 @@ import { connectServiceLoops } from "./planner/loop";
 import { connectGroundJunctions } from "./planner/junctions";
 import { buildLandingCircles } from "./planner/landing";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
-
-export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
-  const dx = b.x - a.x; const dz = b.z - a.z;
-  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
-  return Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t);
-}
-
-export function polygonDistance(p: Vec2, polygon: Vec2[]): number {
-  let inside = false; let distance = Infinity;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const a = polygon[i]; const b = polygon[j];
-    if ((a.z > p.z) !== (b.z > p.z) && p.x < (b.x - a.x) * (p.z - a.z) / (b.z - a.z) + a.x) inside = !inside;
-    distance = Math.min(distance, segmentDistance(p, a, b));
-  }
-  return inside ? distance : -distance;
-}
-
-export const roadNodeId = (p: Vec2): string => `${p.x}:${p.z}`;
-
-/** 路段空间索引：按 CELL 分格，查询只看点周围的格子（全路段逐一算距离是规划生成的主要耗时：profile 里占 60%）。 */
-export class SegmentIndex {
-  private readonly cell = 60;
-  private readonly cells = new Map<string, Array<[Vec2, Vec2]>>();
-  constructor(runs: Vec2[][]) { for (const run of runs) for (let i = 1; i < run.length; i += 1) this.add(run[i - 1], run[i]); }
-  add(a: Vec2, b: Vec2): void {
-    const c = this.cell;
-    for (let gx = Math.floor(Math.min(a.x, b.x) / c); gx <= Math.floor(Math.max(a.x, b.x) / c); gx += 1)
-      for (let gz = Math.floor(Math.min(a.z, b.z) / c); gz <= Math.floor(Math.max(a.z, b.z) / c); gz += 1) {
-        const key = `${gx}:${gz}`;
-        const list = this.cells.get(key);
-        if (list) list.push([a, b]); else this.cells.set(key, [[a, b]]);
-      }
-  }
-  /** 点到任一路段的距离是否小于 d（d 不超过一个格宽，查询 3×3 格）。 */
-  closerThan(p: Vec2, d: number): boolean {
-    const gx = Math.floor(p.x / this.cell); const gz = Math.floor(p.z / this.cell);
-    const reach = Math.ceil(d / this.cell);
-    for (let dx = -reach; dx <= reach; dx += 1) for (let dz = -reach; dz <= reach; dz += 1) {
-      const list = this.cells.get(`${gx + dx}:${gz + dz}`);
-      if (list) for (const [a, b] of list) if (segmentDistance(p, a, b) < d) return true;
-    }
-    return false;
-  }
-}
-
-/** Conservative footprint guard: includes the full deck and a sidewalk setback. */
-export function clearsHighways(p: Vec2, width: number, depth: number, highways: Vec2[][] | SegmentIndex): boolean {
-  const clearance = 5.25 + Math.hypot(width, depth) / 2 + 1;
-  if (highways instanceof SegmentIndex) return !highways.closerThan(p, clearance);
-  for (const run of highways) for (let i = 1; i < run.length; i += 1) {
-    if (segmentDistance(p, run[i - 1], run[i]) < clearance) return false;
-  }
-  return true;
-}
+import { clearsHighways, polygonDistance, roadNodeId, SegmentIndex, segmentDistance } from "./roadGeometry";
+import { targetParcels } from "./scaleTier";
+export { clearsHighways, polygonDistance, roadNodeId, SegmentIndex, segmentDistance } from "./roadGeometry";
+export { MAX_TIER, scaleTierFor, SESSIONS_PER_TIER, targetParcels } from "./scaleTier";
 
 export type Biome = "tropical" | "temperate" | "boreal" | "savanna" | "eastasian";
 
@@ -97,17 +47,6 @@ export type LandmarkKind = "tv-tower" | "sail-opera" | "arch" | "pagoda" | "ligh
 /** shore：海上小岛地标（歌剧院）的堤道陆地端；有它即「立在水中的岛上」，不适用陆地/岸滩规则。 */
 export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; radius: number; to?: Vec2; shore?: Vec2; access?: PublicSite["access"] };
 const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasian"];
-
-/** 每档对应的目标地块数（SPEC §4.2：400 会话一档 × 1.35 余量给公共用地、花园、配套与道路损耗）。 */
-// 档位：每档 400 栋，按会话数逐档扩张大陆，最多 10 档 = 4000 栋（一年的会话）。
-// 曾一度改成「1 档就预留 2000 栋」：会话少时整座岛空旷得像荒地（真机截图反馈），
-// 所以初始面积回到原版的 400 栋一档，随数据逐步长大。
-export const SESSIONS_PER_TIER = 400;
-export const MAX_TIER = 10;
-export function scaleTierFor(sessions: number): number {
-  return Math.max(1, Math.min(MAX_TIER, Math.ceil(sessions / SESSIONS_PER_TIER)));
-}
-export const targetParcels = (tier: number) => Math.ceil(SESSIONS_PER_TIER * tier * 1.35);
 
 /** Capacity is discontinuous when terrain/site/skeleton choices change. Never
  * extrapolate an almost-empty plan into a many-hundred-fold area expansion. */

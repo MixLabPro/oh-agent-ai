@@ -5,7 +5,7 @@
  * 纯函数；本步先让 buildPlan 与 RepairContext 共享同一个 Network 对象，替代 addEdge/key 闭包成员
  * （spec D5：闭包杂物袋 → 数据引用）。
  */
-import { roadNodeId } from "../cityPlan";
+import { roadNodeId } from "../roadGeometry";
 import type { RoadEdge, RoadNode, Vec2 } from "../cityLayout";
 import { classifyRoadSegments } from "./relations";
 

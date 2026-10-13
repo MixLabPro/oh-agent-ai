@@ -1,6 +1,6 @@
 /** 已由短连接接入同一走廊的终端重复段：保留完整、更宽宿主，重绑独立支路而非降角度门槛。 */
 import { DetMath as Math } from "../detMath";
-import { roadNodeId } from "../cityPlan";
+import { roadNodeId } from "../roadGeometry";
 import type { RepairContext } from "./context";
 import { commitNetworkPatch, keyOf, type NetworkPatch } from "./network";
 import { groundJunctionFindings } from "./report";
