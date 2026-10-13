@@ -104,6 +104,52 @@ export function corridorViolation(world: ConnectorWorld, a: Vec2, b: Vec2, polic
   return null;
 }
 
+/** 走廊「是否被拒」的布尔判定：恰当 corridorViolation(world, a, b, policy) !== null 时返回 true（缺省 opts、
+ *  无 waterfront 档——调用方保证）。只给「失败原因不再被观察」的调用方用（并线阶梯在已记下最近拒绝之后：
+ *  候选按距离升序，后续拒绝不可能改写 nearest，只有「过/不过」影响结果）。
+ *  为什么能更快：corridorViolation 从 a 端顺序采样、遇到第一个违规才返回；孤立分量隔水并线时 a 在岛上、水在
+ *  走廊中段，顺序扫描要先走完整段岸上采样（实测平均 ~115 采样/次）。这里对同一组采样点改用二分细化顺序
+ *  （端点与 2^k 步长先、逐级减半），隔水走廊通常几个采样就碰到水。判定是析取（任一采样违规/任一用地相交/
+ *  几何非法即拒），与访问顺序无关；采样坐标表达式与运算顺序逐字照抄 corridorViolation，浮点逐位相同；
+ *  全部采样通过时它与原函数同为「不拒」。不返回原因，因此不能替代需要 reason 的调用。 */
+export function corridorBlocked(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy): boolean {
+  const distance = Math.hypot(b.x - a.x, b.z - a.z);
+  const width = policy.roadWidth ?? 0;
+  if (!Number.isFinite(width) || width < 0 || !Number.isFinite(distance)) return true;
+  const nx = distance ? -(b.z - a.z) / distance : 0;
+  const nz = distance ? (b.x - a.x) / distance : 1;
+  const lateralSteps = width ? 2 * Math.ceil(width / (2 * VALIDATION_CONFIG.sampleSpacing)) : 0;
+  const steps = Math.max(1, Math.ceil(distance / VALIDATION_CONFIG.sampleSpacing));
+  const geo = world.geo;
+  const terrain = geo.terrain;
+  const dxAB = b.x - a.x; const dzAB = b.z - a.z;
+  const sampleFails = (i: number): boolean => {
+    for (let j = 0; j <= lateralSteps; j += 1) {
+      const offset = width * (j / (lateralSteps || 1) - 0.5);
+      const px = a.x + dxAB * i / steps + nx * offset;
+      const pz = a.z + dzAB * i / steps + nz * offset;
+      const height = geo.height(px, pz);
+      if (!Number.isFinite(height)) return true;
+      if (height <= 0.5 || world.inRiver(px, pz)) return true;
+      if (policy.requireBuildable && !geo.buildable(px, pz)) return true;
+      const slope = terrain.slope(px, pz);
+      if (!Number.isFinite(slope) || slope > policy.maxSlope) return true;
+    }
+    return false;
+  };
+  // 二分细化顺序：先 i ∈ {0, P, 2P, …}（P = ≤steps 的最大 2 的幂），再对 s = P/2 … 1 取 s 的奇数倍——每个 i ∈ [0, steps] 恰访问一次。
+  let top = 1; while (top * 2 <= steps) top *= 2;
+  for (let i = 0; i <= steps; i += top) if (sampleFails(i)) return true;
+  for (let s = top / 2; s >= 1; s /= 2) for (let i = s; i <= steps; i += 2 * s) if (sampleFails(i)) return true;
+  // 用地盘相交（corridorViolation 先查它；析取与顺序无关，放后面是因为隔水走廊多数在采样里就被拒）。
+  for (const site of policy.sites) {
+    const dx = b.x - a.x; const dz = b.z - a.z;
+    const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (distance * distance || 1)));
+    if (Math.hypot(site.x - a.x - dx * t, site.z - a.z - dz * t) < site.radius + policy.siteMargin + width / 2) return true;
+  }
+  return false;
+}
+
 /** Preserve the legacy failure enum while detailed diagnostics distinguish causes. */
 export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy: CorridorPolicy, opts: { skipEnds?: boolean; spacing?: number } = {}): ConnectionFailure | null {
   return corridorViolation(world, a, b, policy, opts)?.kind ?? null;
