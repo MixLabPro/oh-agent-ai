@@ -16,6 +16,9 @@ synthetic.push("verify-city-layout-capacity");
 synthetic.push("verify-city-model-envelope");
 synthetic.push("verify-city-site-registry");
 synthetic.push("verify-city-joint-site-road");
+// R2：纯静态 import 边界扫描（不跑规划），便宜，fast 与 planning 都带上。
+synthetic.push("verify-city-import-boundary");
+groups.planning.push("verify-city-import-boundary");
 for (const group of ["network", "planning", "sites"]) groups[group].push("verify-city-joint-site-road");
 groups.planning.push("verify-city-site-registry");
 groups.sites.push("verify-city-site-registry");
