@@ -14,10 +14,11 @@
 // 边界：这里只放「单个违规的几何定义」（如中心到路 < 0.7 半径算穿路）；
 // 「允许多少条」的容忍计数是策略，留在守卫里。逻辑逐字取自两个守卫，勿在此改语义。
 import type { createCityPlan } from "../cityPlan";
+import type { Vec2 } from "../cityLayout";
 import { declaredGroundRoadClear } from "./modelEnvelope";
 import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
 import { WATER_LEVEL, wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
-import { pointInPolygon, siteFootprint, siteFootprintSeparation, worldFootprintSamples } from "../planFootprint";
+import { pointInPolygon, siteFootprint, siteFootprintSeparation, siteRoadClear, worldFootprintSamples } from "../planFootprint";
 import { componentOf, primaryComponentId } from "./intent";
 import { planarAccessAtYaw, resolvePlanarAccess } from "../models/siteAccess";
 import { specByKind } from "./sitespec";
@@ -198,6 +199,9 @@ export const archStraddlesRoad: Constraint = {
         const dir = Math.atan2(host.b.x - host.a.x, host.b.z - host.a.z);
         let d = Math.abs(dir - s.yaw) % Math.PI; d = Math.min(d, Math.PI - d);
         if (d > (15 * Math.PI) / 180) out.push(v("archStraddlesRoad", s, `${s.kind} opening off road by ${Math.round((d * 180) / Math.PI)}deg`));
+        else if (roads.some((road: Site) => road.points.slice(1).some((point: Vec2, i: number) =>
+          !siteRoadClear(s, road.points[i], point, road.width))))
+          out.push(v("archStraddlesRoad", s, "declared passage or pier clearance failed"));
       }
     }
     return out;

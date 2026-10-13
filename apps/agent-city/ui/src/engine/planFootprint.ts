@@ -196,6 +196,49 @@ export function footprintRunsDistance(footprint: FootprintSpec, origin: Vec2, ya
   return best;
 }
 
+/** Ground-road clearance uses exterior setback except inside a declared
+ * through-passage. Two opposed vehicle entrances define that lane; the full
+ * road capsule must still clear every solid pier. This is XY evidence only. */
+export function siteRoadClear(owner: { id?: string; kind: string; x: number; z: number; yaw: number; radius: number; shore?: Vec2 },
+  a: Vec2, b: Vec2, width: number, margin = 3): boolean {
+  if (![owner.x, owner.z, owner.yaw, owner.radius, a.x, a.z, b.x, b.z, width, margin].every(Number.isFinite)
+    || owner.radius < 0 || width < 0 || margin < 0) return false;
+  const id = owner.id ?? `reservation:${owner.kind}`;
+  const footprint = siteFootprint(owner.kind, id, owner.radius, !!owner.shore);
+  const distance = footprintRunsDistance(footprint, owner, owner.yaw, [[a, b]]);
+  if (distance >= width / 2 + margin) return true;
+  if (!width || distance <= width / 2 + 1e-9 || owner.shore) return false;
+  const declaration = DECLARED[owner.kind] ?? (() => {
+    const ground = resolveGroundModel(owner.kind, { seed: hashSeed(id), radius: owner.radius });
+    return ground.status === "partial" ? ground.declaration : undefined;
+  })();
+  const entrances = declaration?.entrances.filter(entrance => entrance.required && entrance.mode === "vehicle") ?? [];
+  const local = (p: Vec2) => ({ x: (p.x - owner.x) * Math.cos(owner.yaw) - (p.z - owner.z) * Math.sin(owner.yaw),
+    z: (p.x - owner.x) * Math.sin(owner.yaw) + (p.z - owner.z) * Math.cos(owner.yaw) });
+  const u = local(a), v = local(b), length = Math.hypot(v.x - u.x, v.z - u.z);
+  if (!length) return false;
+  for (let i = 0; i < entrances.length; i += 1) for (let j = i + 1; j < entrances.length; j += 1) {
+    const start = entrances[i], end = entrances[j];
+    const span = Math.hypot(end.local.x - start.local.x, end.local.z - start.local.z);
+    if (!span) continue;
+    const axis = { x: (end.local.x - start.local.x) / span, z: (end.local.z - start.local.z) / span };
+    const dot = (p: Vec2, q: Vec2) => p.x * q.x + p.z * q.z;
+    if (dot(start.outward, axis) > -0.999 || dot(end.outward, axis) < 0.999) continue;
+    const travel = { x: (v.x - u.x) / length, z: (v.z - u.z) / length };
+    if (Math.abs(dot(travel, axis)) < Math.cos(Math.PI / 12)) continue;
+    const along = (p: Vec2) => (p.x - start.local.x) * axis.x + (p.z - start.local.z) * axis.z;
+    const side = (p: Vec2) => -(p.x - start.local.x) * axis.z + (p.z - start.local.z) * axis.x;
+    const p = along(u), delta = along(v) - p, collar = width / 2 + margin;
+    const cuts = [(-collar - p) / delta, (span + collar - p) / delta].sort((x, y) => x - y);
+    const lo = Math.max(0, cuts[0]), hi = Math.min(1, cuts[1]);
+    if (lo > hi) continue;
+    const spare = Math.min(start.width, end.width) / 2 - width / 2;
+    const offset = (t: number) => Math.abs(side(u) + (side(v) - side(u)) * t);
+    if (spare > 0 && Math.max(offset(lo), offset(hi)) < spare - 1e-9) return true;
+  }
+  return false;
+}
+
 /** Distance from an exact model polygon to the legacy circular reservation. */
 export function footprintCircleDistance(footprint: FootprintSpec, origin: Vec2, yaw: number, circleCentre: Vec2, circleRadius: number): number {
   let best = Infinity;

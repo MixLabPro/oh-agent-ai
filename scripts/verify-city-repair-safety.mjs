@@ -2,12 +2,13 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { emptyNetwork, addNetworkEdge, runRepairTransaction, groundJunctionFindings, snapNearEdgeJunctions, endpointRelineCandidates, relineLooseEndpoint,
+const { siteRoadClear, toWorld, straddleSitesAcrossTrunk, emptyNetwork, addNetworkEdge, runRepairTransaction, groundJunctionFindings, snapNearEdgeJunctions, endpointRelineCandidates, relineLooseEndpoint,
   assignConnectedSite, specByKind, SITE_SPECS, canRelocateGroundSite, resolvePlanarAccess, planarAccessPose, stationEntranceLocal, settleShoreSitesOnCoast,
   trimLeafBeforeUnsafeCrossing, connectGroundJunctions, corridorViolation, validateCandidate, bridgeheadContinuity, roadReport, CONSTRAINTS, classifyRoadSegments, crowdedPolylinePair, commitNetworkPatch, diagnoseNetwork, componentOf, retainRepairDemands, remapDemandNode, REPAIR_STRATEGIES, resiteArchesOnAcceptedRoads, groundFrontageSegments, rerouteUnsafeGroundCrossings, jointJunctionSiteCandidates, moveJunctionSite, groundJunctionCorridorFailure, groundJunctionCorridorViolation, screenTrunkRoute, connectDisconnectedComponent, connectLooseEnd, pruneShortSpurs, extendLooseEnds, endpointClear } = await loadCity({
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge", "commitNetworkPatch"],
   "engine/planner/solve.ts": ["runRepairTransaction", "REPAIR_STRATEGIES", "resiteArchesOnAcceptedRoads"],
-  "engine/planner/access.ts": ["groundFrontageSegments"],
+  "engine/planner/access.ts": ["groundFrontageSegments", "straddleSitesAcrossTrunk"],
+  "engine/planFootprint.ts": ["siteRoadClear", "toWorld"],
   "engine/planner/report.ts": ["groundJunctionFindings", "roadReport"],
   "engine/planner/snapJunctions.ts": ["trimLeafBeforeUnsafeCrossing", "rerouteUnsafeGroundCrossings", "jointJunctionSiteCandidates", "moveJunctionSite", "snapNearEdgeJunctions", "endpointRelineCandidates", "relineLooseEndpoint"],
   "engine/planner/junctions.ts": ["connectGroundJunctions"],
@@ -27,6 +28,35 @@ const { emptyNetwork, addNetworkEdge, runRepairTransaction, groundJunctionFindin
   "engine/planner/siting.ts": ["settleShoreSitesOnCoast"],
 });
 const p = (x, z) => ({ x, z });
+// Declared through-lanes are not exterior plot setbacks or whole-site exemptions.
+for (const yaw of [0, Math.PI / 2, -0.73, 2.1]) {
+  const owner = { id: "passage", kind: "arch", x: 27, z: -19, yaw, radius: 18 };
+  const clear = (a, b, width = 12) => siteRoadClear(owner, toWorld(a, owner, yaw), toWorld(b, owner, yaw), width);
+  assert.equal(clear(p(0, -30), p(0, 30)), true, "full road fits a declared through-passage");
+  assert.equal(clear(p(0, 30), p(0, -30)), true, "travel direction does not change lane admission");
+  assert.equal(clear(p(1, -30), p(1, 30)), true);
+  assert.equal(clear(p(3, -30), p(3, 30)), false, "road shoulder clips a pier");
+  assert.equal(clear(p(0, -30), p(0, 30), 16), false, "touching the pier is not spare passage width");
+  assert.equal(clear(p(-30, 0), p(30, 0)), false, "a transverse route cannot use a passage declaration");
+  assert.equal(clear(p(0, -30), p(10, 30)), false, "tilted road leaves the full-width lane");
+  assert.equal(clear(p(18, -30), p(18, 30)), false, "passage does not waive exterior setback");
+  assert.equal(clear(p(28, -30), p(28, 30)), true, "ordinary exterior setback remains usable");
+  assert.equal(siteRoadClear({ ...owner, yaw: NaN }, p(0, -30), p(0, 30), 12), false);
+  assert.equal(siteRoadClear({ ...owner, kind: "unknown-model" }, toWorld(p(0, -30), owner, yaw),
+    toWorld(p(0, 30), owner, yaw), 12), false, "unknown models receive no passage exception");
+}
+{
+  const arch = { id: "resite-passage", kind: "arch", x: 0, z: 0, yaw: 0, radius: 18 };
+  const world = { publicSites: [], landmarks: [arch], trunkSegments: [[p(0, -30), p(0, 30)]],
+    groundRoads: [{ points: [p(0, -30), p(0, 30)], width: 20 }], ringRuns: [],
+    buildable: () => true, height: () => 1.2, inRiver: () => false, riverBank: () => false };
+  arch.x = 50;
+  straddleSitesAcrossTrunk(world);
+  assert.equal(arch.x, 50, "wide actual host cannot pass admission through a width12 skeleton proxy");
+  world.groundRoads[0].width = 12;
+  straddleSitesAcrossTrunk(world);
+  assert.equal(arch.x, 0);
+}
 const context = () => ({
   network: emptyNetwork(), publicSites: [], landmarks: [], blocks: [], core: p(0, 0),
   geo: { height: () => 1.2, buildable: () => true, terrain: { height: () => 1.2, slope: () => 0 }, river: null },

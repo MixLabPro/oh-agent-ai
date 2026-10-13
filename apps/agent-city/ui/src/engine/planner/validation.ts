@@ -18,7 +18,7 @@
 import { DetMath as Math } from "../detMath";
 import type { Vec2 } from "../cityLayout";
 import { keyOf, type Network } from "./network";
-import { footprintRunsDistance, siteFootprint } from "../planFootprint";
+import { siteRoadClear, siteFootprint } from "../planFootprint";
 import type { ConnectorWorld, ConnectionFailure } from "./connect";
 import { classifyRoadSegments } from "./relations";
 
@@ -69,7 +69,7 @@ export function corridorViolation(world: ConnectorWorld, a: Vec2, b: Vec2, polic
     if (site.kind && Number.isFinite(site.yaw)) {
       const footprint = siteFootprint(site.kind, site.id ?? `reservation:${site.kind}`, site.radius);
       if (footprint.exact) {
-        if (footprintRunsDistance(footprint, site, site.yaw!, [[a, b]]) < policy.siteMargin + width / 2)
+        if (!siteRoadClear({ ...site, kind: site.kind, yaw: site.yaw! }, a, b, width, policy.siteMargin))
           return { kind: "site-clearance", cause: "site-envelope" };
         continue;
       }

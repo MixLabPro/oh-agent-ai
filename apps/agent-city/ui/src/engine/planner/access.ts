@@ -23,7 +23,7 @@ import type { PublicSite, RoadEdge, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
 import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount, isDry } from "./footprint";
-import { footprintCircleDistance, footprintRunsDistance, siteFootprint, siteFootprintSeparation, worldFootprintSamples } from "../planFootprint";
+import { footprintCircleDistance, footprintRunsDistance, siteFootprint, siteFootprintSeparation, siteRoadClear, worldFootprintSamples } from "../planFootprint";
 
 /** 候选点：坐标 + 朝向 + 稳定 id（排序 tie-break 用）+ 来源说明；shoreAnchor 供海上岛堤道校验。 */
 export type SiteCandidate = {
@@ -47,6 +47,8 @@ export type SiteCandidateWorld = {
   coast: Vec2[];
   /** 骨架主干折线（生成临街/跨路候选）。 */
   trunkRuns: Vec2[][];
+  /** Actual ground envelopes when available; legacy skeletons are width 12. */
+  groundRoads?: ReadonlyArray<Pick<RoadEdge, "points" | "width">>;
   frontageCandidateLimit?: number;
   frontageProbeFractions?: readonly number[];
   /** Bounded region candidates tried only after all frontage candidates fail. */
@@ -314,7 +316,10 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
       return (world.buildable(at.x, at.z) ? null : "buildable-center")
         ?? (isDry(geo, at, r) ? null : "dry-footprint")
         ?? ring()
-        ?? spacing(10);
+        ?? spacing(10)
+        ?? ((world.groundRoads ?? world.trunkRuns.map(points => ({ points, width: 12 }))).every(road => road.points.slice(1).every((point, i) => siteRoadClear(
+          { ...at, id: candidate.id, kind: spec.kind, yaw: candidate.yaw, radius: r }, road.points[i], point, road.width)))
+          ? null : "declared-passage-road-clearance");
     case "shore":
       return (wetCount(geo, at, r, { river: true, riverBank: 14 }) <= 3 ? null : "wet-budget-3-riverbank")
         ?? (world.coastDistance(at.x, at.z) <= r * 0.7 ? null : "coast-distance-0.7r")
@@ -343,6 +348,7 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
 
 /** 临路挪动四遍共用的只读依赖 + 可变用地表 + buildPlan 的两个环搜闭包（snap/siteClearance 按引用传入）。 */
 export type FrontageMoveContext = {
+  groundRoads?: ReadonlyArray<Pick<RoadEdge, "points" | "width">>;
   publicSites: PublicSite[];
   landmarks: Landmark[];
   /** Optional relocation transaction scope; omitted means the existing full pass. */
@@ -381,7 +387,7 @@ export function restickSitesClearOfRingRuns(ctx: FrontageMoveContext): void {
 
 /** 跨路遍（原 buildPlan「凯旋门骑上主干中段」）：取离用地最近的主干段（len ≥ 20）中点，
  *  要求可建、占地全干、不压环线高架、距其它用地 ≥ r_o+r+10；开口轴（局部 z）沿道路方向。 */
-export function straddleSitesAcrossTrunk(ctx: Pick<FrontageMoveContext, "publicSites" | "landmarks" | "trunkSegments" | "ringRuns" | "buildable" | "height" | "inRiver" | "riverBank" | "relocateSiteIds" | "straddleProbeFractions">): void {
+export function straddleSitesAcrossTrunk(ctx: Pick<FrontageMoveContext, "publicSites" | "landmarks" | "trunkSegments" | "groundRoads" | "ringRuns" | "buildable" | "height" | "inRiver" | "riverBank" | "relocateSiteIds" | "straddleProbeFractions">): void {
   const { publicSites, landmarks, trunkSegments, ringRuns, buildable, height, inRiver, riverBank } = ctx;
   const footprintGeo = { height, inRiver, riverBank };
   const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
@@ -397,7 +403,10 @@ export function straddleSitesAcrossTrunk(ctx: Pick<FrontageMoveContext, "publicS
       if (!buildable(q.x, q.z) || !footprintDry(q, site.radius)) continue;
       if (!clearsRingRuns(q, site.radius * 2, site.radius * 2, ringRuns)) continue; // 不能压在环线高架下（geography 守卫）
       if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
-      site.x = q.x; site.z = q.z; site.yaw = Math.atan2(dx, dz);
+      const pose = { ...site, ...q, yaw: Math.atan2(dx, dz) };
+      const roads = ctx.groundRoads ?? trunkSegments.map(([u, v]) => ({ points: [u, v], width: 12 }));
+      if (!roads.every(road => road.points.slice(1).every((point, i) => siteRoadClear(pose, road.points[i], point, road.width)))) continue;
+      site.x = q.x; site.z = q.z; site.yaw = pose.yaw;
       break place;
     }
   }

@@ -52,6 +52,7 @@ export function resiteArchesOnAcceptedRoads(ctx: RepairContext): number {
     .map((violation) => `${violation.at!.x}:${violation.at!.z}`));
   const old = new Map(arches.map((site) => [site.id, { x: site.x, z: site.z, yaw: site.yaw }]));
   straddleSitesAcrossTrunk({ publicSites: ctx.publicSites, landmarks: ctx.landmarks,
+    groundRoads: [...ctx.network.edges.values()].filter(road => !road.bridge),
     trunkSegments: groundFrontageSegments([...ctx.network.edges.values()]), ringRuns: ctx.ringRuns,
     straddleProbeFractions: ARCH_RESITE_CONFIG.probes,
     buildable: ctx.geo.buildable, height: ctx.geo.height, inRiver: ctx.inRiver,

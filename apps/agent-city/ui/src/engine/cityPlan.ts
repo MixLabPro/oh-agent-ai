@@ -369,7 +369,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
   // 跨路地标（门式）：凯旋门骑在主干道上、道路从拱券开口穿过——曾与其它用地一样贴到路旁，门下是草地
   // （用户截图：「凯旋门下面不是路？建筑物缺少约束」）。取最近主干道中段，开口轴（局部 z）沿道路方向。
-  straddleSitesAcrossTrunk({ ...frontageCtx, trunkSegments: groundFrontageSegments([...network.edges.values()]) });
+  straddleSitesAcrossTrunk({ ...frontageCtx, groundRoads: [...network.edges.values()].filter(road => !road.bridge),
+    trunkSegments: groundFrontageSegments([...network.edges.values()]) });
   frontSitesOnTrunks(frontageCtx);
   // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
   // 仍不在干地的内陆用地（岸边/跨路/广场豁免，各有专属遍或构造保证）重贴到干地。
@@ -448,7 +449,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
             neighbourMargins: new Map([[ownerId, 10]]), trunkRuns: actualTrunks, roadEnvelopes: [...candidateNetwork.edges.values()] };
           restickSitesClearOfRingRuns(stagedFrontage);
           const archSegments = groundFrontageSegments([...candidateNetwork.edges.values()]);
-          straddleSitesAcrossTrunk({ ...stagedFrontage, trunkSegments: archSegments });
+          straddleSitesAcrossTrunk({ ...stagedFrontage, groundRoads: [...candidateNetwork.edges.values()].filter(road => !road.bridge),
+            trunkSegments: archSegments });
           frontSitesOnTrunks(stagedFrontage);
           resnapSitesOntoDryLand(stagedFrontage);
           settleShoreSitesOnCoast(stagedShore);
