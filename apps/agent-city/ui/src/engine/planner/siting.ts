@@ -204,7 +204,27 @@ export function settleShoreSitesOnCoast(ctx: ShoreMoveContext): void {
  */
 export type SailOperaCandidate = { x: number; z: number; yaw: number; shore: Vec2 };
 export type SailOperaCandidateSet = { siteId: string; candidates: SailOperaCandidate[] };
-export const SAIL_OPERA_CONFIG = { version: 1, coastCandidates: 40, jointCandidates: 40 };
+export const SAIL_OPERA_CONFIG = { version: 2, coastCandidates: 40, jointCandidates: 40,
+  landingInsets: [6, 8, 10, 12, 14, 16, 18, 20, 22, 24] as const, landingRoadWidth: 5 };
+
+/** A dry centre does not support a full-width causeway landing. Keep the
+ * historical 6-unit inset when it is valid; otherwise search a bounded inland
+ * collar, with the same water predicate as the ground approach validator. */
+export function supportedShoreLanding(geo: Pick<ShoreMoveContext, "height" | "inRiver">, shore: Vec2, outward: Vec2): Vec2 | null {
+  const halfWidth = SAIL_OPERA_CONFIG.landingRoadWidth / 2;
+  for (const inset of SAIL_OPERA_CONFIG.landingInsets) {
+    const point = { x: shore.x - outward.x * inset, z: shore.z - outward.z * inset };
+    let dry = true;
+    for (const lateral of [-halfWidth, 0, halfWidth]) for (const longitudinal of [-halfWidth, 0, halfWidth]) {
+      const x = point.x - outward.z * lateral + outward.x * longitudinal;
+      const z = point.z + outward.x * lateral + outward.z * longitudinal;
+      const height = geo.height(x, z);
+      if (!Number.isFinite(height) || height <= 0.5 || geo.inRiver(x, z)) { dry = false; break; }
+    }
+    if (dry) return point;
+  }
+  return null;
+}
 
 export function settleSailOperaOffshore(ctx: ShoreMoveContext): SailOperaCandidateSet[] {
   const { publicSites, landmarks, coast, core, height } = ctx;
@@ -223,10 +243,10 @@ export function settleSailOperaOffshore(ctx: ShoreMoveContext): SailOperaCandida
       const c = { x: shore.x + out.x * (site.radius + 40), z: shore.z + out.z * (site.radius + 40) };
       const deep = isDeepWater(footprintGeo, c, site.radius);
       if (!deep || others.some((o) => Math.hypot(o.x - c.x, o.z - c.z) < o.radius + site.radius + (o.kind === "harbor" ? 120 : 30))) continue;
-      if (height(shore.x - out.x * 6, shore.z - out.z * 6) < 0.3) continue; // 堤道陆地端要踩在实地上
       // 岸点落路净空（A 轨 4-3c 移植）：岸点被其它用地圈住时（实测 seed 42：villa-complex 挪到
       // 歌剧院岸点 21 单位处，路网变化后入口路全失败、堤道两头悬空），选址期直接避开，不靠修复遍。
-      const landing = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
+      const landing = supportedShoreLanding(ctx, shore, out);
+      if (!landing) continue;
       if (others.some((o) => Math.hypot(o.x - landing.x, o.z - landing.z) < o.radius + 30)) continue;
       candidates.push({ x: c.x, z: c.z, yaw: -Math.atan2(out.z, out.x), shore: landing });
     }

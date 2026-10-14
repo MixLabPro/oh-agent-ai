@@ -14,9 +14,11 @@
 // 边界：这里只放「单个违规的几何定义」（如中心到路 < 0.7 半径算穿路）；
 // 「允许多少条」的容忍计数是策略，留在守卫里。逻辑逐字取自两个守卫，勿在此改语义。
 import type { createCityPlan } from "../cityPlan";
+import type { Vec2 } from "../cityLayout";
 import { declaredGroundRoadClear } from "./modelEnvelope";
 import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
-import { wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
+import { WATER_LEVEL, wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
+import { pointInPolygon, siteFootprint, siteFootprintSeparation, siteRoadClear, worldFootprintSamples } from "../planFootprint";
 import { componentOf, primaryComponentId } from "./intent";
 import { planarAccessAtYaw, resolvePlanarAccess } from "../models/siteAccess";
 import { specByKind } from "./sitespec";
@@ -48,7 +50,15 @@ export const siteInWater: Constraint = {
     const out: Violation[] = [];
     const geo = { height: plan.terrain.height, inRiver: () => false };
     for (const s of planSites(plan)) {
-      const wet = wetCount(geo, s, s.radius); // measure 口径：只看地形高度（河道由 siteNearRiver 单独量）
+      const declaration = specByKind(s.kind);
+      const footprint = declaration?.placement === "inland-frontage" ? siteFootprint(s.kind, s.id ?? `reservation:${s.kind}`, s.radius) : null;
+      // Match generator admission for exact inland footprints. The nominal radius is
+      // only a reservation proxy there; testing its empty corners can reject a dry
+      // station/stadium that was admitted against its declared renderer geometry.
+      const samples = footprint?.exact ? worldFootprintSamples(footprint, s, s.yaw, 4) : null;
+      const wet = samples
+        ? samples.length === 0 ? 1 : samples.filter(point => plan.terrain.height(point.x, point.z) < WATER_LEVEL).length
+        : wetCount(geo, s, s.radius); // legacy/shore proxy: height only; river is measured separately
       if (s.kind !== "harbor" && !s.shore && wet > (SHORE.has(s.kind) ? 4 : 0)) out.push(v("siteInWater", s, `${s.kind} wet=${wet}`));
     }
     return out;
@@ -90,11 +100,16 @@ export const roadThroughSite: Constraint = {
 };
 
 export const sitesOverlap: Constraint = {
-  id: "sitesOverlap", description: "用地两两中心距 ≥ 半径和",
+  id: "sitesOverlap", description: "用地实体投影不重叠；未声明模型及海上岛保留名义圆",
   measure(plan) {
     const out: Violation[] = [];
-    const sites = planSites(plan);
-    for (const s of sites) for (const o of sites) if (o !== s && o.kind > s.kind && Math.hypot(o.x - s.x, o.z - s.z) < o.radius + s.radius) out.push(v("sitesOverlap", s, `${s.kind} x ${o.kind}`));
+    const sites = planSites(plan).sort((a, b) => a.kind < b.kind ? -1 : a.kind > b.kind ? 1
+      : (a.id ?? "") < (b.id ?? "") ? -1 : (a.id ?? "") > (b.id ?? "") ? 1 : 0);
+    for (let i = 0; i < sites.length; i += 1) for (let j = i + 1; j < sites.length; j += 1) {
+      const s = sites[i], o = sites[j];
+      if (siteFootprintSeparation(s, o) < 0) out.push({ ...v("sitesOverlap", s, `${s.kind} x ${o.kind}`),
+        identity: [s.id ?? `${s.kind}:${s.x}:${s.z}`, o.id ?? `${o.kind}:${o.x}:${o.z}`].sort().join("/") });
+    }
     return out;
   },
 };
@@ -184,6 +199,9 @@ export const archStraddlesRoad: Constraint = {
         const dir = Math.atan2(host.b.x - host.a.x, host.b.z - host.a.z);
         let d = Math.abs(dir - s.yaw) % Math.PI; d = Math.min(d, Math.PI - d);
         if (d > (15 * Math.PI) / 180) out.push(v("archStraddlesRoad", s, `${s.kind} opening off road by ${Math.round((d * 180) / Math.PI)}deg`));
+        else if (roads.some((road: Site) => road.points.slice(1).some((point: Vec2, i: number) =>
+          !siteRoadClear(s, road.points[i], point, road.width))))
+          out.push(v("archStraddlesRoad", s, "declared passage or pier clearance failed"));
       }
     }
     return out;

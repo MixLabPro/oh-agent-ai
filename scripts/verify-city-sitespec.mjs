@@ -10,16 +10,89 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
-const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject, assignConnectedSite, JOINT_SITE_CONFIG, stationEntranceLocal, emptyNetwork, addNetworkEdge } = await loadCity({
+const { createCityPlan, MIAMI_COASTAL, SITE_SPECS, specByKind, coastalSitingKinds, straddleSitingKinds, frontageExemptKinds, nominalAnchorPoint, SITING_TABLE_VERSION, runAssignment, siteCandidateHardReject, assignConnectedSite, connectRelocatedPlotAccess, JOINT_SITE_CONFIG, stationEntranceLocal, emptyNetwork, addNetworkEdge, siteInWater, sitesOverlap, siteFootprintSeparation, siteFootprint, worldParts, pointInPolygon, ringSamples16 } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/sitespec.ts": ["SITE_SPECS", "specByKind", "coastalSitingKinds", "straddleSitingKinds", "frontageExemptKinds", "nominalAnchorPoint", "SITING_TABLE_VERSION"],
   "engine/planner/assign.ts": ["runAssignment"],
   "engine/planner/access.ts": ["siteCandidateHardReject"],
-  "engine/planner/jointSite.ts": ["assignConnectedSite", "JOINT_SITE_CONFIG"],
+  "engine/planner/jointSite.ts": ["assignConnectedSite", "connectRelocatedPlotAccess", "JOINT_SITE_CONFIG"],
   "engine/models/publicSiteGeometry.ts": ["stationEntranceLocal"],
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
+  "engine/planner/constraints.ts": ["siteInWater", "sitesOverlap"],
+  "engine/planFootprint.ts": ["siteFootprint", "siteFootprintSeparation", "worldParts", "pointInPolygon"],
+  "engine/planner/footprint.ts": ["ringSamples16"],
 });
+
+// Shared collision facts: empty nominal-circle corners may fit beside a
+// rectangle, but real overlap (including two instances of one class) may not.
+{
+  const stadium = { id: "stadium:a", kind: "stadium", x: 0, z: 0, yaw: 0, radius: 49 };
+  const proxy = { id: "small-plot", kind: "unknown-model", x: 50, z: 0, yaw: 0, radius: 5 };
+  assert.equal(siteFootprintSeparation(stadium, proxy), 12.5);
+  assert.equal(siteFootprintSeparation(proxy, stadium), 12.5);
+  assert.equal(sitesOverlap.measure({ publicSites: [stadium, proxy], landmarks: [] }).length, 0);
+  const overlapping = { ...stadium, id: "stadium:b", x: 20 };
+  assert(siteFootprintSeparation(stadium, overlapping) < 0, "polygon penetration must have a negative sign, not the contact distance zero");
+  assert.equal(sitesOverlap.measure({ publicSites: [stadium, overlapping], landmarks: [] }).length, 1);
+  assert.equal(siteFootprintSeparation(stadium, { ...overlapping, x: 65 }), 0, "touching edges have zero separation");
+  assert.equal(siteFootprintSeparation(stadium, { ...overlapping, x: 70 }), 5);
+  assert.equal(siteFootprintSeparation({ ...stadium, kind: "unknown-a" }, proxy), -4,
+    "undeclared shapes retain their full circular reservation");
+  assert.equal(siteFootprintSeparation({ ...stadium, yaw: NaN }, proxy), -Infinity);
+}
+
+// A neighbour may need a new frontage route after a joint move. Only a proved
+// primary connection makes the formerly-too-far candidate usable.
+{
+  const network = emptyNetwork(); addNetworkEdge(network, { x: -100, z: 0 }, { x: 100, z: 0 }, true);
+  const owner = { id: "relocated-park", kind: "park", x: 0, z: 60, yaw: 0, radius: 20 };
+  const geo = { height: () => 1.2, buildable: () => true, terrain: { slope: () => 0 } };
+  assert.equal(connectRelocatedPlotAccess({ network, geo, inRiver: () => false, reservations: () => [owner] }, owner, "-100:0"), true);
+  assert(network.edges.size > 1, "a successful neighbour relocation must retain its actual new route");
+  const wet = emptyNetwork(); addNetworkEdge(wet, { x: -100, z: 0 }, { x: 100, z: 0 }, true);
+  const before = JSON.stringify([...wet.edges]);
+  assert.equal(connectRelocatedPlotAccess({ network: wet, geo: { ...geo, height: () => -1 }, inRiver: () => false,
+    reservations: () => [owner] }, owner, "-100:0"), false);
+  assert.equal(JSON.stringify([...wet.edges]), before, "failed neighbour access publishes no route");
+}
+
+// Exact declared model geometry replaces the nominal reservation circle in
+// generator admission; legacy-only classes keep their existing proxy checks.
+{
+  const candidate = { id: "stadium:shape", x: 0, z: 0, yaw: 0, source: "shape fixture" };
+  const world = { core: { x: 0, z: 0 }, R: 300, turn: 0, coast: [],
+    trunkRuns: [[{ x: -100, z: 40 }, { x: 100, z: 40 }]], ringRuns: [], bridges: [],
+    placed: [{ x: 50, z: 0, radius: 5 }], height: (_x, z) => z > 30 && Math.abs(_x) < 5 ? 0.2 : 1.2,
+    inRiver: () => false, riverBank: () => false, coastDistance: () => 200, landClearance: () => 100, buildable: () => true,
+    hasRiver: false, riverX: () => 9999, riverWidth: () => 0, hillDir: { x: 1, z: 0 }, hillLine: 9999, hillProj: () => 0 };
+  assert.equal(siteCandidateHardReject(world, specByKind("stadium"), candidate), null,
+    "65x50 stadium fits beside a road, on dry model ground, and beside a small plot even when its legacy radius would reject it");
+  assert.equal(siteCandidateHardReject({ ...world, trunkRuns: [[{ x: -100, z: 32 }, { x: 100, z: 32 }]], placed: [] },
+    specByKind("stadium"), candidate), "trunk-clearance-r+8", "real footprint must still reject a road corridor within its 8-unit setback");
+  let terrainSamples = 0;
+  const blockedWorld = { ...world, trunkRuns: [[{ x: -100, z: 32 }, { x: 100, z: 32 }]], placed: [],
+    height: () => { terrainSamples += 1; return 1.2; } };
+  assert.equal(siteCandidateHardReject(blockedWorld, specByKind("stadium"), candidate), "trunk-clearance-r+8");
+  assert.equal(terrainSamples, 0, "cheap physical clearance rejection must happen before terrain sampling");
+}
+
+// Exact inland models use their declared ground footprint for the water measure,
+// matching generator admission instead of rejecting a dry model for wet corners
+// of its larger nominal reservation circle.
+{
+  const owner = { id: "central-station", kind: "station", x: 0, z: 0, yaw: 0, radius: specByKind("station").radius };
+  const footprint = siteFootprint(owner.kind, owner.id, owner.radius), polygons = worldParts(footprint, owner, owner.yaw);
+  assert(footprint.exact, "station fixture must exercise the declared physical footprint path");
+  const outsideRingPoint = ringSamples16(owner, owner.radius).find(point => !polygons.some(polygon => pointInPolygon(point, polygon)));
+  assert(outsideRingPoint, "station's nominal plot circle must contain a point outside the physical ground footprint");
+  const height = (x, z) => Math.hypot(x - outsideRingPoint.x, z - outsideRingPoint.z) < 0.1 ? 0 : 1.2;
+  const plan = { publicSites: [owner], landmarks: [], terrain: { height } };
+  assert.equal(siteInWater.measure(plan).length, 0, "wet area outside the exact inland footprint cannot create a water violation");
+  const proxyOwner = { ...owner, kind: "legacy-proxy" };
+  assert.equal(siteInWater.measure({ ...plan, publicSites: [proxyOwner] }).length, 1,
+    "unknown/nominal footprints retain the conservative reservation-circle water measure");
+}
 
 const frontagePrimaryMax = JOINT_SITE_CONFIG.frontageSegments * (1 + JOINT_SITE_CONFIG.probes.length) * 2;
 const frontageFallbackMax = JOINT_SITE_CONFIG.fallbackCandidateLimit * (1 + JOINT_SITE_CONFIG.fallbackProbes.length) * 2;

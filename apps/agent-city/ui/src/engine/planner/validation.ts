@@ -18,6 +18,7 @@
 import { DetMath as Math } from "../detMath";
 import type { Vec2 } from "../cityLayout";
 import { keyOf, type Network } from "./network";
+import { siteRoadClear, siteFootprint } from "../planFootprint";
 import type { ConnectorWorld, ConnectionFailure } from "./connect";
 import { classifyRoadSegments } from "./relations";
 
@@ -65,6 +66,14 @@ export function corridorViolation(world: ConnectorWorld, a: Vec2, b: Vec2, polic
   if (!Number.isFinite(width) || width < 0 || !Number.isFinite(distance)) return { kind: "projection-loss", cause: "invalid-geometry" };
   // 圆预留与道路胶囊精确相交；不依赖纵向采样相位，不能漏掉采样点之间的小障碍。
   for (const site of policy.sites) {
+    if (site.kind && Number.isFinite(site.yaw)) {
+      const footprint = siteFootprint(site.kind, site.id ?? `reservation:${site.kind}`, site.radius);
+      if (footprint.exact) {
+        if (!siteRoadClear({ ...site, kind: site.kind, yaw: site.yaw! }, a, b, width, policy.siteMargin))
+          return { kind: "site-clearance", cause: "site-envelope" };
+        continue;
+      }
+    }
     const dx = b.x - a.x; const dz = b.z - a.z;
     const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (distance * distance || 1)));
     if (Math.hypot(site.x - a.x - dx * t, site.z - a.z - dz * t) < site.radius + policy.siteMargin + width / 2) return { kind: "site-clearance", cause: "site-envelope" };
@@ -158,7 +167,7 @@ export function corridorFailure(world: ConnectorWorld, a: Vec2, b: Vec2, policy:
 export type CorridorPolicy = {
   requireBuildable: boolean;
   maxSlope: number;
-  sites: Array<{ x: number; z: number; radius: number }>;
+  sites: Array<{ id?: string; kind?: string; yaw?: number; x: number; z: number; radius: number }>;
   siteMargin: number;
   /** 道路全宽（批 A2 胶囊口径）：避让判据从中心线点升级为「中心线 ± width/2 侧向展开」——
    *  宽路的侧缘不得压进用地盘（评审门禁「宽道路侧缘压楼」）。缺省 0 = 历史中心线口径

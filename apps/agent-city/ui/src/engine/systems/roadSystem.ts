@@ -4,7 +4,8 @@
  */
 
 import * as THREE from "three";
-import type { CityLayout, Vec2 } from "../cityLayout";
+import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
+import { cornerArc, curbClearance, junctionIndex, pavementIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../render/shared";
 
@@ -22,13 +23,66 @@ export interface RoadHost {
   makeInstanced(geometry: THREE.BufferGeometry, material: THREE.Material, capacity: number): THREE.InstancedMesh;
 }
 
+/** 桥头 / 滨水 / 尽端的路缘退让：沿用路口改造前的固定 5.5（旧「segment − 11」的一半）。 */
+const LEGACY_CURB_TRIM = 5.5;
+
 /** Batched city furniture and waterfront infrastructure, not selectable data. */
 export function buildInfrastructure(host: RoadHost): void {
   type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number; yaw?: number };
   const parts: Part[] = [];
   const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0, yaw = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt, yaw });
   // Curbs and street lights are real geometry; asphalt and markings share the atlas.
-  for (const edge of host.layout.roadEdges) {
+  // 画路一律用渲染路网（窄短桩按接续宽路画，与贴图 / 路面网格同一份）。
+  const roadEdges = renderRoadEdges(host.layout.roadEdges);
+  const junctions = roadJunctionPlan(roadEdges);
+  const { byNode, armOf } = junctionIndex(junctions);
+  /** 路缘在某端的退让距离。sideAtNode 是相对「从节点出发」方向的侧：+1 = 逆时针侧（+n）。 */
+  const ownTrim = (edge: RoadEdge, node: string, sideAtNode: number): number => {
+    const arm = armOf(edge, node);
+    const junction = byNode.get(node);
+    if (!arm || !junction || junction.touchesDeck || arm.legacy) return LEGACY_CURB_TRIM;
+    const trim = sideAtNode > 0 ? arm.ccwTrim : arm.cwTrim;
+    if (trim !== null) return trim;
+    if (junction.taper && junction.taper.narrow === arm) return junction.taper.length;
+    // 这一侧没有圆角：邻臂是桥面/滨水、或夹角 < 177° 却没能做出圆角（边太短 / 不等宽近直行），沿用旧的 5.5；
+    // 直行侧（≥ 177°）邻臂不比自己宽就接到节点、与邻臂路缘连成一条。两种情况都再用 curbClearance 兜底：
+    // 路缘必须走出路口里其它臂的路面带，不能落在别人的路面上。
+    const neighbor = sideAtNode > 0 ? arm.ccwNeighbor : arm.cwNeighbor;
+    const gap = sideAtNode > 0 ? arm.ccwGap : arm.cwGap;
+    const base = !neighbor || neighbor.legacy || gap < STRAIGHT_GAP ? LEGACY_CURB_TRIM : 0;
+    return Math.max(base, curbClearance(junction, arm, sideAtNode));
+  };
+  // 圆角切点 / 渐变段长度可能长过第一条短边：沿臂的直路链顺延，后续边在近端同侧接着退让。
+  const spill = new Map<string, number>();
+  const spillKey = (edge: RoadEdge, node: string, sideAtNode: number) => `${edge.id}|${node}|${sideAtNode}`;
+  for (const junction of junctions) for (const arm of junction.arms) {
+    const taper = junction.taper && junction.taper.narrow === arm ? junction.taper.length : null;
+    for (const [sideAtNode, trim] of [[1, arm.ccwTrim ?? taper], [-1, arm.cwTrim ?? taper]] as const) {
+      if (trim === null) continue;
+      for (const link of arm.chain.slice(1)) {
+        if (trim <= link.start) break;
+        const key = spillKey(link.edge, link.near, sideAtNode);
+        spill.set(key, Math.max(spill.get(key) ?? 0, trim - link.start));
+      }
+    }
+  }
+  const pavement = pavementIndex(roadEdges);
+  /** 一段路缘：减去它穿过的别的路面带后逐段落盒（< 0.5 的碎段丢弃），高度按每段中点取地形。 */
+  const curb = (p: Vec2, q: Vec2, own: RoadEdge | undefined, overlap: number) => {
+    const length = Math.hypot(q.x - p.x, q.z - p.z);
+    if (length < 1e-3) return;
+    const yaw = -Math.atan2(q.z - p.z, q.x - p.x);
+    for (const [t0, t1] of pavement.outside(p, q, own)) {
+      const piece = (t1 - t0) * length;
+      if (piece < 0.5 && !(t0 === 0 && t1 === 1)) continue;
+      const tm = (t0 + t1) / 2;
+      const x = p.x + (q.x - p.x) * tm; const z = p.z + (q.z - p.z) * tm;
+      add(x, Math.max(0, host.layout.terrain.height(x, z)) + 0.02, z, piece + (t0 === 0 && t1 === 1 ? overlap : 0), 0.18, 0.35, "#cbc6ba", 0, yaw);
+    }
+  };
+  const curbTrim = (edge: RoadEdge, node: string, sideAtNode: number) =>
+    Math.max(ownTrim(edge, node, sideAtNode), spill.get(spillKey(edge, node, sideAtNode)) ?? 0);
+  for (const edge of roadEdges) {
     // Bridge spans need actual geometry; the terrain atlas is below the river surface.
     if (edge.bridge) {
       const [a, b] = edge.points;
@@ -59,16 +113,38 @@ export function buildInfrastructure(host: RoadHost): void {
     // 沿路段的实际方向摆放（G2 起各片区街网朝向不同；曾只认水平/竖直两种方向）。
     const [a, b] = edge.points;
     const segment = Math.hypot(b.x - a.x, b.z - a.z);
-    if (segment < 14) continue;
-    const length = segment - 11;
-    const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
-    const nx = -(b.z - a.z) / segment; const nz = (b.x - a.x) / segment; // 路段法向
-    const x = (a.x + b.x) / 2; const z = (a.z + b.z) / 2;
-    const base = Math.max(0, host.layout.terrain.height(x, z));
+    if (segment < 1) continue;
+    const ux = (b.x - a.x) / segment; const uz = (b.z - a.z) / segment;
+    const nx = -uz; const nz = ux; // 路段法向（side = +1 即 +n 侧）
     for (const side of [-1, 1]) {
+      // 每端按路口几何退让：有圆角的一侧退到切点（圆弧由下面的转角段接上），直行一侧接到节点
+      // （与对面那臂的路缘连成一条），桥头 / 滨水 / 尽端沿用旧的固定 5.5。
+      // 旧做法两端一律退 5.5、且整段 < 14 就不画：路缘要么直插进路口（宽路口 5.5 不够），
+      // 要么在直行一侧断出 11 的口子；与贴图上的圆角路面对不上。
+      const start = curbTrim(edge, edge.from, side);
+      const end = curbTrim(edge, edge.to, -side);
+      if (segment - start - end < 0.5) continue;
       const offset = side * (edge.width / 2 + 0.25);
-      add(x + nx * offset, base + 0.02, z + nz * offset, length, 0.18, 0.35, "#cbc6ba", 0, yaw);
+      curb({ x: a.x + ux * start + nx * offset, z: a.z + uz * start + nz * offset },
+        { x: a.x + ux * (segment - end) + nx * offset, z: a.z + uz * (segment - end) + nz * offset }, edge, 0);
     }
+  }
+  // 转角路缘：沿路面圆弧内收 0.25（路缘中心线与直段一致：路面边线外 0.25）的一串短盒，与贴图圆角同一份几何。
+  for (const junction of junctions) for (const corner of junction.corners) {
+    const arc = cornerArc(corner, 0.25);
+    for (let k = 1; k < arc.length; k += 1) {
+      const p = arc[k - 1]; const q = arc[k];
+      const chord = Math.hypot(q.x - p.x, q.z - p.z);
+      if (chord < 1e-3) continue;
+      // 盒长多 0.12 让相邻弦段在折角外侧咬合，不露缝。
+      curb(p, q, undefined, 0.12);
+    }
+  }
+  // 渐变段两侧的斜路缘：从宽路路缘（节点处）斜接到窄路路缘（渐变段末端）。
+  for (const junction of junctions) if (junction.taper) {
+    const [wideLeft, narrowLeft, narrowRight, wideRight] = taperOutline(junction, 0.25);
+    curb(wideLeft, narrowLeft, undefined, 0.12);
+    curb(wideRight, narrowRight, undefined, 0.12);
   }
   // 城北高架与城南港口曾按常量坐标（urbanBounds.north − 12 / right − 80、south + 58）摆放、与地理无关：
   // G2 起高架是规划层的环线（buildDistrictExpressways 渲染），港口是 harbor 公共用地（buildPublicSites）。
@@ -95,7 +171,7 @@ export function buildInfrastructure(host: RoadHost): void {
  *  不是一口一 Mesh；喇叭抬 0.035（路漆 0.02–0.05 的既有 z-fighting 规避惯例，
  *  路缘盒基面 0.02 / 沙滩带 0.05 之间）。 */
 export function buildChannelizedJunctions(host: RoadHost): void {
-  const mouths = channelizedTPlan(host.layout.roadEdges);
+  const mouths = channelizedTPlan(renderRoadEdges(host.layout.roadEdges));
   if (!mouths.length) return;
   const terrain = host.layout.terrain;
   // 与地面贴图（cityTextures 路漆盘）同色的沥青：喇叭就是「路口变宽」本身，不另配色。
@@ -279,7 +355,7 @@ export function buildCulDeSacBulbs(host: RoadHost): void {
   if (!ends.length) return;
   // 所在点最宽的 incident 路段决定回车圈半径（找到的多为唯一悬挂边）。
   const widthAt = new Map<string, number>();
-  for (const edge of host.layout.roadEdges) {
+  for (const edge of renderRoadEdges(host.layout.roadEdges)) {
     if (edge.bridge) continue;
     for (const id of [edge.from, edge.to]) widthAt.set(id, Math.max(widthAt.get(id) ?? 0, edge.width));
   }

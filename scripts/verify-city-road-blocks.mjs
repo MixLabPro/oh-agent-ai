@@ -69,6 +69,8 @@ assert.ok(excludedSurface.blocks[0].surfaceExclusions.some(exclusion => exclusio
 const forged = run({ ...base, faces: { ...base.faces, faces: base.faces.faces.map(face => ({ ...face, boundary: [point(10, 10), point(70, 10), point(70, 70), point(10, 70)] })) } });
 assert.equal(forged.report.status, "unsupported"); assert.equal(forged.blocks.length, 0);
 const narrow = run(inputFor(square("n", 0, 0, 20))); assert.equal(narrow.access.length, 0);
+const opposingRows = run(inputFor(square("overlap", 0, 0, 30)));
+assert.ok(opposingRows.report.rejected["parcel-overlap"] > 0, "opposing frontage rows must still reject exact rectangle overlaps");
 const consumed = run(inputFor(square("consumed", 0, 0, 8)));
 assert.equal(consumed.report.status, "complete"); assert.equal(consumed.report.faces, 1);
 assert.equal(consumed.report.emptyFaces.length, 1); assert.equal(consumed.report.supportedFaces, 0);

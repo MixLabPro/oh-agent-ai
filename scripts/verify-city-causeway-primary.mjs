@@ -2,11 +2,20 @@
 // Transaction contract guard, not proof that every offshore owner is served.
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
-const { createCityPlan, MIAMI_COASTAL, componentOf, primaryComponentId, diagnoseNetwork } = await loadCity({
+const { createCityPlan, MIAMI_COASTAL, componentOf, primaryComponentId, diagnoseNetwork, supportedShoreLanding } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/intent.ts": ["componentOf", "primaryComponentId", "diagnoseNetwork"],
+  "engine/planner/siting.ts": ["supportedShoreLanding"],
 });
+{
+  const shore = { x: 0, z: 0 }, outward = { x: 1, z: 0 };
+  assert.deepEqual(supportedShoreLanding({ height: () => 1.2, inRiver: () => false }, shore, outward), { x: -6, z: 0 });
+  assert.deepEqual(supportedShoreLanding({ height: (x, z) => x < -10 || Math.abs(z) < 1 ? 1.2 : 0,
+    inRiver: () => false }, shore, outward), { x: -14, z: 0 }, "a dry centre cannot certify wet road shoulders");
+  assert.equal(supportedShoreLanding({ height: () => -1, inRiver: () => false }, shore, outward), null);
+  assert.equal(supportedShoreLanding({ height: () => 1.2, inRiver: () => true }, shore, outward), null);
+}
 for (const seed of [2002827683, 2005655366]) {
   const plan = createCityPlan(seed, 1, MIAMI_COASTAL);
   const components = componentOf(plan), primary = primaryComponentId(plan, components);

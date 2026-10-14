@@ -24,6 +24,7 @@ import { proposeShorePlotAccess } from "./planner/shorePlotAccess";
 import { frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, groundFrontageSegments, type FrontageMoveContext } from "./planner/access";
 import { localResiteCandidates, retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, SAIL_OPERA_CONFIG, type ShoreMoveContext } from "./planner/siting";
 import { buildGeography } from "./planner/geography";
+import { withPlanningWorkLedger, spendPlanningWork, type PlanningWorkLedger } from "./planner/operationBudget";
 import { roadCandidateCrowding } from "./planner/roadAdmission";
 import { extractRoadFaces } from "./planner/roadFaces";
 import { generateRoadBlocks, type RoadBlockReport } from "./planner/roadBlocks";
@@ -73,7 +74,14 @@ export type Shape = {
 };
 
 /** `opts.skipSolve` 仅供守卫（verify-city-solve）取「修复前」的草案；生产调用不传。 */
-export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | null = null, opts: { skipSolve?: boolean; memoizeTerrain?: boolean; legacyGridParcels?: boolean } = {}) {
+export type CityPlanOptions = { skipSolve?: boolean; memoizeTerrain?: boolean; legacyGridParcels?: boolean; workLedger?: PlanningWorkLedger };
+export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | null = null, opts: CityPlanOptions = {}) {
+  if (!opts.workLedger) return createCityPlanDraft(seed, tier, config, opts);
+  const ledger = opts.workLedger;
+  const plan = withPlanningWorkLedger(ledger, () => createCityPlanDraft(seed, tier, config, opts));
+  return { ...plan, workBudget: ledger.snapshot() };
+}
+function createCityPlanDraft(seed: number, tier: number, config: CoastalConfig | null, opts: CityPlanOptions) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   // 岛形参数（与半径无关）：放大时形状不变。
   const shape: Shape = {
@@ -110,6 +118,7 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
 }
 
 function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null, tier: number, skipSolve: boolean, memoizeTerrain: boolean, legacyGridParcels: boolean) {
+  spendPlanningWork("radius:attempt", { radiusAttempt: 1 });
   const random = (key: string) => hashSeed(`${seed}:${key}`);
 
   // ── L1 地理（V2 步 2a：逐字迁至 planner/geography.ts，random 无状态键控哈希、迁移不改调用序）──

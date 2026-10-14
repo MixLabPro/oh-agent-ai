@@ -15,6 +15,9 @@ const ui = path.join(repo, "apps/desktop/ui-dev");
 const engine = path.join(repo, "apps/agent-city/ui/src/engine");
 const jsc = "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc";
 const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
+// Focused regression does not replace the default thirty-layout gate.
+const cases = process.env.CITY_CROSS_ENGINE_PASSAGE === "1" ? [{ tier: 3, i: 0, seed: 4000104729 }]
+  : [1, 2, 5].flatMap(tier => Array.from({ length: 10 }, (_, i) => ({ tier, i, seed: 1703294958 + i * 7919 })));
 const entry = `
 import { createCityPlan } from ${JSON.stringify(path.join(engine, "cityPlan.ts"))};
 import { MIAMI_COASTAL } from ${JSON.stringify(path.join(engine, "citySeaside.ts"))};
@@ -22,10 +25,10 @@ import { CONSTRAINTS } from ${JSON.stringify(path.join(engine, "planner/constrai
 import { diagnoseNetwork } from ${JSON.stringify(path.join(engine, "planner/intent.ts"))};
 const fnv = (t) => { let h = 0x811c9dc5; for (let i = 0; i < t.length; i += 1) { h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16); };
 const out = [];
-for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
+for (const { tier, i, seed } of ${JSON.stringify(cases)}) {
   const trace = typeof process !== "undefined" && process.env.CITY_VERIFY_PROGRESS === "1";
   if (trace) console.error("City cross-engine V8: start " + tier + "/" + i);
-  const plan = createCityPlan(1703294958 + i * 7919, tier, MIAMI_COASTAL);
+  const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
   const constraintCounts = Object.fromEntries(CONSTRAINTS.map(c => [c.id, c.measure(plan).length]));
   const unmet = diagnoseNetwork(plan)?.unmet ?? null;
   if (trace) console.error("City cross-engine V8: done " + tier + "/" + i + " R=" + plan.islandRadius + " attempts=" + plan.radiusAttempts + " edges=" + plan.roadEdges.length

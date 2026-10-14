@@ -82,12 +82,40 @@ const DECLARED: Record<string, PhysicalDeclaration | undefined> = Object.fromEnt
 /** 声明式模型里物理声明还没补的：从件表俯视投影（registry 的 PHYSICAL_PENDING——补了声明就会走 DECLARED）。 */
 const PROJECTABLE: Record<string, BuildingModel> = Object.fromEntries([tvTowerModel, pagodaModel, lighthouseModel].map((model) => [model.id, model]));
 
+// corridorViolation asks for a site's footprint once per candidate road segment.
+// For projected models that used to rebuild every mesh sample and convex hull on
+// every call. Geometry is a pure function of model id, hashed instance seed and
+// radius, so retain a small LRU of projection results.
+const PROJECTED_FOOTPRINT_CACHE_LIMIT = 64;
+const projectedFootprints = new Map<string, FootprintSpec | null>();
+
 /** 件表投影（默认 sizing：塔高取上限——XZ 外廓与高度无关或随高度只增不减，取上限是保守方向）。 */
 function fromProjection(model: BuildingModel, id: string, radius: number): FootprintSpec | null {
+  const seed = hashSeed(id);
+  const key = `${model.id}\u0000${seed}\u0000${radius}`;
+  if (Number.isFinite(radius) && projectedFootprints.has(key)) {
+    const cached = projectedFootprints.get(key)!;
+    projectedFootprints.delete(key);
+    projectedFootprints.set(key, cached);
+    return cached;
+  }
   try {
-    const projected = projectParts(model.geometry({ seed: hashSeed(id), radius }));
-    return projected ? spec(projected.ground, "projected", projected.overhead.slice(projected.ground.length)) : null;
-  } catch { return null; }
+    const projected = projectParts(model.geometry({ seed, radius }));
+    const result = projected ? spec(projected.ground, "projected", projected.overhead.slice(projected.ground.length)) : null;
+    if (Number.isFinite(radius)) {
+      projectedFootprints.set(key, result);
+      if (projectedFootprints.size > PROJECTED_FOOTPRINT_CACHE_LIMIT)
+        projectedFootprints.delete(projectedFootprints.keys().next().value!);
+    }
+    return result;
+  } catch {
+    if (Number.isFinite(radius)) {
+      projectedFootprints.set(key, null);
+      if (projectedFootprints.size > PROJECTED_FOOTPRINT_CACHE_LIMIT)
+        projectedFootprints.delete(projectedFootprints.keys().next().value!);
+    }
+    return null;
+  }
 }
 
 /** 声明 → 两层投影。运动包络是多个输入变体的联合（摩天轮按 cap 有两种半径），全取——保守方向。 */
@@ -135,6 +163,124 @@ export function worldParts(footprint: FootprintSpec, origin: Vec2, yaw: number):
 /** 俯视投影 → 世界（碰撞用）。 */
 export function worldOverhead(footprint: FootprintSpec, origin: Vec2, yaw: number): Polygon[] {
   return footprint.overhead.map((part) => part.map((p) => toWorld(p, origin, yaw)));
+}
+
+/** Bounded deterministic terrain samples over the actual declared ground shape. */
+export function worldFootprintSamples(footprint: FootprintSpec, origin: Vec2, yaw: number, spacing = 4): Vec2[] {
+  if (!Number.isFinite(spacing) || spacing <= 0) return [];
+  const samples: Vec2[] = [];
+  for (const polygon of worldParts(footprint, origin, yaw)) {
+    const xs = polygon.map((point) => point.x), zs = polygon.map((point) => point.z);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
+    const nx = Math.max(1, Math.ceil((maxX - minX) / spacing)), nz = Math.max(1, Math.ceil((maxZ - minZ) / spacing));
+    // Fail closed rather than allowing malformed model data to create unbounded work.
+    if ((nx + 1) * (nz + 1) + samples.length > 4096) return [];
+    for (let ix = 0; ix <= nx; ix += 1) for (let iz = 0; iz <= nz; iz += 1) {
+      const point = { x: minX + (maxX - minX) * ix / nx, z: minZ + (maxZ - minZ) * iz / nz };
+      if (pointInPolygon(point, polygon)) samples.push(point);
+    }
+  }
+  return samples;
+}
+
+/** Exact distance from model polygons to linework, measured against road centerlines. */
+export function footprintRunsDistance(footprint: FootprintSpec, origin: Vec2, yaw: number, runs: readonly (readonly Vec2[])[]): number {
+  let best = Infinity;
+  for (const polygon of worldParts(footprint, origin, yaw)) for (const run of runs) {
+    if (run.length === 1) {
+      const point = run[0];
+      if (pointInPolygon(point, polygon)) return 0;
+      for (let i = 0; i < polygon.length; i += 1) best = Math.min(best, pointSegment(point, polygon[i], polygon[(i + 1) % polygon.length]));
+    } else for (let i = 1; i < run.length; i += 1) best = Math.min(best, segmentPolygonDistance(run[i - 1], run[i], polygon));
+  }
+  return best;
+}
+
+/** Ground-road clearance uses exterior setback except inside a declared
+ * through-passage. Two opposed vehicle entrances define that lane; the full
+ * road capsule must still clear every solid pier. This is XY evidence only. */
+export function siteRoadClear(owner: { id?: string; kind: string; x: number; z: number; yaw: number; radius: number; shore?: Vec2 },
+  a: Vec2, b: Vec2, width: number, margin = 3): boolean {
+  if (![owner.x, owner.z, owner.yaw, owner.radius, a.x, a.z, b.x, b.z, width, margin].every(Number.isFinite)
+    || owner.radius < 0 || width < 0 || margin < 0) return false;
+  const id = owner.id ?? `reservation:${owner.kind}`;
+  const footprint = siteFootprint(owner.kind, id, owner.radius, !!owner.shore);
+  const distance = footprintRunsDistance(footprint, owner, owner.yaw, [[a, b]]);
+  if (distance >= width / 2 + margin) return true;
+  if (!width || distance <= width / 2 + 1e-9 || owner.shore) return false;
+  const declaration = DECLARED[owner.kind] ?? (() => {
+    const ground = resolveGroundModel(owner.kind, { seed: hashSeed(id), radius: owner.radius });
+    return ground.status === "partial" ? ground.declaration : undefined;
+  })();
+  const entrances = declaration?.entrances.filter(entrance => entrance.required && entrance.mode === "vehicle") ?? [];
+  const local = (p: Vec2) => ({ x: (p.x - owner.x) * Math.cos(owner.yaw) - (p.z - owner.z) * Math.sin(owner.yaw),
+    z: (p.x - owner.x) * Math.sin(owner.yaw) + (p.z - owner.z) * Math.cos(owner.yaw) });
+  const u = local(a), v = local(b), length = Math.hypot(v.x - u.x, v.z - u.z);
+  if (!length) return false;
+  for (let i = 0; i < entrances.length; i += 1) for (let j = i + 1; j < entrances.length; j += 1) {
+    const start = entrances[i], end = entrances[j];
+    const span = Math.hypot(end.local.x - start.local.x, end.local.z - start.local.z);
+    if (!span) continue;
+    const axis = { x: (end.local.x - start.local.x) / span, z: (end.local.z - start.local.z) / span };
+    const dot = (p: Vec2, q: Vec2) => p.x * q.x + p.z * q.z;
+    if (dot(start.outward, axis) > -0.999 || dot(end.outward, axis) < 0.999) continue;
+    const travel = { x: (v.x - u.x) / length, z: (v.z - u.z) / length };
+    if (Math.abs(dot(travel, axis)) < Math.cos(Math.PI / 12)) continue;
+    const along = (p: Vec2) => (p.x - start.local.x) * axis.x + (p.z - start.local.z) * axis.z;
+    const side = (p: Vec2) => -(p.x - start.local.x) * axis.z + (p.z - start.local.z) * axis.x;
+    const p = along(u), delta = along(v) - p, collar = width / 2 + margin;
+    const cuts = [(-collar - p) / delta, (span + collar - p) / delta].sort((x, y) => x - y);
+    const lo = Math.max(0, cuts[0]), hi = Math.min(1, cuts[1]);
+    if (lo > hi) continue;
+    const spare = Math.min(start.width, end.width) / 2 - width / 2;
+    const offset = (t: number) => Math.abs(side(u) + (side(v) - side(u)) * t);
+    if (spare > 0 && Math.max(offset(lo), offset(hi)) < spare - 1e-9) return true;
+  }
+  return false;
+}
+
+/** Distance from an exact model polygon to the legacy circular reservation. */
+export function footprintCircleDistance(footprint: FootprintSpec, origin: Vec2, yaw: number, circleCentre: Vec2, circleRadius: number): number {
+  let best = Infinity;
+  for (const polygon of worldParts(footprint, origin, yaw)) {
+    if (pointInPolygon(circleCentre, polygon)) return -circleRadius;
+    for (let i = 0; i < polygon.length; i += 1) best = Math.min(best, pointSegment(circleCentre, polygon[i], polygon[(i + 1) % polygon.length]));
+  }
+  return best - circleRadius;
+}
+
+function polygonDistance(a: Polygon, b: Polygon): number {
+  if (polygonsOverlap(a, b)) {
+    let penetration = Infinity;
+    for (const polygon of [a, b]) for (let i = 0; i < polygon.length; i += 1) {
+      const p = polygon[i], q = polygon[(i + 1) % polygon.length], nx = -(q.z - p.z), nz = q.x - p.x;
+      const length = Math.hypot(nx, nz); if (!length) continue;
+      const left = a.map(point => (point.x * nx + point.z * nz) / length);
+      const right = b.map(point => (point.x * nx + point.z * nz) / length);
+      penetration = Math.min(penetration, Math.max(...left) - Math.min(...right), Math.max(...right) - Math.min(...left));
+    }
+    return -penetration;
+  }
+  if (pointInPolygon(a[0], b) || pointInPolygon(b[0], a)) return 0;
+  let best = Infinity;
+  for (let i = 0; i < a.length; i += 1) best = Math.min(best, segmentPolygonDistance(a[i], a[(i + 1) % a.length], b));
+  return best;
+}
+
+/** Separation between physical model shapes, falling back to the nominal circles only when undeclared. */
+export function siteFootprintSeparation(a: { id: string; kind: string; x: number; z: number; yaw: number; radius: number; shore?: Vec2 },
+  b: { id: string; kind: string; x: number; z: number; yaw: number; radius: number; shore?: Vec2 }): number {
+  if (![a.x, a.z, a.radius, b.x, b.z, b.radius].every(Number.isFinite) || a.radius < 0 || b.radius < 0) return -Infinity;
+  const projection = (owner: typeof a) => {
+    const footprint = siteFootprint(owner.kind, owner.id ?? `reservation:${owner.kind}`, owner.radius, !!owner.shore);
+    return { ...footprint, parts: footprint.overhead };
+  };
+  const left = projection(a), right = projection(b);
+  if ((left.exact && !Number.isFinite(a.yaw)) || (right.exact && !Number.isFinite(b.yaw))) return -Infinity;
+  if (!left.exact && !right.exact) return Math.hypot(a.x - b.x, a.z - b.z) - a.radius - b.radius;
+  if (left.exact && !right.exact) return footprintCircleDistance(left, a, a.yaw, b, b.radius);
+  if (!left.exact && right.exact) return footprintCircleDistance(right, b, b.yaw, a, a.radius);
+  return Math.min(...worldParts(left, a, a.yaw).flatMap(x => worldParts(right, b, b.yaw).map(y => polygonDistance(x, y))));
 }
 
 /** 包围盒在世界里的朝向矩形（叠加层、拾取、障碍物用）。 */

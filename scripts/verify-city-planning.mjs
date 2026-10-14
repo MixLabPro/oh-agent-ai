@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { cachedPlan, loadCity } from "./city-kit/index.mjs";
 
 // 原生加载 + 进程内缓存（CITY_ARCHITECTURE 迁移步 1）。
-const { createCityPlan: rawPlan, MIAMI_COASTAL, CONSTRAINTS, diagnoseNetwork } = await loadCity({
+const { createCityPlan: rawPlan, MIAMI_COASTAL, CONSTRAINTS, diagnoseNetwork, siteFootprintSeparation } = await loadCity({
+  "engine/planFootprint.ts": ["siteFootprintSeparation"],
   "engine/planner/constraints.ts": ["CONSTRAINTS"],
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
@@ -136,7 +137,7 @@ for (const seed of [2005655366, 2005864824, 2005969553]) {
   for (const owner of required) {
     assert.equal(owner.access?.role, "plot-gate", `seed ${seed}: ${owner.id} must retain its accepted gate`);
     assert.ok(sites.filter((site) => site !== owner && site.radius).every((site) =>
-      Math.hypot(site.x - owner.x, site.z - owner.z) >= site.radius + owner.radius), `seed ${seed}: ${owner.id} must not overlap another site`);
+      siteFootprintSeparation(site, owner) >= 0), `seed ${seed}: ${owner.id} must not overlap another site's real projection`);
   }
   assert.equal(byId.roadThroughSite.measure(plan).length, 0, `seed ${seed}: relocation must not put a road through a site`);
   assert.ok(plan.siteObligations?.every((obligation) => obligation.placed), `seed ${seed}: all required placement obligations must be satisfied`);

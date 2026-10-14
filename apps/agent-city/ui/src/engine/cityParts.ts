@@ -32,6 +32,7 @@ import { roadPaintPlan } from "./cityRoadPaint";
 import { buildGroundSpill, buildSeaMountains, buildTerrain, buildWater, type TerrainHost } from "./systems/terrainSystem";
 import { applyFlora, buildTrees, type NatureHost } from "./systems/natureSystem";
 import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type AmbientHost } from "./systems/ambientSystem";
+import { buildRoadSurface, type RoadSurfaceHost } from "./systems/roadSurfaceSystem";
 import { buildInfrastructure, buildCulDeSacBulbs, buildChannelizedJunctions, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
@@ -174,6 +175,7 @@ export class CityParts {
       const staticBucket: Array<{ dispose: () => void }> = [];
       (this.disposables as Array<{ dispose: () => void }>) = staticBucket;
       this.buildTerrain();
+      this.buildRoadSurface();
       this.buildInfrastructure();
       this.buildCulDeSacBulbs();
       this.buildChannelizedJunctions();
@@ -494,6 +496,7 @@ export class CityParts {
 
   /** Batched city furniture and waterfront infrastructure, not selectable data. */
   private buildInfrastructure(): void { buildInfrastructure(this as unknown as RoadHost); }
+  private buildRoadSurface(): void { buildRoadSurface(this as unknown as RoadSurfaceHost); }
 
   /** 尽端回车圈（形态批 §5-3）：合法尽端（culDeSacEnds）的回车圆盘 + 路缘描边，
    *  纯渲染装饰、不改路网拓扑；见 systems/roadSystem.ts。 */

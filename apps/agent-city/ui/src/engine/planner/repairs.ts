@@ -12,6 +12,7 @@ import { bridgeLandingNodes, isPlannedRoadEnd } from "./endpoints";
 import { canRelocateGroundSite, specByKind } from "./sitespec";
 import { planarAccessPose, resolvePlanarAccess } from "../models/siteAccess";
 import { declaredGroundRoadClear } from "./modelEnvelope";
+import { registeredModelGroundFailure } from "./modelGround";
 
 /** 与 constraints/networkRepairs 同一计划内终点视图（批次 3-2：repairs 的两处 height 门切语义判定）。 */
 function plannedEndWorld(ctx: RepairContext) {
@@ -95,10 +96,11 @@ export function frontStationsAndStadiums(ctx: RepairContext): number {
 }
 
 /** Read-only, lazy candidates for the existing bounded coastal fallback. */
-export function* shoreRelocationCandidates(ctx: RepairContext, site: { x: number; z: number; radius: number; kind: string }, g: SiteGeometry,
+export function* shoreRelocationCandidates(ctx: RepairContext, site: RepairContext["landmarks"][number] | RepairContext["publicSites"][number], g: SiteGeometry,
   others: Array<{ x: number; z: number; radius: number }>): Iterable<Vec2> {
   const { ringRuns, coast, core, height, SHORE_SITE_KINDS } = ctx;
   const { nearestRoad, wetAt } = g;
+  const groundRoads = [...ctx.network.edges.values()].filter(road => !road.bridge);
   if (!(SHORE_SITE_KINDS.has(site.kind)) || (site as { shore?: Vec2 }).shore) return;
   const ranked2 = [...coast].sort((u, v) => Math.hypot(u.x - site.x, u.z - site.z) - Math.hypot(v.x - site.x, v.z - site.z));
   // 向内移 0.7 / 1.0 / 1.5 / 2.0 个半径各试一次：沿海大道离水线 ~22，贴岸 0.7 半径的位置正好压在它上面，
@@ -108,16 +110,18 @@ export function* shoreRelocationCandidates(ctx: RepairContext, site: { x: number
     const { q, f } = slots[idx]; const lx = core.x - q.x; const lz = core.z - q.z; const ll = Math.hypot(lx, lz) || 1;
     const nx = q.x + (lx / ll) * site.radius * f; const nz = q.z + (lz / ll) * site.radius * f;
     const probe = nearestRoad(nx, nz);
-    if (!probe || probe.d < site.radius * 0.85 || probe.d > site.radius + 20) continue;
+    const proposed = declaredGroundRoadClear({ ...site, x: nx, z: nz }, groundRoads);
+    if (!probe || proposed === false || (proposed === undefined && probe.d < site.radius * 0.85) || probe.d > site.radius + 20) continue;
     if (wetAt(site, nx, nz) > 3 || height(nx, nz) <= 0.5 || nearBridgeEnd(ctx.bridges, nx, nz, site.radius)) continue;
     if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
     if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;
     if (polylineDistance(ctx.trunkRuns, { x: nx, z: nz }) < site.radius * 0.7) continue;
+    if (registeredModelGroundFailure({ ...site, x: nx, z: nz }, { height, inRiver: ctx.inRiver })) continue;
     yield { x: nx, z: nz };
   }
 }
 
-export function relocateShoreSite(ctx: RepairContext, site: { x: number; z: number; radius: number; kind: string }, g: SiteGeometry, others: Array<{ x: number; z: number; radius: number }>): boolean {
+export function relocateShoreSite(ctx: RepairContext, site: RepairContext["landmarks"][number] | RepairContext["publicSites"][number], g: SiteGeometry, others: Array<{ x: number; z: number; radius: number }>): boolean {
   for (const at of shoreRelocationCandidates(ctx, site, g, others)) {
     site.x = at.x; site.z = at.z;
     for (const block of ctx.blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - at.x, pc.z - at.z) >= site.radius);
@@ -155,6 +159,7 @@ export function nudgeSitesOffRoads(ctx: RepairContext, onlyOwnerId?: string): nu
           if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
           if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;
           if (polylineDistance(ctx.trunkRuns, { x: nx, z: nz }) < site.radius * 0.7) continue;
+          if (registeredModelGroundFailure({ ...site, x: nx, z: nz }, { height, inRiver: ctx.inRiver })) continue;
           site.x = nx; site.z = nz; done = true; moved += 1;
           for (const block of blocks) block.parcels = block.parcels.filter((p) => Math.hypot(p.x - nx, p.z - nz) >= site.radius);
         }

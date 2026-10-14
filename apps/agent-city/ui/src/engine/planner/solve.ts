@@ -1,4 +1,5 @@
 import type { RepairContext } from "./context";
+import { isPlanningInterrupted, spendPlanningWork, checkPlanningWork } from "./operationBudget";
 import { CONSTRAINTS } from "./constraints";
 import { componentOf, diagnoseNetwork, primaryComponentId, remapDemandNode, retainRepairDemands } from "./intent";
 import type { NetworkRemap } from "./network";
@@ -52,6 +53,7 @@ export function resiteArchesOnAcceptedRoads(ctx: RepairContext): number {
     .map((violation) => `${violation.at!.x}:${violation.at!.z}`));
   const old = new Map(arches.map((site) => [site.id, { x: site.x, z: site.z, yaw: site.yaw }]));
   straddleSitesAcrossTrunk({ publicSites: ctx.publicSites, landmarks: ctx.landmarks,
+    groundRoads: [...ctx.network.edges.values()].filter(road => !road.bridge),
     trunkSegments: groundFrontageSegments([...ctx.network.edges.values()]), ringRuns: ctx.ringRuns,
     straddleProbeFractions: ARCH_RESITE_CONFIG.probes,
     buildable: ctx.geo.buildable, height: ctx.geo.height, inRiver: ctx.inRiver,
@@ -118,29 +120,35 @@ function repairExposedSiteEnds(ctx: RepairContext, previous: ReadonlySet<string>
 
 /** An otherwise dry coastal owner with a failed service route is still an
  * obligation. Reuse the existing coastal candidate budget, not a wider snap. */
-function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoorRoad" | "siteInWater" = "siteWithoutDoorRoad"): RepairStrategy[] {
+function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoorRoad" | "siteInWater" | "roadThroughSite" | "sitesOverlap" = "siteWithoutDoorRoad"): RepairStrategy[] {
   const plan = planView(ctx), diagnostics = diagnoseNetwork(plan);
   const unmet = new Set(diagnostics?.demands.filter((entry) => entry.demand.required && !entry.satisfied
     && entry.demand.class === "site-access").map((entry) => entry.demand.anchor) ?? []);
-  const wetFindings = constraint === "siteInWater" ? CONSTRAINTS.find((entry) => entry.id === "siteInWater")!.measure(plan) : [];
+  const wetFindings = constraint !== "siteWithoutDoorRoad" ? CONSTRAINTS.find((entry) => entry.id === constraint)!.measure(plan) : [];
   const groundGeo = { height: ctx.height, inRiver: ctx.inRiver };
-  const groundFailed = new Set([...ctx.publicSites, ...ctx.landmarks].filter(owner => registeredModelGroundFailure(owner, groundGeo)).map(owner => owner.id));
+  const groundFailed = new Set(constraint === "siteInWater" ? [...ctx.publicSites, ...ctx.landmarks]
+    .filter(owner => registeredModelGroundFailure(owner, groundGeo)).map(owner => owner.id) : []);
   const isWetOwner = (owner: { id: string; kind: string; x: number; z: number }) => groundFailed.has(owner.id) || wetFindings.some((finding) =>
-    finding.site === owner.kind && finding.at?.x === owner.x && finding.at?.z === owner.z);
-  if (constraint === "siteInWater" ? !wetFindings.length && !groundFailed.size : !unmet.size) return [];
+    (constraint === "sitesOverlap" && finding.identity?.split("/").includes(owner.id))
+    || (finding.site === owner.kind && finding.at?.x === owner.x && finding.at?.z === owner.z));
+  if (constraint !== "siteWithoutDoorRoad" ? !wetFindings.length && !groundFailed.size : !unmet.size) return [];
   const comp = componentOf(plan), primary = primaryComponentId(plan, comp);
   const primaryRoads = plan.roadEdges.filter((edge) => !edge.bridge && comp.get(edge.from) === primary).map((edge) => edge.points);
   const sites = [...ctx.publicSites, ...ctx.landmarks];
   const candidates: RepairStrategy[] = [];
   for (const owner of sites) {
-    if (!owner.id || !(constraint === "siteInWater" ? isWetOwner(owner) : unmet.has(owner.id))
+    if (!owner.id || !(constraint !== "siteWithoutDoorRoad" ? isWetOwner(owner) : unmet.has(owner.id))
       || !canRelocateGroundSite(owner) || !ctx.SHORE_SITE_KINDS.has(owner.kind)) continue;
     const others = sites.filter((site) => site !== owner && site.radius);
-    const positions = constraint === "siteInWater" ? localResiteCandidates(owner)
-      : shoreRelocationCandidates(ctx, owner, siteGeometry(ctx, owner.id), others);
-    for (const at of positions) {
+    // Wet/foundation failures need the same declared coastal fallback as a
+    // road-blocked owner, after its original local candidates are exhausted.
+    function* positions() {
+      if (constraint !== "siteWithoutDoorRoad") yield* localResiteCandidates(owner);
+      yield* shoreRelocationCandidates(ctx, owner, siteGeometry(ctx, owner.id), others);
+    }
+    for (const at of positions()) {
       const placementFailure = relocatedSitePositionFailure(ctx, owner, at, true);
-      const joint = constraint === "siteInWater" && placementFailure === "owner-road-envelope";
+      const joint = constraint !== "siteWithoutDoorRoad" && placementFailure === "owner-road-envelope";
       if ((placementFailure && !joint) || polylineDistance(primaryRoads, at) > owner.radius + 20) continue;
       if (ctx.blocks.some((block) => block.parcels.some((parcel) => Math.hypot(parcel.x - at.x, parcel.z - at.z)
         < owner.radius + 9 + Math.hypot(parcel.width, parcel.depth) / 2))) continue;
@@ -152,9 +160,10 @@ function unservedShoreCandidates(ctx: RepairContext, constraint: "siteWithoutDoo
       }
       candidates.push({ constraint, name: `${constraint === "siteInWater" ? "resiteWetShore" : "resiteUnservedShore"}:${owner.id}:${at.x}:${at.z}`, run: (draft) => {
         const site = [...draft.publicSites, ...draft.landmarks].find((entry) => entry.id === owner.id);
-        const missing = constraint === "siteInWater" ? !!site && (registeredModelGroundFailure(site, { height: draft.height, inRiver: draft.inRiver })
-          || CONSTRAINTS.find((entry) => entry.id === "siteInWater")!.measure(planView(draft))
-            .some((finding) => finding.site === site.kind && finding.at?.x === site.x && finding.at?.z === site.z))
+        const missing = constraint !== "siteWithoutDoorRoad" ? !!site && ((constraint === "siteInWater" && registeredModelGroundFailure(site, { height: draft.height, inRiver: draft.inRiver }))
+          || CONSTRAINTS.find((entry) => entry.id === constraint)!.measure(planView(draft))
+            .some((finding) => (constraint === "sitesOverlap" && finding.identity?.split("/").includes(site.id))
+              || (finding.site === site.kind && finding.at?.x === site.x && finding.at?.z === site.z)))
           : diagnoseNetwork(planView(draft))?.demands.some((entry) => entry.demand.anchor === owner.id
             && entry.demand.class === "site-access" && !entry.satisfied);
         if (!missing || !site || !canRelocateGroundSite(site)) return 0;
@@ -228,6 +237,10 @@ export const REPAIR_STRATEGIES: RepairStrategy[] = [
       .flatMap((violation) => [...ctx.publicSites, ...ctx.landmarks].filter((site) => site.kind === violation.site
         && site.x === violation.at?.x && site.z === violation.at?.z && site.id).map((site) => site.id!)).sort()
       .map((id) => ({ constraint: "roadThroughSite", name: `nudgeSiteWithAccess:${id}`, run: (draft) => nudgeSiteWithAccessRepair(draft, id) })) },
+  { constraint: "roadThroughSite", name: "resiteRoadBlockedShoreSites", run: () => 0,
+    candidates: ctx => unservedShoreCandidates(ctx, "roadThroughSite") },
+  { constraint: "sitesOverlap", name: "resiteOverlappingShoreSites", run: () => 0,
+    candidates: ctx => unservedShoreCandidates(ctx, "sitesOverlap") },
   { constraint: "looseInlandRoadEnds", name: "detourAroundSites", run: detourAroundSites },
   { constraint: "looseInlandRoadEnds", name: "extendLooseEnds", run: extendLooseEnds,
     candidates: (ctx) => CONSTRAINTS.find((constraint) => constraint.id === "looseInlandRoadEnds")!.measure(planView(ctx))
@@ -275,6 +288,7 @@ export type SolveReport = Array<{ constraint: string; name: string; changes: num
 /** 草稿只复制数据；地形函数保持只读，不复制或调用外部副作用。 */
 function copyData<T>(value: T): T {
   if (value && typeof value === "object" && Object.isFrozen(value)) return value;
+  if (value && typeof value === "object") spendPlanningWork("repair:clone-row", { cloneRow: 1 });
   if (Array.isArray(value)) return value.map(copyData) as T;
   if (value instanceof Map) return new Map([...value].map(([key, item]) => [key, copyData(item)])) as T;
   if (value instanceof Set) return new Set(value) as T;
@@ -439,6 +453,7 @@ export function runRepairDerivedFinalization(ctx: RepairContext, derive: (draft:
 } {
   try { return repairDerivedFinalizationDraft(ctx, derive); }
   catch (error) {
+    if (isPlanningInterrupted(error)) throw error;
     const reason = error instanceof Error ? error.message : "invalid derived finalization", outcome = repairPlanningOutcome(ctx);
     return { ok: false, reason, outcome: { ...outcome, status: "failed", reasons: [...outcome.reasons, `derived finalization rejected: ${reason}`] } };
   }
@@ -455,7 +470,7 @@ function repairDerivedFinalizationDraft(ctx: RepairContext, derive: (draft: Repa
   installRepairWorld(draft, makeWorldState(draft, base.world));
   installDemandCatalogue(draft, diagnoseNetwork(planView(ctx))?.demands.map(entry => entry.demand) ?? ctx.demandCatalogue ?? []);
   try { derive(draft); }
-  catch (error) { return fail(error instanceof Error ? error.message : "derived finalization failed"); }
+  catch (error) { if (isPlanningInterrupted(error)) throw error; return fail(error instanceof Error ? error.message : "derived finalization failed"); }
   if (draft.planningWorld !== repairWorldStates.get(draft)?.world || draft.demandCatalogue !== protectedCatalogues.get(draft))
     return fail("derived finalization replaced protected authority");
   const projection = repairWorldProjection(draft);
@@ -606,6 +621,7 @@ function acceptDraft(ctx: RepairContext, draft: RepairContext, remaps: readonly 
 }
 
 export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrategy): { changes: number; reason?: string } {
+  spendPlanningWork("repair:transaction", { transaction: 1 });
   const parentFailure = flushDraftReferences(ctx);
   if (parentFailure) return { changes: 0, reason: parentFailure };
   // Nested strategies may have already edited the parent's private draft. Bind
@@ -625,6 +641,7 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
     const baseFailure = worldBaseFailure(ctx, baseWorld);
     if (baseFailure) return { changes: 0, reason: baseFailure };
   } catch (error) {
+    if (isPlanningInterrupted(error)) throw error;
     // Reject invalid observed inputs before running candidate/strategy code.
     // Do not invent missing polygons, dimensions or a verified authority.
     return { changes: 0, reason: `planning-world-initialization-refused: ${error instanceof Error ? error.message : "invalid source projection"}` };
@@ -670,6 +687,7 @@ export function runRepairTransaction(ctx: RepairContext, strategy: RepairStrateg
   const stale = worldBaseFailure(ctx, baseWorld);
   if (stale) return { changes: 0, reason: stale };
   const publication = updatedRepairWorld(baseWorld, draft);
+  checkPlanningWork("repair:publication");
   if (!publication.state) return { changes: 0, reason: publication.reason };
   acceptDraft(ctx, draft, draft.network.patchRemaps, publication.state);
   return { changes, ...(diagnostic ? { reason: diagnostic } : {}) };

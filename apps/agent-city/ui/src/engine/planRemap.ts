@@ -17,7 +17,7 @@ import { applyPlanPatch, appendHighwayOp, appendRoadOp, appendSiteOp, edgeLocked
 import { listSites, parseFreeTarget, siteClassOf, siteMoveProblem, type SiteInfo } from "./planSites";
 
 export type RemapFailure = { kind: string; id: string; detail: string };
-export type RemapReport = { fromTier: number; toTier: number; ratio: number; total: number; remapped: number; failed: RemapFailure[] };
+export type RemapReport = { fromTier: number; toTier: number; ratio: number; total: number; remapped: number; alreadySatisfied: RemapFailure[]; failed: RemapFailure[] };
 
 /** 引用型对象的匹配容差（缩放后的锚点到新档对象）。新档路网是重新生长的，路口位置会漂移十来个单位。 */
 const MATCH_RADIUS = 16;
@@ -50,7 +50,9 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
   const ratio = remapRatio(patch, layout);
   const scale = (p: Vec2): Vec2 => quantize({ x: p.x * ratio, z: p.z * ratio });
   const failed: RemapFailure[] = [];
+  const alreadySatisfied: RemapFailure[] = [];
   const fail = (kind: string, id: string, detail: string) => failed.push({ kind, id, detail });
+  const satisfy = (kind: string, id: string, detail: string) => alreadySatisfied.push({ kind, id, detail });
   let next: PlanPatchV1 = { ...emptyPlanPatch(layout.seed, layout.scaleTier), islandRadius: layout.islandRadius };
   let current: CityLayout | null = layout;
   const view = () => (current ??= applyPlanPatch(layout, next).layout);
@@ -88,7 +90,9 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
         const hit = nearestOnPolyline(p, edge.points);
         if (hit.distance <= MATCH_RADIUS && (!best || hit.distance < best.d)) best = { id: edge.id, d: hit.distance, mid: hit.point };
       }
-      if (!best) { fail("road-drop", label, "新档里这附近没有对应的路"); return; }
+      // An idempotent delete survives a tier change when the target corridor is already absent:
+      // there is nothing left to remove, so do not turn this into a lossy/stale edit.
+      if (!best) { satisfy("road-drop", label, "新档目标位置附近已没有对应的路，删除效果已满足"); return; }
       next = appendRoadOp(next, { t: "drop", edge: best.id, anchor: quantize(best.mid) }, next.updatedAt); touched();
       return;
     }
@@ -186,5 +190,6 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
   const cleaned = replay.length ? pruneStalePatch(next, replay, next.updatedAt) : next;
   const total = patch.roadOps.length + (patch.highwayOps?.length ?? 0) + patch.siteOps.length + Object.keys(patch.buildingMoves).length + patch.suppressedContext.length;
   const final = cleaned && Object.keys(cleaned.buildingMoves).length + cleaned.roadOps.length + (cleaned.highwayOps?.length ?? 0) + cleaned.siteOps.length + cleaned.suppressedContext.length ? cleaned : null;
-  return { patch: final ? { ...final, updatedAt: Date.now() } : null, report: { fromTier: patch.scaleTier, toTier: layout.scaleTier, ratio, total, remapped: Math.max(0, total - failed.length), failed } };
+  return { patch: final ? { ...final, updatedAt: Date.now() } : null, report: { fromTier: patch.scaleTier, toTier: layout.scaleTier, ratio, total,
+    remapped: Math.max(0, total - failed.length - alreadySatisfied.length), alreadySatisfied, failed } };
 }

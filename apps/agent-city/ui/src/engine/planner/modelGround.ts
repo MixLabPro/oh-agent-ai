@@ -1,6 +1,7 @@
 /** Shared finite-sample ground admission. Never upgrades partial model facts into full physical proof. */
 import { hashSeed } from "../../cityModel";
 import { DetMath as Math } from "../detMath";
+import { isPlanningInterrupted } from "./operationBudget";
 import { pointInRegion, regionBounds, type LocalRegion } from "../models/physical";
 import { GROUND_MODEL_FACTORIES, resolveGroundModel } from "../models/groundRegistry";
 import { WATER_LEVEL } from "./footprint";
@@ -124,5 +125,5 @@ export function inspectModelGround(owner: GroundOwner, geo: GroundGeo, options: 
         maxStep: MODEL_GROUND_CONFIG.maxStep, heightQueryLimit: queryLimit, heightQueries, supportSamples: samples.length,
         belowPlanningDryLevel, belowRendererSeaLevel, inRiverSamples, minTerrain, maxTerrain, maxGap, maxEmbed, coverage: "bounded-samples-only" },
       findings: [...findings.values()], missing: [...resolved.missing, "continuous terrain support proof"] };
-  } catch (error) { return unsupported("invalid-context", error instanceof Error ? error.message : "ground terrain inspection failed"); }
+  } catch (error) { if (isPlanningInterrupted(error)) throw error; return unsupported("invalid-context", error instanceof Error ? error.message : "ground terrain inspection failed"); }
 }

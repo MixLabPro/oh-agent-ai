@@ -53,6 +53,7 @@ const summaries = [];
 const ACCEPT_BASE = 4_000_000_000;
 const acceptance = [];
 const ACCEPT_CEILING = { siteWithoutDoorRoad: 1, looseInlandRoadEnds: 16, acuteJunctions: 4, crowdedArterials: 2, bridgeheadContinuity: 5 };
+const progress = process.env.CITY_VERIFY_PROGRESS === "1";
 // 2026-10-09 独立验收集（3_000_000_000 系）首测基线=实测值（棘轮起点，只降不升）：t1 门路 1（seed 3005341179
 // villa-complex 门链全败）、t1 断头 16、t3 断头 7/锐角 4、扎堆 t1 2/t3 1、桥头 t1 5/t10 3——调参集（2_000_000_000 系）上限不泛化的直接证据；逐项修复后归零回落。
 for (const { tier, seeds } of TIERS) {
@@ -60,8 +61,11 @@ for (const { tier, seeds } of TIERS) {
   const islands = new Map(CONSTRAINTS.map((c) => [c.id, []]));
   for (let i = 0; i < seeds; i += 1) {
     const seed = ACCEPT_BASE + i * 104_729;
+    const began = Date.now();
+    if (progress) console.error(`City acceptance: start ${seed}/t${tier} (${i + 1}/${seeds})`);
     const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
     for (const c of CONSTRAINTS) if (c.measure(plan).length) islands.get(c.id).push(seed);
+    if (progress) console.error(`City acceptance: done ${seed}/t${tier} ${Date.now() - began}ms`);
   }
   const problems = [];
   for (const c of CONSTRAINTS) {
@@ -72,6 +76,7 @@ for (const { tier, seeds } of TIERS) {
   assert.equal(problems.length, 0, `INDEPENDENT ACCEPTANCE SET regressed (overfitting signal):\n  ${problems.join("\n  ")}`);
   const residual = [...islands].map(([id, l]) => `${id} ${l.length}`).filter((x) => !x.endsWith(" 0")).join(", ");
   acceptance.push(`t${tier}: ${residual || "clean"}`);
+  if (progress) console.error(`City acceptance: passed ${acceptance.at(-1)}`);
 }
 console.log(`City acceptance (independent seeds, never used for tuning): ${acceptance.join(" | ")}.`);
 for (const { tier, seeds } of TIERS) {
@@ -80,9 +85,12 @@ for (const { tier, seeds } of TIERS) {
   let scoreSum = 0;
   for (let i = 0; i < seeds; i += 1) {
     const seed = 2_000_000_000 + i * 104_729; // 与回归样本（1703294958 + i*7919）错开
+    const began = Date.now();
+    if (progress) console.error(`City survey: start ${seed}/t${tier} (${i + 1}/${seeds})`);
     const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
     scoreSum += scorePlan(plan);
     for (const c of CONSTRAINTS) if (c.measure(plan).length) islands.get(c.id).push(seed);
+    if (progress) console.error(`City survey: done ${seed}/t${tier} ${Date.now() - began}ms`);
   }
   const problems = [];
   for (const c of CONSTRAINTS) {

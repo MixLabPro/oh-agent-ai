@@ -20,7 +20,8 @@ import { polylineDistance } from "./footprint";
 import { canRelocateGroundSite, specByKind } from "./sitespec";
 import { candidatesFor, siteCandidateHardReject, frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, groundFrontageSegments, type FrontageMoveContext } from "./access";
 import { localResiteCandidates, retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, type ShoreMoveContext } from "./siting";
-import { assignConnectedSite } from "./jointSite";
+import { assignConnectedSite, connectRelocatedPlotAccess, JOINT_SITE_CONFIG } from "./jointSite";
+import { footprintRunsDistance, siteFootprint, siteFootprintSeparation } from "../planFootprint";
 import { commitNetwork, type Network } from "./network";
 import type { buildGeography } from "./geography";
 
@@ -65,7 +66,8 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
   // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
   // 跨路地标（门式）：凯旋门骑在主干道上、道路从拱券开口穿过——曾与其它用地一样贴到路旁，门下是草地
   // （用户截图：「凯旋门下面不是路？建筑物缺少约束」）。取最近主干道中段，开口轴（局部 z）沿道路方向。
-  straddleSitesAcrossTrunk({ ...frontageCtx, trunkSegments: groundFrontageSegments([...network.edges.values()]) });
+  straddleSitesAcrossTrunk({ ...frontageCtx, groundRoads: [...network.edges.values()].filter(road => !road.bridge),
+    trunkSegments: groundFrontageSegments([...network.edges.values()]) });
   frontSitesOnTrunks(frontageCtx);
   // 占地内外两圈 16 个点都得是干地（高于 0.8、不在河道里）：水面渲染还盖住低矮的河岸坡，只看到河道中线的距离不够。
   // 仍不在干地的内陆用地（岸边/跨路/广场豁免，各有专属遍或构造保证）重贴到干地。
@@ -89,18 +91,26 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
       type RelocationPatch = { publicSites: PublicSite[]; landmarks: Landmark[]; opera: typeof sailOperaCandidateSets };
       const patches = new Map<string, RelocationPatch>();
       const currentSites = [...publicSites, ...landmarks].filter((site) => site.radius);
+      const separation = (a: typeof currentSites[number], b: typeof currentSites[number]) => siteFootprintSeparation(a, b);
       const overlapCount = (sites: typeof currentSites) => {
         let count = 0;
         for (let i = 0; i < sites.length; i += 1) for (let j = i + 1; j < sites.length; j += 1) {
-          if (Math.hypot(sites[i].x - sites[j].x, sites[i].z - sites[j].z) < sites[i].radius + sites[j].radius) count += 1;
+          if (separation(sites[i], sites[j]) < 0) count += 1;
         }
         return count;
       };
       const baselineOverlaps = overlapCount(currentSites);
-      const currentRoads = [...network.edges.values()].map((edge) => edge.points);
-      const baselineRoadOverlaps = currentSites.filter((site) => site.kind !== "civic" && site.kind !== "arch"
-        && polylineDistance(currentRoads, site) < site.radius * 0.7).length;
+      const siteHasRoadOverlap = (site: typeof currentSites[number], candidateNetwork: Network) => {
+        if (site.kind === "civic" || site.kind === "arch") return false;
+        const footprint = siteFootprint(site.kind, site.id, site.radius);
+        if (footprint.exact) return [...candidateNetwork.edges.values()].some((edge) =>
+          footprintRunsDistance(footprint, site, site.yaw, [edge.points]) < edge.width / 2 + 3);
+        return polylineDistance([...candidateNetwork.edges.values()].map((edge) => edge.points), site) < site.radius * 0.7;
+      };
+      const countRoadOverlaps = (sites: typeof currentSites, candidateNetwork: Network) => sites.filter((site) => siteHasRoadOverlap(site, candidateNetwork)).length;
+      const baselineRoadOverlaps = countRoadOverlaps(currentSites, network);
       const relocationRejects = new Map<string, number>();
+      let neighbourAccessEvaluations = 0;
       const noteRelocationReject = (reason: string) => relocationRejects.set(reason, (relocationRejects.get(reason) ?? 0) + 1);
       const ownerRules = CONSTRAINTS.filter((constraint) => ["siteInWater", "siteWithoutDoorRoad", "roadThroughSite",
         "sitesOverlap", "stationStadiumSetback", "stationDoorFacesRoad", "archStraddlesRoad"].includes(constraint.id));
@@ -109,7 +119,7 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
         blocks: [], terrain, core, coast, river, seaside: null, coastRoads: [], riverRoadRuns: [], primaryAnchorNodeId,
       } as unknown as ConstraintPlan);
       const ownerIdentity = (violation: ReturnType<typeof ownerRules[number]["measure"]>[number], sites: typeof currentSites) =>
-        sites.find((site) => site.kind === violation.site && site.x === violation.at?.x && site.z === violation.at?.z)?.id
+        violation.identity ?? sites.find((site) => site.kind === violation.site && site.x === violation.at?.x && site.z === violation.at?.z)?.id
         ?? JSON.stringify([violation.site, violation.at, violation.detail]);
       const previousOwnerFailures = new Map(ownerRules.map((constraint) => [constraint.id,
         new Set(constraint.measure(ownerView(network, publicSites, landmarks)).map((violation) => ownerIdentity(violation, currentSites)))]));
@@ -121,8 +131,8 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
         const initialOwner = initialSites.find((site) => site.id === ownerId)!;
         const candidateRoads = [...candidateNetwork.edges.values()].map((edge) => edge.points);
         const blockerIds = new Set(initialSites.filter((site) => site !== initialOwner && (
-          Math.hypot(site.x - initialOwner.x, site.z - initialOwner.z) < site.radius + initialOwner.radius + 10
-          || (site.kind !== "civic" && site.kind !== "arch" && polylineDistance(candidateRoads, site) < site.radius * 0.7)
+          separation(site, initialOwner) < 10
+          || siteHasRoadOverlap(site, candidateNetwork)
         )).map((site) => site.id));
         if (blockerIds.size > 0) {
           const fixedBlocker = initialSites.find((site) => blockerIds.has(site.id)
@@ -136,7 +146,8 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
             neighbourMargins: new Map([[ownerId, 10]]), trunkRuns: actualTrunks, roadEnvelopes: [...candidateNetwork.edges.values()] };
           restickSitesClearOfRingRuns(stagedFrontage);
           const archSegments = groundFrontageSegments([...candidateNetwork.edges.values()]);
-          straddleSitesAcrossTrunk({ ...stagedFrontage, trunkSegments: archSegments });
+          straddleSitesAcrossTrunk({ ...stagedFrontage, groundRoads: [...candidateNetwork.edges.values()].filter(road => !road.bridge),
+            trunkSegments: archSegments });
           frontSitesOnTrunks(stagedFrontage);
           resnapSitesOntoDryLand(stagedFrontage);
           settleShoreSitesOnCoast(stagedShore);
@@ -161,7 +172,7 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
               const spec = specByKind(blocker.kind);
               if (!canRelocateGroundSite(blocker) || !spec) { noteRelocationReject(`${blocker.id}:immovable-or-unregistered`); invalidBlocker = true; break; }
               const placementWorld = { ...geo, core, turn, trunkRuns: actualTrunks, ringRuns, bridges, inRiver, riverBank: footprintGeo.riverBank,
-                placed: fixedPlaced.map((site) => ({ x: site.x, z: site.z, radius: site.radius })) };
+                placed: fixedPlaced, usePlacedFootprints: true };
               const generated = [...candidatesFor(placementWorld, spec, blocker),
                 ...[...localResiteCandidates(blocker)].map((at, index) => ({ ...at, yaw: blocker.yaw,
                   id: `required-owner-relocation:${blocker.id}:${index}`, source: "declared-local-resite" }))];
@@ -170,7 +181,7 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
                 const hardFailure = siteCandidateHardReject(placementWorld, spec, candidate);
                 if (hardFailure) { noteRelocationReject(`${blocker.id}:${hardFailure}`); continue; }
                 const roadDistance = Math.min(...candidateRoads.map((run) => polylineDistance([run], candidate)));
-                if (roadDistance > spec.radius + 20) { noteRelocationReject(`${blocker.id}:door-road-distance`); continue; }
+                if (roadDistance > spec.radius + 8 + spec.radius + 30) { noteRelocationReject(`${blocker.id}:door-road-distance`); continue; }
                 admitted.push({ site: blocker, spec, candidate });
               }
               admitted.sort((a, b) => Math.hypot(a.candidate.x - blocker.x, a.candidate.z - blocker.z)
@@ -186,28 +197,48 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
                 if (accepted) return;
                 if (index < options.length) { for (const option of options[index]) { selected.push(option); search(index + 1); selected.pop(); if (accepted) break; } return; }
                 const targetById = new Map(selected.map((entry) => [entry.site.id, entry.candidate]));
-                const completePlaced = actualPlaced.filter((site) => !movableIds.has(site.id)).map((site) => ({ x: site.x, z: site.z, radius: site.radius }));
-                for (const entry of selected) completePlaced.push({ x: entry.candidate.x, z: entry.candidate.z, radius: entry.spec.radius });
+                const completePlaced = actualPlaced.filter((site) => !movableIds.has(site.id));
+                for (const entry of selected) completePlaced.push({ ...entry.site, x: entry.candidate.x, z: entry.candidate.z,
+                  yaw: entry.candidate.yaw, radius: entry.spec.radius });
                 for (const entry of selected) {
                   const world = { ...geo, core, turn, trunkRuns: actualTrunks, ringRuns, bridges, inRiver, riverBank: footprintGeo.riverBank,
+                    usePlacedFootprints: true,
                     placed: completePlaced.filter((site) => site.x !== targetById.get(entry.site.id)!.x || site.z !== targetById.get(entry.site.id)!.z) };
                   if (siteCandidateHardReject(world, entry.spec, entry.candidate)) { noteRelocationReject(`${entry.site.id}:joint-final-hard-check`); return; }
-                  if (Math.min(...candidateRoads.map((run) => polylineDistance([run], entry.candidate))) > entry.spec.radius + 20) {
+                  if (Math.min(...candidateRoads.map((run) => polylineDistance([run], entry.candidate))) > entry.spec.radius + 8 + entry.spec.radius + 30) {
                     noteRelocationReject(`${entry.site.id}:joint-final-door-road`); return;
                   }
                 }
                 const prior = selected.map(({ site }) => ({ site, x: site.x, z: site.z, yaw: site.yaw }));
                 for (const entry of selected) { entry.site.x = entry.candidate.x; entry.site.z = entry.candidate.z; entry.site.yaw = entry.candidate.yaw; }
                 const trialSites = [...stagedPublic, ...stagedLandmarks].filter((site) => site.radius);
+                const trialNetwork: Network = { ...candidateNetwork,
+                  ...(candidateNetwork.patchRemaps ? { patchRemaps: [...candidateNetwork.patchRemaps] } : {}),
+                  nodes: new Map([...candidateNetwork.nodes].map(([id, node]) => [id, { ...node }])),
+                  edges: new Map([...candidateNetwork.edges].map(([id, edge]) => [id, { ...edge, points: edge.points.map(point => ({ ...point })) }])) };
                 const spacingConflict = trialSites.some((site) => site !== requiredOwner
-                  && Math.hypot(site.x - requiredOwner.x, site.z - requiredOwner.z) < site.radius + requiredOwner.radius + 10);
-                const introducedFinding = spacingConflict ? null : ownerRules.flatMap((constraint) => constraint.measure(ownerView(candidateNetwork, stagedPublic, stagedLandmarks))
+                  && separation(site, requiredOwner) < 10);
+                const served = !spacingConflict && selected.every(entry => {
+                  if (Math.min(...candidateRoads.map(run => polylineDistance([run], entry.site))) > entry.site.radius + 20
+                    && ++neighbourAccessEvaluations > JOINT_SITE_CONFIG.maxNeighbourAccessEvaluations) {
+                    noteRelocationReject("joint-neighbour-access-budget-exhausted"); return false;
+                  }
+                  return connectRelocatedPlotAccess({ network: trialNetwork, geo, inRiver,
+                    reservations: () => trialSites }, entry.site, primaryAnchorNodeId);
+                });
+                const introducedFinding = spacingConflict || !served ? null : ownerRules.flatMap((constraint) => constraint.measure(ownerView(trialNetwork, stagedPublic, stagedLandmarks))
                   .filter((violation) => !previousOwnerFailures.get(constraint.id)!.has(ownerIdentity(violation, trialSites)))
                   .map((violation) => ({ constraint, violation })))[0] ?? null;
                 const introducedConstraint = introducedFinding?.constraint ?? null;
                 const newViolation = !!introducedConstraint;
-                if (!spacingConflict && !newViolation) { accepted = true; return; }
-                noteRelocationReject(spacingConflict ? "joint-blockers:owner-spacing" : `joint-blockers:new-${introducedConstraint?.id ?? "owner-constraint"}:${introducedFinding ? ownerIdentity(introducedFinding.violation, trialSites) : "unknown"}`);
+                if (!spacingConflict && served && !newViolation) {
+                  candidateNetwork.nodes.clear(); for (const [id, node] of trialNetwork.nodes) candidateNetwork.nodes.set(id, node);
+                  candidateNetwork.edges.clear(); for (const [id, edge] of trialNetwork.edges) candidateNetwork.edges.set(id, edge);
+                  candidateNetwork.patchRemaps = trialNetwork.patchRemaps;
+                  accepted = true; return;
+                }
+                noteRelocationReject(spacingConflict ? "joint-blockers:owner-spacing" : !served ? "joint-blockers:service-route-refused"
+                  : `joint-blockers:new-${introducedConstraint?.id ?? "owner-constraint"}:${introducedFinding ? ownerIdentity(introducedFinding.violation, trialSites) : "unknown"}`);
                 for (const entry of prior) { entry.site.x = entry.x; entry.site.z = entry.z; entry.site.yaw = entry.yaw; }
               };
               search(0);
@@ -217,10 +248,9 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
           const stagedSites = [...stagedPublic, ...stagedLandmarks].filter((site) => site.radius);
           const stagedOwner = stagedSites.find((site) => site.id === ownerId)!;
           const ownerSpacingBlockers = stagedSites.filter((site) => site !== stagedOwner
-            && Math.hypot(site.x - stagedOwner.x, site.z - stagedOwner.z) < site.radius + stagedOwner.radius + 10);
+            && separation(site, stagedOwner) < 10);
           const ownerSpacingConflict = ownerSpacingBlockers.length > 0;
-          const roadOverlaps = stagedSites.filter((site) => site.kind !== "civic" && site.kind !== "arch"
-            && polylineDistance(candidateRoads, site) < site.radius * 0.7).length;
+          const roadOverlaps = countRoadOverlaps(stagedSites, candidateNetwork);
           if (ownerSpacingConflict || overlapCount(stagedSites) > baselineOverlaps || roadOverlaps > baselineRoadOverlaps) {
             const evidence = [...relocationRejects].sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",");
             return `site-relocation-refused(ownerSpacing=${ownerSpacingConflict},siteOverlaps=${overlapCount(stagedSites)}>${baselineOverlaps},roadOverlaps=${roadOverlaps}>${baselineRoadOverlaps}) blockers=[${ownerSpacingBlockers.map((site) => site.id).join(",")}] relocation=[${evidence}]`;

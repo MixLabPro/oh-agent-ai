@@ -22,8 +22,10 @@ import type { Landmark } from "../cityPlan";
 import { segmentDistance } from "../roadGeometry";
 import type { PublicSite, RoadEdge, Vec2 } from "../cityLayout";
 import type { SiteSpec } from "./sitespec";
+import { spendPlanningWork } from "./operationBudget";
 import { coastalSitingKinds, frontageExemptKinds, straddleSitingKinds } from "./sitespec";
 import { isDeepWater, nearBridgeEnd, polylineDistance, wetCount, isDry } from "./footprint";
+import { footprintCircleDistance, footprintRunsDistance, siteFootprint, siteFootprintSeparation, siteRoadClear, worldFootprintSamples } from "../planFootprint";
 
 /** 候选点：坐标 + 朝向 + 稳定 id（排序 tie-break 用）+ 来源说明；shoreAnchor 供海上岛堤道校验。 */
 export type SiteCandidate = {
@@ -47,15 +49,22 @@ export type SiteCandidateWorld = {
   coast: Vec2[];
   /** 骨架主干折线（生成临街/跨路候选）。 */
   trunkRuns: Vec2[][];
+  /** Actual ground envelopes when available; legacy skeletons are width 12. */
+  groundRoads?: ReadonlyArray<Pick<RoadEdge, "points" | "width">>;
   frontageCandidateLimit?: number;
   frontageProbeFractions?: readonly number[];
   /** Bounded region candidates tried only after all frontage candidates fail. */
   frontageFallbackPoints?: readonly Vec2[];
+  /** Joint owner/network proposals may defer exact-shape trunk clearance to their atomic validator. */
+  allowGroundCorridorRelocation?: boolean;
+  /** Joint neighbour placement may consume complete owner shapes; legacy
+   * callers without that contract keep their conservative plot proxies. */
+  usePlacedFootprints?: boolean;
   /** 环线高架折线（hard 闸门的净空检查）。 */
   ringRuns: Vec2[][];
   bridges: Array<{ from: Vec2; to: Vec2 }>;
   /** 已放置用地（间距 hard 判据；assign 按序追加）。 */
-  placed: Array<{ x: number; z: number; radius: number }>;
+  placed: Array<{ x: number; z: number; radius: number; id?: string; kind?: string; yaw?: number; shore?: Vec2 }>;
   height: (x: number, z: number) => number;
   inRiver: (x: number, z: number) => boolean;
   riverBank: (x: number, z: number, bank: number) => boolean;
@@ -268,18 +277,41 @@ export function candidatesFor(world: SiteCandidateWorld, spec: SiteSpec, current
  * 返回首个不过的判据名（诊断用；null = 全过）。
  */
 export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpec, candidate: SiteCandidate): string | null {
+  spendPlanningWork("site:hard-candidate", { candidate: 1 });
   const geo = { height: world.height, inRiver: world.inRiver, riverBank: world.riverBank };
   const at = { x: candidate.x, z: candidate.z };
   const r = spec.radius;
-  const spacing = (gap: number) => world.placed.some((o) => Math.hypot(o.x - at.x, o.z - at.z) < o.radius + r + gap) ? `site-spacing(+${gap})` : null;
+  const footprint = siteFootprint(spec.kind, `candidate:${spec.kind}`, r);
+  const exactFootprint = footprint.exact ? footprint : null;
+  const shapeDry = () => {
+    if (!exactFootprint) return isDry(geo, at, r) ? null : "dry-footprint";
+    const footprintSamples = worldFootprintSamples(footprint, at, candidate.yaw);
+    return footprintSamples.length && footprintSamples.every((point) => world.height(point.x, point.z) >= 0.8 && !world.inRiver(point.x, point.z)
+      && (world.landClearance(point.x, point.z) >= 4)) ? null : "dry-footprint";
+  };
+  const spacing = (gap: number) => world.placed.some((o) => world.usePlacedFootprints && o.kind && o.id && Number.isFinite(o.yaw)
+    ? siteFootprintSeparation({ ...at, id: candidate.id, kind: spec.kind, yaw: candidate.yaw, radius: r },
+      { ...o, id: o.id, kind: o.kind, yaw: o.yaw! }) < gap
+    : exactFootprint ? footprintCircleDistance(footprint, at, candidate.yaw, o, o.radius) < gap
+      : Math.hypot(o.x - at.x, o.z - at.z) < o.radius + r + gap) ? `site-spacing(+${gap})` : null;
   const ring = () => (clearsRingRuns(at, r * 2, r * 2, world.ringRuns) ? null : "clear-of-highways");
   switch (spec.placement) {
     case "plaza":
       return world.landClearance(at.x, at.z) >= r + 14 ? null : "snap-land-clearance";
     case "inland-frontage":
-      return (world.buildable(at.x, at.z) ? null : "buildable-center")
-        ?? (isDry(geo, at, r) ? null : "dry-footprint")
-        ?? (world.landClearance(at.x, at.z) >= r + 4 ? null : "land-clearance-r+4")
+      if (!world.buildable(at.x, at.z)) return "buildable-center";
+      if (exactFootprint) {
+        // Keep the complete physical checks, but reject on inexpensive geometry before sampling terrain.
+        if (!world.allowGroundCorridorRelocation && footprintRunsDistance(footprint, at, candidate.yaw, world.trunkRuns) < 8)
+          return "trunk-clearance-r+8";
+        const highwayFailure = ring();
+        if (highwayFailure) return highwayFailure;
+        const spacingFailure = spacing(10);
+        if (spacingFailure) return spacingFailure;
+        return shapeDry();
+      }
+      return (shapeDry())
+        ?? (world.landClearance(at.x, at.z) < r + 4 ? "land-clearance-r+4" : null)
         ?? (polylineDistance(world.trunkRuns, at) >= r + 8 ? null : "trunk-clearance-r+8")
         ?? ring()
         ?? spacing(10);
@@ -287,7 +319,10 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
       return (world.buildable(at.x, at.z) ? null : "buildable-center")
         ?? (isDry(geo, at, r) ? null : "dry-footprint")
         ?? ring()
-        ?? spacing(10);
+        ?? spacing(10)
+        ?? ((world.groundRoads ?? world.trunkRuns.map(points => ({ points, width: 12 }))).every(road => road.points.slice(1).every((point, i) => siteRoadClear(
+          { ...at, id: candidate.id, kind: spec.kind, yaw: candidate.yaw, radius: r }, road.points[i], point, road.width)))
+          ? null : "declared-passage-road-clearance");
     case "shore":
       return (wetCount(geo, at, r, { river: true, riverBank: 14 }) <= 3 ? null : "wet-budget-3-riverbank")
         ?? (world.coastDistance(at.x, at.z) <= r * 0.7 ? null : "coast-distance-0.7r")
@@ -316,6 +351,7 @@ export function siteCandidateHardReject(world: SiteCandidateWorld, spec: SiteSpe
 
 /** 临路挪动四遍共用的只读依赖 + 可变用地表 + buildPlan 的两个环搜闭包（snap/siteClearance 按引用传入）。 */
 export type FrontageMoveContext = {
+  groundRoads?: ReadonlyArray<Pick<RoadEdge, "points" | "width">>;
   publicSites: PublicSite[];
   landmarks: Landmark[];
   /** Optional relocation transaction scope; omitted means the existing full pass. */
@@ -354,7 +390,7 @@ export function restickSitesClearOfRingRuns(ctx: FrontageMoveContext): void {
 
 /** 跨路遍（原 buildPlan「凯旋门骑上主干中段」）：取离用地最近的主干段（len ≥ 20）中点，
  *  要求可建、占地全干、不压环线高架、距其它用地 ≥ r_o+r+10；开口轴（局部 z）沿道路方向。 */
-export function straddleSitesAcrossTrunk(ctx: Pick<FrontageMoveContext, "publicSites" | "landmarks" | "trunkSegments" | "ringRuns" | "buildable" | "height" | "inRiver" | "riverBank" | "relocateSiteIds" | "straddleProbeFractions">): void {
+export function straddleSitesAcrossTrunk(ctx: Pick<FrontageMoveContext, "publicSites" | "landmarks" | "trunkSegments" | "groundRoads" | "ringRuns" | "buildable" | "height" | "inRiver" | "riverBank" | "relocateSiteIds" | "straddleProbeFractions">): void {
   const { publicSites, landmarks, trunkSegments, ringRuns, buildable, height, inRiver, riverBank } = ctx;
   const footprintGeo = { height, inRiver, riverBank };
   const footprintDry = (c: Vec2, r: number) => isDry(footprintGeo, c, r);
@@ -370,7 +406,10 @@ export function straddleSitesAcrossTrunk(ctx: Pick<FrontageMoveContext, "publicS
       if (!buildable(q.x, q.z) || !footprintDry(q, site.radius)) continue;
       if (!clearsRingRuns(q, site.radius * 2, site.radius * 2, ringRuns)) continue; // 不能压在环线高架下（geography 守卫）
       if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
-      site.x = q.x; site.z = q.z; site.yaw = Math.atan2(dx, dz);
+      const pose = { ...site, ...q, yaw: Math.atan2(dx, dz) };
+      const roads = ctx.groundRoads ?? trunkSegments.map(([u, v]) => ({ points: [u, v], width: 12 }));
+      if (!roads.every(road => road.points.slice(1).every((point, i) => siteRoadClear(pose, road.points[i], point, road.width)))) continue;
+      site.x = q.x; site.z = q.z; site.yaw = pose.yaw;
       break place;
     }
   }
