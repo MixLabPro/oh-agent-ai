@@ -116,14 +116,16 @@ export function seasideHotelLots(band: SeasideBand | null): Array<{ id: string; 
   for (let i = 0; i < count; i += 1) {
     const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
     const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
-    const width = (30 + seed * 14) * 0.65;
+    // 酒店比普通会话楼大，但要和城市同一个比例尺：普通地块 7.2 × 8，酒店 11–15 × 9.6（约 1.5–2 倍）。
+    // 曾是 19.5–28.6 × 11.2（约 3 倍宽），贴着 7 宽的窄楼像放错了比例尺（用户反馈）。
+    const width = 11 + seed * 4;
     // 最小净距：两座酒店用地中心至少隔 max(两座宽度和的一半 + 4, 32)，防短岸
     // 段上相邻采样太近导致酒店体量互相交错（曾只按采样均匀分布，短岸时未查间距）。
-    const minGap = Math.max(width * 0.5 + 16, 32);
+    const minGap = Math.max(width * 0.5 + 12, 24);
     const tooClose = lots.some((lot) => Math.hypot(lot.x - sample.hotelLine.x, lot.z - sample.hotelLine.z) < minGap);
     if (tooClose) continue;
     lots.push({ id: `hotel:${i}`, x: sample.hotelLine.x, z: sample.hotelLine.z, yaw: Math.atan2(sample.inward.x, sample.inward.z),
-      width, depth: 16 * 0.7 });
+      width, depth: 9.6 });
   }
   return lots;
 }
@@ -376,7 +378,7 @@ export type OceanDriveBuilding = Vec2 & { id: string; yaw: number; width: number
 
 /**
  * Ocean Drive Art Deco 街墙（用户：「东岛南段 Ocean Beach / Washington Beach：2–6 层连续的 Art Deco 酒店街墙」）。
- * 沿酒店线（hotelOffset）连续排楼：面宽 12–21、楼缝 1–2.5、进深 14–18、2–6 层；约一半正面带竖向霓虹招牌。
+ * 沿酒店线（hotelOffset）连续排楼：面宽 9–13、楼缝 0.8–2、进深 9–11、2–6 层（与普通会话地块 7.2 × 8 同一比例尺）；约一半正面带竖向霓虹招牌。
  * 是背景楼（街景），不占会话、不进统计——楼高由数据决定的原则不动，会话楼排在它们后面的街区里。
  * accept 由调用方判路网/用地净空（压路口处自然断开，读作横街）。
  */
@@ -396,10 +398,12 @@ export function oceanDriveWall(band: SeasideBand | null, config: CoastalConfig, 
       let s = carry;
       while (s < length) {
         const k = out.length;
-        const width = 12 + rand(`w${si}:${i}:${k}`) * 9;
+        // 面宽 9–13、进深 9–11：普通会话地块 7.2 × 8，街墙略宽一点（1.25–1.8 倍）才读得出「一栋酒店」。
+        // 曾是 12–21 × 14–18（约 5 倍占地），和会话楼不是同一个比例尺（用户反馈）。
+        const width = 9 + rand(`w${si}:${i}:${k}`) * 4;
         const centre = s + width / 2;
         const x = a.x + tx * centre; const z = a.z + tz * centre;
-        const depth = 14 + rand(`d${si}:${i}:${k}`) * 4;
+        const depth = 9 + rand(`d${si}:${i}:${k}`) * 2;
         // 正面（局部 −z）朝海：折线走向不定，按最近海滨采样的内向法线校正（招牌挂在正面，朝滨海大道）
         let yaw = Math.atan2(-tz, tx);
         let nearest: SeasideSample | null = null; let nd = Infinity;
@@ -409,7 +413,7 @@ export function oceanDriveWall(band: SeasideBand | null, config: CoastalConfig, 
           out.push({ id: `ocean-drive:${si}:${i}:${k}`, x, z, yaw, width, depth, floors: 2 + Math.floor(rand(`f${si}:${i}:${k}`) * 5),
             seed: rand(`s${si}:${i}:${k}`), sign: rand(`g${si}:${i}:${k}`) < 0.5 });
         }
-        s += width + 1 + rand(`gap${si}:${i}:${k}`) * 1.5;
+        s += width + 0.8 + rand(`gap${si}:${i}:${k}`) * 1.2;
       }
       carry = s - length;
     }
