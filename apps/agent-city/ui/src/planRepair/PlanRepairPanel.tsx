@@ -62,7 +62,7 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const previewNote = !previewReason && preview && "warning" in preview ? preview.warning : null;
 
   return <section className="city-repair" aria-label="规划修复">
-    <header><h2>修复规划 <small>开发预览</small></h2><button onClick={repair.exit} aria-label="退出修复规划">退出</button></header>
+    <header><h2>修复城市</h2><button onClick={repair.exit} aria-label="退出修复规划">退出</button></header>
     <div className="city-repair-tools" role="toolbar" aria-label="修复工具">
       {TOOLS.map((tool) => <button key={tool.id} className={state.tool === tool.id ? "is-active" : ""} aria-pressed={state.tool === tool.id} title={`${tool.hint}（${tool.key}）`} onClick={() => repair.setTool(tool.id)}>
         {tool.label}<kbd>{tool.key}</kbd>

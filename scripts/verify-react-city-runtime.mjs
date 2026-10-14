@@ -337,6 +337,17 @@ try {
     await setCityWindow(page, "30");
     await expectSummary(page, "3", "53,900");
   }
+  // 修复城市入口在「更多工具」里：点宿主工具栏按钮必须真的打开编辑面板，并且工具项变成「退出修复」。
+  {
+    const more = page.getByRole("button", { name: "更多工具", exact: true });
+    if (await more.count()) await more.click();
+    await page.getByRole("button", { name: /^修复(城市|规划)$/ }).click();
+    await city(page).getByRole("region", { name: "规划修复" }).waitFor({ timeout: 8000 });
+    if (process.env.CITY_REPAIR_SHOT) await page.screenshot({ path: process.env.CITY_REPAIR_SHOT });
+    if (await more.count()) await more.click();
+    await page.getByRole("button", { name: "退出修复", exact: true }).click();
+    await city(page).getByRole("region", { name: "规划修复" }).waitFor({ state: "hidden", timeout: 8000 });
+  }
   console.log("City restored interactions: passed (district focus, replay, persistent seed, keyboard selection, excerpts, PNG download, film cancellation).");
   if (process.argv.includes("--features-only")) {
     const screenshotPath = path.join(dist, "city-restored.png");

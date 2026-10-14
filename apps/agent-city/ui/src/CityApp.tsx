@@ -175,9 +175,9 @@ export function CityApp() {
     // 游戏模式（开发开关门控）：平时「驾驶飞机」直接进自由练习（挑战仍在城市设置）；
     // 游戏中变「退出游戏」——即计划 §3 要求的宿主级通用退出入口。上限 8→9 见 host 校验器。
     { id: "game", commandId: "city.game", label: game.active ? "退出游戏" : "驾驶飞机", kind: "button" as const, enabled: sceneReady && !cinema && !experience.busy && !experience.film },
-    // 修复规划入口放在「更多工具」里（用户：不要悬浮在画面上）。进入后的编辑面板仍在页面内；
+    // 修复城市入口放在「更多工具」里（用户：不要悬浮在画面上）。进入后的编辑面板仍在页面内；
     // 上限 9→10 见 host 校验器（plugin_host.rs::valid_tools）。
-    { id: "repair", commandId: "city.repair", label: planRepair.state.active ? "退出修复" : "修复规划", kind: "button" as const, enabled: planRepair.state.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film) },
+    { id: "repair", commandId: "city.repair", label: planRepair.state.active ? "退出修复" : "修复城市", kind: "button" as const, enabled: planRepair.state.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film) },
   ].map((tool: { id: string; label: string; options?: Array<{ value: string; label: string }> }) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "game" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
   const execute = (commandId: string, value?: string) => {
     const engine = engineRef.current;
