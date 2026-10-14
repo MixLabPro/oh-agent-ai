@@ -8,13 +8,13 @@ const RULE_LABEL: Record<string, string> = {
 const SEVERITY_LABEL = { error: "错误", warning: "警告", info: "提示" } as const;
 const MAX_ISSUE_ROWS = 8;
 
-const TOOLS: Array<{ id: RepairTool; label: string; key: string; hint: string }> = [
-  { id: "build", label: "移动", key: "V", hint: "点选任意建筑，再点空地搬过去：会话楼搬到你选的地块，设施、地标、市政用地搬到任意空地" },
-  { id: "draw", label: "画路", key: "R", hint: "点两下画一段路，可连续画" },
-  { id: "erase", label: "橡皮擦", key: "E", hint: "点击红色高亮的路段擦掉" },
-  { id: "restyle", label: "改路", key: "T", hint: "选路型后点一条路：整条街改成这个路型" },
-  { id: "node", label: "路口", key: "N", hint: "点一个路口拿起来，再点一下放下：连着的路跟着走" },
-  { id: "site", label: "设施", key: "S", hint: "编辑非会话建筑：公共设施、花园、地标、市政用地、背景楼——搬家或拆除" },
+const TOOLS: Array<{ id: RepairTool; label: string; key: string; icon: string; hint: string }> = [
+  { id: "build", icon: "✥", label: "移动", key: "V", hint: "点选任意建筑，再点空地搬过去：会话楼搬到你选的地块，设施、地标、市政用地搬到任意空地" },
+  { id: "draw", icon: "✎", label: "画路", key: "R", hint: "点两下画一段路，可连续画" },
+  { id: "erase", icon: "⌫", label: "橡皮擦", key: "E", hint: "点击红色高亮的路段擦掉" },
+  { id: "restyle", icon: "⇄", label: "改路", key: "T", hint: "选路型后点一条路：整条街改成这个路型" },
+  { id: "node", icon: "◎", label: "路口", key: "N", hint: "点一个路口拿起来，再点一下放下：连着的路跟着走" },
+  { id: "site", icon: "▣", label: "设施", key: "S", hint: "编辑非会话建筑：公共设施、花园、地标、市政用地、背景楼——搬家或拆除" },
 ];
 const ROAD_TYPES: Array<{ id: RoadType; label: string; hint: string }> = [
   { id: "local", label: "小路", hint: "宽 5，街区内的支路" },
@@ -61,19 +61,21 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const previewReason = preview && "reason" in preview ? preview.reason : null;
   const previewNote = !previewReason && preview && "warning" in preview ? preview.warning : null;
 
+  const activeTool = TOOLS.find((tool) => tool.id === state.tool);
+  const hasDetail = !!(state.tool === "draw" || state.tool === "restyle" || info.remap || info.tierChanged || info.staleCount > 0 || state.message
+    || previewReason || previewNote || state.buildingId || state.site || state.stranded.length || issues || (counts && total > 0));
+  const badge = total === 0 ? "未修改" : `${total} 处`;
+  // 侧栏停靠形态（SimCity 式）：右边缘一条窄工具栏常驻，选项/提示/体检结果按需在它左侧弹出一块小卡片，
+  // 不用时只占 58px 宽，不挡画面；容器本身不拦截鼠标，只有栏和卡片可点。
   return <section className="city-repair" aria-label="规划修复">
-    <header><h2>修复城市</h2><button onClick={repair.exit} aria-label="退出修复规划">退出</button></header>
-    <div className="city-repair-tools" role="toolbar" aria-label="修复工具">
-      {TOOLS.map((tool) => <button key={tool.id} className={state.tool === tool.id ? "is-active" : ""} aria-pressed={state.tool === tool.id} title={`${tool.hint}（${tool.key}）`} onClick={() => repair.setTool(tool.id)}>
-        {tool.label}<kbd>{tool.key}</kbd>
-      </button>)}
-    </div>
-    {(state.tool === "draw" || state.tool === "restyle") && <div className="city-repair-widths" role="radiogroup" aria-label="路型">
+    {(hasDetail || activeTool) && <div className="city-repair-flyout">
+    {activeTool && !state.message && !previewReason && state.tool !== "draw" && state.tool !== "restyle" && <p className="city-repair-tip"><b>{activeTool.label}</b>　{activeTool.hint}</p>}
+    {(state.tool === "draw" || state.tool === "restyle") && <div className="city-repair-group"><span className="city-repair-label">路型</span><div className="city-repair-widths" role="radiogroup" aria-label="路型">
       {ROAD_TYPES.filter((type) => state.tool === "draw" || type.id !== "viaduct").map((type) => <button key={type.id} role="radio" aria-checked={state.roadType === type.id} title={type.hint} className={state.roadType === type.id ? "is-active" : ""} onClick={() => repair.setRoadType(type.id)}>{type.label}</button>)}
-    </div>}
-    {state.tool === "draw" && state.roadType !== "viaduct" && <div className="city-repair-widths" role="radiogroup" aria-label="画法">
+    </div></div>}
+    {state.tool === "draw" && state.roadType !== "viaduct" && <div className="city-repair-group"><span className="city-repair-label">画法</span><div className="city-repair-widths" role="radiogroup" aria-label="画法">
       {DRAW_MODES.map((mode) => <button key={mode.id} role="radio" aria-checked={state.drawMode === mode.id} title={`${mode.hint}（C 切换）`} className={state.drawMode === mode.id ? "is-active" : ""} onClick={() => repair.setDrawMode(mode.id)}>{mode.label}</button>)}
-    </div>}
+    </div></div>}
     {state.tool === "draw" && state.roadType === "viaduct" && state.viaduct.length > 0 && <div className="city-repair-site">
       <span>高架已点 {state.viaduct.length} 个点</span>
       <button onClick={repair.finishViaduct} disabled={state.viaduct.length < 2} title="回车">完成</button>
@@ -111,18 +113,10 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
       <span>原址留下 {state.stranded.length} 段断头接入路</span>
       <button onClick={repair.eraseStranded} title="一次擦掉，撤销可恢复">擦掉</button>
     </div>}
-    <p className="city-repair-status">
-      {total === 0 ? "尚无修改" : `${total} 处修改`}
-      {counts && total > 0 && `（${[counts.buildingMoves ? `移楼 ${counts.buildingMoves}` : "", counts.roadAdds ? `画路 ${counts.roadAdds}` : "", counts.roadDrops ? `擦路 ${counts.roadDrops}` : "", counts.highwayOps ? `高架 ${counts.highwayOps}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `改路口 ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `改设施 ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}）`}
+    {(info.staleCount > 0 || (counts && total > 0)) && <p className="city-repair-status">
+      {counts && total > 0 && `${[counts.buildingMoves ? `移楼 ${counts.buildingMoves}` : "", counts.roadAdds ? `画路 ${counts.roadAdds}` : "", counts.roadDrops ? `擦路 ${counts.roadDrops}` : "", counts.highwayOps ? `高架 ${counts.highwayOps}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `改路口 ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `改设施 ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}`}
       {info.staleCount > 0 && <span className="city-repair-stale"> · {info.staleCount} 条已失效</span>}
-      {total > 0 && <span> · {info.saveFailed ? "本次修改仅临时生效" : "已保存"}</span>}
-    </p>
-    <div className="city-repair-actions">
-      <button onClick={repair.undo} disabled={!info.canUndo}>撤销</button>
-      <button onClick={repair.redo} disabled={!info.canRedo}>重做</button>
-      <button onClick={issues ? repair.closeAudit : repair.audit}>{issues ? "收起体检" : "体检"}</button>
-      <button onClick={onReset} disabled={total === 0 && info.staleCount === 0}>{confirmReset ? "再点一次确认" : "恢复生成"}</button>
-    </div>
+    </p>}
     {issues && <div className="city-repair-audit">
       {issues.length === 0 ? <p className="city-repair-ok">体检通过：没有发现布局问题</p> : <>
         <p>{issues.length} 个问题{issues.length > MAX_ISSUE_ROWS ? `（显示前 ${MAX_ISSUE_ROWS} 个）` : ""}</p>
@@ -132,6 +126,19 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
         </li>)}</ul>
       </>}
     </div>}
-    <p className="city-repair-help">V 移动 · R 画路（C 直线/弧线）· E 橡皮擦 · T 改路 · N 路口 · S 设施 · [ ] 转向 · Delete 拆除 · Esc 逐级取消 · ⌘Z 撤销</p>
+    </div>}
+    <div className="city-repair-rail" role="toolbar" aria-label="修复工具">
+      <span className="city-repair-badge" title={info.saveFailed ? "本次修改仅临时生效（存档失败）" : total === 0 ? "尚无修改" : "修改已保存"}>{badge}</span>
+      {TOOLS.map((tool) => <button key={tool.id} className={state.tool === tool.id ? "is-active" : ""} aria-pressed={state.tool === tool.id} title={`${tool.hint}（${tool.key}）`} onClick={() => repair.setTool(tool.id)}>
+        <span className="city-repair-glyph" aria-hidden="true">{tool.icon}</span><span className="city-repair-name">{tool.label}</span><kbd>{tool.key}</kbd>
+      </button>)}
+      <hr />
+      <button onClick={repair.undo} disabled={!info.canUndo} title="撤销（⌘Z）"><span className="city-repair-glyph" aria-hidden="true">↶</span><span className="city-repair-name">撤销</span></button>
+      <button onClick={repair.redo} disabled={!info.canRedo} title="重做（⇧⌘Z）"><span className="city-repair-glyph" aria-hidden="true">↷</span><span className="city-repair-name">重做</span></button>
+      <button className={issues ? "is-active" : ""} onClick={issues ? repair.closeAudit : repair.audit} title="检查楼压路、楼重叠、坡地等布局问题"><span className="city-repair-glyph" aria-hidden="true">✓</span><span className="city-repair-name">体检</span></button>
+      <button className={confirmReset ? "city-repair-danger is-confirm" : "city-repair-danger"} onClick={onReset} disabled={total === 0 && info.staleCount === 0} title="丢弃全部修改，回到生成的样子（可撤销）"><span className="city-repair-glyph" aria-hidden="true">⟲</span><span className="city-repair-name">{confirmReset ? "确认？" : "还原"}</span></button>
+      <hr />
+      <button className="city-repair-exit" onClick={repair.exit} aria-label="退出修复规划" title="退出修复（Esc 先逐级取消）"><span className="city-repair-glyph" aria-hidden="true">✕</span><span className="city-repair-name">退出</span></button>
+    </div>
   </section>;
 }
