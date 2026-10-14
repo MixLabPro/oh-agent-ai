@@ -151,7 +151,17 @@ export function corridorBlocked(world: ConnectorWorld, a: Vec2, b: Vec2, policy:
   for (let i = 0; i <= steps; i += top) if (sampleFails(i)) return true;
   for (let s = top / 2; s >= 1; s /= 2) for (let i = s; i <= steps; i += 2 * s) if (sampleFails(i)) return true;
   // 用地盘相交（corridorViolation 先查它；析取与顺序无关，放后面是因为隔水走廊多数在采样里就被拒）。
+  // 与 corridorViolation 同一判据：有真实占地的用地（kind + yaw，占地精确）按占地判，其余按圆预留——
+  // main 把走廊判定改成精确占地之后，这条快判仍按圆判，会和原函数对同一走廊给出不同的拒/不拒
+  // （合并 main 时 30 岛里 2 个 5 档岛的路网因此与 main 不一致）。
   for (const site of policy.sites) {
+    if (site.kind && Number.isFinite(site.yaw)) {
+      const footprint = siteFootprint(site.kind, site.id ?? `reservation:${site.kind}`, site.radius);
+      if (footprint.exact) {
+        if (!siteRoadClear({ ...site, kind: site.kind, yaw: site.yaw! }, a, b, width, policy.siteMargin)) return true;
+        continue;
+      }
+    }
     const dx = b.x - a.x; const dz = b.z - a.z;
     const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (distance * distance || 1)));
     if (Math.hypot(site.x - a.x - dx * t, site.z - a.z - dz * t) < site.radius + policy.siteMargin + width / 2) return true;

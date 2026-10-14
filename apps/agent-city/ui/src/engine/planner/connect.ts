@@ -276,7 +276,8 @@ function proposeDirectProjection(request: ConnectionRequest, world: ConnectorWor
 const NODE_MERGE_MEMO_LIMIT = 400_000;
 const nodeMergeMemo: {
   geo: Geography | null; inRiver: ConnectorWorld["inRiver"] | null;
-  sites: Array<{ x: number; z: number; radius: number }>;
+  // 键里必须含每个影响走廊判定的用地字段：kind / yaw / id 决定「精确占地 vs 圆预留」与占地朝向（见 corridorViolation）。
+  sites: Array<{ x: number; z: number; radius: number; kind?: string; yaw?: number; id?: string }>;
   map: Map<string, ConnectionFailure | null>;
   /** 只知「拒/不拒」的条目（corridorBlocked 的结果）；与 map 同键、同失效规则。 */
   blocked: Map<string, boolean>;
@@ -286,9 +287,10 @@ function nodeMergeCorridor(world: ConnectorWorld, a: Vec2, b: Vec2, policy: Corr
   if (policy.waterfront) return corridorFailure(world, a, b, policy);
   const m = nodeMergeMemo;
   const same = m.geo === world.geo && m.inRiver === world.inRiver && m.sites.length === policy.sites.length
-    && policy.sites.every((s, i) => s.x === m.sites[i].x && s.z === m.sites[i].z && s.radius === m.sites[i].radius);
+    && policy.sites.every((s, i) => s.x === m.sites[i].x && s.z === m.sites[i].z && s.radius === m.sites[i].radius
+      && s.kind === m.sites[i].kind && s.yaw === m.sites[i].yaw && s.id === m.sites[i].id);
   if (!same || m.map.size + m.blocked.size > NODE_MERGE_MEMO_LIMIT) {
-    m.geo = world.geo; m.inRiver = world.inRiver; m.sites = policy.sites.map((s) => ({ x: s.x, z: s.z, radius: s.radius })); m.map.clear(); m.blocked.clear();
+    m.geo = world.geo; m.inRiver = world.inRiver; m.sites = policy.sites.map((s) => ({ x: s.x, z: s.z, radius: s.radius, kind: s.kind, yaw: s.yaw, id: s.id })); m.map.clear(); m.blocked.clear();
   }
   const key = `${a.x},${a.z}>${b.x},${b.z}|${policy.roadWidth ?? 0}|${policy.siteMargin}|${policy.maxSlope}|${policy.requireBuildable}`;
   const hit = m.map.get(key);
