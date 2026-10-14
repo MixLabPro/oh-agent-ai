@@ -353,7 +353,7 @@ export function applyConstruction(host: BuildingSystemHost, runtime: BuildingRun
       const frontSetback = 0.5; // 楼前沿离地块前沿
       const depthRoom = runtime.slot.depth - 2 * frontSetback + room; // 临街到街区背后的可用进深
       const vary = 0.92 + building.seed * 0.08;
-      const frontage = Math.min(runtime.slot.width - 0.8, 6.4) * vary;
+      const frontage = (runtime.slot.width - 0.8) * vary; // 并入相邻空地块的高楼 slot.width = 14.4 → 面宽 13.6
       const share = form === "tower" || form === "landmark" ? 0.66 : form === "slab" ? 0.82 : form === "block" ? 0.74 : 0.7;
       widths = [frontage, Math.max(widths[1], depthRoom * share)];
       deepen = (widths[1] / 2) - (runtime.slot.depth / 2 - frontSetback); // 前沿固定，中心沿内向轴后移

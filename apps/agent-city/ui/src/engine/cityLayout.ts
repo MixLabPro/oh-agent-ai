@@ -19,7 +19,9 @@ import { civicMinimumSize, civicEnvelopeSize, GARDEN_MINIMUM_SIZE, DISTRICT_LAND
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
-export type Parcel = Vec2 & { id: string; blockId: string; yaw: number; zone: Zone; width: number; depth: number; frontage?: ParcelFrontageProof };
+export type Parcel = Vec2 & { id: string; blockId: string; yaw: number; zone: Zone; width: number; depth: number; frontage?: ParcelFrontageProof;
+  /** 高楼并入的相邻地块 id（slot 的 width 已是两块之和、x/z 在两块中点）；刷新时据此重建，保证塔楼宽度稳定。 */
+  mergedWith?: string };
 export type BlockSurfaceExclusion = { kind: "road-corridor" | "highway-corridor"; id: string; points: Vec2[]; width: number }
   | { kind: "site-circle"; id: string; x: number; z: number; radius: number };
 export type CityBlock = {
@@ -225,6 +227,27 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const blocks = [...plan.blocks, ...hotelBlocks, ...oceanBlocks];
   const parcels = blocks.flatMap((block) => block.parcels);
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
+  // 高楼并入相邻空地块（用户：「session building 太细了」的第二步）：楼高 ≥ TALL 的会话楼把同街区、同一排、紧挨着的
+  // 一块空地块并进来，面宽 7.2 → 14.4（高宽比 5–8:1 → 约 3:1）。海滨酒店 / Ocean Drive 地块本来就宽，不并。
+  const TALL = 26;
+  const parcelsByBlock = new Map<string, Parcel[]>();
+  for (const parcel of parcels) { const list = parcelsByBlock.get(parcel.blockId); if (list) list.push(parcel); else parcelsByBlock.set(parcel.blockId, [parcel]); }
+  const mergeParcels = (a: Parcel, b: Parcel): Parcel => ({ ...a, x: (a.x + b.x) / 2, z: (a.z + b.z) / 2, width: a.width + b.width, mergedWith: b.id });
+  const adjacentFree = (p: Parcel, isFree: (q: Parcel) => boolean): Parcel | null => {
+    if (p.blockId.startsWith("hotel:") || p.blockId.startsWith("oceandrive:") || p.width > 9) return null;
+    const tx = Math.cos(p.yaw); const tz = -Math.sin(p.yaw);
+    let best: Parcel | null = null; let bestAlong = Infinity;
+    for (const q of parcelsByBlock.get(p.blockId) ?? []) {
+      if (q.id === p.id || !isFree(q)) continue;
+      const dx = q.x - p.x; const dz = q.z - p.z;
+      const along = dx * tx + dz * tz; const across = dx * Math.sin(p.yaw) + dz * Math.cos(p.yaw);
+      const yawGap = Math.abs((((q.yaw - p.yaw + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI);
+      if (Math.abs(across) > 0.8 || yawGap > 0.05 || Math.abs(Math.abs(along) - (p.width + q.width) / 2) > 1.2) continue;
+      const gap = Math.abs(along);
+      if (gap < bestAlong - 1e-6 || (Math.abs(gap - bestAlong) <= 1e-6 && best !== null && q.id < best.id)) { bestAlong = gap; best = q; }
+    }
+    return best;
+  };
   const assigned = new Map<string, Parcel>();
   const used = new Set<string>();
   // 规划修复的移楼钉子（CITY_PLAN_MANUAL_REPAIR_SPEC §5/§12.4）：先于「刷新不搬家」落位。
@@ -248,7 +271,8 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const CELL = 40;
     const grid = new Map<string, Parcel[]>();
     for (const parcel of parcels) { const key = `${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`; const list = grid.get(key); if (list) list.push(parcel); else grid.set(key, [parcel]); }
-    const ordered = [...model.buildings].filter((building) => old.has(building.id) && !assigned.has(building.id)).sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    const ordered = [...model.buildings].filter((building) => old.has(building.id) && !assigned.has(building.id)).sort((a, b) => Number(!!old.get(b.id)?.mergedWith) - Number(!!old.get(a.id)?.mergedWith) || a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    // 并过的高楼先落位（它还要在近旁再要一块空地块，晚了邻地块已被别的楼拿走）；其余仍按开工先后。
     for (const building of ordered) {
       const from = old.get(building.id)!;
       const tx = from.x * ratio; const tz = from.z * ratio;
@@ -264,7 +288,12 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
           }
         }
       }
-      if (best && bestD <= 120) { assigned.set(building.id, best); used.add(best.id); }
+      if (best && bestD <= 120) {
+        // 跨档重排：旧 slot 是并过的高楼，就在新位置的近旁再并一块空地块（楼别因为岛放大就瘦回单宽）。
+        const partner = from.mergedWith ? adjacentFree(best, (q) => !used.has(q.id)) : null;
+        assigned.set(building.id, partner ? mergeParcels(best, partner) : best);
+        used.add(best.id); if (partner) used.add(partner.id);
+      }
     }
   }
   if (previous?.seed === seed && previous.scaleTier === tier) {
@@ -272,7 +301,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     for (const building of model.buildings) {
       const parcel = old.get(building.id);
       if (parcel && parcelIndex.has(parcel.id) && !used.has(parcel.id) && !assigned.has(building.id)) {
-        assigned.set(building.id, parcelIndex.get(parcel.id)!); used.add(parcel.id);
+        const base = parcelIndex.get(parcel.id)!;
+        const partner = parcel.mergedWith ? parcelIndex.get(parcel.mergedWith) : undefined;
+        if (partner && !used.has(partner.id)) { assigned.set(building.id, mergeParcels(base, partner)); used.add(base.id); used.add(partner.id); }
+        else { assigned.set(building.id, base); used.add(parcel.id); }
       }
     }
   }
@@ -470,19 +502,35 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const inside = [...blocksOf(district.id), ...(buildings.length >= 20 ? hotelBlocks.filter((b) => nearestDistrict(b) === district.id) : [])].flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
     const overflow: typeof buildings = [];
     let cursor = 0;
+    let placedCount = 0;
+    /** 落位；高楼在本区空地块有富余时顺带并入相邻空地块（富余 = 剩余空地块 − 1 仍 ≥ 剩余会话 × 1.15，
+     *  留给后面的会话与将来的并入，近满载的城市不并，免得把会话挤成 massing 方块）。 */
+    const commit = (building: typeof buildings[number], parcel: Parcel) => {
+      let slot = parcel;
+      used.add(parcel.id);
+      if (building.height >= TALL) {
+        const partner = adjacentFree(parcel, (q) => !used.has(q.id));
+        if (partner) {
+          let free = 0;
+          for (let k = cursor; k < inside.length; k += 1) if (!used.has(inside[k].id)) free += 1;
+          if (free - 1 >= (buildings.length - placedCount - 1) * 1.15) { slot = mergeParcels(parcel, partner); used.add(partner.id); }
+        }
+      }
+      assigned.set(building.id, slot);
+      placedCount += 1;
+    };
     for (const building of buildings) {
       while (cursor < inside.length && used.has(inside[cursor].id)) cursor += 1;
       let parcel: Parcel | undefined = inside[cursor];
       // C-1 近岸高度梯度：楼高 > 26 的会话楼不占海滨地块，让给低层（迈阿密剖面：低层临水、塔楼退后）。楼高仍由 token 决定，只换位置。
       if (parcel && building.height > 26 && parcel.zone === "waterfront") {
         const inland = inside.find((p, k) => k > cursor && !used.has(p.id) && p.zone !== "waterfront");
-        if (inland) { used.add(inland.id); assigned.set(building.id, inland); continue; }
+        if (inland) { commit(building, inland); continue; }
       }
       if (parcel) cursor += 1;
       else parcel = parcels.filter((candidate) => !used.has(candidate.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id))[0];
       if (!parcel) { overflow.push(building); continue; }
-      assigned.set(building.id, parcel);
-      used.add(parcel.id);
+      commit(building, parcel);
     }
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
