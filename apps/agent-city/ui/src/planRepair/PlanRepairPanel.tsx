@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useCityLanguage } from "../i18n";
 import { repairText, repairView } from "./repairCopy";
-import { siteLabel, type DrawMode, type RepairTool, type RoadType } from "./controller";
+import { isGenericHint, siteLabel, type DrawMode, type RepairTool, type RoadType } from "./controller";
 import type { PlanRepairUi } from "./usePlanRepair";
 
 const RULE_LABEL: Record<string, string> = {
@@ -45,6 +45,25 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   useEffect(() => { if (!state.active) setConfirmReset(false); }, [state.active]);
+  // 提示气泡（工具提示 + 控制器消息）点击面板以外的任何地方就收起；换工具、或来了针对当前操作的新消息（成功/警告/失败，
+  // 以及「已选中…」这类选中后的提示）时重新出现；通用的工具用法提示（点空白会回到它）不会再弹回来。
+  const [bubbleHidden, setBubbleHidden] = useState(false);
+  const lastMessage = useRef(state.message);
+  useEffect(() => { setBubbleHidden(false); }, [state.tool, state.active]);
+  useEffect(() => {
+    if (state.message === lastMessage.current) return;
+    lastMessage.current = state.message;
+    if (state.message && !isGenericHint(state.message)) setBubbleHidden(false);
+  }, [state.message]);
+  useEffect(() => {
+    if (!state.active) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest(".city-repair")) return;
+      setBubbleHidden(true);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [state.active]);
 
   if (!repair.enabled) return null;
   if (!state.active) {
@@ -68,14 +87,16 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const previewNote = !previewReason && preview && "warning" in preview ? preview.warning : null;
 
   const activeTool = TOOLS.find((tool) => tool.id === state.tool);
-  const hasDetail = !!(state.tool === "draw" || state.tool === "restyle" || info.remap || info.tierChanged || info.staleCount > 0 || state.message
+  const message = bubbleHidden ? null : state.message;
+  const tipShown = !bubbleHidden && !!activeTool && !state.message && !previewReason && state.tool !== "draw" && state.tool !== "restyle";
+  const hasDetail = !!(state.tool === "draw" || state.tool === "restyle" || info.remap || info.tierChanged || info.staleCount > 0 || message || tipShown
     || previewReason || previewNote || state.buildingId || state.site || state.stranded.length || issues || (counts && total > 0));
   const badge = total === 0 ? "未修改" : `${total} 处`;
   // 侧栏停靠形态（SimCity 式）：右边缘一条窄工具栏常驻，选项/提示/体检结果按需在它左侧弹出一块小卡片，
   // 不用时只占 58px 宽，不挡画面；容器本身不拦截鼠标，只有栏和卡片可点。
   return repairView(<section className="city-repair" aria-label="规划修复">
-    {(hasDetail || activeTool) && <div className="city-repair-flyout">
-    {activeTool && !state.message && !previewReason && state.tool !== "draw" && state.tool !== "restyle" && <p className="city-repair-tip"><b>{activeTool.label}</b>{" "}{activeTool.hint}</p>}
+    {hasDetail && <div className="city-repair-flyout">
+    {tipShown && activeTool && <p className="city-repair-tip"><b>{activeTool.label}</b>{" "}{activeTool.hint}</p>}
     {(state.tool === "draw" || state.tool === "restyle") && <div className="city-repair-group"><span className="city-repair-label">路型</span><div className="city-repair-widths" role="radiogroup" aria-label="路型">
       {ROAD_TYPES.filter((type) => state.tool === "draw" || type.id !== "viaduct").map((type) => <button key={type.id} role="radio" aria-checked={state.roadType === type.id} title={type.hint} className={state.roadType === type.id ? "is-active" : ""} onClick={() => repair.setRoadType(type.id)}>{type.label}</button>)}
     </div></div>}
@@ -109,7 +130,7 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
         : `${info.staleCount} 处修改已失效（城市重算后对象不在了或位置变了），它们不起作用；点「体检」可逐条查看。`}</p>
       <button onClick={repair.pruneStale}>清除失效修改</button>
     </div>}
-    {state.message && <p className={`city-repair-msg city-repair-${state.message.kind}`} role={state.message.kind === "error" ? "alert" : "status"}>{state.message.text}</p>}
+    {message && <p className={`city-repair-msg city-repair-${message.kind}`} role={message.kind === "error" ? "alert" : "status"}>{message.text}</p>}
     {previewReason && <p className="city-repair-reason">不可行：{previewReason}</p>}
     {previewNote && <p className="city-repair-note">注意：{previewNote}</p>}
     {state.buildingId && state.tool === "build" && <p className="city-repair-sel">选中：<code>{state.buildingId}</code></p>}

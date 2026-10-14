@@ -248,6 +248,9 @@ const footprintContains = (site: SiteInfo, p: Vec2) => {
 const CURVE_HINT: RepairMessage = { kind: "hint", text: "弧线：点起点，再点路要经过的点，最后点终点；可连续画，Esc 撤回上一步，C 切回直线" };
 const CURVE_START_HINT: RepairMessage = { kind: "hint", text: "起点已落下：点一下路要经过的地方（弧线会穿过它）" };
 const VIADUCT_HINT: RepairMessage = { kind: "hint", text: "高架：逐点点击画折线（可跨河、跨路），回车或在最后一点上再点一下完成；Esc 撤回上一个点" };
+/** 通用的「这个工具怎么用」提示（工具切换/取消选中时回到的那条），区别于选中结果等针对当前操作的提示。 */
+export const isGenericHint = (message: RepairMessage | null): boolean =>
+  !!message && (Object.values(HINT).includes(message) || message === CURVE_HINT || message === CURVE_START_HINT || message === VIADUCT_HINT);
 
 const ghostPreview = (ghost: PlacementGhost | null): RepairPreview =>
   ghost ? { kind: "ghost", rect: ghost.rect, ok: ghost.blockers.length === 0, reason: ghost.blockers[0] === "unchanged" ? "它已经在这里了" : reasonOf(ghost.blockers), warning: noteOf(ghost.warnings) } : null;
