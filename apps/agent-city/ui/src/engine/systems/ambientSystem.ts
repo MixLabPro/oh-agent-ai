@@ -52,7 +52,9 @@ export function buildCars(host: AmbientHost): { mesh: THREE.InstancedMesh; cars:
     }
   });
   const carColors = ["#f8f5ec", "#c96f4a", "#4d7ca8", "#3f8f7a", "#d8a13c", "#8d5a5a"];
-  const geometry = new THREE.BoxGeometry(2.5, 0.8, 1.2).translate(0, 0.4, 0);
+  // 4.5 × 1.8 × 1.5：1 单位 ≈ 1 米的轿车尺寸（CITY_SCALE_AUDIT 方案 A）。曾 2.5 × 1.2 × 0.8，
+  // 比人（1.75 高）还矮；两车道各 2.5 的 5 宽支路仍放得下（车宽 1.8，车道中线偏 1.2）。
+  const geometry = new THREE.BoxGeometry(4.5, 1.5, 1.8).translate(0, 0.75, 0);
   const material = new THREE.MeshLambertMaterial({ color: "#ffffff" });
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(cars.length, 1));
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -103,7 +105,8 @@ export function buildBoats(host: AmbientHost): { mesh: THREE.InstancedMesh; boat
     const flybridge = new THREE.BoxGeometry(3.4, 1.4, 2.2).translate(-1.8, 4.2, 0);
     const radarArch = new THREE.BoxGeometry(0.3, 2.2, 2.4).translate(-3.6, 5.4, 0);
     const bowSpray = new THREE.ConeGeometry(0.5, 2.5, 4).rotateZ(-Math.PI / 2).translate(6.5, 0.8, 0);
-    const yachtGeometry = mergeGeometries([hull.clone(), cabin.clone(), flybridge, radarArch, bowSpray]);
+    // 飞桥游艇按 1.7× 放大（11.5 → 19.5 m、宽 6.8）：Vice 式豪华游艇 20–30 m；普通船 11.5 m 是小型游艇，不动。
+    const yachtGeometry = mergeGeometries([hull.clone(), cabin.clone(), flybridge, radarArch, bowSpray]).scale(1.7, 1.7, 1.7);
     const yachtMaterial = new THREE.MeshLambertMaterial({ color: "#f8f6f0" });
     const yachtMesh = new THREE.InstancedMesh(yachtGeometry, yachtMaterial, yachtCount);
     yachtMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);

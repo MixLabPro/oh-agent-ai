@@ -35,35 +35,44 @@ export function isletEstate(radius: number, seed: number): IsletEstate {
   const r = radius;
   const inner = r * 0.8;
   const causewayZ = r * ISLET_CAUSEWAY_OFFSET;
-  const loop = { cx: 0, cz: -r * 0.08, ax: r * 0.5, az: r * 0.36, width: 7 };
-  const spur = { x: 0, z0: loop.cz + loop.az, z1: causewayZ, width: 6 };
-  const houses: IsletHouse[] = [];
-
-  // ── 环路外侧一圈住宅：每 30° 一个候选，住宅中心放在环路外沿与岸线噪声下限之间的正中，面朝外 ──
-  const scale = Math.max(0.45, Math.min(0.7, (inner - Math.hypot(loop.ax, loop.az) * 0.8) / 40));
+  // 住宅缩放 ≥0.85（主楼 ≥18.7 × 10.2 m）：曾夹在 0.45–0.7（10 × 6 m，对着 1.75 的人是个小棚）。
+  // 先定住宅尺寸、再按岛大小算环路：环路半轴 = 住宅外沿还落在岸线噪声下限（0.8R）内所允许的最大值（夹在 0.5R 与 0.2R 之间），
+  // 岛小环就小、住宅还是满尺寸——曾固定环路 0.5R，半径 < 95 的岛一栋住宅都放不下（CITY_SCALE_AUDIT 方案 A）。
+  const scale = r >= 100 ? 1 : 0.85;
   const halfW = HOUSE_HALF_W * scale; const halfD = HOUSE_HALF_D * scale;
-  for (let k = 0; k < 12; k += 1) {
-    const a = (k / 12) * Math.PI * 2 + Math.PI / 12;
-    const ex = loop.cx + loop.ax * Math.cos(a); const ez = loop.cz + loop.az * Math.sin(a);
-    // 椭圆外法线方向（近似取径向，椭圆扁度不大时足够）
-    const nx = Math.cos(a) / loop.ax; const nz = Math.sin(a) / loop.az; const nl = Math.hypot(nx, nz);
-    const ux = nx / nl; const uz = nz / nl;
-    const along = loop.width / 2 + 3 + halfD; // 台地后沿离路边 3
-    const x = ex + ux * along; const z = ez + uz * along;
-    // 台地四角都在岸线噪声下限之内、离堤道 ≥ 10、彼此不重叠
-    const corners = [[-halfW, -halfD], [halfW, -halfD], [-halfW, halfD], [halfW, halfD]].map(([lx, lz]) => {
+  const loopWidth = 7;
+  const along = loopWidth / 2 + 3 + halfD; // 住宅中心离环路中线（台地后沿离路边 3）
+  /** 给定环路半轴 ax，沿环路外侧每 30° 一个候选放住宅（台地四角都在岸线噪声下限内、离堤道 ≥ 10、彼此不重叠）。 */
+  const ringHouses = (ax: number): IsletHouse[] => {
+    const out: IsletHouse[] = [];
+    const lp = { cx: 0, cz: -r * 0.08, ax, az: ax * 0.72 };
+    for (let k = 0; k < 12; k += 1) {
+      const a = (k / 12) * Math.PI * 2 + Math.PI / 12;
+      const ex = lp.cx + lp.ax * Math.cos(a); const ez = lp.cz + lp.az * Math.sin(a);
+      const nx = Math.cos(a) / lp.ax; const nz = Math.sin(a) / lp.az; const nl = Math.hypot(nx, nz);
+      const ux = nx / nl; const uz = nz / nl;
+      const x = ex + ux * along; const z = ez + uz * along;
       const yaw = Math.atan2(ux, uz);
-      return { x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) };
-    });
-    if (!corners.every((c) => Math.hypot(c.x, c.z) < inner && c.z < causewayZ - 10)) continue;
-    if (houses.some((h) => Math.hypot(h.x - x, h.z - z) < (halfW + h.scale * HOUSE_HALF_W) * 1.05)) continue;
-    // 码头按名义岸线估到岸距离（噪声 ±18%：偏小一侧码头多伸出一截，偏大一侧码头端头仍在岸外 4 以上）。
-    const reach = Math.max(0, r * 1.05 - Math.hypot(x, z));
-    houses.push({ x, z, yaw: Math.atan2(ux, uz), scale, reach, grand: false });
+      const corners = [[-halfW, -halfD], [halfW, -halfD], [-halfW, halfD], [halfW, halfD]].map(([lx, lz]) => (
+        { x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) }));
+      if (!corners.every((c) => Math.hypot(c.x, c.z) < inner && c.z < causewayZ - 10)) continue;
+      if (out.some((h) => Math.hypot(h.x - x, h.z - z) < (halfW + h.scale * HOUSE_HALF_W) * 1.05)) continue;
+      // 码头按名义岸线估到岸距离（噪声 ±18%：偏小一侧码头多伸出一截，偏大一侧码头端头仍在岸外 4 以上）。
+      out.push({ x, z, yaw, scale, reach: Math.max(0, r * 1.05 - Math.hypot(x, z)), grand: false });
+    }
+    return out;
+  };
+  // 环路半轴取「能放下最多住宅」的那个（并列取大的）：岛小环就小，住宅保持满尺寸，不靠缩住宅凑数。
+  let ax = r * 0.5; let houses: IsletHouse[] = ringHouses(ax);
+  for (let candidate = r * 0.5 - 2; candidate >= r * 0.2; candidate -= 2) {
+    const trial = ringHouses(candidate);
+    if (trial.length > houses.length) { ax = candidate; houses = trial; }
   }
+  const loop = { cx: 0, cz: -r * 0.08, ax, az: ax * 0.72, width: loopWidth };
+  const spur = { x: 0, z0: loop.cz + loop.az, z1: causewayZ, width: 6 };
 
   // ── 北侧大宅：堤道与北岸之间的条带够深就放一栋正常尺寸、面朝北；不够深就缩到 0.75 ──
-  for (const grandScale of [1, 0.75]) {
+  for (const grandScale of [1.1, 1, 0.85]) {
     const gz = causewayZ + 6 + 3 + HOUSE_HALF_D * grandScale;
     const corner = Math.hypot(HOUSE_HALF_W * grandScale, gz + HOUSE_HALF_D * grandScale);
     if (corner < inner) { houses.push({ x: 0, z: gz, yaw: 0, scale: grandScale, reach: Math.max(0, r * 1.05 - gz), grand: true }); break; }

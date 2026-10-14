@@ -44,7 +44,7 @@ export function roadLayerOf(width: number): 2 | 3 | 4 {
   return width <= 5 ? 2 : width <= 8 ? 3 : 4;
 }
 /** 人行道带宽（每侧），与地面贴图的「路宽 + 2.4」一致。 */
-const SIDEWALK = 1.2;
+const SIDEWALK = 1.8; // 与 cityRoadJunctions.SIDEWALK_BAND 同值（路面网格与贴图垫底共用）
 const SIDEWALK_COLOR = "#d4cfc2";
 /** aRoadRun.w：0 = 路段带（画标线），1 = 沥青填充，2 = 人行道。 */
 const PIECE_RIBBON = 0; const PIECE_FILL = 1; const PIECE_SIDEWALK = 2;

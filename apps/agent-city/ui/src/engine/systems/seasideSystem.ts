@@ -452,19 +452,20 @@ export function buildMarina(host: SeasideHost): void {
     const length = 30 + (i % 2) * 6;
     const sx = harbor.x + ux * (shore - 3) + vx * lateral; const sz = harbor.z + uz * (shore - 3) + vz * lateral;
     const cx = sx + ux * length / 2; const cz = sz + uz * length / 2;
-    host.compose(cx, 0.35, cz, yaw, length, 0.35, 2.2);
+    host.compose(cx, 0.35, cz, yaw, length, 0.35, 2.6);
     piers.setMatrixAt(p++, host.matrix);
     // 栈桥两侧每隔 6 泊一条船（长 7–9），颜色按种子在白/海军蓝/珊瑚之间。
     // 截图验收：每 6 一条时船挤成一整块、把栈桥都盖住了——改为每 8 一个泊位、约四成空位，船体收窄并加白色舱室。
-    for (let along = 7; along < length - 3 && b < 40; along += 8) for (const side of [-1, 1]) {
+    // 船长 7–11、船宽 2.6、泊位间距 10（曾长 6–8 / 宽 2.1 / 间距 8）：真实码头小艇 8–12 m。
+    for (let along = 8; along < length - 4 && b < 40; along += 10) for (const side of [-1, 1]) {
       const seed = hashSeed(`marina:${i}:${along}:${side}`);
       if (seed < 0.45 || b >= 40) continue;
       const bx = sx + ux * along + vx * side * 3.6; const bz = sz + uz * along + vz * side * 3.6;
-      const len = 6 + seed * 2;
-      host.compose(bx, -0.15, bz, yaw + Math.PI / 2, 2.1, 1.2, len);
+      const len = 7 + seed * 4;
+      host.compose(bx, -0.15, bz, yaw + Math.PI / 2, 2.6, 1.4, len);
       boats.setMatrixAt(b, host.matrix);
       boats.setColorAt(b, host.color.set(seed > 0.85 ? "#1f3b5c" : seed > 0.7 ? "#e8775f" : "#ffffff"));
-      host.compose(bx - ux * len * 0.08, 1.0, bz - uz * len * 0.08, yaw + Math.PI / 2, 1.5, 0.9, len * 0.4);
+      host.compose(bx - ux * len * 0.08, 1.15, bz - uz * len * 0.08, yaw + Math.PI / 2, 1.9, 1.0, len * 0.4);
       cabins.setMatrixAt(b, host.matrix);
       b += 1;
     }

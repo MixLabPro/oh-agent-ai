@@ -14,7 +14,7 @@
 import type { RoadEdge, Vec2 } from "./cityLayout";
 
 /** 人行道带宽（贴图里人行道是路宽 +2.4 的描边 = 每侧 1.2）。转角处的人行道沿半径 r−1.2 的同心弧走。 */
-export const SIDEWALK_BAND = 1.2;
+export const SIDEWALK_BAND = 1.8; // 人行道每侧 1.8 m（曾 1.2，真实 ≥2）；与 roadSurfaceSystem.SIDEWALK 必须同值
 /** 圆角不得超过所在臂长的 40%（臂长 = 直路链长，见 JunctionArm.length）：两端都做圆角时最多吃掉 80%，中间总留一段直路。 */
 export const CORNER_EDGE_SHARE = 0.4;
 /** 夹角 ≥ 177° 视为直行（两条边线平行或背离），这一侧不需要圆角。 */
