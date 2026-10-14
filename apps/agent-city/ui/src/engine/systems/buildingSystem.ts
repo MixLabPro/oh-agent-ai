@@ -134,6 +134,12 @@ export function buildRuntimes(host: BuildingSystemHost): void {
         // 装饰艺术楼墙面用执行环境强调色的粉彩版（而不是执行环境的浅墙色）：浅墙色在黄昏暖光下被压成灰，
         // 海滨要的是一眼能认出的粉、薄荷、青、紫。
         runtime.paletteWall = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.52).multiplyScalar(0.96 + building.seed * 0.08);
+        // Ocean Drive 街墙地块：墙面按楼在风格圣经粉彩里逐栋变化（一条街同一执行环境，整排一个色读不出 Ocean Drive）；
+        // 执行环境身份留在下面的女儿墙/遮阳棚强调色与屋顶上。
+        if (runtime.slot.blockId.startsWith("oceandrive:")) {
+          const pastels = ["#f08b92", "#a5d8c3", "#f2d8ae", "#9fd6e0", "#f5e3a3", "#e7b8d8"];
+          runtime.paletteWall = new THREE.Color(pastels[Math.floor(building.seed * 997) % pastels.length]);
+        }
         // 转角柱与墙同色略亮；女儿墙与遮阳棚用执行环境强调色的粉彩版——海滨一眼看出是哪个执行环境。
         const accent = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.35);
         host.decoCornerMesh.setColorAt(runtime.deco, runtime.paletteWall.clone().multiplyScalar(1.06));
@@ -303,6 +309,8 @@ export function applyConstruction(host: BuildingSystemHost, runtime: BuildingRun
     // 海滨酒店地块上的会话楼：铺满宽地块成为一栋酒店（低楼走装饰艺术立面，见 facadeFor 的海滨规则）。
     // 楼高仍由 token 决定——酒店是会话，不是装饰。
     if (runtime.slot.blockId.startsWith("hotel:")) widths = [runtime.slot.width * 0.92, runtime.slot.depth * 0.9];
+    // Ocean Drive 街墙地块：会话楼铺满面宽（楼缝 1–2.5 由排地块时留），否则落成细塔，街墙读不出来（截图）。
+    if (runtime.slot.blockId.startsWith("oceandrive:")) widths = [runtime.slot.width * 0.97, runtime.slot.depth * 0.92];
 
     // Parcel frontage owns orientation; podium, shaft and roof share it.
     const yaw = runtime.slot.yaw;
@@ -768,4 +776,62 @@ export function writeContext(host: BuildingSystemHost): void {
     }
     context.bodies.instanceMatrix.needsUpdate = true;
     context.crowns.instanceMatrix.needsUpdate = true;
+}
+
+/**
+ * Ocean Drive Art Deco 街墙（layout.oceanDrive）：饱和粉彩（不同于背景楼的降饱和——这条街就是 Vice City 的招牌）、
+ * 立面窗格按 4 层一铺（背景楼按 11 层铺，矮楼会挤成密格）、白色压顶、约一半正面一块竖向霓虹招牌。
+ * 固定街景：不参与背景楼的回放生长（回放起点也有这条街）。
+ */
+export function buildOceanDrive(host: BuildingSystemHost): void {
+  const buildings = host.layout.oceanDrive ?? [];
+  if (!buildings.length) return;
+  const facade = makeDecoFacadeTexture();
+  facade.colorSpace = THREE.SRGBColorSpace;
+  facade.repeat.set(6, 2);
+  const bodyGeometry = artDecoTowerGeometry();
+  const bodyMaterial = new THREE.MeshLambertMaterial({ map: facade });
+  const bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, buildings.length);
+  const capGeometry = BOX.clone();
+  const capMaterial = new THREE.MeshLambertMaterial({ color: "#fbf6ec" });
+  const caps = new THREE.InstancedMesh(capGeometry, capMaterial, buildings.length);
+  const signCount = buildings.filter((b) => b.sign).length;
+  const signGeometry = BOX.clone();
+  const signMaterial = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
+  const signs = new THREE.InstancedMesh(signGeometry, signMaterial, Math.max(1, signCount));
+  // 风格圣经调色：珊瑚 / 薄荷 / 沙奶油 / 浅青 / 淡黄 / 粉紫；招牌：霓虹品红 / 霓虹青 / 暖黄
+  const walls = ["#f08b92", "#a5d8c3", "#f2d8ae", "#9fd6e0", "#f5e3a3", "#e7b8d8"];
+  const neon = ["#f04ea3", "#52e1e4", "#ffd36e"];
+  let signIndex = 0;
+  buildings.forEach((building, index) => {
+    const y = Math.max(0.3, host.layout.terrain.height(building.x, building.z));
+    const height = building.floors * 3.1 + 1.2;
+    host.compose(building.x, y, building.z, building.yaw, building.width, height, building.depth);
+    bodies.setMatrixAt(index, host.matrix);
+    bodies.setColorAt(index, host.color.set(walls[Math.floor(building.seed * walls.length) % walls.length]));
+    host.compose(building.x, y + height, building.z, building.yaw, building.width * 0.96, 0.9, building.depth * 0.96);
+    caps.setMatrixAt(index, host.matrix);
+    if (building.sign) {
+      // 招牌贴正面（朝滨海大道一侧 = 局部 −z）靠一端，竖向细长，略高出压顶
+      const along = building.width * 0.32 * (building.seed < 0.5 ? -1 : 1);
+      const out = building.depth / 2 + 0.5;
+      const cos = Math.cos(building.yaw); const sin = Math.sin(building.yaw);
+      const sx = building.x + along * cos - out * sin; const sz = building.z - along * sin - out * cos;
+      host.compose(sx, y + height * 0.35, sz, building.yaw, 0.7, height * 0.75 + 1.5, 0.5);
+      signs.setMatrixAt(signIndex, host.matrix);
+      signs.setColorAt(signIndex, host.color.set(neon[Math.floor(building.seed * 97) % neon.length]));
+      signIndex += 1;
+    }
+  });
+  signs.count = signIndex;
+  for (const mesh of [bodies, caps, signs]) {
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.castShadow = mesh !== signs;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+  }
+  bodies.name = "city-ocean-drive-facades"; caps.name = "city-ocean-drive-rooftops"; signs.name = "city-ocean-drive-signs";
+  host.group.add(bodies, caps, signs);
+  host.disposables.push(bodyGeometry, bodyMaterial, facade, capGeometry, capMaterial, signGeometry, signMaterial);
 }

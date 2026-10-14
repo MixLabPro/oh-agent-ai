@@ -4,7 +4,7 @@ import { hashSeed, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
 import { clearsHighways, polygonDistance } from "./roadGeometry";
 import { scaleTierFor } from "./scaleTier";
-import { seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
+import { oceanDriveSplitZ, oceanDriveWall, seasideHotelLots, seasideStripContains, type CoastalConfig, type OceanDriveBuilding } from "./citySeaside";
 import { preserveDemandPaths, preserveDisplayJunctions, retainBridgeLandings } from "./planner/retention";
 import { diagnoseNetwork } from "./planner/intent";
 import type { ParcelFrontageProof } from "./planner/roadBlocks";
@@ -119,6 +119,8 @@ export type CityLayout = {
   coastalConfig: CoastalConfig | null;
   /** 低数据量也保留城市轮廓；这些环境楼明确不代表会话。 */
   contextBuildings: ContextBuilding[];
+  /** Ocean Drive Art Deco 街墙（开湾时东岛南段酒店线；背景楼，不占会话、不进统计）。 */
+  oceanDrive?: OceanDriveBuilding[];
   gardens: GardenSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
@@ -200,11 +202,27 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const lotClearOfRoads = (lot: { x: number; z: number; yaw: number; width: number; depth: number }) => {
     return lotClearsRoads(lot, plan.roadEdges);
   };
-  const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).filter(lotClearOfRoads).map((lot) => ({
+  // 开湾时南段（Ocean Beach / Washington Beach）的酒店线让给 Art Deco 街墙（oceanDrive，背景楼），会话酒店只留北段。
+  const oceanDriveSplit = (coastal?.bayHalfWidth ?? 0) > 0 ? oceanDriveSplitZ(plan.seaside) : -Infinity;
+  const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).filter(lotClearOfRoads).filter((lot) => lot.z >= oceanDriveSplit).map((lot) => ({
     id: lot.id, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
     parcels: [{ id: `${lot.id}/0`, blockId: lot.id, x: lot.x, z: lot.z, yaw: lot.yaw, zone: "waterfront" as Zone, width: lot.width, depth: lot.depth }],
   }));
-  const blocks = [...plan.blocks, ...hotelBlocks];
+  // Ocean Drive 街墙地块（用户定：会话楼优先占用、空位再补背景 Art Deco 酒店）：沿南段酒店线连续排，
+  // 海滨地块（facadeFor：海滨 + 楼高 ≤ 36 → Art Deco 立面；C-1：楼高 > 26 让到内陆），属于东岛城区的扇区。
+  // 压路（含横街）、压公共用地/地标的位置不排，读作街墙在路口处断开。
+  const oceanLots = coastal && oceanDriveSplit > -Infinity ? oceanDriveWall(plan.seaside, coastal, seed, (lot) => {
+    if (!lotClearsRoads(lot, plan.roadEdges)) return false;
+    const h = plan.terrain.height(lot.x, lot.z);
+    if (h < 0.5 || h > 6) return false;
+    const half = Math.hypot(lot.width, lot.depth) / 2;
+    return [...plan.publicSites, ...plan.landmarks].every((site) => !site.radius || Math.hypot(site.x - lot.x, site.z - lot.z) > half + site.radius + 1);
+  }) : [];
+  const oceanBlocks: CityBlock[] = oceanLots.map((lot) => ({
+    id: `oceandrive:${lot.id}`, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
+    parcels: [{ id: `${lot.id}/0`, blockId: `oceandrive:${lot.id}`, x: lot.x, z: lot.z, yaw: lot.yaw, zone: "waterfront" as Zone, width: lot.width, depth: lot.depth }],
+  }));
+  const blocks = [...plan.blocks, ...hotelBlocks, ...oceanBlocks];
   const parcels = blocks.flatMap((block) => block.parcels);
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
   const assigned = new Map<string, Parcel>();
@@ -283,16 +301,44 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     .sort((a, b) => angleFrom(a) - angleFrom(b) || a.id.localeCompare(b.id));
   const totalLots = usableBlocks.reduce((sum, block) => sum + block.parcels.length, 0);
   const wedgeOf = new Map<string, string>(); // blockId → districtId
-  {
+  /** 按方位扇形把 blocks 切给 order 里的城区，份额 = weight 占比（最后一个城区拿余量）。 */
+  const assignWedges = (pool: CityBlock[], order: Array<{ id: string; weight: number }>) => {
+    const lots = pool.reduce((sum, block) => sum + block.parcels.length, 0);
+    const total = order.reduce((sum, item) => sum + item.weight, 0) || 1;
     let index = 0; let accumulated = 0; let quota = 0;
-    for (const district of ranked) {
-      quota += (sessionsOf.get(district.id)! / totalSessions) * totalLots;
-      while (index < usableBlocks.length && (accumulated < quota || district === ranked[ranked.length - 1])) {
-        wedgeOf.set(usableBlocks[index].id, district.id);
-        accumulated += usableBlocks[index].parcels.length;
+    for (const item of order) {
+      quota += (item.weight / total) * lots;
+      while (index < pool.length && (accumulated < quota || item === order[order.length - 1])) {
+        wedgeOf.set(pool[index].id, item.id);
+        accumulated += pool[index].parcels.length;
         index += 1;
       }
     }
+  };
+  // 开湾（Vice City 式）：东岛整岛归一个执行环境（用户：「东岛应该是单独一个执行环境的区」）。曾以核心为圆心切扇形，
+  // 核心在西岛，扇形跨过海湾把东岛切成几块分给不同执行环境。选会话占比与东岛地块占比最接近的城区（排名第一的留在
+  // 大陆核心）；它在东岛放不下的部分按差额在西岛再分一片，其余城区照旧按扇形分西岛。
+  const riverXAt = (z: number) => {
+    let best = plan.river[0]; for (const p of plan.river) if (Math.abs(p.z - z) < Math.abs(best.z - z)) best = p;
+    return best.x;
+  };
+  const bayMode = (coastal?.bayHalfWidth ?? 0) > 0 && plan.river.length > 0 && ranked.length > 1;
+  const eastBlocks = bayMode ? usableBlocks.filter((block) => block.x > riverXAt(block.z)) : [];
+  const eastLots = eastBlocks.reduce((sum, block) => sum + block.parcels.length, 0);
+  let eastDistrictId: string | null = null;
+  if (bayMode && eastLots > 0) {
+    const eastShare = eastLots / Math.max(1, totalLots);
+    const eastDistrict = ranked.slice(1).reduce((best, district) =>
+      Math.abs(sessionsOf.get(district.id)! / totalSessions - eastShare) < Math.abs(sessionsOf.get(best.id)! / totalSessions - eastShare) ? district : best);
+    eastDistrictId = eastDistrict.id;
+    for (const block of eastBlocks) wedgeOf.set(block.id, eastDistrict.id);
+    const eastSet = new Set(eastBlocks.map((block) => block.id));
+    const deficit = Math.max(0, sessionsOf.get(eastDistrict.id)! - eastLots * (totalSessions / Math.max(1, totalLots)));
+    assignWedges(usableBlocks.filter((block) => !eastSet.has(block.id)),
+      ranked.map((district) => ({ id: district.id, weight: district === eastDistrict ? deficit : sessionsOf.get(district.id)! }))
+        .filter((item) => item.weight > 0));
+  } else {
+    assignWedges(usableBlocks, ranked.map((district) => ({ id: district.id, weight: sessionsOf.get(district.id)! })));
   }
   const blocksOf = (districtId: string) => usableBlocks.filter((block) => wedgeOf.get(block.id) === districtId);
   /** 小区中心：本片街区按离核心距离由近到远，取 30% 处——靠内但不压在核心点上（核心是市政广场）。 */
@@ -301,6 +347,14 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const own = blocksOf(district.id).sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
     const pick = own[Math.min(own.length - 1, Math.floor(own.length * 0.3))];
     anchorOf.set(district.id, pick ? { x: pick.x, z: pick.z } : core);
+    // 东岛城区从 Ocean Beach 往北长（用户定）：锚点 = 离 Ocean Drive 街墙中点最近的本区街区（花园与生长起点都在这里）。
+    // 曾按「离核心 30% 处」——东岛靠海湾、靠市中心的北段先建满，南段海滩一片空地（2000 会话截图）。
+    if (district.id === eastDistrictId && oceanLots.length) {
+      const mid = [...oceanLots].sort((a, b) => a.z - b.z)[Math.floor(oceanLots.length / 2)];
+      const inland = own.filter((block) => !block.id.startsWith("oceandrive:") && !block.id.startsWith("hotel:"))
+        .sort((a, b) => Math.hypot(a.x - mid.x, a.z - mid.z) - Math.hypot(b.x - mid.x, b.z - mid.z))[0];
+      if (inland) anchorOf.set(district.id, { x: inland.x, z: inland.z });
+    }
   }
 
   // 小区中心花园：先于会话落楼，在本小区内离中心最近的空街区整块预留（只看规划与会话数，确定性不变）。
@@ -512,6 +566,9 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       if (selected.length >= target) break;
     }
   }
+  // 会话没占用的街墙地块补背景 Art Deco 酒店（2–6 层）：街墙始终连续，会话越多真实数据占比越高。
+  const civicParcels = new Set(civics.map((civic) => civic.parcelId));
+  const oceanDrive = oceanLots.filter((lot) => !used.has(`${lot.id}/0`) && !civicParcels.has(`${lot.id}/0`) && !civicParcels.has(`oceandrive:${lot.id}`));
   {
     // 数据窗口缺省（测试夹具/旧调用方）时退回会话起始时刻的范围，绝不产出 NaN。
     const starts = model.buildings.map((building) => building.startedAt).filter(Number.isFinite);
@@ -578,7 +635,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
     sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
     aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
-  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings, oceanDrive };
 }
 
 /**
