@@ -11,7 +11,8 @@ import type { ParcelFrontageProof } from "./planner/roadBlocks";
 import { validateParcelFrontage } from "./planner/parcelFrontage";
 import { lotClearsRoads } from "./planner/lotRoadClearance";
 import { measureLayoutCapacity } from "./planner/layoutCapacity";
-import { closestPolylineSegment } from "./planner/footprint";
+import { closestPolylineSegment, polylineDistance } from "./planner/footprint";
+import { isletEstate } from "./cityIsletEstate";
 import { findBlockLotCandidate, LAYOUT_PLACEMENT_WORK_CONFIG } from "./planner/blockLotCandidates";
 import { inspectBlockPlacement, type BlockPlacementInput, type BlockPlacementResult } from "./planner/blockPlacement";
 import { civicMinimumSize, civicEnvelopeSize, GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE } from "./models/layoutPlacementGeometry";
@@ -178,7 +179,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
         coastal.wetSandWidth, coastal.drySandWidth, coastal.promenadeOffset, coastal.boulevardOffset,
         coastal.hotelOffset, coastal.bandOuter, coastal.maxCoastalSlope,
         coastal.maxCoastalHeight, coastal.riverMargin, coastal.siteMargin,
-        coastal.minValidRatio,
+        coastal.minValidRatio, coastal.bayHalfWidth, coastal.bayShift,
       ].join(",")}`
     : "none";
   const planKey = `${seed}:${tier}:${coastalKey}`;
@@ -577,7 +578,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
     sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
     aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
-  return { ...plan, ...grown, culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
 }
 
 /**
@@ -826,6 +827,28 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     out.push({ id, kind, districtId: owner, parcelId: parcel.id, ...oriented, y: plan.terrain.height(oriented.x, oriented.z), unlockAt });
     recordLayoutPlacement(placementReport, id, "civic", true, "accepted renderer rectangle", samples, attempted);
   });
+  return out;
+}
+
+/** 豪宅岛（Vice City 的 Starfish Island 母题）：湾心小岛的场地层（环路/支路/棕榈）+ 一圈海湾豪宅 + 北侧大宅，
+ *  位置全由 cityIsletEstate.isletEstate 算（渲染场地层用同一个函数，棕榈天然避开住宅）。布局期装饰：规划层只认得
+ *  贴岛北缘穿过的那段堤道，不进规划基线、不占地块、不接路。离任何桥 < 20 的住宅不放（兜底：堤道被别的桥取代时）。 */
+function isletVillas(plan: { islets?: Array<Vec2 & { radius: number; kind?: string }>; bridges: BridgeLayout[] }): Landmark[] {
+  const out: Landmark[] = [];
+  for (const [index, islet] of (plan.islets ?? []).entries()) {
+    const id = `landmark:islet-grounds:${index}`;
+    // Leaf Links：3 号堤道从岛南部穿过（geography 把中心放在堤道以北 0.2R）；Prawn：引道从岛心往东。只画场地层。
+    if (islet.kind === "leaf-links") { out.push({ id, kind: "islet-grounds", variant: "golf", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius, roadZ: 0.2 * islet.radius }); continue; }
+    if (islet.kind === "prawn") { out.push({ id, kind: "islet-grounds", variant: "studio", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius }); continue; }
+    out.push({ id, kind: "islet-grounds", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius });
+    const estate = isletEstate(islet.radius, Math.floor(hashSeed(id) * 0x7fffffff));
+    estate.houses.forEach((house, k) => {
+      const at = { x: islet.x + house.x, z: islet.z + house.z };
+      if (!plan.bridges.every((b) => polylineDistance([[b.from, b.to]], at) > 20 + 13 * house.scale)) return;
+      out.push({ id: `landmark:islet-mansion:${index}:${k}`, kind: "islet-mansion", x: at.x, z: at.z, yaw: house.yaw, radius: 0,
+        reach: house.reach, scale: house.scale });
+    });
+  }
   return out;
 }
 

@@ -59,6 +59,8 @@ export const SITE_CLASSES: readonly SiteClass[] = [
   ...[tvTowerModel, pagodaModel, archModel, sailOperaModel, lighthouseModel, ferrisWheelModel].map(model => landmark(model.id, model.title)),
   landmark("twin-towers", "双子塔"), landmark("twist-tower", "扭转塔", { "city-landmark-twisting-deco-tower": "landmark:twisting-deco-tower" }),
   landmark("villa-complex", "地中海庄园"), landmark("suspension-bridge", "悬索桥"),
+  { ...landmark("islet-mansion", "豪宅岛庄园"), catalogId: null, noCatalogReason: "湾心豪宅岛的布局期装饰，不经规划选址，暂无建筑说明配图" },
+  { ...landmark("islet-grounds", "豪宅岛场地"), catalogId: null, noCatalogReason: "豪宅岛的环路与绿化，纯场地装饰，没有独立目录条目" },
   publicSite("civic", "市政厅", "civic-hall"), publicSite("station", "车站", "station"), publicSite("stadium", "体育场", "stadium"),
   publicSite("park", "城市公园", "park"), publicSite("tower", "观景塔", "observation-tower"), publicSite("harbor", "港口与码头", "harbor"),
   scenery("seaside", "海滨设施", "beach", ["city-lifeguard-towers", "city-yachts", "city-beach-furniture", "city-beach-people", "city-volleyball-courts", "city-promenade-props", "city-marina"]),

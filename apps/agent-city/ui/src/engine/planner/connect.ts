@@ -611,7 +611,10 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
     // 连线水段分析：首/末水采样界定连续水段；无水 = 纯地面引道。
     // 6 单位采样只用于提出桥跨候选；最终各段按统一路幅终筛，不以历史漏检授予豁免。
     const n = Math.max(4, Math.ceil(Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z) / (VALIDATION_CONFIG.sampleSpacing / 2)));
-    const maxWetLength = CONNECTOR_CONFIG.bridgeMaxSpanSamples * CONNECTOR_CONFIG.bridgeSampleSpacing;
+    // 开湾（geo.maxWaterSpan > 140）时跨湾堤道按湾宽放开：84 是窄河口径，东岛的孤立街网永远接不上
+    // 大陆，整岛被当孤立分量裁掉（4 种子 × 3 档实测 4/12 东岛 0 地块）。
+    const bayWet = (world.geo as { maxWaterSpan?: number }).maxWaterSpan ?? 0;
+    const maxWetLength = Math.max(CONNECTOR_CONFIG.bridgeMaxSpanSamples * CONNECTOR_CONFIG.bridgeSampleSpacing, bayWet > 140 ? bayWet : 0);
     const at = (k: number) => ({ x: request.source.x + (candidate.p.x - request.source.x) * (k / n), z: request.source.z + (candidate.p.z - request.source.z) * (k / n) });
     const width = roadWidthOf(request);
     const distance = Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z);

@@ -12,6 +12,7 @@ import type { TerrainField, Vec2 } from "../cityLayout";
 import type { Shape } from "../cityPlan";
 import { exactFieldCache } from "./exactFieldCache";
 import { spendPlanningUnit } from "./operationBudget";
+import { ISLET_CAUSEWAY_OFFSET } from "../cityIsletEstate";
 
 export type Geography = {
   R: number;
@@ -31,9 +32,26 @@ export type Geography = {
   height: (x: number, z: number) => number;
   buildable: (x: number, z: number) => boolean;
   terrain: TerrainField;
+  /** 主干道一次最多跨多宽的水面。窄河 140；开湾时按湾的最大全宽放开，否则没有一条主干道能过湾、东岛成孤岛。 */
+  maxWaterSpan: number;
+  /** 湾内小岛。规划层只把岛上那段桥间地面路当陆地（inRiver 在岛上为假），岛不可建、不分地块。 */
+  islets: Array<Vec2 & { radius: number; kind: "starfish" | "leaf-links" | "prawn" }>;
+  /** 到最近小岛岸线的带符号距离（岛内为正）；无岛恒为 -Infinity。 */
+  isletClearance: (x: number, z: number) => number;
 };
 
-export function buildGeography(seed: number, R: number, shape: Shape, opts: { memoize?: boolean } = {}): Geography {
+/** 中央海湾参数（来自 CoastalConfig.bayHalfWidth / bayShift）；null = 原来的窄河。 */
+export type BayOptions = { halfWidth: number; shift: number };
+
+export function buildGeography(seed: number, R: number, seedShape: Shape, opts: { memoize?: boolean; bay?: BayOptions | null } = {}): Geography {
+  const bay = opts.bay && opts.bay.halfWidth > 0 ? opts.bay : null;
+  // 开湾时岛形定向：长轴固定南北（spin 0、x 向压扁），不挖随机海湾，二次谐波减半。
+  // 随机旋转/拉伸/挖湾下，湾东侧有时只剩几十个地块的碎片或被掐断成孤岛（4 种子 × 3 档实测：
+  // 海滩落东岛 1/4、一个种子无跨湾桥）。保留 3/5 次谐波，海岸仍各不相同。
+  const shape: Shape = bay
+    ? { ...seedShape, spin: 0, stretch: 0.8 + (seedShape.stretch - 0.78) * 0.2, bays: [],
+        harmonics: seedShape.harmonics.map((h) => (h.k === 2 ? { ...h, a: h.a * 0.5 } : h)) }
+    : seedShape;
   // Each radius attempt owns its caches. Only the original exact scalar result
   // is reused, and eviction affects cost rather than planning decisions.
   const field = <T extends number | boolean>(evaluate: (x: number, z: number) => T) => {
@@ -66,15 +84,23 @@ export function buildGeography(seed: number, R: number, shape: Shape, opts: { me
 
   // ── 河：82% 有河，大致南北向穿岛（街网沿河弯曲，桥跨在第 0 列空隙上）。
   // 横向偏移不超过岛半宽的 25%，弯曲幅度与东西镜像随种子；无河时河宽恒负、不切地。
-  const hasRiver = random("hasRiver") < 0.82;
+  // 开湾（Vice City 式）：湾恒在，中线东偏让东岛成一条窄长的海滩城、西岛是宽的大陆；湾岸只缓弯
+  // （窄河的蜿蜒幅度放到湾上会把东岛某段掐断）。湾宽沿 z 缓慢起伏，读起来像海湾而不是运河。
+  const hasRiver = bay ? true : random("hasRiver") < 0.82;
   const halfWidth = (bbox.maxX - bbox.minX) / 2;
-  const riverShift = (bbox.minX + bbox.maxX) / 2 + (random("riverShift") - 0.5) * halfWidth * 0.5;
-  const riverAmp = (0.04 + random("riverAmp") * 0.07) * R * (random("riverMirror") < 0.5 ? -1 : 1);
+  const riverShift = bay
+    ? (bbox.minX + bbox.maxX) / 2 + bay.shift * halfWidth
+    : (bbox.minX + bbox.maxX) / 2 + (random("riverShift") - 0.5) * halfWidth * 0.5;
+  const riverAmp = (bay ? 0.02 : 0.04 + random("riverAmp") * 0.07) * R * (random("riverMirror") < 0.5 ? -1 : 1);
   // 河中心/河宽只依赖 z，却含 3 次确定性 sin/cos + smoothstep；一次高度/入河/坡度求值会以同一个 z（坡度还有 z±1）
   // 反复调用它们。单槽记忆（上一次的 z → 结果）是纯函数的精确复用：命中返回的就是同一表达式上次算出的同一个数，
   // 未命中走原式，逐位相同；每个 buildGeography 各持一份闭包，互不共享。
   const riverXRaw = (z: number) => hasRiver ? riverShift + riverAmp * Math.sin(z * 0.006 + phase) + 0.03 * R * Math.sin(z * 0.014) : riverShift;
-  const riverWidthRaw = (z: number) => hasRiver ? 16 + 4 * Math.cos(z * 0.012) + smoothstep(bbox.minZ + (bbox.maxZ - bbox.minZ) * 0.55, bbox.maxZ, z) * 34 : -1e6;
+  // 湾宽按岛的东西半宽算，不按 R：岛形开湾时被压扁，按 R 算的湾把东岛吃到只剩 ~40 宽（seed 1703318715/2 档实测）。
+  const bayHalf = bay ? bay.halfWidth * halfWidth : 0;
+  const riverWidthRaw = (z: number) => bay
+    ? bayHalf * (1 + 0.22 * Math.cos(z * 0.0045 + phase))
+    : hasRiver ? 16 + 4 * Math.cos(z * 0.012) + smoothstep(bbox.minZ + (bbox.maxZ - bbox.minZ) * 0.55, bbox.maxZ, z) * 34 : -1e6;
   let riverXZ = NaN; let riverXV = 0;
   const riverX = (z: number) => { if (z !== riverXZ) { riverXV = riverXRaw(z); riverXZ = z; } return riverXV; };
   let riverWidthZ = NaN; let riverWidthV = 0;
@@ -105,13 +131,58 @@ export function buildGeography(seed: number, R: number, shape: Shape, opts: { me
   const landClearance = field((x: number, z: number) => Math.min(coastDistance(x, z), Math.abs(x - riverX(z)) - riverWidth(z)));
 
   // ── 山脊：方位随种子，占岛在该方向上最外侧的一带。
-  const hillAngle = random("hillAngle") * Math.PI * 2;
+  // 开湾时山只留在西岛（大陆）的外侧：东岛是窄海滩城，山压上去就没地方盖城了。
+  const hillAngle = bay ? Math.PI + (random("hillAngle") - 0.5) * 1.2 : random("hillAngle") * Math.PI * 2;
   const hillDir = { x: Math.cos(hillAngle), z: Math.sin(hillAngle) };
   const reach = Math.max(...coast.map((p) => p.x * hillDir.x + p.z * hillDir.z));
   const hillLine = reach * 0.6;
   const hillProj = (x: number, z: number) => x * hillDir.x + z * hillDir.z;
+  // 湾心小岛（参考 Vice City 的 Starfish/Prawn Island）：开湾时在湾中线、东岛南北跨度的正中隆起一座圆岛，
+  // 中间那条堤道（buildCauseways k=2，同一 z）从岛上跨过。只改地形高度：规划层仍按湾（inRiver）处理，
+  // 不铺路、不分地块——岛上放什么另议，先让构图成立。
+  const eastZ = bay ? coast.filter((p) => p.x > riverXRaw(p.z) + riverWidthRaw(p.z)).map((p) => p.z) : [];
+  // 三座湾内岛（照 Vice City 区划：Starfish 居中、Leaf Links 在北段贴东岛、Prawn 更北靠东岛）。
+  // z 用堤道同一套四等分（buildCauseways：k 号堤道在 zMin + k·spacing）：
+  //  · starfish：中心在 2 号堤道以南 ISLET_CAUSEWAY_OFFSET·R——堤道贴着岛的北缘过，岛主体留给环路与住宅；
+  //  · leaf-links：3 号堤道从它南部穿过（偏 0.2R），中心贴东岸、留 40 的水道，再由短桥接东岛；
+  //  · prawn：3 号堤道以北 0.7 个间距，贴东岸留 30 的水道，单独一座短桥接东岛。
+  // 西侧水道至少留 60（湾窄时缩小半径；缩到放不下就不放），岛整体必须在海岸以内。
+  const islets: Geography["islets"] = [];
+  if (eastZ.length >= 3) {
+    const zMin = Math.min(...eastZ); const spacing = (Math.max(...eastZ) - zMin) / 4;
+    const starfishR = bayHalf * 0.55;
+    const sz = zMin + 2 * spacing - ISLET_CAUSEWAY_OFFSET * starfishR;
+    islets.push({ x: riverXRaw(sz), z: sz, radius: starfishR, kind: "starfish" });
+    const hugEast = (kind: "leaf-links" | "prawn", nominal: number, zAt: (r: number) => number, eastChannel: number) => {
+      const z0 = zAt(nominal);
+      const r = Math.min(nominal, (2 * riverWidthRaw(z0) - eastChannel - 60) / 2);
+      if (r < 22) return;
+      const z = zAt(r); const x = riverXRaw(z) + riverWidthRaw(z) - r - eastChannel;
+      if (coastDistanceRaw(x, z) < r * 1.8 + 20) return; // 拉长后南北半轴 ≈ 1.4·1.26·r
+      islets.push({ x, z, radius: r, kind });
+    };
+    hugEast("leaf-links", bayHalf * 0.5, (r) => zMin + 3 * spacing - 0.2 * r, 40);
+    hugEast("prawn", bayHalf * 0.32, () => zMin + 3.7 * spacing, 30);
+  }
+  const isletClearance = (x: number, z: number) => {
+    let best = -Infinity;
+    // 轮廓按方位加噪（±18%），不是正圆：正圆读起来像占位圆盘。
+    // Leaf Links / Prawn 不做成圆（用户要求）：沿南北拉长、岸线起伏更大；Starfish 照原版保持近圆。
+    // 拉长只放大 z 向（radius 是短半轴），所以岛内一切按半径 r 圆盘放置的布局仍落在岛上。
+    for (const islet of islets) {
+      const stretch = islet.kind === "leaf-links" ? 1.4 : islet.kind === "prawn" ? 1.35 : 1;
+      const amp = islet.kind === "starfish" ? 0.18 : 0.26;
+      const dz = (z - islet.z) / stretch;
+      const d = Math.hypot(x - islet.x, dz);
+      const a = Math.atan2(dz, x - islet.x);
+      const r = islet.radius * (1 + amp * fbm(Math.cos(a) * (stretch > 1 ? 2.3 : 1.6), Math.sin(a) * (stretch > 1 ? 2.3 : 1.6), seed + 233 + islets.indexOf(islet) * 17, 3));
+      best = Math.max(best, r - d);
+    }
+    return best;
+  };
   const height = field((x: number, z: number) => {
-    const inland = landClearance(x, z);
+    const shore = landClearance(x, z);
+    const inland = islets.length && shore < 0 ? Math.max(shore, isletClearance(x, z)) : shore;
     if (inland < 0) return -0.65 - Math.min(5, -inland * 0.25);
     const hillWeight = smoothstep(hillLine - 10, hillLine + reach * 0.3, hillProj(x, z));
     // 平地权重严格为零时，噪声不影响高度；路网验证会反复采样这些点。
@@ -125,5 +196,7 @@ export function buildGeography(seed: number, R: number, shape: Shape, opts: { me
     buildable, center: { x: 0, z: 0 }, radius: R * 1.3, coastRadius: () => R, hasRiver,
   };
 
-  return { R, coast, bbox, hasRiver, river, riverShift, riverX, riverWidth, coastDistance, landClearance, hillAngle, hillDir, hillLine, hillProj, height, buildable, terrain };
+  // 斜穿的主干道跨距比湾的全宽长，留 1.6 倍余量 + 对岸退界。
+  const maxWaterSpan = bay ? Math.max(140, Math.ceil(bayHalf * 1.22 * 2 * 1.6 + 60)) : 140;
+  return { R, coast, bbox, hasRiver, river, riverShift, riverX, riverWidth, coastDistance, landClearance, hillAngle, hillDir, hillLine, hillProj, height, buildable, terrain, maxWaterSpan, islets, isletClearance };
 }

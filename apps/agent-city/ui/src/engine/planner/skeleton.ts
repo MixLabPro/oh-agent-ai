@@ -95,8 +95,12 @@ export function chooseCore(geo: Geography, seed: number, random: (key: string) =
     const x = bbox.minX + ((bbox.maxX - bbox.minX) * gx) / 24;
     const z = bbox.minZ + ((bbox.maxZ - bbox.minZ) * gz) / 24;
     if (!buildable(x, z)) continue;
+    // 开湾：核心（Downtown）只落在西岛大陆，并离湾岸 0.12R——曾按窄河的「离岸 70」贴在湾边，
+    // 朝湾的主干道一出广场就进水，本岸没有引道，跨湾桥全被拒（seed 807065449/5 档实测）。
+    const bayMode = geo.maxWaterSpan > 140;
+    if (bayMode && x > riverX(z)) continue;
     const shore = coastDistance(x, z);
-    const riverGap = hasRiver ? Math.abs(Math.abs(x - riverX(z)) - riverWidth(z) - 70) : 0;
+    const riverGap = hasRiver ? Math.abs(Math.abs(x - riverX(z)) - riverWidth(z) - (bayMode ? 0.12 * R : 70)) : 0;
     const score = -Math.abs(shore - 0.32 * R) - riverGap * 0.6 - Math.max(0, hillProj(x, z) - hillLine * 0.4) * 0.8 + random(`core${gx}:${gz}`) * 8;
     const total = score - (ringSurvival({ x, z }) < 6 ? 40 : 0);
     if (total > best) { best = total; core = { x, z }; }
@@ -171,12 +175,29 @@ export function buildSkeleton(opts: {
     for (let step = Math.ceil(PLAZA_RING / 12) + 1; step < 400; step += 1) {
       const q = { x: core.x + dir.x * step * 12, z: core.z + dir.z * step * 12 };
       if (inRiver(q.x, q.z)) {
+        // 开湾：方向偏离东西向超过 30° 的主干道停在本岸，过湾交给等距的平行堤道（buildCauseways）。
+        // 斜射线过湾的桥长 500–700，两条还会在湾上交叉成 X（seed 807065449/5 档截图）。
+        if (water === 0 && geo.maxWaterSpan > 140 && Math.abs(dir.z) > 0.5) {
+          if (points[points.length - 1] !== lastLand) points.push(lastLand);
+          break;
+        }
         // 入水前的最后一个陆地点作为桥头（曾用「每 3 步才记一次」的上一个路点，桥头最多退回岸上 36）。
         if (water === 0 && points[points.length - 1] !== lastLand) points.push(lastLand);
-        water += 12; if (water > 140) break; continue; // 河：最多跨 140
+        water += 12; if (water > geo.maxWaterSpan) break; continue; // 河最多跨 140；开湾时按湾宽放开（堤道）
       }
       // Riverbank setbacks are not obstacles to a road crossing the river.
-      if (coastDistance(q.x, q.z) <= 0 || hillProj(q.x, q.z) >= hillLine - 12) break;
+      if (coastDistance(q.x, q.z) <= 0 || hillProj(q.x, q.z) >= hillLine - 12) {
+        // 开湾：东岛窄，主干道刚上岸几步就碰到外侧海岸。桥落点后面没有地面段，桥头就没有引道
+        // （screenTrunkRoute 以 missing-ground-approach 拒掉整条，seed 807065449/5 档实测）。
+        // 上岸后走过的最后一个陆地点补进路线当引道；一个都没走到，就退掉这座桥，主干道停在本岸桥头。
+        const landing = rayBridges[rayBridges.length - 1];
+        if (geo.maxWaterSpan > 140 && water === 0 && landing && points[points.length - 1] === landing.to) {
+          const beyond = (lastLand.x - landing.to.x) * dir.x + (lastLand.z - landing.to.z) * dir.z > 0;
+          if (beyond) points.push(lastLand);
+          else { points.pop(); rayBridges.pop(); }
+        }
+        break;
+      }
       // 岸边用地（港口/灯塔/歌剧院/摩天轮）：主干道到它门口为止，这一段就是它的入口路。
       // 曾一路穿过去直到海边（港口中心离主干道 1 单位）。
       if (water === 0 && [...publicSites, ...landmarks].some((site) => SHORE_SITE_KINDS.has(site.kind) && Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 4)) {
@@ -195,6 +216,10 @@ export function buildSkeleton(opts: {
         water = 0;
         continue;
       }
+      // 开湾时桥头只记在离岸 ≥10 的陆地上：湾岸是长缓坡，离水 <3 的点高度已 ≤0.5，桥头落在那里时
+      // 引道两侧的横向采样会掉进水里，整条跨湾主干道被走廊检查以 water-span 拒掉（seed 807065449/5 档实测）。
+      // 岸边带内的点也不进路线：否则路线先走到岸边、再折回桥头，引道是一段回头路。
+      if (geo.maxWaterSpan > 140 && geo.landClearance(q.x, q.z) < 10) continue;
       lastLand = q;
       if (step % 3 === 0) points.push(q);
     }
@@ -209,6 +234,7 @@ export function buildSkeleton(opts: {
     trunks.push({ angle, points: screened.points });
   }
   trunks.sort((p, q) => p.angle - q.angle);
+  if (geo.maxWaterSpan > 140) buildCauseways(geo, network, inRiver, publicSites, landmarks, bridges, diagnostics);
   let primaryAnchorNodeId: string | null = null;
   let primaryAnchorDistance = Infinity;
   const civicNodes = new Map<string, Vec2>();
@@ -242,7 +268,9 @@ export function buildSkeleton(opts: {
   for (let i = 0; i <= 96; i += 1) {
     const t = (i / 96) * Math.PI * 2;
     const q = ringPointAt(core, R, seed, t);
-    if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12) run.push(q);
+    // 开湾时环线也在海湾处断开：环半径 0.55R 必然斜穿海湾，高架斜跨 300+ 的湾面，和平行堤道
+    // 交叉成一片乱线（seed 807065449/5 档截图）。两岸各留一段弧，端头由下面的修剪 + 出口接入收尾。
+    if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12 && !(geo.maxWaterSpan > 140 && inRiver(q.x, q.z))) run.push(q);
     else { if (run.length >= 6) ringRuns.push(run); run = []; }
   }
   if (run.length >= 6) ringRuns.push(run);
@@ -299,4 +327,104 @@ export function buildSkeleton(opts: {
     return Math.hypot(p.x - core.x, p.z - core.z) - Math.hypot(q.x - core.x, q.z - core.z) || (a < b ? -1 : a > b ? 1 : 0);
   });
   return { trunks, bridges, ringRuns, primaryAnchorNodeId, primaryAnchorNodeIds, diagnostics };
+}
+
+/**
+ * 跨湾堤道（Vice City 式）：开湾时沿海湾等距架 3 条东西向堤道。
+ * 只靠放射主干道「顺路过湾」时，核心常在岛的一端，射线斜着过湾，跨湾通道只有 1–2 条且位置随缘
+ * （6 种子 × 3 档实测）。堤道沿等 z 线直跨：西岸引道 → 桥 → 东岸引道，两端各留一段地面路当桥头引道，
+ * 和街网的连接交给后面的连通阶段（connectGeneratedComponents）。已有跨湾桥附近的那一条不再重复架。
+ */
+function buildCauseways(geo: Geography, network: Network, inRiver: (x: number, z: number) => boolean,
+  publicSites: PublicSite[], landmarks: Landmark[], bridges: CityLayout["bridges"], diagnostics: SkeletonDiagnostic[]): void {
+  const { coast, riverX, riverWidth, landClearance, coastDistance } = geo;
+  const eastShore = coast.filter((p) => p.x > riverX(p.z) + riverWidth(p.z));
+  if (eastShore.length < 3) return;
+  const minZ = Math.min(...eastShore.map((p) => p.z)); const maxZ = Math.max(...eastShore.map((p) => p.z));
+  const spacing = (maxZ - minZ) / 4;
+  const crossesBay = (b: CityLayout["bridges"][number]) => (b.from.x - riverX(b.from.z)) * (b.to.x - riverX(b.to.z)) < 0;
+  const world = { network, geo, inRiver, reservations: () => [...publicSites, ...landmarks] };
+  const clearOfSites = (p: Vec2) => [...publicSites, ...landmarks].every((site) => Math.hypot(p.x - site.x, p.z - site.z) > site.radius + 16);
+  for (let k = 1; k <= 3; k += 1) {
+    const z = minZ + spacing * k;
+    if (bridges.some((b) => crossesBay(b) && Math.abs((b.from.z + b.to.z) / 2 - z) < spacing * 0.5)) continue;
+    // 两岸桥头：从湾岸各向外走，直到离岸 ≥10（与主干道桥头同一口径）。
+    const walk = (side: -1 | 1): Vec2 | null => {
+      for (let d = 0; d < 240; d += 12) {
+        const p = { x: riverX(z) + side * (riverWidth(z) + d), z };
+        if (coastDistance(p.x, p.z) <= 0) return null;
+        if (landClearance(p.x, p.z) >= 10 && !inRiver(p.x, p.z)) return p;
+      }
+      return null;
+    };
+    const west = walk(-1); const east = walk(1);
+    if (!west || !east) { diagnostics.push({ trunk: 100 + k, phase: "route", reason: "no-target", cause: "causeway-no-landing" }); continue; }
+    // 引道：桥头外再走 48；东岛窄，走不满就退到 24。
+    const approach = (from: Vec2, side: -1 | 1): Vec2 | null => {
+      for (const d of [48, 36, 24]) {
+        const p = { x: from.x + side * d, z };
+        if (coastDistance(p.x, p.z) > 20 && landClearance(p.x, p.z) >= 10) return p;
+      }
+      return null;
+    };
+    const westIn = approach(west, -1); const eastIn = approach(east, 1);
+    if (!westIn || !eastIn || ![westIn, west, east, eastIn].every(clearOfSites)) {
+      diagnostics.push({ trunk: 100 + k, phase: "route", reason: "no-target", cause: "causeway-no-approach" }); continue;
+    }
+    // 穿过湾心小岛时拆成两座桥：桥 → 岛上一段地面路 → 桥。一整座桥面横压在岛上会和地形穿模（用户截图）。
+    // 岛上两个桥头取离岛岸 ≥10 的最外侧点（与两岸桥头同一口径）。
+    const islet = geo.islets.find((i) => Math.abs(z - i.z) < i.radius * 0.6);
+    let route = [westIn, west, east, eastIn];
+    let spans = [{ from: west, to: east, angle: 0, length: east.x - west.x }];
+    if (islet) {
+      const edge = (side: -1 | 1): Vec2 | null => {
+        let last: Vec2 | null = null;
+        for (let d = 0; d < islet.radius * 1.3; d += 6) {
+          const p = { x: islet.x + side * d, z };
+          if (geo.isletClearance(p.x, p.z) < 10) break;
+          last = p;
+        }
+        return last;
+      };
+      const isletWest = edge(-1); const isletEast = edge(1);
+      if (isletWest && isletEast && isletEast.x - isletWest.x >= 24 && isletWest.x > west.x + 24 && isletEast.x < east.x - 24) {
+        route = [westIn, west, isletWest, isletEast, east, eastIn];
+        spans = [{ from: west, to: isletWest, angle: 0, length: isletWest.x - west.x },
+          { from: isletEast, to: east, angle: 0, length: east.x - isletEast.x }];
+      }
+    }
+    const screened = screenTrunkRoute(world, route, spans, 100 + k);
+    diagnostics.push(...screened.diagnostics);
+    if (!screened.patch || screened.points.length < route.length) continue;
+    const result = commitNetworkPatch(network, screened.patch, screened.validate);
+    if (!result.ok) { diagnostics.push({ trunk: 100 + k, phase: "route", reason: result.reason, cause: result.detail ?? "commit-rejected" }); continue; }
+    bridges.push(...screened.bridges);
+  }
+  // Prawn Island（不在任何堤道线上）：岛中心 → 岛东岸桥头 → 短桥 → 东岛。岛上那段是桥头引道（地面路）。
+  for (const islet of geo.islets.filter((i) => i.kind === "prawn")) {
+    const z = islet.z;
+    let edge: Vec2 | null = null;
+    for (let d = 0; d < islet.radius * 1.3; d += 6) {
+      const p = { x: islet.x + d, z };
+      if (geo.isletClearance(p.x, p.z) < 10) break;
+      edge = p;
+    }
+    let east: Vec2 | null = null;
+    for (let d = 0; d < 240 && edge; d += 12) {
+      const p = { x: edge.x + 12 + d, z };
+      if (coastDistance(p.x, p.z) <= 0) break;
+      if (landClearance(p.x, p.z) >= 10 && !inRiver(p.x, p.z)) { east = p; break; }
+    }
+    const eastIn = east && [48, 36, 24].map((d) => ({ x: east!.x + d, z })).find((p) => coastDistance(p.x, p.z) > 20 && landClearance(p.x, p.z) >= 10);
+    const start = { x: islet.x, z };
+    if (!edge || !east || !eastIn || edge.x - start.x < 18 || ![start, edge, east, eastIn].every(clearOfSites)) {
+      diagnostics.push({ trunk: 200, phase: "route", reason: "no-target", cause: "prawn-bridge-no-landing" }); continue;
+    }
+    const screened = screenTrunkRoute(world, [start, edge, east, eastIn], [{ from: edge, to: east, angle: 0, length: east.x - edge.x }], 200);
+    diagnostics.push(...screened.diagnostics);
+    if (!screened.patch || screened.points.length < 4) continue;
+    const result = commitNetworkPatch(network, screened.patch, screened.validate);
+    if (!result.ok) { diagnostics.push({ trunk: 200, phase: "route", reason: result.reason, cause: result.detail ?? "commit-rejected" }); continue; }
+    bridges.push(...screened.bridges);
+  }
 }

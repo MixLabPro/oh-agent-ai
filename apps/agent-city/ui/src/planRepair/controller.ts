@@ -228,7 +228,7 @@ const HINT: Record<RepairTool, RepairMessage> = {
 
 // 名称表暂在这里（注册表 SPEC CITY_SITE_REGISTRY_SPEC.md B1 会把它们收进 siteClasses 单一来源）。
 const SITE_LABEL: Record<string, string> = { school: "学校", mall: "商场", hospital: "医院", garden: "城区花园与景观湖", "district-landmark": "城区地标", context: "背景楼" };
-const LANDMARK_LABEL: Record<string, string> = { "tv-tower": "电视塔", "sail-opera": "帆形歌剧院", arch: "凯旋拱门", pagoda: "宝塔", lighthouse: "灯塔", "ferris-wheel": "摩天轮", "suspension-bridge": "悬索桥", "twin-towers": "双子塔", "twist-tower": "扭转塔", "villa-complex": "地中海庄园" };
+const LANDMARK_LABEL: Record<string, string> = { "tv-tower": "电视塔", "sail-opera": "帆形歌剧院", arch: "凯旋拱门", pagoda: "宝塔", lighthouse: "灯塔", "ferris-wheel": "摩天轮", "suspension-bridge": "悬索桥", "twin-towers": "双子塔", "twist-tower": "扭转塔", "villa-complex": "地中海庄园", "islet-mansion": "豪宅岛庄园", "islet-grounds": "豪宅岛场地" };
 const PUBLIC_LABEL: Record<string, string> = { civic: "市政厅", station: "车站", stadium: "体育场", park: "城市公园", tower: "观景塔", harbor: "港口与码头" };
 export const siteLabel = (site: Pick<SiteInfo, "kind" | "civicKind" | "landmarkKind" | "publicKind">): string =>
   site.kind === "civic" ? SITE_LABEL[site.civicKind ?? ""] ?? "公共设施"

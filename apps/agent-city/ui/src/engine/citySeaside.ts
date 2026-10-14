@@ -38,13 +38,20 @@ export type CoastalConfig = {
   siteMargin: number;
   /** 有效采样占比低于该值 → 整段降级。 */
   minValidRatio: number;
+  /** 中央海湾（Vice City 式「东岛海滩 + 西岛大陆」）：半宽占岛东西半宽的比例，0 = 不开湾、保持原来的窄河。
+   *  湾是把南北向的河整体放宽：两岸成两座岛，跨湾靠主干道的桥（堤道）。 */
+  bayHalfWidth: number;
+  /** 海湾中线相对岛中心的东偏（占岛半宽的比例，正 = 东）：东岛窄（海滩城），西岛宽（大陆）。 */
+  bayShift: number;
 };
 
 export const MIAMI_COASTAL: CoastalConfig = {
   profile: "miami-coastal",
-  version: 1,
+  version: 2,
   biome: "tropical",
-  preferredAzimuth: Math.PI / 2,
+  // 海滩朝 +x：开湾后 +x 一侧是窄的东岛，海滩铺在它背向海湾的外岸（Ocean Beach 的位置）。
+  // 曾朝 +z（π/2），海滩落在整岛的南端，与海湾、东西两岛的构图无关。
+  preferredAzimuth: 0,
   azimuthTolerance: 1.2,
   segmentArc: (85 * Math.PI) / 180,
   wetSandWidth: 7,
@@ -59,6 +66,9 @@ export const MIAMI_COASTAL: CoastalConfig = {
   riverMargin: 26,
   siteMargin: 14,
   minValidRatio: 0.6,
+  // 比例照 Vice City 地图：西岛 ~45%、海湾 ~25%、东岛 ~20%（东岛最窄处约 0.4 个岛半宽）。
+  bayHalfWidth: 0.22,
+  bayShift: 0.33,
 };
 
 export type SeasideSample = {
@@ -127,6 +137,8 @@ export type SeasideWorld = {
   reservations: Array<{ x: number; z: number; radius: number }>;
   /** 排除朝向（港口/河口等），at 为方位角、halfWidth 为半宽。 */
   blockedAzimuths: Array<{ at: number; halfWidth: number; weight?: number }>;
+  /** 可选：只在满足它的水线点上选段（开湾时 = 湾东侧，海滩只铺东岛外岸）。 */
+  eligibleShore?: (p: Vec2) => boolean;
 };
 
 const normalizeAngle = (a: number): number => {
@@ -190,8 +202,17 @@ function buildSample(point: Vec2, inward: Vec2, azimuth: number, world: SeasideW
 export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorld, config: CoastalConfig, seed: number): SeasideBand {
   const n = coast.length;
   const azimuthOf = (p: Vec2) => normalizeAngle(Math.atan2(p.z - center.z, p.x - center.x));
-  const samplesPerWindow = Math.max(4, Math.round((config.segmentArc / (Math.PI * 2)) * n));
-  const step = Math.max(3, Math.round(samplesPerWindow / 6));
+  // 限定岸段（开湾 = 东岛外岸）时，窗口不长于该岸最长的连续段：东岛外岸常只有十几个海岸点，
+  // 固定 85° 窗口（~23 点）放不下，整条海滨带退化成 no-coast（seed 1703318715/2 档实测）。
+  let eligibleRun = n;
+  if (world.eligibleShore) {
+    const ok = coast.map((p) => world.eligibleShore!(p));
+    let run = 0; eligibleRun = 0;
+    for (let i = 0; i < 2 * n && eligibleRun < n; i += 1) { run = ok[i % n] ? run + 1 : 0; eligibleRun = Math.max(eligibleRun, Math.min(run, n)); }
+  }
+  const samplesPerWindow = Math.max(4, Math.min(eligibleRun, Math.round((config.segmentArc / (Math.PI * 2)) * n)));
+  // 限定岸段时逐点滑窗：窗口与连续段等长，步长 3 会错过唯一能放下的起点。
+  const step = world.eligibleShore ? 1 : Math.max(3, Math.round(samplesPerWindow / 6));
   let best: { from: number; score: number; samples: SeasideSample[] } | null = null;
   for (let start = 0; start < n; start += step) {
     const samples: SeasideSample[] = [];
@@ -201,6 +222,7 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
       const inward = coastInwardNormal(coast, center, index);
       samples.push(buildSample(point, inward, azimuthOf(point), world, config));
     }
+    if (world.eligibleShore && samples.some((sample) => !world.eligibleShore!(sample.waterline))) continue;
     const midAzimuth = azimuthOf(coast[(start + Math.round(samplesPerWindow / 2)) % n]);
     const outward = normalizeAngle(midAzimuth);
     const orientationBonus = Math.max(0, 1 - angleDelta(outward, config.preferredAzimuth) / Math.max(0.001, config.azimuthTolerance));

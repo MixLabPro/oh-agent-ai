@@ -66,6 +66,8 @@ export function buildInfrastructure(host: RoadHost): void {
       }
     }
   }
+  const suspension = (host.layout.landmarks ?? []).find((l) => l.kind === "suspension-bridge");
+  const nearSuspension = (a: Vec2, b: Vec2) => !!suspension?.to && [a, b].some((p) => Math.hypot(p.x - suspension.x, p.z - suspension.z) < 2 || Math.hypot(p.x - suspension.to!.x, p.z - suspension.to!.z) < 2);
   const pavement = pavementIndex(roadEdges);
   /** 一段路缘：减去它穿过的别的路面带后逐段落盒（< 0.5 的碎段丢弃），高度按每段中点取地形。 */
   const curb = (p: Vec2, q: Vec2, own: RoadEdge | undefined, overlap: number) => {
@@ -91,6 +93,13 @@ export function buildInfrastructure(host: RoadHost): void {
       const x = (a.x + b.x) / 2; const z = (a.z + b.z) / 2;
       // Deck top meets the level plain; unlike atlas roads it remains above water.
       const deckTop = Math.max(host.layout.terrain.height(a.x, a.z), host.layout.terrain.height(b.x, b.z));
+      // 长跨（> 160，桁架桥只认 40–160、悬索桥另画）：平铺在两端地面高度的桥面离水只有 ~1，墩子全没在水里，
+      // 远看就是一条铺在水面上的路（开湾后的跨湾堤道，用户截图）。改成混凝土高架：两端按 6% 坡爬升、中段抬到
+      // ≤ 8，桥面下压梁侧、每 22 一对墩柱带盖梁。分 4 长的短段按高度曲线摆放（盒子不能倾斜，6% 坡下每段台阶 0.24）。
+      if (length > 160 && !nearSuspension(a, b)) {
+        drawViaduct(add, host.layout.terrain, a, b, deckTop, edge.width);
+        continue;
+      }
       add(x, deckTop - 0.4, z, length + 0.5, 0.4, edge.width, "#6a7071", 0, yaw);
       for (const side of [-1, 1]) {
         const offset = side * (edge.width / 2 - 0.15);
@@ -386,6 +395,42 @@ export function buildCulDeSacBulbs(host: RoadHost): void {
     rims.setMatrixAt(index, host.matrix);
   });
   for (const mesh of [discs, rims]) { mesh.count = ends.length; mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
+}
+
+type AddPart = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt?: number, yaw?: number) => void;
+
+/** 长跨混凝土高架（见调用处注释）：deckTop 是两端地面高度，桥面在两端与它齐平，中段抬升 rise。 */
+function drawViaduct(add: AddPart, terrain: { height: (x: number, z: number) => number }, a: Vec2, b: Vec2, deckTop: number, width: number): void {
+  const length = Math.hypot(b.x - a.x, b.z - a.z);
+  const ux = (b.x - a.x) / length; const uz = (b.z - a.z) / length;
+  const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+  const rise = Math.min(8, length * 0.03);
+  const ramp = Math.min(length / 2, rise / 0.06);
+  const lift = (d: number) => { const t = Math.min(1, d / ramp, (length - d) / ramp); return deckTop + rise * t * t * (3 - 2 * t); };
+  const at = (d: number) => ({ x: a.x + ux * d, z: a.z + uz * d });
+  const step = 4;
+  for (let d = 0; d < length; d += step) {
+    const piece = Math.min(step, length - d); const mid = d + piece / 2; const p = at(mid); const y = lift(mid);
+    add(p.x, y - 0.4, p.z, piece + 0.3, 0.4, width, "#6a7071", 0, yaw);           // 桥面
+    add(p.x, y - 1.15, p.z, piece + 0.3, 1.1, width - 1.4, "#8e928c", 0, yaw);    // 箱梁梁侧
+    for (const side of [-1, 1]) {
+      const rail = side * (width / 2 - 0.15); const line = side * (width / 2 - 0.65);
+      add(p.x + Math.sin(yaw) * rail, y, p.z + Math.cos(yaw) * rail, piece + 0.3, 0.65, 0.3, "#b9bcb2", 0, yaw);
+      add(p.x + Math.sin(yaw) * line, y + 0.015, p.z + Math.cos(yaw) * line, piece + 0.3, 0.025, 0.12, "#e4dfc9", 0, yaw);
+    }
+  }
+  for (let d = 2; d < length - 1; d += 6) { const p = at(d + 1); add(p.x, lift(d + 1) + 0.015, p.z, 2, 0.025, 0.14, "#dfd1a5", 0, yaw); }
+  // 墩：每 22 一对圆柱感的方墩 + 盖梁；桥头 ramp 段太矮的不立（墩高 < 1 时只是一块压在地上的板）
+  for (let d = 11; d < length - 8; d += 22) {
+    const p = at(d); const y = lift(d); const top = y - 1.7;
+    const bed = terrain.height(p.x, p.z);
+    if (top - bed < 1) continue;
+    add(p.x, top, p.z, 1.8, 0.55, width - 0.4, "#9c9f97", 0, yaw);               // 盖梁（顶面贴箱梁底 y-1.15）
+    for (const side of [-1, 1]) {
+      const o = side * (width / 2 - 2);
+      add(p.x + Math.sin(yaw) * o, bed, p.z + Math.cos(yaw) * o, 1.5, top - bed, 1.5, "#a9aaa0", 0, yaw);
+    }
+  }
 }
 
 /** 红色穿式桁架桥（backlog L-7）：悬索桥之外、跨距 40–160 的过河桥加一套格构桁架——上下弦 + 竖杆 + 交替斜腹杆，

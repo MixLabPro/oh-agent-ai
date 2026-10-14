@@ -35,7 +35,7 @@ const GRID_CELL = 48;
 /** 地标保守高度表（与 cityCatalog 取景高度同源；碰撞取略高值）。 */
 const LANDMARK_HEIGHT: Record<string, number> = {
   "tv-tower": 36, "twist-tower": 36, "twin-towers": 40, "ferris-wheel": 28,
-  arch: 18, pagoda: 16, lighthouse: 16, "sail-opera": 12, "suspension-bridge": 14, "villa-complex": 9,
+  arch: 18, pagoda: 16, lighthouse: 16, "sail-opera": 12, "suspension-bridge": 14, "villa-complex": 9, "islet-mansion": 12, "islet-grounds": 10,
 };
 
 export class FlightWorld {
