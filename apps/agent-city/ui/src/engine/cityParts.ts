@@ -710,13 +710,16 @@ export class CityParts {
   /** display/civicProgress 直接对齐 target：模型重建后的第一步。重建时 display
    *  被初始化为「已完工」（closed 的 builtFraction=1，civic 全 1），回放中若任由
    *  动画循环追赶，整城会先闪满高、再被压回时间轴进度——数据加载不应改变城市
-   *  已呈现的样子。 */
-  snapToTargets(): void {
+   *  已呈现的样子。
+   *  all=true：连还在「长入」的楼也立即对齐——回放起点 / 拖时间轴是时间跳变，城市应当直接是那一刻的样子，
+   *  而不是先让整座城从当前高度慢慢缩下去（回放看起来就不是从第一栋楼开始）。 */
+  snapToTargets(all = false): void {
     this.contextProgress.set(this.contextTarget);
     this.writeContext();
     for (const runtime of this.runtimes) {
-      if (!runtime.settled) continue; // 新楼交给 update 循环长入
+      if (!all && !runtime.settled) continue; // 新楼交给 update 循环长入
       runtime.display = runtime.target;
+      if (all) runtime.settled = true;
       this.applyConstruction(runtime, true);
     }
     for (let index = 0; index < this.civicTarget.length; index += 1) {

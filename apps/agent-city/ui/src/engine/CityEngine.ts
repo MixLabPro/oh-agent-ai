@@ -1090,7 +1090,7 @@ export class CityEngine {
     this.cursorMs = ms;
     if (options?.playing !== undefined) this.playing = options.playing;
     if (options?.speed !== undefined) this.playbackSpeed = options.speed;
-    if (ms !== null) this.parts?.applyCursor(ms, false, this.playbackSpeed * 1000);
+    if (ms !== null) { this.parts?.applyCursor(ms, false, this.playbackSpeed * 1000); this.parts?.snapToTargets(true); } // 时间跳变（开始回放/拖时间轴）：直接是那一刻的城市
     else if (this.model) this.parts?.applyCursor(this.model.windowEndMs, true);
     this.noteActivity();
   }

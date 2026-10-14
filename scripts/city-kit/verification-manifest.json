@@ -168,6 +168,12 @@
     "shared": false
   },
   {
+    "id": "verify-city-replay-snap",
+    "file": "verify-city-replay-snap.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-city-constraints",
     "file": "verify-city-constraints.mjs",
     "env": {},
