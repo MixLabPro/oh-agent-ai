@@ -122,7 +122,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     if (!current || !controller) return;
     const overlay = new ParcelOverlay();
     current.addOverlay(overlay.group);
-    current.setRepairHook({ onClick: (click) => controller.click(click), onMove: (ground, ray) => controller.hover(ground, ray) });
+    current.setRepairHook({ onClick: (click) => controller.click(click), onMove: (ground, ray) => controller.hover(ground, ray), onSecondary: () => controller.back() });
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;

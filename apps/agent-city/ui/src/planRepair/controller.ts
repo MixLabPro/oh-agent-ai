@@ -219,7 +219,7 @@ const noteOf = (warnings: readonly string[]) => (warnings.length ? warnings.map(
 
 const HINT: Record<RepairTool, RepairMessage> = {
   build: { kind: "hint", text: "点选任意建筑（会话楼、设施、地标、市政用地），再点要搬去的空地" },
-  draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，拐弯自动倒圆，Esc 结束" },
+  draw: { kind: "hint", text: "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，拐弯自动倒圆。结束：右键、再点一下终点或 Esc" },
   erase: { kind: "hint", text: "把橡皮擦移到道路上，红色高亮的路段点击即擦掉" },
   restyle: { kind: "hint", text: "先选路型，再把鼠标移到路上：整条街高亮，点一下就改成这个路型（变宽会推平/安置两侧的楼；桥面不能改）" },
   site: { kind: "hint", text: "点选任意非会话建筑（公共设施、花园、地标、市政用地、背景楼）；再点空地搬家，或点「拆除」" },
@@ -247,6 +247,7 @@ const footprintContains = (site: SiteInfo, p: Vec2) => {
 
 const CURVE_HINT: RepairMessage = { kind: "hint", text: "弧线：点起点，再点路要经过的点，最后点终点；可连续画，Esc 撤回上一步，C 切回直线" };
 const CURVE_START_HINT: RepairMessage = { kind: "hint", text: "起点已落下：点一下路要经过的地方（弧线会穿过它）" };
+const DRAW_DONE: RepairMessage = { kind: "ok", text: "已结束这条路线，可以点新的起点" };
 const VIADUCT_HINT: RepairMessage = { kind: "hint", text: "高架：逐点点击画折线（可跨河、跨路），回车或在最后一点上再点一下完成；Esc 撤回上一个点" };
 /** 通用的「这个工具怎么用」提示（工具切换/取消选中时回到的那条），区别于选中结果等针对当前操作的提示。 */
 export const isGenericHint = (message: RepairMessage | null): boolean =>
@@ -339,7 +340,7 @@ export class RepairController {
   }
 
   /** Esc：画路——先放弃当前起点，没有起点就回到选择工具；选择/橡皮擦——先取消选中，再退出模式。 */
-  cancel(): void {
+  cancel(keepActive = false): void {
     const { active, tool, buildingId, drawStart } = this.state;
     if (!active) return;
     if (tool === "draw" && this.state.viaduct.length) {
@@ -353,8 +354,11 @@ export class RepairController {
     if (tool === "site" && this.state.site) { this.clearSite(HINT.site); return; }
     if (tool !== "build") { this.setTool("build"); return; }
     if (buildingId) { this.deselect(HINT.build); return; }
-    this.exit();
+    if (!keepActive) this.exit();
   }
+
+  /** 右键：和 Esc 一样逐级退一步（放弃起点 / 回到选择工具 / 取消选中），但绝不退出修复模式——误触右键不该关掉编辑器。 */
+  back(): void { this.cancel(true); }
 
   private deselect(message: RepairMessage | null): void {
     this.deps.setSelected(null);
@@ -529,7 +533,13 @@ export class RepairController {
     const start = this.state.drawStart;
     const curve = this.state.drawMode === "curve";
     if (!start) {
-      this.set({ drawStart: snap, message: curve ? CURVE_START_HINT : { kind: "hint", text: "起点已落下，移动鼠标预览，再点一下落笔；Esc 放弃这个起点" } });
+      this.set({ drawStart: snap, message: curve ? CURVE_START_HINT : { kind: "hint", text: "起点已落下，移动鼠标预览，再点一下落笔；右键或 Esc 放弃这个起点" } });
+      this.recomputePreview();
+      return;
+    }
+    // 再点一下刚落下的起点（连续画时就是上一段的终点）= 结束这条路线，回到「等下一个起点」；不必靠 Esc。
+    if (!this.state.drawVia && Math.hypot(snap.x - start.x, snap.z - start.z) < 3) {
+      this.set({ drawStart: null, drawVia: null, preview: null, message: DRAW_DONE });
       this.recomputePreview();
       return;
     }
@@ -551,7 +561,7 @@ export class RepairController {
     this.set({
       drawStart: { ...snap, kind: "node", locked: false }, // 落笔后终点已是路口（拆开或新建）
       drawVia: null,
-      message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已画一段（${warnings.join("；")}），接着点下一个点` : "已画一段，接着点下一个点；Esc 结束" },
+      message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已画一段（${warnings.join("；")}），接着点下一个点` : "已画一段，接着点下一个点；右键、再点一下这个终点或 Esc 结束" },
     });
     this.recomputePreview();
   }

@@ -56,7 +56,7 @@ export type CameraOwner = "orbit" | "cinematic" | "game";
 export type RepairRay = { origin: { x: number; y: number; z: number }; direction: { x: number; y: number; z: number } };
 export type RepairClick = { pickedId: string | null; ground: { x: number; z: number } | null; ray: RepairRay };
 /** onMove：指针移动时的地面点（离开画布/朝天为 null）——画路/橡皮擦的悬停预览用。 */
-export type RepairHook = { onClick(click: RepairClick): void; onMove?(ground: { x: number; z: number } | null, ray: RepairRay | null): void };
+export type RepairHook = { onClick(click: RepairClick): void; onMove?(ground: { x: number; z: number } | null, ray: RepairRay | null): void; /** 右键轻点（不拖动）：修复模式里用来退一步。 */ onSecondary?(): void };
 
 export type CityEngineOptions = {
   canvas: RenderCanvas;
@@ -100,6 +100,7 @@ export class CityEngine {
   /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
   private baseLayout: CityLayout | null = null;
   private repairHook: RepairHook | null = null;
+  private secondaryDown: { id: number; x: number; y: number; at: number } | null = null;
   private planPatchValue: PlanPatchV1 | null = null;
   private planResult: PatchedLayout | null = null;
   private model: CityModel | null = null;
@@ -261,6 +262,7 @@ export class CityEngine {
       this.hoveredId = null;
       this.parts?.setHovered(null);
       this.options.onHover?.(null, 0, 0);
+      this.secondaryDown = event.button === 2 && event.isPrimary ? { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() } : null;
       this.pointerDown = event.button === 0 && event.isPrimary ? { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now(), moved: 0 } : null;
       interactiveCanvas.focus({ preventScroll: true });
       if (this.cinematic) this.stopCinematic();
@@ -271,6 +273,12 @@ export class CityEngine {
       this.noteActivity();
     };
     const onPointerUp = (event: PointerEvent) => {
+      const secondary = this.secondaryDown;
+      this.secondaryDown = null;
+      if (secondary && secondary.id === event.pointerId && this.repairHook?.onSecondary && this.cameraOwner !== "game"
+        && Math.hypot(event.clientX - secondary.x, event.clientY - secondary.y) < 5 && performance.now() - secondary.at < 500) {
+        this.repairHook.onSecondary();
+      }
       const down = this.pointerDown;
       this.pointerDown = null;
       this.noteActivity();

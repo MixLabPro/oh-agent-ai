@@ -763,4 +763,38 @@ function harness(overrides = {}) {
   assert.equal(log.adds.at(-1)[4], undefined, "back in straight mode a click lays a straight road");
 }
 
+// (a3) 画路的自然收尾：再点一下终点结束、右键（back）逐级退一步但绝不退出修复模式、再点当前工具回选择工具由面板做（这里只测控制器）。
+{
+  const { controller, deps, log } = harness();
+  deps.addRoad = (from, to, width, purpose, via) => { log.adds.push([from, to, width, purpose, via]); return { ok: true, patch: {}, warnings: [] }; };
+  controller.enter(); controller.setTool("draw");
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  controller.click({ pickedId: null, ground: { x: 50, z: 10 } });
+  assert.equal(log.adds.length, 1); assert.ok(controller.snapshot.drawStart, "a chain: the end is the next start");
+  controller.click({ pickedId: null, ground: { x: 50.5, z: 10 } });
+  assert.equal(log.adds.length, 1, "clicking the chain's end again lays no zero-length road");
+  assert.equal(controller.snapshot.drawStart, null, "…it finishes the route");
+  assert.match(controller.snapshot.message.text, /已结束这条路线/);
+  assert.equal(controller.snapshot.tool, "draw"); assert.equal(controller.snapshot.active, true);
+
+  controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  controller.back();
+  assert.equal(controller.snapshot.drawStart, null, "right-click drops the pending start");
+  controller.back();
+  assert.equal(controller.snapshot.tool, "build", "…then returns to the select tool");
+  controller.back();
+  controller.back();
+  assert.equal(controller.snapshot.active, true, "right-click never leaves repair mode (Esc does)");
+  controller.cancel();
+  assert.equal(controller.snapshot.active, false, "Esc still exits at the bottom of the stack");
+
+  const curve = harness();
+  curve.deps.addRoad = (from, to, width, purpose, via) => { curve.log.adds.push([from, to, width, purpose, via]); return { ok: true, patch: {}, warnings: [] }; };
+  curve.controller.enter(); curve.controller.setTool("draw"); curve.controller.setDrawMode("curve");
+  curve.controller.click({ pickedId: null, ground: { x: 10, z: 10 } });
+  curve.controller.click({ pickedId: null, ground: { x: 10.5, z: 10 } });
+  assert.equal(curve.controller.snapshot.drawVia, null, "in arc mode clicking the start again finishes instead of setting a bend point on it");
+  assert.equal(curve.controller.snapshot.drawStart, null);
+}
+
 console.log("City plan repair controller: arcs are drawn start → bend point → end (C toggles, Esc peels the bend point first, chains); the restyle tool changes a whole run to the chosen road type (target-width preview, bulldozer note, unchanged/locked explained, no viaduct); free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");

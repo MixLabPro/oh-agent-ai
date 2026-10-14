@@ -163,7 +163,7 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
     </div>}
     <div className="city-repair-rail" role="toolbar" aria-label="修复工具">
       <span className="city-repair-badge" title={info.saveFailed ? "本次修改仅临时生效（存档失败）" : total === 0 ? "尚无修改" : "修改已保存"}>{badge}</span>
-      {TOOLS.map((tool) => <button key={tool.id} className={state.tool === tool.id ? "is-active" : ""} aria-pressed={state.tool === tool.id} title={keyed(tool.hint, tool.key)} onClick={() => repair.setTool(tool.id)}>
+      {TOOLS.map((tool) => <button key={tool.id} className={state.tool === tool.id ? "is-active" : ""} aria-pressed={state.tool === tool.id} title={keyed(tool.hint, tool.key)} onClick={() => repair.setTool(tool.id !== "build" && state.tool === tool.id ? "build" : tool.id)}>
         <span className="city-repair-glyph" aria-hidden="true">{tool.icon}</span><span className="city-repair-name">{tool.label}</span><kbd>{tool.key}</kbd>
       </button>)}
       <hr />
