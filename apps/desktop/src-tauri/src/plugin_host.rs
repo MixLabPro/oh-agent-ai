@@ -224,8 +224,8 @@ fn persist_diagnostics(instance: &Instance) {
 
 fn valid_tools(namespace: &str, items: &[Tool]) -> bool {
     let mut ids = std::collections::BTreeSet::new();
-    // 9 = 8 常规工具 + 游戏模式宿主级退出按钮（开发开关控制是否出现；默认插件仍 ≤8）。
-    items.len() <= 9 && items.iter().all(|item| {
+    // 10 = 8 常规工具 + 游戏模式宿主级退出按钮 + 修复规划入口（均已默认开放；其余插件仍 ≤8）。
+    items.len() <= 10 && items.iter().all(|item| {
         !item.id.is_empty() && item.id.len() <= 64 && ids.insert(&item.id)
             && item.command_id.starts_with(&format!("{namespace}.")) && item.command_id.len() <= 64
             && !item.label.is_empty() && item.label.len() <= 100

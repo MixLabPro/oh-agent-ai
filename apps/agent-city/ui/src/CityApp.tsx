@@ -165,10 +165,8 @@ export function CityApp() {
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
   const toolbarReady = dataLoaded && (sceneUnavailable || !dataAvailable || projection.status === "empty" || firstModelFrame);
   const tools: Tool[] = [
-    { id: "window", commandId: "city.window", label: "时间范围", kind: "select", enabled: !cinema && !game.active && !experience.busy, value: String(windowDays), options: windowOptions.map((days) => ({ value: String(days), label: `${days} 天` })) },
-    // 工具栏上限 8 项（host 校验）：画质移入城市设置，让位给「建筑说明」（用户：按钮放在顶部导航）。
+    // 时间范围、显示标签移入城市设置（用户：这两个应放设置里）；画质同样在设置里。city.window / city.labels 命令仍保留给宿主与自动化。
     { id: "catalog", commandId: "city.catalog", label: "建筑说明", kind: "button", enabled: !cinema && !game.active },
-    { id: "labels", commandId: "city.labels", label: labels ? "隐藏标签" : "显示标签", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy },
     { id: "reset", commandId: "city.reset", label: "重置视角", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy },
     { id: "cinema", commandId: "city.cinema", label: cinema ? "停止航拍" : "航拍", kind: "button", enabled: sceneReady && !experience.busy && !game.active },
     { id: "photo", commandId: "city.photo", label: experience.photoBusy ? "正在拍照" : "拍照", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy && !experience.film },
@@ -177,7 +175,10 @@ export function CityApp() {
     // 游戏模式（开发开关门控）：平时「驾驶飞机」直接进自由练习（挑战仍在城市设置）；
     // 游戏中变「退出游戏」——即计划 §3 要求的宿主级通用退出入口。上限 8→9 见 host 校验器。
     { id: "game", commandId: "city.game", label: game.active ? "退出游戏" : "驾驶飞机", kind: "button" as const, enabled: sceneReady && !cinema && !experience.busy && !experience.film },
-  ].map((tool) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "game" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
+    // 修复规划入口放在「更多工具」里（用户：不要悬浮在画面上）。进入后的编辑面板仍在页面内；
+    // 上限 9→10 见 host 校验器（plugin_host.rs::valid_tools）。
+    { id: "repair", commandId: "city.repair", label: planRepair.state.active ? "退出修复" : "修复规划", kind: "button" as const, enabled: planRepair.state.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film) },
+  ].map((tool: { id: string; label: string; options?: Array<{ value: string; label: string }> }) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "game" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
   const execute = (commandId: string, value?: string) => {
     const engine = engineRef.current;
     switch (commandId) {
@@ -199,6 +200,9 @@ export function CityApp() {
       case "city.film": void experience.exportFilm(); break;
       case "city.settings": experience.setOptions(!experience.options); break;
       case "city.catalog": experience.setCatalog(!experience.catalog); break;
+      case "city.repair":
+        if (planRepair.state.active) planRepair.exit(); else planRepair.enter();
+        break;
       case "city.game":
         if (game.active) game.exit();
         else game.enterPractice();
@@ -206,10 +210,10 @@ export function CityApp() {
       default: throw new Error("command_unavailable");
     }
   };
-  useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, game.active, experience.busy, experience.cut, experience.options, experience.catalog, experience.film]);
+  useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, game.active, planRepair.state.active, experience.busy, experience.cut, experience.options, experience.catalog, experience.film]);
   // Publishing the first toolbar is the host's ready handshake. An empty scene
   // or loaded DTO alone must not arm the runtime watchdog during shader boot.
-  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, experience.busy, experience.film?.frame, experience.film?.total]);
+  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, planRepair.state.active, experience.busy, experience.film?.frame, experience.film?.total]);
   const sceneMessage = sceneUnavailable ? "当前环境无法显示三维城市，仍可查看会话摘要。"
     : !dataAvailable || projection.status === "empty" ? status : null;
   return cityView((
@@ -222,6 +226,7 @@ export function CityApp() {
           : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>
       </header>}
       <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} planRepair={planRepair}
+        windowDays={windowDays} windowOptions={windowOptions} onWindowDays={(days) => setWindowDays(days as WindowDays)} labels={labels} onLabels={(next) => { engineRef.current?.setLabelsVisible(next); setLabels(next); }}
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} />
     </section>
   ), language);

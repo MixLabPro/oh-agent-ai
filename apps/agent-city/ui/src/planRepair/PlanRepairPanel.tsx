@@ -33,7 +33,7 @@ const DRAW_MODES: Array<{ id: DrawMode; label: string; hint: string }> = [
  * 规划修复面板（开发预览，仅中文）。未进入修复模式时只显示一个始终可见的入口按钮——
  * 曾把入口放在设置弹窗最底部，小窗口里被挤出可视区，用户根本找不到。
  */
-export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairUi; entryDisabled: boolean }) {
+export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const { state, info, issues } = repair;
   const [confirmReset, setConfirmReset] = useState(false);
   const timer = useRef<number | undefined>(undefined);
@@ -42,7 +42,8 @@ export function PlanRepairPanel({ repair, entryDisabled }: { repair: PlanRepairU
 
   if (!repair.enabled) return null;
   if (!state.active) {
-    return <button className="city-repair-entry" disabled={entryDisabled} onClick={repair.enter} title="修复规划：移动建筑、画路、橡皮擦、拖路口（开发预览）">✎ 修复规划</button>;
+    // 入口已移到顶部导航「更多工具」（CityApp 的 city.repair），未进入修复模式时不在画面上放任何东西。
+    return null;
   }
 
   const counts = info.counts;

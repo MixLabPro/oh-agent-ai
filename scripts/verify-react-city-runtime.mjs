@@ -168,6 +168,22 @@ async function openCitySettings(page) {
   await page.getByRole("button", { name: "城市设置", exact: true }).click();
   return city(page).getByRole("dialog", { name: "城市设置", exact: true });
 }
+async function setCityWindow(page, days) {
+  const settings = await openCitySettings(page);
+  await settings.getByLabel("时间范围", { exact: true }).selectOption(String(days));
+  await settings.press("Escape");
+}
+async function setCityLabels(page, visible) {
+  const settings = await openCitySettings(page);
+  await settings.getByLabel("显示建筑标签", { exact: true }).setChecked(visible);
+  await settings.press("Escape");
+}
+async function cityLabelsVisible(page) {
+  const settings = await openCitySettings(page);
+  const visible = await settings.getByLabel("显示建筑标签", { exact: true }).isChecked();
+  await settings.press("Escape");
+  return visible;
+}
 async function cityStatus(page) {
   const toggle = city(page).getByRole("button", { name: "城市摘要", exact: true });
   if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
@@ -307,18 +323,18 @@ try {
     // acknowledgement instead of racing the next click against host pending.
     await page.getByRole("button", { name: "重置视角", exact: true }).click({ timeout: 5000, noWaitAfter: true });
     await page.waitForFunction(async () => !(await window.__TAURI__.core.invoke("plugin_snapshot")).pending);
-    await page.getByRole("button", { name: "隐藏标签", exact: true }).click({ timeout: 5000, noWaitAfter: true });
-    await page.getByRole("button", { name: "显示标签", exact: true }).waitFor({ timeout: 5000 });
-    await page.getByRole("button", { name: "显示标签", exact: true }).click({ timeout: 5000, noWaitAfter: true });
-    await page.getByRole("button", { name: "隐藏标签", exact: true }).waitFor({ timeout: 5000 });
+    await setCityLabels(page, false);
+    assert.equal(await cityLabelsVisible(page), false, "labels must stay hidden");
+    await setCityLabels(page, true);
+    assert.equal(await cityLabelsVisible(page), true, "labels must be visible");
     await city(page).getByRole("button", { name: "播放回放", exact: true }).click({ timeout: 5000, noWaitAfter: true });
     await city(page).getByRole("button", { name: "暂停回放", exact: true }).click({ timeout: 5000, noWaitAfter: true });
     await city(page).getByRole("button", { name: "回到实时", exact: true }).click({ timeout: 5000, noWaitAfter: true });
-    await page.getByRole("combobox", { name: "时间范围" }).selectOption("7");
+    await setCityWindow(page, "7");
     await expectSummary(page, "2", "26,400");
     await city(page).getByRole("button", { name: "取消导出", exact: true }).click();
     await city(page).locator(".city-export-preview").waitFor({ state: "hidden" });
-    await page.getByRole("combobox", { name: "时间范围" }).selectOption("30");
+    await setCityWindow(page, "30");
     await expectSummary(page, "3", "53,900");
   }
   console.log("City restored interactions: passed (district focus, replay, persistent seed, keyboard selection, excerpts, PNG download, film cancellation).");
@@ -328,9 +344,9 @@ try {
     console.log(`City restored screenshot: ${screenshotPath}`);
     await page.close();
   } else {
-  await page.getByRole("button", { name: "隐藏标签", exact: true }).click();
-  await page.getByRole("button", { name: "显示标签", exact: true }).waitFor();
-  await page.getByRole("button", { name: "显示标签", exact: true }).click();
+  await setCityLabels(page, false);
+  assert.equal(await cityLabelsVisible(page), false, "labels must stay hidden");
+  await setCityLabels(page, true);
   await page.getByRole("button", { name: "重置视角", exact: true }).click();
   await page.getByRole("button", { name: "航拍", exact: true }).click();
   await page.getByRole("button", { name: "停止航拍", exact: true }).click();
@@ -386,8 +402,8 @@ try {
     };
   });
   await cityEvaluate(page, () => { window.cityRetentionMarker = "same-scene"; });
-  await page.getByRole("button", { name: "隐藏标签", exact: true }).click();
-  await page.getByRole("button", { name: "显示标签", exact: true }).waitFor();
+  await setCityLabels(page, false);
+  assert.equal(await cityLabelsVisible(page), false, "labels must stay hidden");
   await page.locator(".sidebar").getByRole("button", { name: /^(Overview|总览)$/ }).click();
   await page.waitForFunction(() => document.querySelector("iframe")?.style.display === "none");
   await page.waitForTimeout(300);
@@ -395,12 +411,12 @@ try {
   await page.waitForTimeout(300);
   assert.equal(await frame.evaluate(() => window.cityDrawCalls), pausedDraws, "hidden City must pause rendering");
   await page.locator(".sidebar").getByRole("button", { name: "City", exact: true }).click();
-  await page.getByRole("button", { name: "显示标签", exact: true }).waitFor();
+  assert.equal(await cityLabelsVisible(page), false, "labels must stay hidden");
   assert.equal(await page.evaluate(async () => (await window.__TAURI__.core.invoke("plugin_snapshot")).instanceId), cityInstanceBeforeSwitch);
   assert.equal(await frame.evaluate(() => window.cityRetentionMarker), "same-scene");
   await page.waitForFunction(() => window.pluginResumeRefreshes > 0);
   await frame.waitForFunction((before) => window.cityDrawCalls > before, pausedDraws);
-  await page.getByRole("button", { name: "显示标签", exact: true }).click();
+  await setCityLabels(page, true);
   console.log("City tab retention: passed (same instance/scene/settings, hidden rendering paused, resume draws).");
   const summaryToggle = city(page).getByRole("button", { name: "城市摘要", exact: true });
   if (await summaryToggle.getAttribute("aria-expanded") !== "true") await summaryToggle.click();
@@ -468,7 +484,7 @@ try {
   await expectSummary(page, "3", "53,900");
   console.log("Browser toolbar, aerial playback, iframe resize and sender validation: passed.");
 
-  const picker = page.getByRole("combobox", { name: "时间范围" });
+  const picker = { selectOption: (days) => setCityWindow(page, days) };
   if (!process.argv.includes("--recovery-only")) {
   await picker.selectOption("7");
   await expectSummary(page, "2", "26,400");

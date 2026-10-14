@@ -232,7 +232,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     lockSelection: (id: string) => engine.current?.lockSelection(id) };
 }
 
-export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, planRepair }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; planRepair: PlanRepairUi }) {
+export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, planRepair, windowDays, windowOptions, onWindowDays, labels, onLabels }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; planRepair: PlanRepairUi; windowDays: number; windowOptions: readonly number[]; onWindowDays: (days: number) => void; labels: boolean; onLabels: (next: boolean) => void }) {
   const language = useCityLanguage();
   const gameActive = game.active;
   // 游戏接管时收起模态与侧栏（native dialog 在 top layer，会盖住游戏 HUD）。
@@ -436,6 +436,8 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <p>只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。</p>
       <label htmlFor="city-backdrop">城市背景楼</label><select id="city-backdrop" value={ui.backdrop} disabled={locked} onChange={(e) => ui.setBackdrop(e.target.value as BackdropMode)}><option value="auto">自动（随会话数，不挤占城区）</option><option value="off">关闭（纯数据城市）</option><option value="full">繁华（铺满城区周边）</option></select>
       <p>背景楼只是城市氛围，不是会话，不可点击，不计入统计。</p>
+      <label htmlFor="city-window">时间范围</label><select id="city-window" value={String(windowDays)} disabled={locked || gameActive} onChange={(e) => onWindowDays(Number(e.target.value))}>{windowOptions.map((days) => <option key={days} value={String(days)}>{`${days} 天`}</option>)}</select>
+      <label className="city-check" htmlFor="city-labels"><input id="city-labels" type="checkbox" checked={labels} disabled={locked || gameActive} onChange={(e) => onLabels(e.target.checked)} />显示建筑标签</label>
       <label htmlFor="city-quality">画质</label><select id="city-quality" value={quality} onChange={(e) => onQuality(e.target.value)}><option value="auto">自动</option><option value="high">高画质</option><option value="eco">节能</option></select>
       <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
       <details className="city-settings-help"><summary>导出说明</summary><p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p></details>
@@ -465,7 +467,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <small>实际生成帧 · 预览最多 2 FPS，成片 30 FPS</small>
     </section>}
     {ui.error && !ui.options && <div className="city-feature-error" role="alert">{ui.error}<button aria-label="关闭提示" onClick={() => ui.setError(null)}>×</button></div>}
-    {!cinema && !gameActive && <PlanRepairPanel repair={planRepair} entryDisabled={ui.busy || !ui.model || !!ui.film} />}
+    {!cinema && !gameActive && <PlanRepairPanel repair={planRepair} />}
     {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} persist={{ tier: game.persistTier, saveFailed: game.saveFailed }} actions={{
       onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse, onSoundVolume: game.setSoundVolume, onToggleSfx: game.toggleSfx, onToggleMusic: game.toggleMusic,
     }} />}
