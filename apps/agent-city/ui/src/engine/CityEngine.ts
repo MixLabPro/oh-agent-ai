@@ -188,7 +188,8 @@ export class CityEngine {
 
   constructor(private readonly options: CityEngineOptions) {
     const canvas = options.canvas;
-    const lowPower = { antialias: options.headless || window.devicePixelRatio < 1.75, powerPreference: "low-power" as const, stencil: false };
+    // 抗锯齿不再按屏幕像素密度关闭：视网膜屏在 0 档以 1.25 倍渲染再拉伸，没有 MSAA 时楼边与路缘锯齿很重。
+    const lowPower = { antialias: true, powerPreference: "low-power" as const, stencil: false };
     this.renderer = new THREE.WebGLRenderer({ canvas, ...lowPower });
     const gl = this.renderer.getContext();
     const rendererInfo = gl.getExtension("WEBGL_debug_renderer_info");
@@ -406,7 +407,10 @@ export class CityEngine {
     if (!this.composer || this.composerKey !== key) {
       this.composer?.dispose();
       const size = this.renderer.getSize(new THREE.Vector2());
-      const composer = new EffectComposer(this.renderer);
+      // 后处理链画在自己的离屏缓冲里，画布的 antialias 对它不起作用——给读写缓冲配 4 倍多重采样（1 档以上才进此路径）。
+      const ratio = this.renderer.getPixelRatio();
+      const target = new THREE.WebGLRenderTarget(Math.max(1, Math.floor(size.x * ratio)), Math.max(1, Math.floor(size.y * ratio)), { type: THREE.HalfFloatType, samples: 4 });
+      const composer = new EffectComposer(this.renderer, target);
       composer.addPass(new RenderPass(this.scene, this.camera));
       if (wantAo) {
         // GTAOPass 构造时用 new SimplexNoise()（默认 Math.random）生成降噪噪声贴图：每次重建 composer
@@ -452,7 +456,7 @@ export class CityEngine {
     const parent = this.options.headless ? null : (canvas as HTMLCanvasElement).parentElement;
     const width = this.exportSize?.width ?? Math.max(1, parent?.clientWidth ?? (this.options.headless ? canvas.width : (canvas as HTMLCanvasElement).clientWidth));
     const height = this.exportSize?.height ?? Math.max(1, parent?.clientHeight ?? (this.options.headless ? canvas.height : (canvas as HTMLCanvasElement).clientHeight));
-    const dprCap = this.quality >= 2 ? 2 : this.quality === 1 ? 1.5 : 1;
+    const dprCap = this.quality >= 2 ? 2 : this.quality === 1 ? 1.5 : 1.25;
     const pixelRatio = this.exportSize || this.options.headless ? 1 : Math.min(window.devicePixelRatio || 1, dprCap,
       this.softwareRenderer ? Math.min(640 / width, 360 / height) : Infinity);
     if (width === this.surfaceWidth && height === this.surfaceHeight && pixelRatio === this.surfacePixelRatio) return;
