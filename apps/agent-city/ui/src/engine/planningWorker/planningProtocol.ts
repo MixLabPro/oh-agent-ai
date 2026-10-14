@@ -1,8 +1,8 @@
 import { createCityShape, MAX_TIER, targetParcels, RADIUS_CALIBRATION_CONFIG, type createCityPlan } from "../cityPlan";
 import type { CoastalConfig } from "../citySeaside";
 import type { TerrainField } from "../cityLayout";
-import { buildGeography } from "./geography";
-import { PLANNING_WORK_UNITS, type PlanningWorkCounts, type PlanningWorkSnapshot, type PlanningStop } from "./operationBudget";
+import { buildGeography } from "../planner/geography";
+import { PLANNING_WORK_UNITS, type PlanningWorkCounts, type PlanningWorkSnapshot, type PlanningStop } from "../planner/operationBudget";
 
 export const PLANNING_PROTOCOL_VERSION = 1;
 export type GeneratedCityPlan = ReturnType<typeof createCityPlan>;

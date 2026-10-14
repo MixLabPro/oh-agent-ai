@@ -1,5 +1,5 @@
 import { createCityPlan } from "../cityPlan";
-import { createPlanningWorkLedger, isPlanningInterrupted, type PlanningWorkLedger } from "./operationBudget";
+import { createPlanningWorkLedger, isPlanningInterrupted, type PlanningWorkLedger } from "../planner/operationBudget";
 import { PLANNING_PROTOCOL_VERSION, serializePlanningPlan, validPlanningParameters,
   type PlanningRequest, type PlanningWorkerResponse } from "./planningProtocol";
 

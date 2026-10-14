@@ -1,6 +1,6 @@
 import { hydratePlanningPlan, planningRequestKey, validPlanningParameters, validPlanningWorkSnapshot, PLANNING_PROTOCOL_VERSION,
   type PlanningParameters, type PlanningWorkerResponse, type GeneratedCityPlan, type PlanningRequest } from "./planningProtocol";
-import type { PlanningStop, PlanningWorkSnapshot } from "./operationBudget";
+import type { PlanningStop, PlanningWorkSnapshot } from "../planner/operationBudget";
 export type PlanningJobResult =
   | { status: "computed"; plan: GeneratedCityPlan; requestKey: string }
   | { status: "cancelled" | "failed" | "unsupported"; reason: string; stop?: PlanningStop; workBudget?: PlanningWorkSnapshot;

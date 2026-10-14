@@ -8,9 +8,9 @@ import { citySrc, loadCity, repo } from "./city-kit/index.mjs";
 const { runPlanningJob, executePlanningWorkerJob, hydratePlanningPlan, planningRequestKey, createCityPlan,
   MIAMI_COASTAL, PLANNING_WORK_UNITS, buildCityModel, layoutCity, cityPlanCacheSize, CITY_PLAN_CACHE_CONFIG,
   createPlanningWorkLedger, withPlanningWorkLedger } = await loadCity({
-  "engine/planner/planningJob.ts": ["runPlanningJob"],
-  "engine/planner/planningWorkerJob.ts": ["executePlanningWorkerJob"],
-  "engine/planner/planningProtocol.ts": ["hydratePlanningPlan", "planningRequestKey"],
+  "engine/planningWorker/planningJob.ts": ["runPlanningJob"],
+  "engine/planningWorker/planningWorkerJob.ts": ["executePlanningWorkerJob"],
+  "engine/planningWorker/planningProtocol.ts": ["hydratePlanningPlan", "planningRequestKey"],
   "engine/planner/operationBudget.ts": ["PLANNING_WORK_UNITS", "createPlanningWorkLedger", "withPlanningWorkLedger"],
   "engine/cityLayout.ts": ["layoutCity", "cityPlanCacheSize", "CITY_PLAN_CACHE_CONFIG"], "cityModel.ts": ["buildCityModel"],
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
@@ -92,7 +92,7 @@ const { buildSync } = createRequire(path.join(repo, "apps/desktop/ui-dev/package
 const entry = `import { parentPort } from "node:worker_threads";
 globalThis.postMessage = value => parentPort.postMessage(value);
 parentPort.on("message", data => globalThis.onmessage({ data }));
-import ${JSON.stringify(path.join(citySrc, "engine/planner/planning.worker.ts"))};`;
+import ${JSON.stringify(path.join(citySrc, "engine/planningWorker/planning.worker.ts"))};`;
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "city-planning-worker-")), file = path.join(directory, "worker.cjs");
 fs.writeFileSync(file, buildSync({ stdin: { contents: entry, resolveDir: citySrc }, bundle: true, format: "cjs",
   platform: "node", write: false, logLevel: "silent" }).outputFiles[0].text);
