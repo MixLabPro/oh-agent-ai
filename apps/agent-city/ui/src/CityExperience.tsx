@@ -232,7 +232,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     lockSelection: (id: string) => engine.current?.lockSelection(id) };
 }
 
-export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, gameDev, planRepair }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; gameDev: boolean; planRepair: PlanRepairUi }) {
+export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, planRepair }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; planRepair: PlanRepairUi }) {
   const language = useCityLanguage();
   const gameActive = game.active;
   // 游戏接管时收起模态与侧栏（native dialog 在 top layer，会盖住游戏 HUD）。
@@ -439,8 +439,8 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <label htmlFor="city-quality">画质</label><select id="city-quality" value={quality} onChange={(e) => onQuality(e.target.value)}><option value="auto">自动</option><option value="high">高画质</option><option value="eco">节能</option></select>
       <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
       <details className="city-settings-help"><summary>导出说明</summary><p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p></details>
-      {gameDev && <div className="city-game-entry">
-        <label style={{ fontSize: 12, color: "var(--city-muted)" }}>{gameText("游戏模式（开发预览）", language === "en" ? "en" : "zh-Hans")}</label>
+      <div className="city-game-entry">
+        <label style={{ fontSize: 12, color: "var(--city-muted)" }}>{gameText("游戏模式", language === "en" ? "en" : "zh-Hans")}</label>
         {/* 空投影也允许在生成的空岛练习（§1.1）：门槛是「城市已建模」而非 sceneReady。 */}
         <div style={{ display: "flex", gap: 8 }}>
           <button disabled={cinema || ui.busy || gameActive || !ui.model} onClick={() => { ui.setOptions(false); game.enterPractice(); }}>{gameText("自由练习", language === "en" ? "en" : "zh-Hans")}</button>
@@ -449,7 +449,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         </div>
         {game.entryError && <p role="alert">{game.entryError}</p>}
         <p>{gameText("进入后用 W/S/A/D 与方向键飞行，Esc 暂停。", language === "en" ? "en" : "zh-Hans")}</p>
-      </div>}
+      </div>
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
       {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}
       <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.lockSelection(e.target.value); else ui.clearSelection(); ui.setOptions(false); }}>

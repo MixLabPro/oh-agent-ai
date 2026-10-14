@@ -20,7 +20,7 @@
 | `COURSE_VERSION` | 1 | `apps/agent-city/ui/src/game/RaceCourse.ts` |
 | 档案 schema | `flight-profile:v1`（plugins.json `stateKeys`） | `apps/desktop/plugins.json` |
 | 校准基线 | `calibration-replay/p1`（verify-city-game-flight 单行输出） | `scripts/verify-city-game-flight.mjs` |
-| 入口开关 | 开发预览：`?cityGame=1` 或 `localStorage.cityGameDev=1`，经城市设置进入 | 未开放默认入口 |
+| 入口开关 | 2026-10-14 起已移除开发开关：城市设置与工具栏默认显示（`AGENT_VITALS_CITY_GAME_UAT=1` 仅用于额外显示 UAT 键盘驾驶按钮） | 默认入口已开放 |
 
 ## 3. 已记录的量化测量（2026-10-09，浏览器 1280×720，合成数据 3 会话，quality 0 自动档）
 

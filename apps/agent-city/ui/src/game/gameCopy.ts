@@ -8,7 +8,7 @@ const ENGLISH: Record<string, string> = {
   "自由练习": "Free flight",
   "穿环挑战": "Ring race",
   "驾驶飞机": "Fly a plane",
-  "游戏模式（开发预览）": "Game mode (dev preview)",
+  "游戏模式": "Game mode",
   "进入后用 W/S/A/D 与方向键飞行，Esc 暂停。": "Fly with W/S/A/D and arrow keys; Esc pauses.",
   "自由飞行，没有任务与计时。": "Free flight — no mission, no timer.",
   "正在准备飞行场地…": "Preparing the flight area…",
