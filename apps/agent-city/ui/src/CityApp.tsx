@@ -210,7 +210,12 @@ export function CityApp() {
       default: throw new Error("command_unavailable");
     }
   };
-  useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, game.active, planRepair.state.active, experience.busy, experience.cut, experience.options, experience.catalog, experience.film]);
+  // 宿主命令监听只注册一次、永远调用最新的 execute：此前按依赖列表重注册，列表里没有 model，
+  // 模型晚于首次注册才就绪时 execute 里的 planRepair.enter 还是 model=null 的旧闭包，静默 return——
+  // 宿主日志显示「命令成功」而界面毫无反应（修复城市入口的真机症状）。
+  const executeRef = useRef(execute);
+  executeRef.current = execute;
+  useEffect(() => connect((command) => executeRef.current(command.commandId, command.value)), []);
   // Publishing the first toolbar is the host's ready handshake. An empty scene
   // or loaded DTO alone must not arm the runtime watchdog during shader boot.
   useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, planRepair.state.active, experience.busy, experience.film?.frame, experience.film?.total]);
