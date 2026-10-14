@@ -1200,6 +1200,21 @@
       }
       case "harness_display_names": return { ...cityHarnessNames, workbuddy: "WorkBuddy" };
       case "clear_nav_target": case "clear_focus_target": return ok({ status: "ok" });
+      // 测试板 IP 自检：浏览器预览不跑真实网络探测（探测收敛在应用进程），给一份
+      // TEST-NET 合成报告，保证布局/降级态可开发可验证。
+      case "ip_check_run": return {
+        proxy_mode: "direct",
+        claude: { ip: "203.0.113.7", colo: "SYN", loc: "SG", warp: "off" },
+        cloudflare: { ip: "203.0.113.7", colo: "SIN", loc: "SG", warp: "off" },
+        china: { ip: "198.51.100.23", location: "中国 · 上海 · 上海" },
+        dns: { ip: "203.0.113.7", geo: "Singapore - Mock Resolver" },
+        intel: { country: "Singapore", countryCode: "SG", regionName: "", city: "Singapore", isp: "MockNet", org: "MockNet", as: "AS64512 MockNet", mobile: false, proxy: true, hosting: true },
+        latency: [
+          { host: "claude.ai", ms: 128, ok: true },
+          { host: "www.anthropic.com", ms: 311, ok: true },
+        ],
+        stun: { ip: "203.0.113.7" },
+      };
         default: throw new Error("Unsupported browser mock command: " + command);
       }
     } catch (error) {

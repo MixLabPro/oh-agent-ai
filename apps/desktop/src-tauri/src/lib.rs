@@ -13,6 +13,9 @@ mod quota_alerts;
 mod plugin_host;
 mod plugin_projections;
 mod plugin_state;
+// 「测试」板 Claude IP 风险自检：全部出站探测收敛在此模块（离线包契约：React
+// 源码不得含远端 URL / 网络客户端），并按 scutil --proxy 对齐系统代理路由。
+mod ip_check;
 #[cfg(all(feature = "plugin-isolation-probe", target_os = "macos"))]
 mod plugin_isolation_probe;
 
@@ -3329,65 +3332,6 @@ fn fail_pricing_catalog_update(
     Err(reason)
 }
 
-/// 「测试」板嵌入的 Claude IP 风险自检：webview 受 ATS 限制拿不到 ip-api 的
-/// http 明文接口（免费版才带 proxy/hosting 标记），由本进程代取一次公开 geo
-/// 情报。仅对公共目录发 GET、查询对象就是待检 IP 本身，不携带任何本地数据；
-/// 无缓存、无持久化、失败即向调用方报错（页面自行降级到 HTTPS 数据源）。
-fn ip_check_intel_arg_is_ip(ip: &str) -> bool {
-    let ip = ip.trim();
-    if ip.is_empty() || ip.len() > 45 {
-        return false;
-    }
-    let v4: Vec<&str> = ip.split('.').collect();
-    if v4.len() == 4 {
-        return v4.iter().all(|part| {
-            !part.is_empty()
-                && part.len() <= 3
-                && part.bytes().all(|b| b.is_ascii_digit())
-                && part.parse::<u8>().is_ok()
-        });
-    }
-    // IPv6：十六进制冒号，允许 IPv4 尾段（ip-api 接受该写法）
-    ip.contains(':') && ip.bytes().all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
-}
-
-#[tauri::command]
-async fn ip_check_intel(ip: String) -> Result<Value, String> {
-    if !ip_check_intel_arg_is_ip(&ip) {
-        return Err("invalid ip".into());
-    }
-    let url = format!(
-        "http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,isp,org,as,asname,mobile,proxy,hosting,query"
-    );
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .user_agent("agent-vitals-ip-check/1")
-        .build()
-        .map_err(|e| format!("create ip intel client failed: {e}"))?;
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("ip intel request failed: {e}"))?;
-    let code = response.status();
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("ip intel decode failed: {e}"))?;
-    if !code.is_success() {
-        return Err(format!("ip intel http {code}"));
-    }
-    if body.get("status").and_then(Value::as_str) != Some("success") {
-        return Err(
-            body.get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("ip intel rejected")
-                .to_string(),
-        );
-    }
-    Ok(body)
-}
-
 #[tauri::command(async)]
 fn public_pricing_catalog_status() -> Value {
     let data_home = overview::data_home();
@@ -5834,7 +5778,7 @@ pub fn run() {
             restore_authority_backup,
             export_diagnostic_package,
             about_diagnostics,
-            ip_check_intel,
+            ip_check::ip_check_run,
             check_for_updates,
             open_trusted_releases_page,
             budget_config,

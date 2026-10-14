@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { readRouteQuality, safeUiError, type RouteQualityFamily, type RouteQualityHarness, type RouteQualityReport } from "../../lib/tauri";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
+import { IpCheckSection } from "./IpCheckSection";
 
 const tx = (key: MessageKey, params: Record<string, string | number> = {}): string => message(key, resolvedLanguage(), params);
 const isEn = (): boolean => resolvedLanguage() === "en";
@@ -120,6 +121,8 @@ export function TestPage() {
     <ToolbarActions>
       <div className="test-header-actions"><label className="test-window-field"><span>{tx("qt.window")}</span><select value={days} onChange={(event) => setDays(Number(event.target.value) as 30 | 90 | 365)}>{windows.map((window) => <option key={window.value} value={window.value}>{tx(window.key)}</option>)}</select></label><button className="button button-secondary" type="button" onClick={refresh} disabled={loading}>{loading ? tx("qt.loading") : tx("qt.reload")}</button></div>
     </ToolbarActions>
+
+    <IpCheckSection />
 
     <section className="test-evidence-callout" aria-label={tx("qt.boundaryAria")}>
       <div><p className="eyebrow">{tx("qt.boundary")}</p><h3>{tx("qt.boundaryTitle")}</h3><p>{tx("qt.boundaryBody")}</p></div>

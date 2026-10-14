@@ -2521,6 +2521,33 @@ export async function readRouteQuality(days: 30 | 90 | 365): Promise<RouteQualit
   }
 }
 
+/** 「测试」板 Claude IP 自检：Rust 侧 ip_check::ip_check_run 的一份完整报告。
+ * 全部出站探测（trace / ipip / edns / ip-api / favicon 探针 / STUN）都在应用
+ * 进程执行并按 scutil --proxy 对齐系统代理路由；React 只渲染，零网络。 */
+export type IpCheckTrace = { ip: string; colo?: string; loc?: string; warp?: string };
+export type IpCheckReport = {
+  proxy_mode: "direct" | "static" | "pac" | "socks";
+  claude: IpCheckTrace | null;
+  cloudflare: IpCheckTrace | null;
+  china: { ip: string; location: string } | null;
+  dns: { ip: string; geo: string } | null;
+  intel: {
+    country?: string; countryCode?: string; regionName?: string; city?: string;
+    isp?: string; org?: string; as?: string;
+    mobile?: boolean | null; proxy?: boolean | null; hosting?: boolean | null;
+  } | null;
+  latency: Array<{ host: string; ms: number | null; ok: boolean }>;
+  stun: { ip: string } | null;
+};
+
+export async function readIpCheckReport(): Promise<IpCheckReport> {
+  const value = await invoke<IpCheckReport>("ip_check_run");
+  if (!value || typeof value !== "object" || !Array.isArray(value.latency)) {
+    throw new Error("ip 自检报告读取失败");
+  }
+  return value;
+}
+
 export async function readSessions(input: {
   day?: string;
   month?: string;

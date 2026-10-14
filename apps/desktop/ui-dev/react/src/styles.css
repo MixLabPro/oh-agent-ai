@@ -621,6 +621,86 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .test-quality-time { min-width: 135px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
 .test-quality-foot { margin-top: 12px; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
 
+/* Claude 访问风险自检（原生 React，测试板内嵌一体） */
+.ipcheck { display: grid; gap: 12px; margin-top: 26px; }
+.ipcheck-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.ipcheck-head h3 { margin: 4px 0 0; color: #26384e; font-size: 17px; }
+.ipcheck-head p:not(.eyebrow) { max-width: 760px; margin: 6px 0 0; color: var(--text-subtle); font-size: 12px; line-height: 1.6; }
+.ipcheck-banner { padding: 10px 14px; border: 1px solid #f0d9b0; border-radius: 10px; background: #fff6df; color: #8e5d0e; font-size: 12.5px; }
+.ipcheck-idle { padding: 22px; border-style: dashed; color: var(--text-subtle); font-size: 12.5px; }
+.ipcheck-idle p { margin: 0; }
+.ipcheck-card { padding: 16px 18px; border: 1px solid #e1e8f0; border-radius: 13px; background: #fff; box-shadow: 0 10px 28px rgb(31 55 80 / 3%); }
+.ipcheck-card h4 { margin: 0 0 10px; color: #26384e; font-size: 13px; font-weight: 650; }
+.ipcheck-note { margin: 10px 0 0; color: var(--text-muted); font-size: 11px; }
+.ipcheck-meta { color: var(--text-muted); font-size: 12px; }
+.ipcheck-value-failed { color: #a33b3b; }
+
+/* 出口：一致时单卡，分流时三卡 */
+.ipcheck-exits-same { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.ipcheck-exit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.ipcheck-exit { display: grid; gap: 3px; min-width: 0; padding: 12px 14px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fbfcfe; }
+.ipcheck-exit-primary { border-color: #e5c9bc; background: #fdf7f4; }
+.ipcheck-exit-label { color: var(--text-muted); font-size: 11px; }
+.ipcheck-exit-ip { color: #142238; font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; word-break: break-all; }
+.ipcheck-exit-meta { color: var(--text-muted); font-size: 11px; }
+
+/* 信任分 */
+.ipcheck-score-main { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.ipcheck-gauge { flex: 1 1 300px; }
+.ipcheck-gauge-track { position: relative; height: 10px; border-radius: 999px; background: linear-gradient(90deg, #a33b3b 0%, #c9a53c 50%, #087f62 75%, #06755a 100%); }
+.ipcheck-gauge-marker { position: absolute; top: -5px; width: 3px; height: 20px; border-radius: 2px; background: #142238; transform: translateX(-1.5px); box-shadow: 0 0 0 2px #fff; transition: left .5s cubic-bezier(.22, 1, .36, 1); }
+.ipcheck-gauge-scale { position: relative; height: 14px; margin-top: 5px; color: var(--text-muted); font-size: 10px; }
+.ipcheck-gauge-scale span { position: absolute; transform: translateX(-50%); }
+.ipcheck-gauge-scale span:nth-child(1) { left: 0; transform: none; }
+.ipcheck-gauge-scale span:nth-child(2) { left: 50%; }
+.ipcheck-gauge-scale span:nth-child(3) { left: 75%; }
+.ipcheck-gauge-scale span:nth-child(4) { left: 100%; transform: translateX(-100%); }
+.ipcheck-score-value { display: grid; gap: 6px; justify-items: center; min-width: 86px; }
+.ipcheck-score-value strong { font-size: 32px; font-weight: 730; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+.ipcheck-zone-ok { color: #087f62; } .ipcheck-zone-mid { color: #8e5d0e; } .ipcheck-zone-bad { color: #a33b3b; }
+.ipcheck-reasons { display: grid; gap: 5px; margin: 12px 0 0; padding: 0; list-style: none; }
+.ipcheck-reasons li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 12px; border: 1px solid #e1e8f0; border-radius: 8px; background: #fbfcfe; color: #3c4c60; font-size: 12px; }
+.ipcheck-reasons li.ipcheck-reason-good { color: #087f62; }
+.ipcheck-source { display: inline-block; margin-top: 10px; color: var(--text-muted); font-size: 10.5px; }
+
+/* KV 网格（详情 / 指纹） */
+.ipcheck-kv { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.ipcheck-kv > div { display: grid; gap: 3px; min-width: 0; padding: 10px 12px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fbfcfe; }
+.ipcheck-kv-wide { grid-column: 1 / -1; }
+.ipcheck-kv dt { color: var(--text-muted); font-size: 11px; }
+.ipcheck-kv dd { margin: 0; color: #142238; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+
+/* 可达性 */
+.ipcheck-latency-rows { display: grid; gap: 8px; }
+.ipcheck-latency-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fbfcfe; font-size: 13px; }
+.ipcheck-latency-row code { color: #3c4c60; font-size: 12px; }
+.ipcheck-latency-ok { color: #087f62; font-variant-numeric: tabular-nums; }
+.ipcheck-latency-bad { color: #a33b3b; }
+
+/* 泄漏 */
+.ipcheck-leak-rows { display: grid; gap: 8px; }
+.ipcheck-leak-row { display: grid; grid-template-columns: 170px 1fr auto; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fbfcfe; }
+.ipcheck-leak-label { color: var(--text-muted); font-size: 12px; }
+.ipcheck-leak-value { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ipcheck-leak-value code { color: #142238; font-size: 12.5px; word-break: break-all; }
+.ipcheck-leak-value small { color: var(--text-muted); font-size: 11px; }
+
+/* 历史 */
+.ipcheck-history-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ipcheck-history-head h4 { margin: 0; }
+.ipcheck-table-wrap { margin-top: 10px; overflow-x: auto; }
+.ipcheck-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ipcheck-table th { padding: 6px 10px; border-bottom: 1px solid #e1e8f0; color: var(--text-muted); font-size: 11px; font-weight: 550; text-align: left; white-space: nowrap; }
+.ipcheck-table td { padding: 6px 10px; border-bottom: 1px solid #edf1f6; white-space: nowrap; color: #3c4c60; }
+.ipcheck-table td strong { font-variant-numeric: tabular-nums; }
+
+@media (max-width: 800px) {
+  .ipcheck-exit-grid, .ipcheck-kv { grid-template-columns: 1fr 1fr; }
+  .ipcheck-leak-row { grid-template-columns: 1fr; }
+  .ipcheck-head { flex-direction: column; }
+}
+
+
 @media (max-width: 1100px) and (min-width: 801px) {
   .stats-grid, .overview-harness-list, .test-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
