@@ -377,7 +377,10 @@ export function buildBeachRibbon(host: SeasideHost): void {
   });
   const positions: number[] = []; const colors: number[] = [];
   const bands: Array<[number, number, THREE.Color]> = [];
-  const foam = new THREE.Color("#eef5f2"); const wetSand = new THREE.Color("#cdb487"); const drySand = new THREE.Color("#f3e5c2");
+  // 水线外侧曾铺一条 7 宽的不透明近白「浪花」带（#eef5f2，−6…+1）：均匀、不动、不透明，读作水边一圈白水泥
+  // （用户截图「湿沙外接近水的区域为什么是白色」）。浪花交给水面着色器的岸线涟漪（动态、不规则、随深度淡出）；
+  // 这里只留一窄条比湿沙更深的冲刷带（刚退浪、被水浸透的沙），把湿沙收到水线里。
+  const swash = new THREE.Color("#b39b70"); const wetSand = new THREE.Color("#cdb487"); const drySand = new THREE.Color("#f3e5c2");
   const point = (x: number, z: number, nx: number, nz: number, d: number) => {
     const px = x + nx * d; const pz = z + nz * d;
     return [px, terrain.height(px, pz) + 0.05, pz];
@@ -395,7 +398,7 @@ export function buildBeachRibbon(host: SeasideHost): void {
       };
       const s0 = at(t0); const s1 = at(t1);
       bands.length = 0;
-      bands.push([-6, 1.0, foam], [1.0, Math.min(wet, s0.depth - 1), wetSand], [Math.min(wet, s0.depth - 1), s0.depth, drySand]);
+      bands.push([-2, 1.5, swash], [1.5, Math.min(wet, s0.depth - 1), wetSand], [Math.min(wet, s0.depth - 1), s0.depth, drySand]);
       for (const [from, to, color] of bands) {
         const to1 = color === drySand ? s1.depth : to;
         const q = [point(s0.x, s0.z, s0.nx, s0.nz, from), point(s1.x, s1.z, s1.nx, s1.nz, from),
