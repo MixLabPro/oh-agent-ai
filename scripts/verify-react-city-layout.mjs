@@ -70,6 +70,21 @@ function validate(layout, input) {
     assert.equal(layout.terrain.height(parcel.x, parcel.z), 1.2, "buildings occupy the level coastal plain");
     // Parcel footprint (half-diagonal of width × depth) must clear every street + sidewalk, in any direction.
     // 曾只检查水平/竖直路段：街网一旦斜向（warp 后已是斜的，G2 起各片区朝向不同）这条断言就形同虚设。
+    // 高楼并入的相邻地块（parcel.mergedWith，宽 14.4）按真实朝向矩形检查：两块原地块各自都过了圆判据，
+    // 拼成的矩形不压路；但 14.4×8 的外接圆比两块原地块的圆都大一圈，会把贴着横街的并地块误判成压路。
+    if (parcel.mergedWith) {
+      const ax = Math.sin(parcel.yaw); const az = Math.cos(parcel.yaw); const bx = az; const bz = -ax;
+      for (const edge of layout.roadEdges) for (let segment = 1; segment < edge.points.length; segment += 1) {
+        const a = edge.points[segment - 1], b = edge.points[segment], len = Math.hypot(b.x - a.x, b.z - a.z);
+        for (let d = 0; d <= len; d += 1) {
+          const t = len ? d / len : 0;
+          const dx = a.x + (b.x - a.x) * t - parcel.x; const dz = a.z + (b.z - a.z) * t - parcel.z;
+          assert(!(Math.abs(dx * bx + dz * bz) < parcel.width / 2 + edge.width / 2 + 0.5 && Math.abs(dx * ax + dz * az) < parcel.depth / 2 + edge.width / 2 + 0.5),
+            `merged parcel ${parcel.id} overlaps road ${edge.id}`);
+        }
+      }
+      continue;
+    }
     const halfDiagonal = Math.hypot(parcel.width, parcel.depth) / 2;
     for (const edge of layout.roadEdges) for (let segment = 1; segment < edge.points.length; segment += 1) {
       const a = edge.points[segment - 1], b = edge.points[segment];

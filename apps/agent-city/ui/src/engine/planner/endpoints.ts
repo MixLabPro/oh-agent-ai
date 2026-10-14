@@ -54,6 +54,8 @@ export type PlannedEndInputs = {
   coastRoadRunEnds: Vec2[];
   coast: Vec2[];
   river: Vec2[] | null;
+  /** 内水岸线（geography.waterEdges：海湾两岸 + 湾内岛轮廓）；缺省视为无。 */
+  waterEdges?: Vec2[][];
 };
 
 const segDistance = (p: Vec2, a: Vec2, b: Vec2): number => {
@@ -77,5 +79,6 @@ export function isPlannedRoadEnd(node: Vec2 & { id?: string }, world: PlannedEnd
   if (world.coastRoadRunEnds.some((c) => Math.hypot(c.x - node.x, c.z - node.z) < 1)) return true;
   if (polylineDistance(world.coast, node) <= WATER_STOP_MARGIN) return true;
   if (world.river && polylineDistance(world.river, node) <= WATER_STOP_MARGIN) return true;
+  if (world.waterEdges?.some((edge) => polylineDistance(edge, node) <= WATER_STOP_MARGIN)) return true;
   return false;
 }

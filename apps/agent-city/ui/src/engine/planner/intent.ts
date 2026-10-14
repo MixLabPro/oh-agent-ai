@@ -48,7 +48,7 @@ type Site = { id?: string; kind: string; x: number; z: number; radius: number };
 /** 意图诊断实际消费的 plan 结构子集（structural typing）：createCityPlan 的完整产物满足，
  *  cityPlan 组装中的中间产物（尚未补 scaleTier/biome 等外层字段）也满足——形态批 §5-3
  *  在 buildPlan 末尾直接取 cul-de-sac 端点而无需等外层包装。 */
-export type NetworkIntentPlan = Pick<CityPlan, "roadNodes" | "roadEdges" | "publicSites" | "landmarks" | "seaside" | "coastRoads" | "riverRoadRuns" | "coast" | "river" | "core"> & { primaryAnchorNodeId?: string | null; siteObligations?: Array<{ ownerId: string; placed: boolean; reason?: string }>; demandCatalogue?: readonly ConnectionDemand[] };
+export type NetworkIntentPlan = Pick<CityPlan, "roadNodes" | "roadEdges" | "publicSites" | "landmarks" | "seaside" | "coastRoads" | "riverRoadRuns" | "coast" | "river" | "core"> & { waterEdges?: Vec2[][]; primaryAnchorNodeId?: string | null; siteObligations?: Array<{ ownerId: string; placed: boolean; reason?: string }>; demandCatalogue?: readonly ConnectionDemand[] };
 
 /** 连通分量（桥计入连通——车能过桥）。返回 node id → 分量 id（复用 roadNodeId 作分量代表）。 */
 export function componentOf(plan: NetworkIntentPlan): Map<string, string> {
@@ -205,7 +205,7 @@ export function classifyEndpoints(plan: NetworkIntentPlan, comp: Map<string, str
     else if (site) role = { kind: "site-access", ownerId: site.id ?? site.kind };
     else if (boulevardEnds.some((b) => Math.hypot(b.x - q.x, b.z - q.z) < 1)) role = { kind: "cul-de-sac", reason: "planned-local" };
     else if (coastRunEnd >= 0) role = { kind: "must-connect", demandId: `coastal:${coastRunEnd}` };
-    else if (isPlannedRoadEnd(q, { sites, boulevardEnds, coastRoadRunEnds: [], coast: plan.coast ?? [], river: plan.river ?? null })) role = { kind: "cul-de-sac", reason: "coast" };
+    else if (isPlannedRoadEnd(q, { sites, boulevardEnds, coastRoadRunEnds: [], coast: plan.coast ?? [], river: plan.river ?? null, waterEdges: plan.waterEdges ?? [] })) role = { kind: "cul-de-sac", reason: "coast" };
     else role = { kind: "must-connect", demandId: `endpoint:${id}` };
     out.push({ node: id, at: { x: q.x, z: q.z }, role });
   }

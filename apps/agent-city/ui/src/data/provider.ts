@@ -32,7 +32,9 @@ function syntheticSessions(count: number): CityProjectionV1["sessions"] {
 
 function fixtureProjection(windowDays: 7 | 30 | 90 | 366): CityProjectionV1 {
   const from = ({ 7: "2026-09-27T00:00:00Z", 30: "2026-09-03T00:00:00Z", 90: "2026-07-06T00:00:00Z", 366: "2025-10-03T00:00:00Z" } as const)[windowDays];
-  const synthetic = Number(new URLSearchParams(location.search).get("fixtureSessions"));
+  // 只在浏览器里读查询参数：Node 守卫（verify-react-city-data）没有 location / URLSearchParams。
+  const search = typeof location !== "undefined" && typeof URLSearchParams !== "undefined" ? new URLSearchParams(location.search) : null;
+  const synthetic = Number(search?.get("fixtureSessions") ?? 0);
   const allSessions: CityProjectionV1["sessions"] = Number.isInteger(synthetic) && synthetic > 0 ? syntheticSessions(Math.min(synthetic, 3000)) : [
     { id: "fixture-session-001", harness: "codex", first_event_at: "2026-10-02T09:10:00Z", last_event_at: "2026-10-02T09:42:00Z", tokens: { input: 12400, output: 3100, total: 15500 } },
     { id: "fixture-session-002", harness: "claude_code", first_event_at: "2026-09-28T14:05:00Z", last_event_at: "2026-09-28T14:51:00Z", tokens: { input: 8700, output: 2200, total: 10900 } },

@@ -139,7 +139,7 @@ export function connectSiteEntrances(w: SiteEntranceWorld) {
         const view = (candidate: Network, access?: PublicSite["access"]) => ({
           roadEdges: [...candidate.edges.values()], roadNodes: [...candidate.nodes.values()],
           publicSites: publicSites.map((owner) => owner === site && access ? { ...owner, access } : owner),
-          landmarks, blocks: [], terrain, core, coast, river, seaside,
+          landmarks, blocks: [], terrain, core, coast, river, waterEdges: geo.waterEdges, seaside,
           coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount),
           primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => candidate.nodes.has(id)) ?? null,
           siteObligations, demandCatalogue: declaredSiteDemands } as unknown as ConstraintPlan);

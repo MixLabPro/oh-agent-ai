@@ -38,6 +38,9 @@ export type Geography = {
   islets: Array<Vec2 & { radius: number; kind: "starfish" | "leaf-links" | "prawn"; /** 贴哪一岸（短桥接这一岸）：1 = 东岛，-1 = 西岛大陆。 */ side?: 1 | -1 }>;
   /** 到最近小岛岸线的带符号距离（岛内为正）；无岛恒为 -Infinity。 */
   isletClearance: (x: number, z: number) => number;
+  /** 内水岸线（开湾时 = 海湾两岸 + 湾内岛轮廓；否则空）。路端离它 ≤ WATER_STOP_MARGIN 算合法的近水终止——
+   *  外海岸（coast）与河道中线（river）认不到湾岸：湾半宽 100+，停在湾岸的主干道端头曾全被判成违规断头。 */
+  waterEdges: Vec2[][];
 };
 
 /** 中央海湾参数（来自 CoastalConfig.bayHalfWidth / bayShift）；null = 原来的窄河。 */
@@ -207,7 +210,34 @@ export function buildGeography(seed: number, R: number, seedShape: Shape, opts: 
     buildable, center: { x: 0, z: 0 }, radius: R * 1.3, coastRadius: () => R, hasRiver,
   };
 
+  const waterEdges: Vec2[][] = [];
+  if (bay && river.length) {
+    for (const side of [-1, 1]) waterEdges.push(river.map((p) => ({ x: riverX(p.z) + side * riverWidth(p.z), z: p.z })));
+    for (const islet of islets) {
+      // 轮廓：每个方位二分出 isletClearance = 0 的半径（岸线带噪声，不能直接用名义半径）
+      const ring: Vec2[] = [];
+      for (let k = 0; k <= 48; k += 1) {
+        const a = (k / 48) * Math.PI * 2; const ux = Math.cos(a); const uz = Math.sin(a);
+        let lo = 0; let hi = islet.radius * 2.2;
+        for (let it = 0; it < 18; it += 1) { const mid = (lo + hi) / 2; if (isletClearance(islet.x + ux * mid, islet.z + uz * mid) > 0) lo = mid; else hi = mid; }
+        ring.push({ x: islet.x + ux * lo, z: islet.z + uz * lo });
+      }
+      waterEdges.push(ring);
+    }
+    // 可见外海岸：保守离岸距离（coastDistanceRaw，低估）的零线才是地形上看得见的岸；名义轮廓（coast）在它外面，
+    // 开湾的定向岛形下差到 40+，停在可见岸边的主干道端头离名义轮廓 > 40，被判违规断头（seed 1703294958/2 档实测 41/47）。
+    // 只从岛中心沿射线二分，取最外一处零点即可（岛形是星形的极坐标函数）。
+    const visible: Vec2[] = [];
+    const cx = (bbox.minX + bbox.maxX) / 2; const cz = (bbox.minZ + bbox.maxZ) / 2;
+    for (let k = 0; k <= 96; k += 1) {
+      const a = (k / 96) * Math.PI * 2; const ux = Math.cos(a); const uz = Math.sin(a);
+      let lo = 0; let hi = R * 2;
+      for (let it = 0; it < 20; it += 1) { const mid = (lo + hi) / 2; if (coastDistanceRaw(cx + ux * mid, cz + uz * mid) > 0) lo = mid; else hi = mid; }
+      visible.push({ x: cx + ux * lo, z: cz + uz * lo });
+    }
+    waterEdges.push(visible);
+  }
   // 斜穿的主干道跨距比湾的全宽长，留 1.6 倍余量 + 对岸退界。
   const maxWaterSpan = bay ? Math.max(140, Math.ceil(bayHalf * 1.22 * 2 * 1.6 + 60)) : 140;
-  return { R, coast, bbox, hasRiver, river, riverShift, riverX, riverWidth, coastDistance, landClearance, hillAngle, hillDir, hillLine, hillProj, height, buildable, terrain, maxWaterSpan, islets, isletClearance };
+  return { R, coast, bbox, hasRiver, river, riverShift, riverX, riverWidth, coastDistance, landClearance, hillAngle, hillDir, hillLine, hillProj, height, buildable, terrain, maxWaterSpan, islets, isletClearance, waterEdges };
 }

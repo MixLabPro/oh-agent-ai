@@ -195,12 +195,19 @@ export function buildSkeleton(opts: {
           const beyond = (lastLand.x - landing.to.x) * dir.x + (lastLand.z - landing.to.z) * dir.z > 0;
           if (beyond) points.push(lastLand);
           else { points.pop(); rayBridges.pop(); }
+        } else if (geo.maxWaterSpan > 140 && points[points.length - 1] !== lastLand) {
+          // 路点每 3 步（36）才记一次：停在海岸时最后一个路点可能离 lastLand 还差 36，加上离岸 13 的门槛，
+          // 端头离水最远 ~49，过了近水终止带（40）成了断头（seed 1703294958/2 档实测）。把 lastLand 补进路线。
+          points.push(lastLand);
         }
         break;
       }
       // 岸边用地（港口/灯塔/歌剧院/摩天轮）：主干道到它门口为止，这一段就是它的入口路。
       // 曾一路穿过去直到海边（港口中心离主干道 1 单位）。
-      if (water === 0 && [...publicSites, ...landmarks].some((site) => SHORE_SITE_KINDS.has(site.kind) && Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 4)) {
+      // 开湾时只为位置固定的港口停：可挪动的岸边地标（庄园/歌剧院/灯塔…）随后会被贴岸遍挪走，主干道端头留在原地成了
+      // 离新位置 30+ 的断头（seed 1703294958/2 档实测：庄园挪到 67 外）。它们贴岸时本来就避让主干道。
+      if (water === 0 && [...publicSites, ...landmarks].some((site) => SHORE_SITE_KINDS.has(site.kind)
+        && (geo.maxWaterSpan <= 140 || site.kind === "harbor") && Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 4)) {
         if (points[points.length - 1] !== lastLand) points.push(lastLand);
         break;
       }
@@ -219,7 +226,9 @@ export function buildSkeleton(opts: {
       // 开湾时桥头只记在离岸 ≥10 的陆地上：湾岸是长缓坡，离水 <3 的点高度已 ≤0.5，桥头落在那里时
       // 引道两侧的横向采样会掉进水里，整条跨湾主干道被走廊检查以 water-span 拒掉（seed 807065449/5 档实测）。
       // 岸边带内的点也不进路线：否则路线先走到岸边、再折回桥头，引道是一段回头路。
-      if (geo.maxWaterSpan > 140 && geo.landClearance(q.x, q.z) < 10) continue;
+      // 门槛 13（> buildable 的 12）：离岸 10–12 的路点过不了地面路走廊的可建设检查，整段被退回到更早的点，
+      // 端头停在离水 ~50 的内陆成了断头（seed 1703294958/2 档实测 trunk 3 building-setback）。
+      if (geo.maxWaterSpan > 140 && geo.landClearance(q.x, q.z) < 13) continue;
       lastLand = q;
       if (step % 3 === 0) points.push(q);
     }
@@ -352,7 +361,7 @@ function buildCauseways(geo: Geography, network: Network, inRiver: (x: number, z
     if (!onIslet && bridges.some((b) => crossesBay(b) && Math.abs((b.from.z + b.to.z) / 2 - z) < spacing * 0.5)) continue;
     // 两岸桥头：从湾岸各向外走，直到离岸 ≥10（与主干道桥头同一口径）。
     const walk = (side: -1 | 1): Vec2 | null => {
-      for (let d = 0; d < 240; d += 12) {
+      for (let d = 0; d < 240; d += 4) { // 步长 4：桥头离岸 10–14（步长 12 时 10–22）
         const p = { x: riverX(z) + side * (riverWidth(z) + d), z };
         if (coastDistance(p.x, p.z) <= 0) return null;
         if (landClearance(p.x, p.z) >= 10 && !inRiver(p.x, p.z)) return p;
@@ -361,9 +370,11 @@ function buildCauseways(geo: Geography, network: Network, inRiver: (x: number, z
     };
     const west = walk(-1); const east = walk(1);
     if (!west || !east) { diagnostics.push({ trunk: 100 + k, phase: "route", reason: "no-target", cause: "causeway-no-landing" }); continue; }
-    // 引道：桥头外再走 48；东岛窄，走不满就退到 24。
+    // 引道：桥头外再走 20（走不满退到 16）。端头离湾岸 ≤ 34，落在近水终止带（WATER_STOP_MARGIN 40）内：
+    // 引道靠后面的连通阶段接进街网，没被接满时剩下的尾段是合法的近水尽端。曾走 48，端头离岸 58–70，
+    // 被街在中途 T 接后剩下的 5 长尾巴成了违规断头（seed 1703310796/1–2 档实测）。
     const approach = (from: Vec2, side: -1 | 1): Vec2 | null => {
-      for (const d of [48, 36, 24]) {
+      for (const d of [20, 16]) {
         const p = { x: from.x + side * d, z };
         if (coastDistance(p.x, p.z) > 20 && landClearance(p.x, p.z) >= 10) return p;
       }
@@ -412,13 +423,20 @@ function buildCauseways(geo: Geography, network: Network, inRiver: (x: number, z
       edge = p;
     }
     let east: Vec2 | null = null;
-    for (let d = 0; d < 240 && edge; d += 12) {
+    for (let d = 0; d < 240 && edge; d += 4) {
       const p = { x: edge.x + s * (12 + d), z };
       if (coastDistance(p.x, p.z) <= 0) break;
       if (landClearance(p.x, p.z) >= 10 && !inRiver(p.x, p.z)) { east = p; break; }
     }
-    const eastIn = east && [48, 36, 24].map((d) => ({ x: east!.x + s * d, z })).find((p) => coastDistance(p.x, p.z) > 20 && landClearance(p.x, p.z) >= 10);
-    const start = { x: islet.x, z };
+    const eastIn = east && [20, 16].map((d) => ({ x: east!.x + s * d, z })).find((p) => coastDistance(p.x, p.z) > 20 && landClearance(p.x, p.z) >= 10);
+    // 岛上的路从岛的另一侧岸边（离岸 12）起，而不是岛心：岛心那一端离任何水都 > 40，会被判成违规断头
+    // （seed 2005864824/1 档实测「required road endpoint has no accepted continuation」）；岸边起点算近水终止。
+    let start: Vec2 = { x: islet.x, z };
+    for (let d = 0; d < islet.radius * 1.3; d += 3) {
+      const p = { x: islet.x - s * d, z };
+      if (geo.isletClearance(p.x, p.z) < 12) break;
+      start = p;
+    }
     if (!edge || !east || !eastIn || Math.abs(edge.x - start.x) < 18 || ![start, edge, east, eastIn].every(clearOfSites)) {
       diagnostics.push({ trunk: 200, phase: "route", reason: "no-target", cause: "prawn-bridge-no-landing" }); continue;
     }

@@ -73,8 +73,11 @@ if (process.argv.includes("--named") || process.env.CITY_SHORE_NAMED === "1") {
   const plan = createCityPlan(2005445908, 1, MIAMI_COASTAL);
   const owner = plan.publicSites.find((site) => site.id === "working-harbor");
   assert.ok(owner);
-  assert.equal(owner.x, -105.06170319231644); assert.equal(owner.z, -660.4371312640201);
-  assert.equal(owner.yaw, 2.0810708964973292); assert.equal(plan.islandRadius, 551.5432893255071);
+  // 2026-10-15 开湾地理（生成器版本 2）后重钉：岛形定向、海湾与湾口排除改变了港口落点，下面的语义断言
+  //（需求全满足、约束零违例、容量一致、港口有 plot-gate）照旧成立。曾为 -105.06/-660.44、yaw 2.081、R 551.54。
+  assert.equal(owner.x, -208.4862353967711); assert.equal(owner.z, 663.4343380729366);
+  assert.equal(owner.yaw, -2.7529294616059796); assert.equal(plan.islandRadius, 780.0000000000001);
+  assert.equal(owner.access?.role, "plot-gate");
   assert.deepEqual(diagnoseNetwork(plan).unmet, []);
   assert.deepEqual(Object.fromEntries(CONSTRAINTS.map((c) => [c.id, c.measure(plan)]).filter(([, v]) => v.length)), {});
   assert.equal(plan.capacity.available, plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0));

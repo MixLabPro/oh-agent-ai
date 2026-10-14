@@ -232,7 +232,32 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const TALL = 26;
   const parcelsByBlock = new Map<string, Parcel[]>();
   for (const parcel of parcels) { const list = parcelsByBlock.get(parcel.blockId); if (list) list.push(parcel); else parcelsByBlock.set(parcel.blockId, [parcel]); }
-  const mergeParcels = (a: Parcel, b: Parcel): Parcel => ({ ...a, x: (a.x + b.x) / 2, z: (a.z + b.z) / 2, width: a.width + b.width, mergedWith: b.id });
+  // 并集取精确外包：沿街方向两块的最外侧边缘之间。曾取「宽 = 两块面宽之和、中心 = 两块中点」——相邻判定允许间距 ±1.2，
+  // 间距偏小时矩形两头各多伸出 ~0.6，碰到街区自己的边界路（verify-react-city-layout 实测）。
+  const mergeParcels = (a: Parcel, b: Parcel): Parcel => {
+    const tx = Math.cos(a.yaw); const tz = -Math.sin(a.yaw);
+    const along = (b.x - a.x) * tx + (b.z - a.z) * tz;
+    const lo = Math.min(-a.width / 2, along - b.width / 2); const hi = Math.max(a.width / 2, along + b.width / 2);
+    const mid = (lo + hi) / 2;
+    return { ...a, x: a.x + tx * mid, z: a.z + tz * mid, width: hi - lo, mergedWith: b.id };
+  };
+  const nearbyRoads = (x: number, z: number, reach: number) => plan.roadEdges.filter((edge) => edge.points.some((pt, i) => {
+    if (i === 0) return false;
+    const a = edge.points[i - 1];
+    return Math.min(a.x, pt.x) - reach < x && Math.max(a.x, pt.x) + reach > x && Math.min(a.z, pt.z) - reach < z && Math.max(a.z, pt.z) + reach > z;
+  }));
+  const mergedClearsRoads = (m: Parcel): boolean => {
+    const ax = Math.sin(m.yaw); const az = Math.cos(m.yaw); const bx = az; const bz = -ax;
+    for (const edge of nearbyRoads(m.x, m.z, Math.hypot(m.width, m.depth) / 2 + 10)) for (let i = 1; i < edge.points.length; i += 1) {
+      const a = edge.points[i - 1]; const b = edge.points[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
+      for (let d = 0; d <= len; d += 1) {
+        const t = len ? d / len : 0;
+        const dx = a.x + (b.x - a.x) * t - m.x; const dz = a.z + (b.z - a.z) * t - m.z;
+        if (Math.abs(dx * bx + dz * bz) < m.width / 2 + edge.width / 2 + 0.5 && Math.abs(dx * ax + dz * az) < m.depth / 2 + edge.width / 2 + 0.5) return false;
+      }
+    }
+    return true;
+  };
   const adjacentFree = (p: Parcel, isFree: (q: Parcel) => boolean): Parcel | null => {
     if (p.blockId.startsWith("hotel:") || p.blockId.startsWith("oceandrive:") || p.width > 9) return null;
     const tx = Math.cos(p.yaw); const tz = -Math.sin(p.yaw);
@@ -243,6 +268,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       const along = dx * tx + dz * tz; const across = dx * Math.sin(p.yaw) + dz * Math.cos(p.yaw);
       const yawGap = Math.abs((((q.yaw - p.yaw + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI);
       if (Math.abs(across) > 0.8 || yawGap > 0.05 || Math.abs(Math.abs(along) - (p.width + q.width) / 2) > 1.2) continue;
+      // 空地块不保证不压路（规划后期的修补/接入路可能穿过还没人住的地块；守卫只查有楼的地块）：并之前按合并后的
+      // 真实朝向矩形查一遍。判据与 verify-react-city-layout 的并地块断言同一口径——两个轴向都留「半个路幅 + 0.5」，
+      // 比 lotClearsRoads 严：街区折角处斜着走的边界路，lotClearsRoads 放行、这条判据拒绝（守卫实测 4 例）。
+      if (!mergedClearsRoads(mergeParcels(p, q))) continue;
       const gap = Math.abs(along);
       if (gap < bestAlong - 1e-6 || (Math.abs(gap - bestAlong) <= 1e-6 && best !== null && q.id < best.id)) { bestAlong = gap; best = q; }
     }
@@ -544,7 +573,9 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   if (coastal?.profile === "miami-coastal" && backdrop !== "off") {
     const full = backdrop === "full";
     const reserved = new Set([...used, ...civics.map((civic) => civic.parcelId)]);
-    const coreRadius = plan.islandRadius;
+    // 开湾时岛形定向南北、长半轴 ≈ 1.25R，核心又贴着西岸：0.94R 的圈罩不住南北两端，「繁华」档背景楼只剩一半
+    // （verify-react-city-layout 低会话量实测 75 < 140）。放宽到 1.4R；仍要求可建、坡度、避高架与海滨带。
+    const coreRadius = plan.islandRadius * ((coastal?.bayHalfWidth ?? 0) > 0 ? 1.4 / 0.94 : 1);
     const sessionSlots = [...assigned.values()];
     const candidates = plan.blocks
       .flatMap((block) => block.parcels)

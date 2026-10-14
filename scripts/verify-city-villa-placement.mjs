@@ -5,8 +5,11 @@ const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, diagnoseNetwork, inspectMode
   "engine/planner/constraints.ts": ["CONSTRAINTS"], "engine/planner/intent.ts": ["diagnoseNetwork"],
   "engine/planner/modelGround.ts": ["inspectModelGround"], "engine/planner/modelEnvelope.ts": ["inspectEnvelopeRoad"],
 });
-const plan = createCityPlan(1703310796, 2, MIAMI_COASTAL);
-const before = createCityPlan(1703310796, 2, MIAMI_COASTAL, { skipSolve: true });
+// 见证用「不开湾」的迈阿密配置（bayHalfWidth 0）：开湾（生成器版本 2）后庄园候选岸点排除了湾口，生产配置下
+// 1703294958 起 80 个种子×档位都不再出现「地基落水 → 修复」，这条修复路径只在不开湾的岛形上还有真实见证。
+const WITNESS = { ...MIAMI_COASTAL, bayHalfWidth: 0 };
+const plan = createCityPlan(1703310796, 2, WITNESS);
+const before = createCityPlan(1703310796, 2, WITNESS, { skipSolve: true });
 const beforeOwner = before.landmarks.find(site => site.id === "landmark:villa-complex");
 assert(beforeOwner, "the unrepaired witness must retain its owner");
 assert.equal(inspectModelGround(beforeOwner, { height: before.terrain.height, inRiver: () => false }).status, "violation",

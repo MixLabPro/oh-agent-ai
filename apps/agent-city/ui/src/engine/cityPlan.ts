@@ -186,11 +186,18 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 否则环岛、放射主干道、高架都围着旧核心画，广场孤悬一旁（用户截图；30 岛里 10 个偏 12–60）。
   { const plaza = publicSites[publicSites.length - 1]; core = { x: plaza.x, z: plaza.z }; }
   place("observation-tower", "tower", around(turn + 0.9, 0.16 * R), 26, 0);
-  place("riverside-park", "park", hasRiver ? { x: riverX(core.z + 0.18 * R) + riverWidth(core.z) + 60, z: core.z + 0.18 * R } : around(turn + 3.6, 0.3 * R), 47, 0);
+  // 开湾时公园放西岸（大陆、核心一侧）的湾边：东岸往里 60 正好是窄东岛上堤道上岸的地方，引道从公园里穿过
+  // （seed 4001256748/1 档实测 roadThroughSite park d=28）。对应迈阿密市中心湾边的 Bayfront Park。
+  const parkSide = geo.maxWaterSpan > 140 ? -1 : 1;
+  place("riverside-park", "park", hasRiver ? { x: riverX(core.z + 0.18 * R) + parkSide * (riverWidth(core.z) + 60), z: core.z + 0.18 * R } : around(turn + 3.6, 0.3 * R), 47, 0);
+  // 岸边用地（港口、岸边地标）的候选岸点：开湾时排除湾口那段轮廓——整岛轮廓在海湾两端横跨湾口，
+  // 那几个「岸点」其实在湾面上；核心又贴着湾，最近的岸点正好落在湾口，港口被放进水里、路接不上
+  // （seed 1703350391/2 档实测：港口中心离湾中线 38、湾半宽 100+）。窄河不变。
+  const outerShore = geo.maxWaterSpan > 140 ? coast.filter((p) => Math.abs(p.x - riverX(p.z)) > riverWidth(p.z) + 40) : coast;
   {
     // 港口：离核心最近的一段海岸内侧（码头离市中心不远）。
     // 取离核心 ≥150 的最近岸点：核心贴海时（用户种子）曾取到市政广场旁的岸点，再被避让推进内陆，港口落在市中心（真机截图）。
-    const byDistance = [...coast].sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
+    const byDistance = [...outerShore].sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
     const shore = byDistance.find((p) => Math.hypot(p.x - core.x, p.z - core.z) >= 150) ?? byDistance[0];
     // 中心只内移 10：码头半边伸向水面（buildMarina 的栈桥由此入海）。
     const toCore = Math.max(1, Math.hypot(core.x - shore.x, core.z - shore.z));
@@ -202,7 +209,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── 致敬型地标：种子从候选里抽 2–3 座，按地理条件选址；和公共用地一样先于街区预留土地。
   const landmarks: Landmark[] = [];
   {
-    const shoreOrder = [...coast].sort((p, q) => Math.hypot(p.x - core.x, p.z - core.z) - Math.hypot(q.x - core.x, q.z - core.z));
+    const shoreOrder = [...outerShore].sort((p, q) => Math.hypot(p.x - core.x, p.z - core.z) - Math.hypot(q.x - core.x, q.z - core.z));
     const inwardFrom = (shore: Vec2, amount: number) => ({ x: shore.x + (core.x - shore.x) * amount, z: shore.z + (core.z - shore.z) * amount });
     const taken = () => [...publicSites, ...landmarks].map((site) => ({ x: site.x, z: site.z, radius: site.radius }));
     const candidates: Array<{ kind: LandmarkKind; weight: number; site: () => { at: Vec2; radius: number; clearance: number; yaw: number } | null }> = [
@@ -594,7 +601,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       "sitesOverlap", "stationStadiumSetback", "stationDoorFacesRoad", "archStraddlesRoad", "unjoinedGroundJunctions",
       "crowdedArterials", "bridgeheadContinuity"].includes(rule.id));
     const view = (candidate: Network, sites: PublicSite[]) => ({ roadEdges: [...candidate.edges.values()],
-      roadNodes: [...candidate.nodes.values()], publicSites: sites, landmarks, blocks: [], terrain, core, coast, river,
+      roadNodes: [...candidate.nodes.values()], publicSites: sites, landmarks, blocks: [], terrain, core, coast, river, waterEdges: geo.waterEdges,
       seaside, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount),
       primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => candidate.nodes.has(id)) ?? null } as unknown as ConstraintPlan);
     const identity = (finding: { site?: string; at?: Vec2; detail?: string }) => JSON.stringify([finding.site, finding.at, finding.detail]);
@@ -795,7 +802,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 死胡同回车圈。classifyEndpoints 经 diagnoseNetwork 调用，只读（verify-city-intent
   // 已证诊断前后 plan 深比较一致），不改任何路网/用地字段，计划基线哈希不受影响。
   const plan = { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
-    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks, seaside, islets: geo.islets,
+    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks, seaside, islets: geo.islets, waterEdges: geo.waterEdges,
     // 修复可能合并掉一个 civic 节点；只在骨架预先声明的锚点集合内重绑，不能选附近支路。
     connections: connectionLog, primaryAnchorNodeId: repairCtx.primaryAnchorNodeId ?? null, junctionReport, solveReport, siteObligations,
     demandCatalogue: repairCtx.demandCatalogue?.map((demand) => ({ ...demand })),
