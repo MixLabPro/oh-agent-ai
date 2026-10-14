@@ -123,6 +123,8 @@ export type CityLayout = {
 };
 
 const plans = new Map<string, ReturnType<typeof createCityPlan>>();
+export const CITY_PLAN_CACHE_CONFIG = { version: 1, maxEntries: 8 } as const;
+export const cityPlanCacheSize = () => plans.size;
 
 /** Overflow sessions never vanish and never crash the page: they merge into a
  *  few background massing blocks per district, placed on open buildable land
@@ -173,7 +175,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const coastalKey = coastal
     ? `${coastal.profile}:v${coastal.version}:${[
         coastal.preferredAzimuth, coastal.azimuthTolerance, coastal.segmentArc,
-        coastal.wetSandWidth, coastal.drySandWidth, coastal.promenadeOffset,
+        coastal.wetSandWidth, coastal.drySandWidth, coastal.promenadeOffset, coastal.boulevardOffset,
         coastal.hotelOffset, coastal.bandOuter, coastal.maxCoastalSlope,
         coastal.maxCoastalHeight, coastal.riverMargin, coastal.siteMargin,
         coastal.minValidRatio,
@@ -181,7 +183,14 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     : "none";
   const planKey = `${seed}:${tier}:${coastalKey}`;
   let plan = plans.get(planKey);
-  if (!plan) { plan = createCityPlan(seed, tier, coastal); plans.set(planKey, plan); }
+  if (plan) { plans.delete(planKey); plans.set(planKey, plan); }
+  else {
+    plan = createCityPlan(seed, tier, coastal);
+    if (plan.derivedFinalization.ok && plan.capacity.satisfied && plan.planningOutcome.status !== "failed") {
+      plans.set(planKey, plan);
+      while (plans.size > CITY_PLAN_CACHE_CONFIG.maxEntries) plans.delete(plans.keys().next().value!);
+    }
+  }
   // 海滨酒店地块并入可落楼街区（单地块合成街区，朝海、宽 20–29）：酒店只在有会话落户时才出现。
   // 只进本函数的落楼候选，不改缓存的 plan、不进返回的 layout.blocks（地面贴图/规划守卫看到的规划不变），
   // 配套选址与背景楼仍只看 plan.blocks——酒店地块留给会话。

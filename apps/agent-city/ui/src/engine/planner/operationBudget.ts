@@ -42,13 +42,17 @@ export function isPlanningInterrupted(error: unknown): error is PlanningInterrup
     && PLANNING_WORK_UNITS.includes(detail.unit) && count(detail.requested) && count(detail.consumed) && count(detail.limit));
 }
 
-export function createPlanningWorkLedger(input: PlanningWorkCounts, isCancelled: () => boolean = () => false): PlanningWorkLedger {
+export function createPlanningWorkLedger(input: PlanningWorkCounts, isCancelled: () => boolean = () => false,
+  onCheckpoint?: (snapshot: PlanningWorkSnapshot) => void): PlanningWorkLedger {
   const limits = Object.freeze({ ...input });
   if (!input || Object.keys(limits).length !== PLANNING_WORK_UNITS.length
     || PLANNING_WORK_UNITS.some(unit => !Object.hasOwn(limits, unit) || !count(limits[unit])))
     throw new Error("invalid-planning-work-limits");
   const consumed = Object.fromEntries(PLANNING_WORK_UNITS.map(unit => [unit, 0])) as Record<PlanningWorkUnit, number>;
   let stop: PlanningInterrupted | undefined;
+  let checkpointCalls = 0;
+  const snapshot = (): PlanningWorkSnapshot => Object.freeze({ limits,
+    consumed: Object.freeze({ ...consumed }), ...(stop ? { stop: stop.detail } : {}) });
   const check = (stage: string) => {
     if (!stageValid(stage)) throw new Error("invalid-planning-work-stage");
     if (stop) throw stop;
@@ -75,9 +79,12 @@ export function createPlanningWorkLedger(input: PlanningWorkCounts, isCancelled:
       }
     }
     for (const unit of units) consumed[unit] += charges[unit]!;
+    if (onCheckpoint && checkpointCalls++ % 50000 === 0) {
+      try { onCheckpoint(snapshot()); }
+      catch { stop = new PlanningInterrupted({ status: "cancelled", stage: "job:checkpoint" }); throw stop; }
+    }
   };
-  return Object.freeze({ check, spend, snapshot: () => Object.freeze({ limits,
-    consumed: Object.freeze({ ...consumed }), ...(stop ? { stop: stop.detail } : {}) }) });
+  return Object.freeze({ check, spend, snapshot });
 }
 
 // Existing planning is synchronous. Scope the one job ledger without adding it

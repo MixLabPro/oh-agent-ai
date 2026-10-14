@@ -13,6 +13,8 @@ const groups = {
 const newGeometryStages = ["verify-city-layout-envelopes", "verify-city-parcel-frontage", "verify-city-block-placement", "verify-city-block-lot-candidates", "verify-city-villa-physical", "verify-city-model-ground"];
 synthetic.push(...newGeometryStages);
 synthetic.push("verify-city-operation-budget");
+synthetic.push("verify-city-planning-job");
+groups.planning.push("verify-city-planning-job");
 groups.planning.push("verify-city-operation-budget");
 synthetic.push("verify-city-layout-capacity");
 synthetic.push("verify-city-model-envelope");

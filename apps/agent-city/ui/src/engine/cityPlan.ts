@@ -73,6 +73,18 @@ export type Shape = {
   bays: Array<{ at: number; depth: number; width: number }>;
 };
 
+/** Shared seed recipe for worker transport hydration; never approximate the
+ * returned terrain with a sampled grid or rerun full planning on the UI. */
+export function createCityShape(seed: number): Shape {
+  const random = (key: string) => hashSeed(`${seed}:${key}`);
+  return {
+    stretch: 0.78 + random("stretch") * 0.5,
+    spin: random("spin") * Math.PI * 2,
+    harmonics: [2, 3, 5].map((k) => ({ k, a: 0.05 + random(`h${k}`) * (k === 2 ? 0.16 : 0.1), p: random(`hp${k}`) * Math.PI * 2 })),
+    bays: Array.from({ length: 1 + Math.floor(random("bays") * 3) }, (_, i) => ({ at: random(`bay${i}`) * Math.PI * 2, depth: 0.14 + random(`bayd${i}`) * 0.18, width: 0.18 + random(`bayw${i}`) * 0.25 })),
+  };
+}
+
 /** `opts.skipSolve` 仅供守卫（verify-city-solve）取「修复前」的草案；生产调用不传。 */
 export type CityPlanOptions = { skipSolve?: boolean; memoizeTerrain?: boolean; legacyGridParcels?: boolean; workLedger?: PlanningWorkLedger };
 export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | null = null, opts: CityPlanOptions = {}) {
@@ -84,12 +96,7 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
 function createCityPlanDraft(seed: number, tier: number, config: CoastalConfig | null, opts: CityPlanOptions) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   // 岛形参数（与半径无关）：放大时形状不变。
-  const shape: Shape = {
-    stretch: 0.78 + random("stretch") * 0.5,
-    spin: random("spin") * Math.PI * 2,
-    harmonics: [2, 3, 5].map((k) => ({ k, a: 0.05 + random(`h${k}`) * (k === 2 ? 0.16 : 0.1), p: random(`hp${k}`) * Math.PI * 2 })),
-    bays: Array.from({ length: 1 + Math.floor(random("bays") * 3) }, (_, i) => ({ at: random(`bay${i}`) * Math.PI * 2, depth: 0.14 + random(`bayd${i}`) * 0.18, width: 0.18 + random(`bayw${i}`) * 0.25 })),
-  };
+  const shape = createCityShape(seed);
   // 海滨配置（VICE B1）：提供 config 时强制生态带（miami-coastal → tropical），
   // 否则保持原有随机五选一——无配置调用方行为不变。
   const biome: Biome = config ? config.biome : BIOMES[Math.floor(random("biome") * BIOMES.length) % BIOMES.length];
