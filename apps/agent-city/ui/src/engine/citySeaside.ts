@@ -47,20 +47,22 @@ export type CoastalConfig = {
 
 export const MIAMI_COASTAL: CoastalConfig = {
   profile: "miami-coastal",
-  version: 2,
+  version: 3,
   biome: "tropical",
   // 海滩朝 +x：开湾后 +x 一侧是窄的东岛，海滩铺在它背向海湾的外岸（Ocean Beach 的位置）。
   // 曾朝 +z（π/2），海滩落在整岛的南端，与海湾、东西两岛的构图无关。
   preferredAzimuth: 0,
   azimuthTolerance: 1.2,
   segmentArc: (85 * Math.PI) / 180,
-  wetSandWidth: 7,
-  // 沙滩加宽 6（真机反馈「沙滩略微再宽一些」，还要放得下沙排场），其后各带整体内移 6。
-  drySandWidth: 20,
-  promenadeOffset: 24,
-  boulevardOffset: 36,
-  hotelOffset: 54,
-  bandOuter: 70,
+  // 海滨休闲带按 South Beach 的断面放宽（用户反馈「沙滩景观带不够宽」）：
+  // 湿沙 0–8 → 干沙 8–40（遮阳伞/沙排场）→ 棕榈公园 40–62（草坪 + 三排错落棕榈，natureSystem 种）
+  // → 步道 62 → 滨海大道 74 → 酒店线 92。曾是干沙到 20、步道紧贴在 24，沙滩和大道之间没有公园。
+  wetSandWidth: 8,
+  drySandWidth: 40,
+  promenadeOffset: 62,
+  boulevardOffset: 74,
+  hotelOffset: 92,
+  bandOuter: 108,
   maxCoastalSlope: 0.9,
   maxCoastalHeight: 6,
   riverMargin: 26,
@@ -350,6 +352,8 @@ export function validRuns(band: SeasideBand): SeasideSample[][] {
 }
 
 export const promenadeSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.promenade);
+/** 离水线 d 处的平行折线（棕榈公园的树行用；无效采样处同样断开）。 */
+export const bandSegmentsAt = (band: SeasideBand, d: number): Vec2[][] => offsetSegments(band, (sample) => offset(sample.waterline, sample.inward, d));
 /** Valid vehicle-road centerlines; invalid river/terrain/reservation samples split the route. */
 export const boulevardSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.boulevard);
 

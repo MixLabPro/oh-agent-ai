@@ -833,13 +833,14 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
 /** 豪宅岛（Vice City 的 Starfish Island 母题）：湾心小岛的场地层（环路/支路/棕榈）+ 一圈海湾豪宅 + 北侧大宅，
  *  位置全由 cityIsletEstate.isletEstate 算（渲染场地层用同一个函数，棕榈天然避开住宅）。布局期装饰：规划层只认得
  *  贴岛北缘穿过的那段堤道，不进规划基线、不占地块、不接路。离任何桥 < 20 的住宅不放（兜底：堤道被别的桥取代时）。 */
-function isletVillas(plan: { islets?: Array<Vec2 & { radius: number; kind?: string }>; bridges: BridgeLayout[] }): Landmark[] {
+function isletVillas(plan: { islets?: Array<Vec2 & { radius: number; kind?: string; side?: 1 | -1 }>; bridges: BridgeLayout[] }): Landmark[] {
   const out: Landmark[] = [];
   for (const [index, islet] of (plan.islets ?? []).entries()) {
     const id = `landmark:islet-grounds:${index}`;
     // Leaf Links：3 号堤道从岛南部穿过（geography 把中心放在堤道以北 0.2R）；Prawn：引道从岛心往东。只画场地层。
     if (islet.kind === "leaf-links") { out.push({ id, kind: "islet-grounds", variant: "golf", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius, roadZ: 0.2 * islet.radius }); continue; }
-    if (islet.kind === "prawn") { out.push({ id, kind: "islet-grounds", variant: "studio", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius }); continue; }
+    // Prawn 的场地按「引道朝局部 +x」布置；贴西岸（side −1、短桥接大陆）时整组转 180°。
+    if (islet.kind === "prawn") { out.push({ id, kind: "islet-grounds", variant: "studio", x: islet.x, z: islet.z, yaw: (islet.side ?? 1) < 0 ? Math.PI : 0, radius: 0, reach: islet.radius }); continue; }
     out.push({ id, kind: "islet-grounds", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius });
     const estate = isletEstate(islet.radius, Math.floor(hashSeed(id) * 0x7fffffff));
     estate.houses.forEach((house, k) => {

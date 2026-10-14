@@ -347,7 +347,9 @@ function buildCauseways(geo: Geography, network: Network, inRiver: (x: number, z
   const clearOfSites = (p: Vec2) => [...publicSites, ...landmarks].every((site) => Math.hypot(p.x - site.x, p.z - site.z) > site.radius + 16);
   for (let k = 1; k <= 3; k += 1) {
     const z = minZ + spacing * k;
-    if (bridges.some((b) => crossesBay(b) && Math.abs((b.from.z + b.to.z) / 2 - z) < spacing * 0.5)) continue;
+    // 已有跨湾桥附近不重复架——除非这条线上有湾内岛：岛只能靠这条堤道上岸（seed 1703342472 实测 Leaf Links 成孤岛）。
+    const onIslet = geo.islets.some((i) => Math.abs(z - i.z) < i.radius * 0.6);
+    if (!onIslet && bridges.some((b) => crossesBay(b) && Math.abs((b.from.z + b.to.z) / 2 - z) < spacing * 0.5)) continue;
     // 两岸桥头：从湾岸各向外走，直到离岸 ≥10（与主干道桥头同一口径）。
     const walk = (side: -1 | 1): Vec2 | null => {
       for (let d = 0; d < 240; d += 12) {
@@ -400,27 +402,27 @@ function buildCauseways(geo: Geography, network: Network, inRiver: (x: number, z
     if (!result.ok) { diagnostics.push({ trunk: 100 + k, phase: "route", reason: result.reason, cause: result.detail ?? "commit-rejected" }); continue; }
     bridges.push(...screened.bridges);
   }
-  // Prawn Island（不在任何堤道线上）：岛中心 → 岛东岸桥头 → 短桥 → 东岛。岛上那段是桥头引道（地面路）。
+  // Prawn Island（不在任何堤道线上）：岛中心 → 岛岸桥头 → 短桥 → 它贴的那一岸（side：1 东岛 / -1 大陆）。岛上那段是桥头引道。
   for (const islet of geo.islets.filter((i) => i.kind === "prawn")) {
-    const z = islet.z;
+    const z = islet.z; const s = islet.side ?? 1;
     let edge: Vec2 | null = null;
     for (let d = 0; d < islet.radius * 1.3; d += 6) {
-      const p = { x: islet.x + d, z };
+      const p = { x: islet.x + s * d, z };
       if (geo.isletClearance(p.x, p.z) < 10) break;
       edge = p;
     }
     let east: Vec2 | null = null;
     for (let d = 0; d < 240 && edge; d += 12) {
-      const p = { x: edge.x + 12 + d, z };
+      const p = { x: edge.x + s * (12 + d), z };
       if (coastDistance(p.x, p.z) <= 0) break;
       if (landClearance(p.x, p.z) >= 10 && !inRiver(p.x, p.z)) { east = p; break; }
     }
-    const eastIn = east && [48, 36, 24].map((d) => ({ x: east!.x + d, z })).find((p) => coastDistance(p.x, p.z) > 20 && landClearance(p.x, p.z) >= 10);
+    const eastIn = east && [48, 36, 24].map((d) => ({ x: east!.x + s * d, z })).find((p) => coastDistance(p.x, p.z) > 20 && landClearance(p.x, p.z) >= 10);
     const start = { x: islet.x, z };
-    if (!edge || !east || !eastIn || edge.x - start.x < 18 || ![start, edge, east, eastIn].every(clearOfSites)) {
+    if (!edge || !east || !eastIn || Math.abs(edge.x - start.x) < 18 || ![start, edge, east, eastIn].every(clearOfSites)) {
       diagnostics.push({ trunk: 200, phase: "route", reason: "no-target", cause: "prawn-bridge-no-landing" }); continue;
     }
-    const screened = screenTrunkRoute(world, [start, edge, east, eastIn], [{ from: edge, to: east, angle: 0, length: east.x - edge.x }], 200);
+    const screened = screenTrunkRoute(world, [start, edge, east, eastIn], [{ from: edge, to: east, angle: s > 0 ? 0 : Math.PI, length: Math.abs(east.x - edge.x) }], 200);
     diagnostics.push(...screened.diagnostics);
     if (!screened.patch || screened.points.length < 4) continue;
     const result = commitNetworkPatch(network, screened.patch, screened.validate);

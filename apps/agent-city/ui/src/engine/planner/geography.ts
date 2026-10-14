@@ -35,7 +35,7 @@ export type Geography = {
   /** 主干道一次最多跨多宽的水面。窄河 140；开湾时按湾的最大全宽放开，否则没有一条主干道能过湾、东岛成孤岛。 */
   maxWaterSpan: number;
   /** 湾内小岛。规划层只把岛上那段桥间地面路当陆地（inRiver 在岛上为假），岛不可建、不分地块。 */
-  islets: Array<Vec2 & { radius: number; kind: "starfish" | "leaf-links" | "prawn" }>;
+  islets: Array<Vec2 & { radius: number; kind: "starfish" | "leaf-links" | "prawn"; /** 贴哪一岸（短桥接这一岸）：1 = 东岛，-1 = 西岛大陆。 */ side?: 1 | -1 }>;
   /** 到最近小岛岸线的带符号距离（岛内为正）；无岛恒为 -Infinity。 */
   isletClearance: (x: number, z: number) => number;
 };
@@ -153,16 +153,27 @@ export function buildGeography(seed: number, R: number, seedShape: Shape, opts: 
     const starfishR = bayHalf * 0.55;
     const sz = zMin + 2 * spacing - ISLET_CAUSEWAY_OFFSET * starfishR;
     islets.push({ x: riverXRaw(sz), z: sz, radius: starfishR, kind: "starfish" });
-    const hugEast = (kind: "leaf-links" | "prawn", nominal: number, zAt: (r: number) => number, eastChannel: number) => {
+    // 南北半轴 = 拉伸 × (1 + 噪声幅度 0.26) × r（与 isletClearance 同参数）。
+    const halfLength = (kind: "leaf-links" | "prawn", r: number) => (kind === "leaf-links" ? 1.4 : 1.35) * 1.26 * r;
+    const hugEast = (kind: "leaf-links" | "prawn", nominal: number, zAt: (r: number) => number, eastChannel: number, side: 1 | -1 = 1) => {
       const z0 = zAt(nominal);
       const r = Math.min(nominal, (2 * riverWidthRaw(z0) - eastChannel - 60) / 2);
       if (r < 22) return;
-      const z = zAt(r); const x = riverXRaw(z) + riverWidthRaw(z) - r - eastChannel;
-      if (coastDistanceRaw(x, z) < r * 1.8 + 20) return; // 拉长后南北半轴 ≈ 1.4·1.26·r
-      islets.push({ x, z, radius: r, kind });
+      const z = zAt(r); const x = riverXRaw(z) + side * (riverWidthRaw(z) - r - eastChannel);
+      if (coastDistanceRaw(x, z) < halfLength(kind, r) + 15) return;
+      islets.push({ x, z, radius: r, kind, side });
     };
     hugEast("leaf-links", bayHalf * 0.5, (r) => zMin + 3 * spacing - 0.2 * r, 40);
-    hugEast("prawn", bayHalf * 0.32, () => zMin + 3.7 * spacing, 30);
+    // Prawn 紧挨 Leaf Links 北端往北排（留 30 的水面）：按固定比例放时，常越过东岛北端出海、或撞上拉长后的 Leaf Links
+    // （6 种子 × 3 档只出现 4/18）。没有 Leaf Links 时退到 3.3 个间距处。
+    const leaf = islets.find((i) => i.kind === "leaf-links");
+    hugEast("prawn", bayHalf * 0.32, (r) => leaf ? leaf.z + halfLength("leaf-links", leaf.radius) + halfLength("prawn", r) + 30 : zMin + 3.3 * spacing, 30);
+    // 东岛北头太窄（出海）放不下时，改贴西岸（大陆）放在 3 号堤道以北、短桥接大陆——原版 Prawn 本就在 Downtown 北侧一带。
+    // 曾试退到 Starfish 以南：两者与 1 号堤道之间的间距常不够，Prawn 会压在堤道线上（6 种子 × 3 档仍只 9/18）。
+    if (!islets.some((i) => i.kind === "prawn")) {
+      const z3 = zMin + 3 * spacing;
+      hugEast("prawn", bayHalf * 0.32, (r) => z3 + halfLength("prawn", r) + 30, 30, -1);
+    }
   }
   const isletClearance = (x: number, z: number) => {
     let best = -Infinity;
