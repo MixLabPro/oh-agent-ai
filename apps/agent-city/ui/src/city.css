@@ -169,6 +169,10 @@
 .city-repair-name { font-size: 10.5px; color: var(--city-muted); }
 .city-app .city-repair-rail button.is-active .city-repair-name { color: #fff; }
 .city-repair-rail kbd { position: absolute; top: 2px; right: 3px; font: 600 8px/10px ui-monospace, monospace; opacity: 0.5; }
+.city-repair-badge small { display: block; font-size: 9px; opacity: 0.8; }
+.city-repair-badge small.is-warn { color: #ffd98a; opacity: 1; }
+.city-repair-origin { font-style: normal; font-size: 10px; padding: 0 5px; margin-left: 4px; border-radius: 8px; border: 1px solid var(--city-border); color: var(--city-muted); white-space: nowrap; }
+.city-repair-origin-edit { color: #ffd98a; border-color: #ffd98a66; }
 .city-repair-badge { display: block; text-align: center; font-size: 10px; color: var(--city-muted); padding: 2px 0 4px; white-space: nowrap; }
 .city-app .city-repair-rail .city-repair-danger .city-repair-glyph { color: #ffb4a8; }
 .city-app .city-repair-rail .city-repair-danger.is-confirm { background: #c0392b; }

@@ -19,6 +19,8 @@ export type PlanIssue = {
   at: Vec2 | null;
   detail: string;
   entities: string[];
+  /** 体检时标注：问题在未编辑的生成城市里就存在（generated），还是用户的修改带来的（edit）；补丁失效条目没有来源。 */
+  origin?: "generated" | "edit";
 };
 
 const SLOPE_LIMIT = 0.55;   // 同背景楼筛（cityLayout contextBuildings 候选）
@@ -111,4 +113,11 @@ export function auditLayout(layout: CityLayout, model: CityModel, stale: readonl
   }
 
   return issues.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** 给体检结果标来源：同一个 id 在「未编辑的生成城市」里就存在 → generated，否则 → edit（用户的修改造成）。
+ *  baseIssues 为 null = 没有补丁，全部是生成城市自带的。补丁失效条目不是城市问题，不标来源。 */
+export function tagAuditOrigins(issues: PlanIssue[], baseIssues: PlanIssue[] | null): PlanIssue[] {
+  const baseIds = baseIssues ? new Set(baseIssues.map((issue) => issue.id)) : null;
+  return issues.map((issue) => issue.rule === "patchStale" ? issue : { ...issue, origin: !baseIds || baseIds.has(issue.id) ? "generated" as const : "edit" as const });
 }

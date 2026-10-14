@@ -43,7 +43,9 @@ export const EXACT: Record<string, string> = {
   "楼压路": "Building on road", "楼重叠": "Buildings overlap", "坡地/不可建": "Slope / unbuildable", "街区无路": "Block without road", "补丁失效": "Stale edit",
   "错误": "Error", "警告": "Warning", "提示": "Note",
   "选中：": "Selected: ", "不可行：": "Not possible: ", "注意：": "Note: ", "指向：": "Pointing at: ", "（点击选中）": " (click to select)",
-  "移楼": "Moves", "擦路": "Erased", "改路口": "Junctions", "改设施": "Site edits", "条已失效": "stale",
+  "计数:移楼": "Buildings moved", "计数:画路": "Roads drawn", "计数:擦路": "Roads erased", "计数:高架": "Viaducts", "计数:改路口": "Junctions moved", "计数:改设施": "Site edits", "条已失效": "stale",
+  "你的修改造成": "From your edits", "生成时就有": "Already generated", "已保存": "Saved", "保存中…": "Saving…", "仅临时": "Temporary",
+  "修改会自动保存在本机，关闭或重启后仍在": "Edits save automatically on this Mac and survive closing or restarting",
   // 提示（controller HINT）
   "点选任意建筑（会话楼、设施、地标、市政用地），再点要搬去的空地": "Pick any building (session building, facility, landmark, civic land), then click the open spot to move it to",
   "点一下落起点（会吸附到路口或路面），再点一下落笔；可连续画，拐弯自动倒圆。结束：右键、再点一下终点或 Esc": "Click to set the start (snaps to junctions and roads), click again to place; keep chaining, turns are rounded. To finish: right-click, click the end point again, or Esc",

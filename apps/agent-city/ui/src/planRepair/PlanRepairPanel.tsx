@@ -40,6 +40,7 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const language = useCityLanguage();
   const en = language === "en";
   const T = (text: string) => repairText(text, language);
+  const countLabel = (zh: string) => en ? T(`计数:${zh}`) : zh;
   const keyed = (text: string, key: string) => en ? `${T(text)} (${key})` : `${text}（${key}）`;
   const [confirmReset, setConfirmReset] = useState(false);
   const timer = useRef<number | undefined>(undefined);
@@ -92,6 +93,7 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const hasDetail = !!(state.tool === "draw" || state.tool === "restyle" || info.remap || info.tierChanged || info.staleCount > 0 || message || tipShown
     || previewReason || previewNote || state.buildingId || state.site || state.stranded.length || issues || (counts && total > 0));
   const badge = total === 0 ? "未修改" : `${total} 处`;
+  const saveNote = total === 0 ? null : info.saveFailed ? "仅临时" : info.savePending ? "保存中…" : "已保存";
   // 侧栏停靠形态（SimCity 式）：右边缘一条窄工具栏常驻，选项/提示/体检结果按需在它左侧弹出一块小卡片，
   // 不用时只占 58px 宽，不挡画面；容器本身不拦截鼠标，只有栏和卡片可点。
   return repairView(<section className="city-repair" aria-label="规划修复">
@@ -148,21 +150,21 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
       <button onClick={repair.eraseStranded} title="一次擦掉，撤销可恢复">擦掉</button>
     </div>}
     {(info.staleCount > 0 || (counts && total > 0)) && <p className="city-repair-status">
-      {counts && total > 0 && `${[counts.buildingMoves ? `${T("移楼")} ${counts.buildingMoves}` : "", counts.roadAdds ? `${T("画路")} ${counts.roadAdds}` : "", counts.roadDrops ? `${T("擦路")} ${counts.roadDrops}` : "", counts.highwayOps ? `${T("高架")} ${counts.highwayOps}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `${T("改路口")} ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `${T("改设施")} ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}`}
+      {counts && total > 0 && `${[counts.buildingMoves ? `${countLabel("移楼")} ${counts.buildingMoves}` : "", counts.roadAdds ? `${countLabel("画路")} ${counts.roadAdds}` : "", counts.roadDrops ? `${countLabel("擦路")} ${counts.roadDrops}` : "", counts.highwayOps ? `${countLabel("高架")} ${counts.highwayOps}` : "", counts.roadOps - counts.roadAdds - counts.roadDrops > 0 ? `${countLabel("改路口")} ${counts.roadOps - counts.roadAdds - counts.roadDrops}` : "", counts.siteOps ? `${countLabel("改设施")} ${counts.siteOps}` : ""].filter(Boolean).join(" · ")}`}
       {info.staleCount > 0 && <span className="city-repair-stale">{` · ${info.staleCount} ${T("条已失效")}`}</span>}
     </p>}
     {issues && <div className="city-repair-audit">
       {issues.length === 0 ? <p className="city-repair-ok">体检通过：没有发现布局问题</p> : <>
         <p>{`${issues.length} 个问题${issues.length > MAX_ISSUE_ROWS ? `（显示前 ${MAX_ISSUE_ROWS} 个）` : ""}`}</p>
         <ul>{issues.slice(0, MAX_ISSUE_ROWS).map((issue) => <li key={issue.id} className={`city-repair-${issue.severity}`}>
-          <span><b>{SEVERITY_LABEL[issue.severity]}</b>{" "}{`${T(RULE_LABEL[issue.rule] ?? issue.rule)}${en ? ": " : "："}${T(issue.detail)}`}</span>
+          <span><b>{SEVERITY_LABEL[issue.severity]}</b>{issue.origin && <i className={`city-repair-origin city-repair-origin-${issue.origin}`}>{issue.origin === "edit" ? "你的修改造成" : "生成时就有"}</i>}{" "}{`${T(RULE_LABEL[issue.rule] ?? issue.rule)}${en ? ": " : "："}${T(issue.detail)}`}</span>
           {issue.at && <button onClick={() => repair.locate(issue)}>定位</button>}
         </li>)}</ul>
       </>}
     </div>}
     </div>}
     <div className="city-repair-rail" role="toolbar" aria-label="修复工具">
-      <span className="city-repair-badge" title={info.saveFailed ? "本次修改仅临时生效（存档失败）" : total === 0 ? "尚无修改" : "修改已保存"}>{badge}</span>
+      <span className="city-repair-badge" title={info.saveFailed ? "本次修改仅临时生效（存档失败）" : total === 0 ? "尚无修改" : "修改会自动保存在本机，关闭或重启后仍在"}>{badge}{saveNote && <small className={info.saveFailed ? "is-warn" : ""}>{saveNote}</small>}</span>
       {TOOLS.map((tool) => <button key={tool.id} className={state.tool === tool.id ? "is-active" : ""} aria-pressed={state.tool === tool.id} title={keyed(tool.hint, tool.key)} onClick={() => repair.setTool(tool.id !== "build" && state.tool === tool.id ? "build" : tool.id)}>
         <span className="city-repair-glyph" aria-hidden="true">{tool.icon}</span><span className="city-repair-name">{tool.label}</span><kbd>{tool.key}</kbd>
       </button>)}
