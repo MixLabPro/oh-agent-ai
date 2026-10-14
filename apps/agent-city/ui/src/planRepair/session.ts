@@ -3,8 +3,8 @@
  *
  * 编辑 UI（planRepair/PlanRepairPanel + controller）与开发控制台入口（`window.__cityPlan`）共用这个会话：
  * 校验 → 写补丁 → 引擎重建 → 存档。道路编辑一律先过 planRoadRules 的硬规则，再追加一条道路日志。
- * 开关：`?cityPlan` 或 localStorage `cityPlanDev=1`（同 cityGame 的开发开关口径）。未开启时本模块
- * 不读存档、不挂 window、不改引擎行为（引擎里 planPatch 恒为 null → 与旧版逐字节一致）。
+ * 开关：已于 2026-10-14 移除（原 `?cityPlan` / `cityPlanDev=1`），修复规划默认开启：
+ * 存档始终读取，补丁随会话生效；没有补丁时引擎的 planPatch 为空，地图与未编辑时逐字节一致。
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, type PlanIssue } from "../engine/planAudit";
@@ -22,10 +22,10 @@ import { nearestEdgeAt, roadRun, snapPoint, validateEdgeDrop, validateHighwayAdd
 import type { CityLayout, Parcel, Vec2 } from "../engine/cityLayout";
 import { cityPlanPatchStore, emptyPlanPatchStore, type PlanPatchStoreV1 } from "../data/planPatch";
 
+/** 修复规划默认开启（2026-10-14 起去掉 ?cityPlan / cityPlanDev=1 开发开关）：城市设置里始终有入口，
+ *  存档始终读取，引擎里 planPatch 随会话生效。函数保留是为了让 hook 的单一判断点不变。 */
 export function planDevEnabled(): boolean {
-  try {
-    return new URLSearchParams(location.search).has("cityPlan") || localStorage.getItem("cityPlanDev") === "1";
-  } catch { return false; }
+  return true;
 }
 
 export type RepairCandidate = { parcelId: string; x: number; z: number; yaw: number; width: number; depth: number; distance: number; warnings: string[] };
@@ -644,7 +644,7 @@ declare global {
   interface Window { __cityPlan?: PlanRepairSession }
 }
 
-/** 开发开关下把会话挂到 `window.__cityPlan`；返回卸载函数。 */
+/** 把会话挂到 `window.__cityPlan`；返回卸载函数。 */
 export function installPlanRepairDebug(engine: CityEngine): { session: PlanRepairSession; dispose: () => void } {
   const session = new PlanRepairSession(engine);
   window.__cityPlan = session;
