@@ -98,3 +98,21 @@ node scripts/verify-city-driving-browser.mjs http://127.0.0.1:5179
 architecture测试覆盖：同核逐tick终态、不同调度批一致、整车有向门/错误层、非法起点、无进展/计划停车全局预算、NaN/瞬移防线、重复或缺失证据、无见证不判阻塞、缺最终边界复跑、key与kernel不匹配、取消/过期/迟到成功及交互时钟。它不证明真实城市已通畅。
 
 合并顺序：共享契约 → A → B/C → D → E → 产品SPEC原生/性能验收。所有Agent保留现有门槛；未完成或缺证据必须显式降级，不能补无条件通过桩。不要运行rustfmt；不为本轮纯TS工作改Rust或golden。
+
+## 6. A1增量交付（2026-10-15）
+
+普通道路与地形采样已从渲染system提取到 `engine/surface/groundRoadCompiler.ts`、`terrainSampling.ts`，renderer已消费同源计算，旧API继续可用。Agent A无需重新搬移这部分。优先接续边界/岛排除、桥高架顶面和SurfaceStore；当前返回的只是geometry-only，不能作为正式SurfacePatch/Portal或通行证明。
+
+基线、接口、十五规划布局与剩余范围见 [CITY_GROUND_SURFACE_EXTRACTION_NOTES.md](CITY_GROUND_SURFACE_EXTRACTION_NOTES.md)。新增必跑 `node scripts/verify-city-ground-surface.mjs --cities`；不要更新基线来掩盖几何变化。
+
+## 7. A2增量交付（2026-10-15）
+
+已增加单片段meshBoundaries、buildGroundSurfaceSnapshot、SurfaceStore与本地SHA256。闭环/孔洞、几何错误/预算、复制所有权、版本/并发失效均有测试。它们不生成跨片段union或portal，eligibleLength仍为0；Store也尚未接CityEngine。Agent A/B应优先诊断原几何中的unresolved片段，再做union/岛排除/结构连接。
+
+## 8. A3增量交付（2026-10-15）
+
+`engine/surface/SurfaceIndex.ts` 提供有界XZ三角候选索引和显式layerId的点采样。构建会复制patch缓冲区，限制三角数、桶数、总索引项、单三角跨格数；查询在同一patch共边按稳定ID取样，跨patch重叠明确返回ambiguous，超候选预算返回budget。它不做整车footprint、portal穿越、固体碰撞或可行性认证，也未接入CityEngine/Store生命周期。
+
+后续B工作包可在此候选层上增加跨三角的连续运动验证、坡度/台阶阈值和全footprint覆盖；必须先完成普通路面union及岛/路缘语义，再允许任何点采样结果参与正式开放图。
+
+见 [CITY_SURFACE_STORE_NOTES.md](CITY_SURFACE_STORE_NOTES.md)。Store revision只代表路面，禁止直接当含全部障碍的baseSnapshotHash。新增必跑 `node scripts/verify-city-surface-store.mjs --cities`。

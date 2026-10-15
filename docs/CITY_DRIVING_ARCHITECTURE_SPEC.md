@@ -412,3 +412,9 @@ A/B 输出并锁定：坐标/量纲、几何epsilon、轮距净空、最大坡�
 已实现共享CPU surface类型、DrivingKernel兼容内核、审计contracts/key/case验证、有向整车GateAuditObserver、定步DrivingRouteRunner、可取消/过期/总预算AuditScheduler、缺证据关闭的AuditReleasePolicy、FixedStepClock和GameScenePort接口。合成试驾已使用同一DrivingKernel。
 
 真实路面编译/查询、静态几何证明、自动驾驶pilot和宿主lease仍待实现。完整目录、限制、Agent文件所有权与可直接接续的任务见 [CITY_DRIVING_AGENT_HANDOFF.md](CITY_DRIVING_AGENT_HANDOFF.md)。落地接口以代码contracts为准；需要调整时由集成人统一维护，禁止并行Agent各造一套协议。
+
+A1增量：普通路带/路口/人行道编译与地形采样已提取为纯CPU模块，renderer共用原几何算法；三角片段来源和Float32视图可供后续查询使用。仍未解决边界union、岛排除、桥/高架及SurfaceStore，输出明确为geometry-only。证据与后续边界见 [普通路面提取记录](CITY_GROUND_SURFACE_EXTRACTION_NOTES.md)。
+
+A2增量：已实现单片段闭环/孔洞提取、边界故障/预算诊断、独立patch快照、本地SHA256与防御性复制SurfaceStore；迟到异步发布、clear与旧revision均有明确失效语义。跨片段union/portal及宿主Store接入尚未完成，且路面revision不能代替完整障碍世界身份。验收范围与限制见 [SurfaceStore记录](CITY_SURFACE_STORE_NOTES.md)。
+
+A3增量：`engine/surface/SurfaceIndex.ts` 已提供复制快照、有界XZ三角索引和显式layerId点采样；跨patch重叠返回ambiguous，构建/查询超预算失败关闭。该索引只产出点级几何候选，不能代替全车覆盖、连续运动、portal、碰撞或正式通行审计，尚未连接CityEngine运行时。
