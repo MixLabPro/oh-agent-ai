@@ -418,3 +418,5 @@ A1增量：普通路带/路口/人行道编译与地形采样已提取为纯CPU�
 A2增量：已实现单片段闭环/孔洞提取、边界故障/预算诊断、独立patch快照、本地SHA256与防御性复制SurfaceStore；迟到异步发布、clear与旧revision均有明确失效语义。跨片段union/portal及宿主Store接入尚未完成，且路面revision不能代替完整障碍世界身份。验收范围与限制见 [SurfaceStore记录](CITY_SURFACE_STORE_NOTES.md)。
 
 A3增量：`engine/surface/SurfaceIndex.ts` 已提供复制快照、有界XZ三角索引和显式layerId点采样；跨patch重叠返回ambiguous，构建/查询超预算失败关闭。该索引只产出点级几何候选，不能代替全车覆盖、连续运动、portal、碰撞或正式通行审计，尚未连接CityEngine运行时。
+
+A4/B1增量：同层alias合并（精确叠置顶点高差 ≤0.1）、唯一点分类器、按两侧分类切分的curb/closed/step区域边界、整车矩形覆盖（侧向余量0.2）与细分扫掠凸包连续运动验证已实现，并通过 `SurfaceDrivingEnvironment`/`SurfaceWorldValidator` 接入现有kernel/runner/observer。十五城直路同核试跑每个tick独立复核均合法。SurfaceIndex法线错误已修。仍无portal、固体障碍、桥/高架和渠化岛编译，不认证通行。见 [区域与整车覆盖记录](CITY_SURFACE_REGIONS_NOTES.md)。

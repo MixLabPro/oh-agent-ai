@@ -15,3 +15,9 @@
 这个模块只回答“给定层上的这个点，哪些候选三角覆盖它”。它不回答道路是否可开、不验证相邻三角间的连续行驶，也不把同高的跨patch重叠当成无歧义。所有输出都带surface revision，消费者必须丢弃与当前快照版本不一致的结果。
 
 尚未接入SurfaceStore/CityEngine；正式驾驶仍受A2的`geometricallyEligibleLength=0`和无portal约束。后续要增加连续轨迹支持、坡度/台阶、整车投影覆盖与禁区相交检测，并与union后的边界和连接图共享同一revision。
+
+## A4修订（2026-10-15）
+
+- 入桶改为三角形与格子的闭区间2D SAT精确覆盖；`maxCellsPerTriangle` 按真实触及格数计，另设 `maxScanCellsPerTriangle`（默认65536）限制单三角扫描成本。原先按AABB计格，seed 42 tier 2 一条斜向长平路超出256格，整城索引构建失败。
+- 修正命中法线：A3草稿的叉积分量错位，平路返回水平法线 (0,0,±1)，现在为 (b−a)×(c−a)，y分量与构建时的朝上检查一致。
+- 新增 `trianglesInBox`（宽相引用，有结果上限）、`triangle`（捕获后的坐标）、`patches`（元数据），供区域合并使用。点查询语义不变：跨patch重叠仍返回ambiguous，消解只在 [surfaceRegions](CITY_SURFACE_REGIONS_NOTES.md) 中按显式规则进行。

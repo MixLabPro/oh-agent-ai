@@ -116,3 +116,14 @@ architecture测试覆盖：同核逐tick终态、不同调度批一致、整车�
 后续B工作包可在此候选层上增加跨三角的连续运动验证、坡度/台阶阈值和全footprint覆盖；必须先完成普通路面union及岛/路缘语义，再允许任何点采样结果参与正式开放图。
 
 见 [CITY_SURFACE_STORE_NOTES.md](CITY_SURFACE_STORE_NOTES.md)。Store revision只代表路面，禁止直接当含全部障碍的baseSnapshotHash。新增必跑 `node scripts/verify-city-surface-store.mjs --cities`。
+
+## 9. A4/B1增量交付（2026-10-15）
+
+- **跨片段合并**：`engine/surface/surfaceRegions.ts` 把同layer、叠置高差 ≤0.1（按精确叠置顶点判定）的车行片段合成区域，有唯一点分类器 `classify`。高差冲突的叠置区、边界未解决的片段、跨区域叠置都判不可行驶。
+- **路缘/岛语义**：区域边界在线段交点处切分，按两侧分类给标签：`curb`（人行道或岛）、`closed`（无路面、未解决、跨区域）、`step`（同区域内台阶）。岛是区域里的curb孔洞；边界未解决的岛按全部三角边保守扣除。
+- **整车覆盖/连续运动**：`game/driving/surfaceFootprint.ts` 的 `footprintSupport` 和 `validateMotion` 负责（侧向余量0.2；细分扫掠凸包按旋转弦高膨胀）。`SurfaceDrivingWorld.ts` 提供 `SurfaceDrivingEnvironment`（现有kernel可直接用，整步拒绝）和独立的 `SurfaceWorldValidator`（kernel放过非法运动时判 `simulation-invalid`）。
+- **SurfaceIndex修正**：法线分量错位已修，平路法线原先是水平的；单三角按真实触及格计预算，seed 42 tier 2 的长斜路因此不再构建失败。
+
+规则、锁定数值、十五城证据与限制见 [CITY_SURFACE_REGIONS_NOTES.md](CITY_SURFACE_REGIONS_NOTES.md)。新增必跑：`node scripts/verify-city-surface-regions.mjs [--cities]`、`node scripts/verify-city-driving-surface.mjs [--cities]`。
+
+接续优先级：Agent A 修路口扇面坡地细分与急弯带子自折叠（十五城报告中的conflicts/excluded可直接定位），再产出桥/高架顶面与渠化岛；Agent B 实现CollisionIndex并接入 `validateMotion`，再做portal与SafeRecovery；Agent C 用同一区域边界做TOI/滑动以替换整步拒绝。不得为让城市变绿而放宽aliasTolerance、余量或把closed改成curb。
