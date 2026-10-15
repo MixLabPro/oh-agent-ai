@@ -88,6 +88,9 @@ export function applyDistrictLandmarkGrowth(host: LandmarkSystemHost, cursor: nu
   }
 }
 
+/** 立面窗距（世界单位）：与会话楼照片立面的窗宽同口径（cityParts 注释「窗宽≈2.4」）。 */
+const WINDOW_PITCH = 2.4;
+
 export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
   const neon = activeTheme().neon;
   for (const spot of host.layout.districtLandmarks ?? []) {
@@ -115,12 +118,14 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
         lctx.fillRect(6 + cell * 13 + 1, floor * 64 + 16, 11, 34);
       }
     }
-    // 窗格按真实层高 3.2 m 铺（曾按每 4 单位一层 = 8 m 一层，窗户比旁边的会话楼大一倍多）。
-    const floors = Math.max(8, Math.round(h / m(REAL.floorHeight)));
+    // 窗格按「每一级塔身各自的」真实层高 3.2 m、窗距 WINDOW_PITCH 铺：uv 乘到每级几何上，纹理本身 1:1。
+    // 曾整座塔共用一个按总高算的重复数（3 × 56 层）——三级塔身高 95/46/31 m 却各铺 56 行，每层只有 1.7/0.8/0.55 m，
+    // 窗户比会话楼（≈3 m 一层）细好几倍，看上去玻璃小得多（用户：「为什么 session building 玻璃要大？」）。
     const dayTexture = new THREE.CanvasTexture(day as HTMLCanvasElement);
     const litTexture = new THREE.CanvasTexture(lit as HTMLCanvasElement);
     for (const texture of [dayTexture, litTexture]) { texture.colorSpace = THREE.SRGBColorSpace; texture.wrapS = texture.wrapT = THREE.RepeatWrapping; }
-    dayTexture.repeat.set(Math.max(3, Math.round(3 * grow)), floors); litTexture.repeat.set(Math.max(3, Math.round(3 * grow)), floors / 4);
+    // 夜窗图是 4 层 × 4 窗的一块：uv 里「一层、一窗」= 日窗图一整块，所以夜窗图在两个方向都取 1/4。
+    litTexture.repeat.set(0.25, 0.25);
     const pastel = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.55);
     const wall = new THREE.MeshLambertMaterial({ map: dayTexture, color: pastel, emissive: new THREE.Color("#3a3936"), emissiveMap: dayTexture });
     host.landmarkWindows.push({ material: wall, day: dayTexture, lit: litTexture, dayEmissive: new THREE.Color("#3a3936") });
@@ -138,7 +143,12 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
     let y = 4;
     for (const [w, share] of [[12, 0.55], [9.5, 0.27], [7, 0.18]] as Array<[number, number]>) {
       const height = (h - 4) * share;
-      add(new THREE.BoxGeometry(w * grow, height, w * grow).translate(0, height / 2, 0), wall, y);
+      const width = w * grow;
+      const tier = new THREE.BoxGeometry(width, height, width).translate(0, height / 2, 0);
+      const uv = tier.getAttribute("uv") as THREE.BufferAttribute;
+      const cols = Math.max(2, Math.round(width / WINDOW_PITCH)), floors = Math.max(2, Math.round(height / m(REAL.floorHeight)));
+      for (let k = 0; k < uv.count; k += 1) uv.setXY(k, uv.getX(k) * cols, uv.getY(k) * floors);
+      add(tier, wall, y);
       add(new THREE.BoxGeometry(w * grow + 0.6, 0.45, w * grow + 0.6), glow, y + height);                      // 每级霓虹勾边
       y += height;
     }

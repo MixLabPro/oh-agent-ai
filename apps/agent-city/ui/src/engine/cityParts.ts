@@ -550,14 +550,16 @@ export class CityParts {
   /** 城区地标（S5「每个区也需要有自己的地标建筑物」）：离城区中心最近的空地块上一座三级收分的装饰艺术塔，
    *  墙身取区色粉彩、玻璃带窗、霓虹勾边与塔尖，夜里亮窗（与双子塔同一套 landmarkWindows）。
    *  高度取本区最高会话楼 × 1.15（58–110）——城区天际线的峰值；装饰，不代表会话。 */
-  /** 城区地标高度（绝对口径，用户确认）：下限 = 全城最高会话楼 × 1.1（≈40，不低于会话楼），每个会话 +0.37，上限 160。
+  /** 城区地标高度（绝对口径，用户确认）：下限 = 全城最高会话楼 × 1.1（≈40，不低于会话楼），每个会话 +0.16，上限 90（= 180 m）。
+   *  2026-10-15 在 2 米比例尺下从「+0.37、上限 160（320 m）」压下来：2000 会话时四个城区全顶到 320 m，是周围楼的 6–10 倍，
+   *  还高过所有致敬地标（电视塔 144 m、双子塔 157 m）——地标该是城区的天际线峰值，不是另一座城市。下面的「实测」是旧口径的数。
    *  只随本区会话数增长，别的城区增长不会把它压矮；回放中按「截至游标已开始的会话数」逐层加盖（applyCursor）。
    *  实测（700 模拟会话）：DeepSeek 43 → 56，ZCode 82 → 70，Claude Code 120 → 84，Codex 135 → 90。
    *  曾按「最少 → 最多城区」相对插值：最大城区恒为 90、最小恒为 40，全体同比增长时高度不变，别区增长还会变矮。 */
   districtLandmarkHeight(districtId: string, sessions?: number): number {
     const own = sessions ?? this.model.districts.find((d) => d.id === districtId)?.sessionCount ?? 0;
     const floor = Math.max(30, ...this.model.buildings.map((b) => b.height)) * 1.1;
-    return Math.min(160, floor + 0.37 * own);
+    return Math.min(90, floor + 0.16 * own);
   }
 
   private districtLandmarkGroups: THREE.Object3D[] | null = null;
