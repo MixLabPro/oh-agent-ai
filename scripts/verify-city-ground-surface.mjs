@@ -111,7 +111,7 @@ if (process.argv.includes("--cities")) {
     assert.equal(groundGeometryDigest(compiled.layers), baseline.corrected.generatedPlans[`${seed}/${tier}`], `seed ${seed}, tier ${tier}: corrected buffer baseline`);
     inspect(compiled);
     const fit = fitAndTopology(`seed ${seed} tier ${tier}`, compiled, plan, 2);
-    assert.ok(fit.sidewalkUnresolved <= 1, `seed ${seed} tier ${tier}: ${fit.sidewalkUnresolved} sidewalk pieces without manifold boundary`);
+    assert.equal(fit.sidewalkUnresolved, 0, `seed ${seed} tier ${tier}: ${fit.sidewalkUnresolved} sidewalk pieces without manifold boundary`);
     const vertices = compiled.layers.reduce((n, layer) => n + layer.positions.length / 3, 0);
     console.log(`Ground surface: seed ${seed}, planning tier ${tier}: ${compiled.pieces.length} pieces, ${vertices} vertices, sampled terrain deviation ≤ ${fit.worst.toFixed(4)}, ${fit.sidewalkUnresolved} sidewalk boundary unresolved.`);
   }

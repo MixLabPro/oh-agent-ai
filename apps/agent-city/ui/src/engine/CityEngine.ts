@@ -40,6 +40,7 @@ import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 import { buildingFrame, isSelectionGesture } from "./cityCameraInteraction";
 import type { ReturnCameraView } from "../game/types";
+import { CitySurfacePort, type CitySurfaceCapture } from "./surface/citySurfacePort";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -97,6 +98,8 @@ export class CityEngine {
   private parts: CityParts | null = null;
   /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
+  /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
+  private readonly surfacePort = new CitySurfacePort();
   /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
   private baseLayout: CityLayout | null = null;
   private repairHook: RepairHook | null = null;
@@ -638,6 +641,7 @@ export class CityEngine {
     if (seed === this.seed) return;
     const first = this.seed === null;
     this.seed = seed;
+    this.surfacePort.invalidate();
     this.layout = null;
     this.baseLayout = null;
     this.planResult = null;
@@ -653,6 +657,7 @@ export class CityEngine {
     if (this.seed === null) return;
     // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
     const previousDisplays = this.parts ? this.parts.displaySnapshot() : null;
+    this.surfacePort.invalidate();
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
@@ -1880,8 +1885,15 @@ export class CityEngine {
     this.lowFpsWindows = this.highFpsWindows = 0;
   }
 
+  /** Capture the drivable surface of the city as currently drawn (lazy compile + local SHA-256
+   *  revision). Stale once the layout/seed changes; the caller must re-capture, never reuse. */
+  captureDrivingSurface(signal?: AbortSignal): Promise<CitySurfaceCapture> {
+    return this.surfacePort.capture(this.parts?.drivingSurfaceSource() ?? null, signal);
+  }
+
   dispose(): void {
     this.disposed = true;
+    this.surfacePort.invalidate();
     this.stopLoop();
     this.gameFrame = null;
     this.cameraOwner = "orbit";

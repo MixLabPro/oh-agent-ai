@@ -20,7 +20,9 @@ import type { SurfaceIndexBuild, SurfaceQueryHit, SurfaceTriangle } from "./Surf
 import type { CompiledCitySurface, SurfaceKind, SurfacePatch } from "./types";
 
 /** Bump when classification, merge or boundary rules change; part of AuditKey.queryVersion inputs. */
-export const SURFACE_REGION_RULES_VERSION = 1;
+export const SURFACE_REGION_RULES_VERSION = 2;
+/** Float slack on every aliasTolerance comparison (v2). */
+const ALIAS_EPSILON = 1e-6;
 
 export type SurfaceRegionParams = Readonly<{
   /** Max height difference for two overlapping/touching patches to act as one surface. */
@@ -209,7 +211,8 @@ function build(snapshot: CompiledCitySurface, index: Extract<SurfaceIndexBuild, 
   const conflictSet = new Set<string>();
   for (const [key, dy] of [...pairDy].sort((x, y) => x[0] < y[0] ? -1 : 1)) {
     const [a, b] = key.split("\u0000");
-    if (dy <= params.aliasTolerance) { aliasPairs++; maxAlias = Math.max(maxAlias, dy); parent.set(find(a), find(b)); }
+    // 1e-6 float slack: a 0.1 lip computed as 0.10000000000000002 is the tolerance, not past it.
+    if (dy <= params.aliasTolerance + ALIAS_EPSILON) { aliasPairs++; maxAlias = Math.max(maxAlias, dy); parent.set(find(a), find(b)); }
     else { conflictSet.add(key); conflicts.push(Object.freeze({ a, b, layerId: byId.get(a)!.layerId, maxHeightDifference: Number.isFinite(dy) ? dy : -1 })); }
   }
   // Stable region identity: the smallest member patch id, never insertion order.
@@ -255,7 +258,7 @@ function build(snapshot: CompiledCitySurface, index: Extract<SurfaceIndexBuild, 
       if (hit.point.y > top.point.y || (hit.point.y === top.point.y && (hit.patchId < top.patchId || (hit.patchId === top.patchId && hit.triangleIndex < top.triangleIndex)))) top = hit;
     }
     // Defensive: pairwise alias checks bound this, a violation means the merge was wrong.
-    if (top.point.y - low > params.aliasTolerance) return blocked("closed", "height-conflict");
+    if (top.point.y - low > params.aliasTolerance + ALIAS_EPSILON) return blocked("closed", "height-conflict");
     // Support is the upper envelope of aliases (the surface actually drawn on top).
     return Object.freeze({ status: "drivable", regionId: region, layerId, y: top.point.y, normal: top.normal, patchId: top.patchId, triangleIndex: top.triangleIndex });
   };
@@ -332,7 +335,7 @@ function build(snapshot: CompiledCitySurface, index: Extract<SurfaceIndexBuild, 
         };
         if (left.status === "drivable" && right.status === "drivable") {
           if (left.regionId !== right.regionId) { emit(left.regionId, "closed", "ambiguous-region"); emit(right.regionId, "closed", "ambiguous-region"); }
-          else if (Math.abs(left.y - right.y) > params.aliasTolerance) emit(left.regionId, "step", "step");
+          else if (Math.abs(left.y - right.y) > params.aliasTolerance + ALIAS_EPSILON) emit(left.regionId, "step", "step");
         } else if (left.status === "drivable" && right.status === "blocked") emit(left.regionId, right.label, right.cause);
         else if (right.status === "drivable" && left.status === "blocked") emit(right.regionId, left.label, left.cause);
       }

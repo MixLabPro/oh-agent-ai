@@ -137,3 +137,15 @@ architecture测试覆盖：同核逐tick终态、不同调度批一致、整车�
 - 基线：七个平地夹具仍与重构前逐字节一致；closed-loop、wavy-tee与十五城对照 `corrected` 段。这是**有意的几何变更**，不要再改回重构前基线。
 
 见 [CITY_GROUND_SURFACE_TERRAIN_FIT_NOTES.md](CITY_GROUND_SURFACE_TERRAIN_FIT_NOTES.md)。Agent A剩余：桥/高架顶面（structureCompiler + compileSurface聚合 + roadSystem消费）、渠化岛、尽端铺面、portal、0/90/500会话矩阵、SurfaceStore接CityEngine；另有seed 7 tier 3一个人行道转角扇面自重叠（修改前就存在，不影响支撑）。
+
+## 11. A6增量交付（2026-10-15）——A批次几何部分完成
+
+- 桥面、高架、桁架、尽端圆盘、渠化口改为纯描述符（`engine/surface/structureCompiler.ts`），roadSystem只消费描述符；十五城结构渲染与改动前逐字节一致（有基线守卫）。
+- `compileCitySurface` 聚合整城驾驶路面：地面 + 喇叭口（改为贴渲染地形）+ 分流岛（curb孔洞）+ 尽端圆盘 + 桥面（跨河在 `ground` 层、立交单独成层）+ 高架（每条单独成层）；同时输出静态障碍和桥头诊断，`landingConnectivity` 按区域规则判定桥头是否连通。
+- 不是星形的扇面改用耳切，自交的渐变轮廓用凸包：十五城与15个显示布局的所有片段边界都是流形。
+- 0/90/500会话 × 5种子的显示布局守卫：`verify-city-surface-sessions`。
+- `CitySurfacePort`：CityEngine的 `captureDrivingSurface()` 返回当前画出来那座城的快照（SHA-256 revision），布局一变即失效。
+
+**关键发现**：桥面是平板（取两岸原始地形高的较大值），引道却有坡。十五城里没有一座桥两端都连通，桥梁全部关闭并上报。开放桥梁需要另行做视觉修复（斜板或匝道），需产品确认。详见 [CITY_STRUCTURE_SURFACE_NOTES.md](CITY_STRUCTURE_SURFACE_NOTES.md)。
+
+A批次剩余项不再是几何问题：跨层portal（立交、高架匝道）与B/C/D的碰撞、恢复、开放图一起做。新增必跑：`verify-city-structure-surface [--cities]`、`verify-city-surface-sessions`。

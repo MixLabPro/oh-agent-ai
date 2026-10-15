@@ -33,6 +33,8 @@ import { buildGroundSpill, buildSeaMountains, buildTerrain, buildWater, type Ter
 import { applyFlora, buildTrees, type NatureHost } from "./systems/natureSystem";
 import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type AmbientHost } from "./systems/ambientSystem";
 import { buildRoadSurface, type RoadSurfaceHost } from "./systems/roadSurfaceSystem";
+import { compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./surface/groundRoadCompiler";
+import type { CitySurfaceSource } from "./surface/citySurfacePort";
 import { buildInfrastructure, buildCulDeSacBulbs, buildChannelizedJunctions, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
@@ -53,6 +55,8 @@ type StaticCity = {
   landmarkWindows: CityParts["landmarkWindows"];
   lifeguardGlowMaterial: THREE.MeshBasicMaterial | null;
   layout: CityLayout;
+  /** The ground road compilation the rendered road mesh was built from (driving reads the same one). */
+  groundRoadSurface: CompiledGroundRoadSurface;
   group: THREE.Group;
   disposables: Array<{ dispose: () => void }>;
   water: THREE.Mesh;
@@ -219,6 +223,7 @@ export class CityParts {
       staticCity = {
         seed: layout.seed,
         layout,
+        groundRoadSurface: this.groundRoadSurface!,
         group: this.group,
         disposables: staticBucket,
         water: this.water,
@@ -246,6 +251,7 @@ export class CityParts {
       (this.disposables as Array<{ dispose: () => void }>) = [];
     }
     this.group.add(staticCity.group);
+    this.staticSource = Object.freeze({ layout: staticCity.layout, ground: staticCity.groundRoadSurface });
     this.water = staticCity.water;
     this.treeMesh = staticCity.treeMesh;
     this.carMesh = staticCity.carMesh;
@@ -496,7 +502,16 @@ export class CityParts {
 
   /** Batched city furniture and waterfront infrastructure, not selectable data. */
   private buildInfrastructure(): void { buildInfrastructure(this as unknown as RoadHost); }
-  private buildRoadSurface(): void { buildRoadSurface(this as unknown as RoadSurfaceHost); }
+  /** Compiled once per static city; the renderer and the driving surface consume this same object. */
+  private groundRoadSurface: CompiledGroundRoadSurface | null = null;
+  private staticSource: CitySurfaceSource | null = null;
+  private buildRoadSurface(): void {
+    this.groundRoadSurface = compileGroundRoadSurface(this.layout);
+    buildRoadSurface(this as unknown as RoadSurfaceHost);
+  }
+  /** Layout + ground compilation the CURRENTLY drawn static city was built from (the static cache
+   *  may reuse an earlier layout object): the driving surface must match what is on screen. */
+  drivingSurfaceSource(): CitySurfaceSource | null { return this.staticSource; }
 
   /** 尽端回车圈（形态批 §5-3）：合法尽端（culDeSacEnds）的回车圆盘 + 路缘描边，
    *  纯渲染装饰、不改路网拓扑；见 systems/roadSystem.ts。 */

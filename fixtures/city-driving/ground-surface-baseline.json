@@ -32,7 +32,7 @@
   },
   "corrected": {
     "revision": "terrain-conforming-v1",
-    "reason": "Exact terrain fit: strips/sectors deviating > ROAD_SURFACE_LIFT/2 from the rendered terrain are split along the terrain triangulation (pre-refactor ribbons sank up to 0.25 below terrain; fans overlapped ribbons with 0.30 height gaps). Closed loops weld at a mitred seam; narrowed miters at stubs and reflex-corner diagonals stop strip folds. Flat fixtures not listed here still equal the pre-refactor digests above.",
+    "reason": "Exact terrain fit: strips/sectors deviating > ROAD_SURFACE_LIFT/2 from the rendered terrain are split along the terrain triangulation (pre-refactor ribbons sank up to 0.25 below terrain; fans overlapped ribbons with 0.30 height gaps). Closed loops weld at a mitred seam; narrowed miters at stubs and reflex-corner diagonals stop strip folds. Flat fixtures not listed here still equal the pre-refactor digests above. Fans that are not star-shaped from their hub (offset sidewalk arcs) are ear-clipped; a self-intersecting closed taper outline uses its convex hull.",
     "fixtures": {
       "closed-loop": "a399ae1cead2aa69050b9dbc6971a14a6f06307ef62d52e36df1b73323fb7046",
       "wavy-tee": "36cc302e6567366ceb98610dc9bba846bc7d20b2dab97a846405f3418bd70da8"
@@ -43,7 +43,7 @@
       "1/3": "a87026be526b1c817b535157329ecc0e237313cc0a9928db12f8c828c6de8312",
       "7/1": "b2c68882087241b5836735bdbaee23a7789e477f5c6e46ed070aa05ad2316d67",
       "7/2": "25b5b6de88575e1149401563a771440195067869cdfceb4fcfc5854d56de9ab5",
-      "7/3": "1f5a5d98582e04ea40cc09e2db3ee6bbf0cd601fb5ecbcdb9f7915ec660d25c4",
+      "7/3": "dd0d24740d4c515807dff9956779e4a894dd19d627948e12d150a2822ba092ff",
       "42/1": "9b3fc8399d5ab3f3b7939e43606861903815d8da66182fdf2f50f9354bbc0d9d",
       "42/2": "0a2e90dff9477c6bf0e4fe71290ceba7eddd8fb07b0535a89cac04b4e9354732",
       "42/3": "6c03fd86c5d29256a5e61d251d766393dd9279dc656877aa8802361d1725c5a0",

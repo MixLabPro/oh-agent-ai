@@ -62,3 +62,7 @@ node scripts/verify-city-surface-regions.mjs --cities   # 十五城区域与边�
 node scripts/verify-city-driving-surface.mjs            # 合成：整车覆盖、窄口、扫掠、接缝、坡度、分层、kernel/runner集成、漏碰撞环境检测、纯模块边界
 node scripts/verify-city-driving-surface.mjs --cities   # 十五城真实路段同核试跑
 ```
+
+## A6修订（2026-10-15）
+
+规则版本 `SURFACE_REGION_RULES_VERSION=2`：所有aliasTolerance比较加1e-6浮点余量。尽端圆盘顶面比路面高0.10，计算结果是0.10000000000000002，按容差处理而不是超差。跨层规则不变：不同layer永不隐式互通。

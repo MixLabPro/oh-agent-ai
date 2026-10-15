@@ -23,7 +23,8 @@ const { grid, patch, regionsOf } = makeFixtures(m);
   // Pure CPU boundary (spec §4): no THREE/React/engine systems/host/data provider/runtime planner.
   const { createRequire } = await import("node:module");
   const { buildSync } = createRequire(new URL("../apps/agent-city/ui/package.json", import.meta.url))("esbuild");
-  for (const file of ["engine/surface/surfaceRegions.ts", "game/driving/surfaceFootprint.ts", "game/driving/SurfaceDrivingWorld.ts"]) {
+  for (const file of ["engine/surface/surfaceRegions.ts", "engine/surface/compileSurface.ts", "engine/surface/structureCompiler.ts", "engine/surface/citySurfacePort.ts",
+    "engine/surface/terrainClip.ts", "game/driving/surfaceFootprint.ts", "game/driving/SurfaceDrivingWorld.ts"]) {
     const built = buildSync({ entryPoints: [new URL(`../apps/agent-city/ui/src/${file}`, import.meta.url).pathname], bundle: true, write: false, platform: "node", format: "esm", metafile: true });
     for (const input of Object.keys(built.metafile.inputs)) {
       assert.ok(!/node_modules|engine\/systems|engine\/render|host\.ts|cityPlan\.ts|cityLayout\.ts|\/data\/|CityEngine|react/i.test(input), `${file} leaked runtime dependency ${input}`);

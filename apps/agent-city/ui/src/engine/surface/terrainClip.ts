@@ -11,6 +11,9 @@
  * Sutherland–Hodgman 的原始输出再吸附到这些规范点上，相邻片/相邻条带共享边的顶点因此逐位一致，
  * 不会出现 T 形接点。 */
 
+import type { CityLayout } from "../cityLayout";
+import { TERRAIN_SEGMENTS, terrainSurfaceHeight } from "./terrainSampling";
+
 export type TerrainGrid = Readonly<{ cellSize: number; half: number }>;
 export type ClipPoint = { readonly x: number; readonly z: number };
 
@@ -125,4 +128,102 @@ export function triangulateConvex<P extends ClipPoint>(piece: readonly P[], cent
   if (!collinear) return piece.slice(1, -1).map((p, k) => [piece[0], p, piece[k + 2]]);
   const c = centroid();
   return piece.map((p, k) => [c, p, piece[(k + 1) % piece.length]]);
+}
+
+/** Exact fit of linear triangles to the rendered terrain + `lift`.
+ * 分段线性差的极值只在断点上：边与地形网格线（x、z 两组 + 每格对角线 gx+gz=整数）的交点，
+ * 以及三角形内部的地形顶点——全部查一遍是精确最大偏差，不是抽样。 */
+export function terrainFit(layout: Pick<CityLayout, "extent" | "terrain">, lift: number) {
+  const grid: TerrainGrid = Object.freeze({ cellSize: layout.extent / TERRAIN_SEGMENTS, half: layout.extent / 2 });
+  const { cellSize, half: half0 } = grid;
+  const heightAt = (x: number, z: number) => terrainSurfaceHeight(layout, x, z) + lift;
+  const lineDeviation = (px: number, pz: number, qx: number, qz: number) => {
+    const hp = heightAt(px, pz); const hq = heightAt(qx, qz);
+    const gx0 = (px + half0) / cellSize; const gz0 = (pz + half0) / cellSize; const gx1 = (qx + half0) / cellSize; const gz1 = (qz + half0) / cellSize;
+    let worst = 0;
+    const probe = (t: number) => { if (t > 0 && t < 1) worst = Math.max(worst, Math.abs(heightAt(px + (qx - px) * t, pz + (qz - pz) * t) - (hp + (hq - hp) * t))); };
+    for (const [g0, g1] of [[gx0, gx1], [gz0, gz1], [gx0 + gz0, gx1 + gz1]]) {
+      if (g0 === g1) continue;
+      for (let k = Math.ceil(Math.min(g0, g1)); k <= Math.floor(Math.max(g0, g1)); k += 1) probe((k - g0) / (g1 - g0));
+    }
+    return worst;
+  };
+  const triangleDeviation = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number) => {
+    let worst = Math.max(lineDeviation(ax, az, bx, bz), lineDeviation(bx, bz, cx, cz), lineDeviation(cx, cz, ax, az));
+    const ha = heightAt(ax, az); const hb = heightAt(bx, bz); const hc = heightAt(cx, cz);
+    const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+    if (Math.abs(d) < 1e-12) return worst;
+    const i0 = Math.ceil((Math.min(ax, bx, cx) + half0) / cellSize); const i1 = Math.floor((Math.max(ax, bx, cx) + half0) / cellSize);
+    const j0 = Math.ceil((Math.min(az, bz, cz) + half0) / cellSize); const j1 = Math.floor((Math.max(az, bz, cz) + half0) / cellSize);
+    for (let i = i0; i <= i1; i += 1) for (let j = j0; j <= j1; j += 1) {
+      const x = -half0 + i * cellSize; const z = -half0 + j * cellSize;
+      const wa = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d; const wb = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d; const wc = 1 - wa - wb;
+      if (wa < 0 || wb < 0 || wc < 0) continue;
+      worst = Math.max(worst, Math.abs(heightAt(x, z) - (wa * ha + wb * hb + wc * hc)));
+    }
+    return worst;
+  };
+  return Object.freeze({ grid, heightAt, lineDeviation, triangleDeviation });
+}
+
+/** Conforming version of an arbitrary triangle mesh whose shared vertices are shared objects.
+ * Triangles within `tolerance` of the terrain stay as they are; others are clipped along the
+ * terrain triangulation; a kept triangle next to a clipped one carries the same crossings on
+ * the shared edge (no T-junctions). Returns triangles over original or new points. */
+export function conformMesh<V extends ClipPoint>(fit: ReturnType<typeof terrainFit>, tolerance: number, triangles: readonly (readonly [V, V, V])[]) {
+  const ids = new Map<ClipPoint, number>(); const id = (p: ClipPoint) => { let i = ids.get(p); if (i === undefined) { i = ids.size; ids.set(p, i); } return i; };
+  const edgeKey = (p: ClipPoint, q: ClipPoint) => { const a = id(p); const b = id(q); return a < b ? `${a}:${b}` : `${b}:${a}`; };
+  const pass: boolean[] = []; let maxDeviation = 0;
+  const clippedEdges = new Set<string>();
+  triangles.forEach(([a, b, c], t) => {
+    const dev = fit.triangleDeviation(a.x, a.z, b.x, b.z, c.x, c.z);
+    pass[t] = dev <= tolerance;
+    if (pass[t]) maxDeviation = Math.max(maxDeviation, dev);
+    else for (const [p, q] of [[a, b], [b, c], [c, a]]) clippedEdges.add(edgeKey(p, q));
+  });
+  const out: [ClipPoint, ClipPoint, ClipPoint][] = [];
+  const centroidOf = (poly: readonly ClipPoint[]) => () => ({ x: poly.reduce((n, p) => n + p.x, 0) / poly.length, z: poly.reduce((n, p) => n + p.z, 0) / poly.length });
+  triangles.forEach((tri, t) => {
+    if (!pass[t]) { for (const piece of clipConvexToTerrain(fit.grid, tri)) out.push(...triangulateConvex(piece, centroidOf(piece))); return; }
+    const shared = tri.map((p, k) => clippedEdges.has(edgeKey(p, tri[(k + 1) % 3])));
+    if (!shared.some(Boolean)) { out.push([tri[0], tri[1], tri[2]]); return; }
+    const ring: ClipPoint[] = [];
+    tri.forEach((p, k) => { ring.push(p); if (shared[k]) ring.push(...edgeCrossings(fit.grid, p, tri[(k + 1) % 3])); });
+    out.push(...triangulateConvex(ring, centroidOf(tri)));
+  });
+  return { triangles: out, maxDeviation };
+}
+
+/** Ear clipping of a simple polygon (either winding). Returns null if the polygon is not simple
+ * enough to clip (self-intersecting), so callers can keep their fallback and report it. */
+export function earClip<P extends ClipPoint>(polygon: readonly P[]): [P, P, P][] | null {
+  const pts = polygon.filter((p, i) => { const q = polygon[(i + 1) % polygon.length]; return p.x !== q.x || p.z !== q.z; });
+  if (pts.length < 3) return null;
+  const sign = Math.sign(signedArea(pts)) || 1;
+  const cross = (a: ClipPoint, b: ClipPoint, c: ClipPoint) => ((b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x)) * sign;
+  const inside = (p: ClipPoint, a: ClipPoint, b: ClipPoint, c: ClipPoint) => cross(a, b, p) >= 0 && cross(b, c, p) >= 0 && cross(c, a, p) >= 0;
+  const ring = [...pts]; const out: [P, P, P][] = [];
+  let guard = ring.length * ring.length;
+  while (ring.length > 3 && guard-- > 0) {
+    let cut = false;
+    for (let i = 0; i < ring.length; i += 1) {
+      const a = ring[(i + ring.length - 1) % ring.length]; const b = ring[i]; const c = ring[(i + 1) % ring.length];
+      if (cross(a, b, c) <= 1e-12) continue;
+      if (ring.some((p) => p !== a && p !== b && p !== c && inside(p, a, b, c))) continue;
+      out.push([a, b, c]); ring.splice(i, 1); cut = true; break;
+    }
+    if (!cut) return null;
+  }
+  if (ring.length !== 3 || cross(ring[0], ring[1], ring[2]) <= 1e-12) return null;
+  out.push([ring[0], ring[1], ring[2]]);
+  return out;
+}
+
+/** Convex hull (Andrew monotone chain), counter-clockwise, of point objects (kept by identity). */
+export function convexHullOf<P extends ClipPoint>(points: readonly P[]): P[] {
+  const pts = [...points].sort((a, b) => a.x - b.x || a.z - b.z);
+  const cross = (o: P, a: P, b: P) => (a.x - o.x) * (b.z - o.z) - (a.z - o.z) * (b.x - o.x);
+  const lower: P[] = []; for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+  const upper: P[] = []; for (const p of [...pts].reverse()) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
 }

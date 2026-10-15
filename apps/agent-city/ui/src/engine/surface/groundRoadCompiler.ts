@@ -3,8 +3,7 @@
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { roadPaintPlan } from "../cityRoadPaint";
 import { cornerArc, junctionIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline, type JunctionArm, type RoadJunction } from "../cityRoadJunctions";
-import { TERRAIN_SEGMENTS, terrainSurfaceHeight } from "./terrainSampling";
-import { clipConvexToTerrain, edgeCrossings, triangulateConvex, type ClipPoint } from "./terrainClip";
+import { clipConvexToTerrain, conformMesh, convexHullOf, earClip, edgeCrossings, terrainFit, triangulateConvex, type ClipPoint } from "./terrainClip";
 
 /** Same transfer function as the project's Three.js linear-sRGB working space.
  * Fixed local #rrggbb palette only; no CSS parser or global color-management state. */
@@ -119,40 +118,12 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
       terrainDeviation: typeof deviation === "number" ? deviation : 0 }));
   };
   const color = new LinearColor();
-  const heightAt = (x: number, z: number) => terrainSurfaceHeight(layout, x, z) + ROAD_SURFACE_LIFT;
+  // 精确贴地判定见 terrainClip.terrainFit：旧版只查中点，带子最低处比「地形 + 抬升」低 0.29（埋进地形），
+  // 与路口扇面叠置高差 0.30，驾驶区域判 height-conflict 关闭路口。
+  const fit = terrainFit(layout, ROAD_SURFACE_LIFT);
+  const { heightAt, triangleDeviation } = fit;
   /** 路面与渲染地形的允许偏差（抬升量的一半：最坏也不钻到地下，两片叠置路面高差 ≤ 0.04）。 */
   const PLANAR_TOLERANCE = ROAD_SURFACE_LIFT / 2;
-  // 只查中点会漏：渲染地形是 extent/192 网格上的分段线性面，中点恰好落在线性插值上时
-  // 四分之一处仍可偏 0.3（十五城实测带子最低到 −0.29，路面埋进地形；与路口扇面叠置高差 0.30，
-  // 驾驶区域判 height-conflict 关闭路口）。分段线性差的极值只在断点上：边与地形网格线
-  // （x、z 两组 + 每格对角线 gx+gz=整数）的交点，以及三角形内部的地形顶点——全部查一遍是精确最大偏差。
-  const cellSize = layout.extent / TERRAIN_SEGMENTS; const half0 = layout.extent / 2;
-  const lineDeviation = (px: number, pz: number, qx: number, qz: number) => {
-    const hp = heightAt(px, pz); const hq = heightAt(qx, qz);
-    const gx0 = (px + half0) / cellSize; const gz0 = (pz + half0) / cellSize; const gx1 = (qx + half0) / cellSize; const gz1 = (qz + half0) / cellSize;
-    let worst = 0;
-    const probe = (t: number) => { if (t > 0 && t < 1) worst = Math.max(worst, Math.abs(heightAt(px + (qx - px) * t, pz + (qz - pz) * t) - (hp + (hq - hp) * t))); };
-    for (const [g0, g1] of [[gx0, gx1], [gz0, gz1], [gx0 + gz0, gx1 + gz1]]) {
-      if (g0 === g1) continue;
-      for (let k = Math.ceil(Math.min(g0, g1)); k <= Math.floor(Math.max(g0, g1)); k += 1) probe((k - g0) / (g1 - g0));
-    }
-    return worst;
-  };
-  const triangleDeviation = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number) => {
-    let worst = Math.max(lineDeviation(ax, az, bx, bz), lineDeviation(bx, bz, cx, cz), lineDeviation(cx, cz, ax, az));
-    const ha = heightAt(ax, az); const hb = heightAt(bx, bz); const hc = heightAt(cx, cz);
-    const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
-    if (Math.abs(d) < 1e-12) return worst;
-    const i0 = Math.ceil((Math.min(ax, bx, cx) + half0) / cellSize); const i1 = Math.floor((Math.max(ax, bx, cx) + half0) / cellSize);
-    const j0 = Math.ceil((Math.min(az, bz, cz) + half0) / cellSize); const j1 = Math.floor((Math.max(az, bz, cz) + half0) / cellSize);
-    for (let i = i0; i <= i1; i += 1) for (let j = j0; j <= j1; j += 1) {
-      const x = -half0 + i * cellSize; const z = -half0 + j * cellSize;
-      const wa = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d; const wb = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d; const wc = 1 - wa - wb;
-      if (wa < 0 || wb < 0 || wc < 0) continue;
-      worst = Math.max(worst, Math.abs(heightAt(x, z) - (wa * ha + wb * hb + wc * hc)));
-    }
-    return worst;
-  };
   /** 法线取地形真值梯度（中心差分 1）：同一位置的重叠顶点法线一致，层间不因光照差闪烁。 */
   const normalAt = (x: number, z: number) => {
     const gx = (layout.terrain.height(x + 1, z) - layout.terrain.height(x - 1, z)) / 2;
@@ -167,7 +138,7 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
     return b.count++;
   };
 
-  const grid = { cellSize, half: half0 };
+  const grid = fit.grid;
   type Attrs = { u: number; v: number; run: number[]; ends: number[]; edges: number[]; zebra: number[]; color: LinearColor };
   /** Conforming emission for one piece: vertices shared by exact XZ across all its polygons. */
   const conformingEmitter = (b: Builder, existing: readonly (ClipPoint & { index: number })[]) => {
@@ -186,6 +157,8 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
       for (const [x, y, z] of triangles) pushUpTriangle(b, index(x, attrsAt), index(y, attrsAt), index(z, attrsAt));
     };
     return {
+      /** Already-conformed triangles over canonical points. */
+      triangles: (triangles: [ClipPoint, ClipPoint, ClipPoint][], attrsAt: (p: ClipPoint) => Attrs) => emit(triangles, attrsAt),
       /** Fails the tolerance: split along the terrain triangulation (deviation 0). */
       clip: (corners: readonly ClipPoint[], attrsAt: (p: ClipPoint) => Attrs) => {
         for (const piece of clipConvexToTerrain(grid, corners)) emit(triangulateConvex(piece, centroidOf(piece)), attrsAt);
@@ -350,6 +323,25 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
     const row = rimXZ.map((p) => vertex(b, p.x, p.z, attrs));
     const hub = { x: center.x, z: center.z, index: middle };
     const rim = rimXZ.map((p, k) => ({ x: p.x, z: p.z, index: row[k] }));
+    // A fan is only valid when the polygon is star-shaped from its hub (every sector turns the
+    // same way). Corner sidewalk arcs offset by 1.2 are not always: their sectors overlapped and
+    // the piece was non-manifold (seed 7 tier 3, and twice in display layouts). Those polygons are
+    // ear-clipped instead; star-shaped fans keep their exact original triangles.
+    const turn = Array.from({ length: segments }, (_, k) => {
+      const p = rimXZ[k]; const q = rimXZ[(k + 1) % ring.length];
+      return (p.x - center.x) * (q.z - center.z) - (p.z - center.z) * (q.x - center.x);
+    });
+    if (!(turn.every((t) => t > 1e-9) || turn.every((t) => t < -1e-9))) {
+      const polygon = closed ? rim : [hub, ...rim];
+      // A closed ring that is not even simple (the 1.2-offset taper outline crosses into a bow-tie)
+      // means its convex hull — the trapezoid the outline was meant to bound.
+      const ears = earClip(polygon) ?? (closed ? earClip(convexHullOf(rim)) : null);
+      if (ears) {
+        const conformed = conformMesh(fit, PLANAR_TOLERANCE, ears);
+        conformingEmitter(b, [hub, ...rim]).triangles(conformed.triangles, () => attrs);
+        return conformed.maxDeviation;
+      }
+    }
     const pass: boolean[] = []; let deviation = 0;
     for (let k = 0; k < segments; k += 1) {
       const p = rimXZ[k]; const q = rimXZ[(k + 1) % ring.length];

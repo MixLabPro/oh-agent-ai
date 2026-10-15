@@ -1,0 +1,213 @@
+#!/usr/bin/env node
+// Structure descriptors (bridges, expressways, truss, channelised mouths, cul-de-sacs):
+// render-neutral extraction, exact BOX/cylinder top faces vs THREE, the aggregate driving
+// surface (layers, landings, obstacles) and same-kernel crossings. --cities: fifteen plans.
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { loadCity, cachedPlan } from "./city-kit/index.mjs";
+import { structureRenderDigests } from "./city-kit/structure-render-digest.mjs";
+const kit = await loadCity({
+  "pkg:three": ["* as THREE"],
+  "engine/systems/roadSystem.ts": ["buildInfrastructure", "buildDistrictExpressways", "buildTrussBridges", "buildCulDeSacBulbs", "buildChannelizedJunctions"],
+  "engine/surface/structureCompiler.ts": ["eulerMatrix", "boxPoint", "boxTopFace", "bridgeDeckParts", "expresswayPieces", "culDeSacDiscs", "culDeSacTopCap", "trussBars", "trussBarPart"],
+  "engine/surface/compileSurface.ts": ["compileCitySurface", "landingConnectivity", "CITY_SURFACE_GEOMETRY_VERSION"],
+  "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
+  "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
+  "game/driving/surfaceFootprint.ts": ["footprintSupport"],
+  "game/driving/SurfaceDrivingWorld.ts": ["SurfaceDrivingEnvironment", "SurfaceWorldValidator", "polylineProgress"],
+  "game/driving/DrivingKernel.ts": ["DrivingKernel"],
+  "game/DrivingSimulation.ts": ["initialDrivingState"],
+  "engine/cityPlan.ts": ["createCityPlan"],
+  "engine/surface/citySurfacePort.ts": ["CitySurfacePort"],
+  "engine/surface/groundRoadCompiler.ts": ["compileGroundRoadSurface"],
+});
+const { THREE } = kit;
+const close = (a, b, eps = 1e-9, what = "") => assert.ok(Math.abs(a - b) <= eps, `${what} ${a} vs ${b}`);
+
+// ── Pure Euler/BOX transform equals THREE's compose for every order the renderer uses ──
+{
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), v = new THREE.Vector3();
+  let k = 0;
+  for (const order of ["XYZ", "YZX", "YXZ"]) for (let i = 0; i < 40; i++) {
+    const r = (s) => Math.sin(++k * s) * 2.7;
+    const part = { x: r(1.3) * 40, y: r(0.7) * 5, z: r(2.1) * 40, sx: 1 + Math.abs(r(0.9)) * 8, sy: 0.2 + Math.abs(r(1.7)), sz: 0.5 + Math.abs(r(0.4)) * 6, rx: r(0.31), ry: r(0.53), rz: r(0.29), order, color: "#fff", role: "truss" };
+    e.set(part.rx, part.ry, part.rz, order); q.setFromEuler(e);
+    m.compose(new THREE.Vector3(part.x, part.y, part.z), q, new THREE.Vector3(part.sx, part.sy, part.sz));
+    for (const [lx, ly, lz] of [[-0.5, 1, -0.5], [0.5, 0, 0.5], [0.5, 1, -0.5], [0, 0.5, 0]]) {
+      v.set(lx, ly, lz).applyMatrix4(m); const p = kit.boxPoint(part, lx, ly, lz);
+      close(p.x, v.x, 1e-9, `${order} x`); close(p.y, v.y, 1e-9, `${order} y`); close(p.z, v.z, 1e-9, `${order} z`);
+    }
+  }
+  // Cul-de-sac top cap equals the renderer's CylinderGeometry(…,20) top ring under its own matrix.
+  const disc = { x: 12, z: -7, radius: 7.5, base: 2.3, gx: 0.08, gz: -0.05 };
+  const geometry = new THREE.CylinderGeometry(1, 1, 1, 20).translate(0, 0.5, 0);
+  const normal = new THREE.Vector3(-disc.gx, 1, -disc.gz).normalize(); q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+  m.compose(new THREE.Vector3(disc.x, disc.base + 0.02, disc.z), q, new THREE.Vector3(disc.radius, 0.12, disc.radius));
+  const cap = kit.culDeSacTopCap(disc); const pos = geometry.getAttribute("position");
+  for (let i = 0; i < 20; i++) { v.fromBufferAttribute(pos, i).applyMatrix4(m); close(cap.rim[i].x, v.x, 1e-6, "rim x"); close(cap.rim[i].y, v.y, 1e-6, "rim y"); close(cap.rim[i].z, v.z, 1e-6, "rim z"); }
+}
+
+// ── Synthetic layouts ──
+const node = (p) => `${p.x}:${p.z}`;
+const edge = (a, b, width = 5, extra = {}) => ({ id: `${node(a)}/${node(b)}`, from: node(a), to: node(b), points: [a, b], width, kind: width >= 8 ? "arterial" : "local", ...extra });
+const city = (roadEdges, height = () => 2, extra = {}) => ({ extent: 400, terrain: { height }, roadEdges, highways: [], bridges: [], landmarks: [], culDeSacEnds: [], ...extra });
+const W = { x: -60, z: 0 }, A = { x: -20, z: 0 }, B = { x: 20, z: 0 }, E = { x: 60, z: 0 };
+const span = (a = A, b = B, extra = {}) => edge(a, b, 5, { bridge: true, structure: "deck", ...extra });
+const build = (layout) => {
+  const c = kit.compileCitySurface(layout); const surface = { ...c.surface, revision: "fixture" };
+  const index = kit.buildSurfaceIndex(surface); assert.equal(index.status, "ready");
+  const regions = kit.buildSurfaceRegions(surface, index); assert.equal(regions.status, "ready");
+  return { c, surface, regions };
+};
+const key = { baseSnapshotHash: "synthetic-structure-v1", vehicleConfigHash: "car-v1", kernelBuildId: "fixture-build-v1",
+  surfaceVersion: 2, queryVersion: 2, snapshotCompilerVersion: 1, physicsVersion: 1, collisionVersion: 1, controllerVersion: 1, plannerVersion: 1, observerVersion: 1, manifestHash: "x", releasePolicyVersion: 1, releaseBoundaryHash: null };
+/** Drive straight along +x from (x0, z) with a bounded lane-keeping pilot; every tick independently validated. */
+const drive = (regions, x0, z, x1) => {
+  const env = new kit.SurfaceDrivingEnvironment(regions); const kernel = new kit.DrivingKernel(env, key);
+  const start = regions.classify(x0, z, "ground"); assert.equal(start.status, "drivable");
+  let s = { ...kit.initialDrivingState(x0, z, 0, start.regionId), ...env.place(x0, z, 0, start.regionId) };
+  const validator = new kit.SurfaceWorldValidator(regions, kit.polylineProgress([{ x: x0, z }, { x: x1, z }]));
+  assert.equal(validator.validateStart(s), "valid");
+  for (let tick = 0; tick < 3000 && s.x < x1; tick++) {
+    const err = -s.heading - (s.z - z) * 0.3;
+    const step = kernel.step(s, { forward: true, backward: false, left: err < -0.02, right: err > 0.02 });
+    assert.equal(validator.validate(s, step), "valid", `tick ${tick}`);
+    if (step.motion.blocked) return { reached: false, x: s.x, reason: step.motion.reason, maxY: s.y };
+    s = step.state;
+  }
+  return { reached: s.x >= x1, x: s.x, maxY: s.y };
+};
+{
+  // Level banks: both landings aligned, the deck joins the ground region, the car crosses.
+  const { c, regions } = build(city([edge(W, A), span(), edge(B, E)]));
+  assert.equal(c.surface.geometryVersion, kit.CITY_SURFACE_GEOMETRY_VERSION);
+  assert.deepEqual(c.landings.map((l) => [l.end, l.status, l.layerId]), [["from", "aligned", "ground"], ["to", "aligned", "ground"]]);
+  const deck = c.surface.patches.find((p) => p.kind === "bridge-deck");
+  assert.ok(deck && deck.layerId === "ground");
+  assert.equal(regions.classify(0, 0, "ground").regionId, regions.classify(-40, 0, "ground").regionId, "deck and both roads are one region");
+  assert.equal(regions.classify(0, 2.4, "ground").status, "blocked", "railing band is not drivable (inner face at width/2 − 0.3)");
+  assert.ok(c.obstacles.some((o) => o.role === "bridge-railing") && c.obstacles.every((o) => o.shape !== "box" || o.corners.every((p) => Number.isFinite(p.x + p.y + p.z))));
+  assert.deepEqual(kit.landingConnectivity(c, regions).map((x) => x.reason), ["connected", "connected"]);
+  const run = drive(regions, -40, 0, 40); assert.ok(run.reached, `crosses the level bridge (${JSON.stringify(run)})`);
+}
+{
+  // West bank 0.6 lower than the deck (deck top = max of the two bank heights): a real step.
+  const { c, regions } = build(city([edge(W, A), span(), edge(B, E)], (x) => (x < 0 ? 2 : 2.6)));
+  const west = c.landings.find((l) => l.end === "from");
+  assert.equal(west.status, "step"); assert.ok(Math.abs(west.step - 0.56) < 1e-6);
+  assert.equal(c.landings.find((l) => l.end === "to").status, "aligned");
+  assert.deepEqual(kit.landingConnectivity(c, regions).map((x) => x.connected), [false, true]);
+  const run = drive(regions, -40, 0, 40); assert.equal(run.reached, false, "a 0.56 landing step is never driven over");
+  assert.ok(run.x < -20, "blocked at the west landing, not somewhere else");
+}
+{
+  // Overpass: a ground road runs under the span → the deck is its own layer, the road below is unaffected.
+  const N = { x: 0, z: -40 }, S = { x: 0, z: 40 };
+  const { c, regions } = build(city([edge(W, A), span(), edge(B, E), edge(N, S)]));
+  const deck = c.surface.patches.find((p) => p.kind === "bridge-deck");
+  assert.ok(deck.layerId.startsWith("bridge:")); assert.ok(c.landings.every((l) => l.status === "layered"));
+  assert.equal(regions.classify(0, 10, "ground").status, "drivable", "the road under the deck stays drivable");
+  assert.equal(regions.classify(0, 0, deck.layerId).status, "drivable");
+  assert.notEqual(regions.classify(0, 0, deck.layerId).regionId, regions.classify(-40, 0, "ground").regionId, "no implicit cross-layer portal");
+}
+{
+  // Dangling far end and a multi-point bridge.
+  const { c } = build(city([edge(W, A), span()]));
+  assert.equal(c.landings.find((l) => l.end === "to").status, "no-ground");
+  const bent = { ...span(), points: [A, { x: 0, z: 5 }, B] };
+  const issues = build(city([edge(W, A), bent, edge(B, E)])).c.surface.report.issues;
+  assert.ok(issues.some((i) => i.source.id === `bridge:${bent.id}` && i.reason === "unsupported"), "multi-point bridges are rejected, not drawn as decks");
+}
+{
+  // Expressway: own layer, actual tilted deck tops, ramp ends a real step above the road.
+  const points = Array.from({ length: 11 }, (_, i) => ({ x: -100 + i * 20, z: 60 }));
+  const { c, regions } = build(city([edge({ x: -120, z: 60 }, { x: 120, z: 60 }, 12)], () => 2, { highways: [points] }));
+  const decks = c.surface.patches.filter((p) => p.layerId === "expressway:0");
+  assert.equal(decks.length, 10);
+  const mid = regions.classify(0, 60, "expressway:0"); assert.equal(mid.status, "drivable"); close(mid.y, 9.1, 1e-4, "mid deck top");
+  assert.ok(c.landings.filter((l) => l.structureId === "expressway:0").every((l) => l.status === "layered" && Math.abs(l.step - 0.26) < 0.02));
+  assert.equal(regions.classify(0, 60, "ground").status, "drivable", "the road under the expressway is its own layer");
+  assert.equal(regions.classify(0, 65.2, "expressway:0").status, "blocked", "rails bound the deck at ±4.95");
+}
+{
+  // Channelised 40° T: flare is drivable junction surface, the island is a curb hole.
+  const DEG = Math.PI / 180; const J = { x: 0, z: 0 };
+  const tee = [edge({ x: -60, z: 0 }, J), edge({ x: 60, z: 0 }, J), edge({ x: Math.cos(40 * DEG) * 60, z: Math.sin(40 * DEG) * 60 }, J)];
+  const { c, regions } = build(city(tee));
+  assert.equal(c.counts.islands, 1); assert.equal(c.counts.flares, 2);
+  const island = c.obstacles.find((o) => o.role === "island");
+  const cx = island.ring.reduce((n, p) => n + p.x, 0) / island.ring.length, cz = island.ring.reduce((n, p) => n + p.z, 0) / island.ring.length;
+  assert.equal(regions.classify(cx, cz, "ground").cause, "island");
+}
+{
+  // Cul-de-sac disc: the turnaround beyond the road width is drivable and joins the road's region.
+  const end = { x: 60, z: 0 };
+  const { c, regions } = build(city([edge(W, end)], () => 2, { culDeSacEnds: [end] }));
+  assert.equal(c.counts.culDeSacs, 1);
+  const bulb = regions.classify(62, 4.5, "ground"); assert.equal(bulb.status, "drivable"); close(bulb.y, 2.14, 1e-4, "disc top");
+  assert.equal(bulb.regionId, regions.classify(30, 0, "ground").regionId, "a 0.10 lip is within the seam tolerance");
+}
+{
+  // Host snapshot port: lazy compile + SHA-256 revision, cached per source, invalidation and cancellation.
+  const layout = city([edge(W, A), span(), edge(B, E)]);
+  const source = { layout, ground: kit.compileGroundRoadSurface(layout) };
+  const port = new kit.CitySurfacePort();
+  assert.equal((await port.capture(null)).status, "unavailable");
+  const aborted = new AbortController(); aborted.abort();
+  assert.equal((await port.capture(source, aborted.signal)).status, "cancelled");
+  const first = await port.capture(source);
+  assert.equal(first.status, "ready"); assert.match(first.revision, /^surface-v2:sha256:[a-f0-9]{64}$/);
+  assert.ok(first.compilation.surface.patches.some((p) => p.kind === "bridge-deck"));
+  assert.equal(await port.capture(source), first, "same rendered source reuses the published snapshot");
+  const copy = first.read(); copy.patches[0].vertices[0] += 99;
+  assert.notEqual(first.read().patches[0].vertices[0], copy.patches[0].vertices[0], "reads are defensive copies");
+  port.invalidate();
+  assert.equal(first.read(), null, "an invalidated capture never reads the next city");
+  const again = await port.capture(source);
+  assert.equal(again.revision, first.revision, "same content → same revision after invalidation");
+  const racing = port.capture({ layout, ground: kit.compileGroundRoadSurface(layout) }); port.invalidate();
+  assert.equal((await racing).status, "stale", "a capture overtaken by a city change is stale");
+}
+console.log("Structure surface: THREE-exact BOX/cylinder tops, level bridge crossed by the kernel, landing steps block, overpass layering, dangling/multi-point bridges, expressway layer and rails, channelised island, cul-de-sac turnaround, host snapshot port passed.");
+
+if (process.argv.includes("--cities")) {
+  const baseline = JSON.parse(readFileSync(new URL("../fixtures/city-driving/structure-render-baseline.json", import.meta.url), "utf8")).plans;
+  const totals = { bridges: 0, landings: 0, connected: 0, crossings: 0, crossable: 0 };
+  const reasons = {};
+  for (const seed of [1, 7, 42, 2026, 65537]) for (const tier of [1, 2, 3]) {
+    const plan = cachedPlan(kit.createCityPlan, seed, tier);
+    const digests = await structureRenderDigests(kit, plan);
+    assert.deepEqual(digests, baseline[`${seed}/${tier}`], `seed ${seed} tier ${tier}: structure render output changed`);
+    const { c, regions } = build(plan);
+    assert.deepEqual(c.surface.report.issues.filter((i) => i.reason !== "unsupported"), [], "every compiled patch has a manifold boundary");
+    const connectivity = kit.landingConnectivity(c, regions).filter((x) => x.landing.structureId.startsWith("bridge:"));
+    totals.bridges += c.counts.bridges; totals.landings += connectivity.length;
+    for (const x of connectivity) { reasons[x.reason] = (reasons[x.reason] ?? 0) + 1; if (x.connected) totals.connected++; }
+    // A bridge is crossable only when BOTH landings join the deck's region; cross each one with the same kernel.
+    for (const id of new Set(connectivity.map((x) => x.landing.structureId))) {
+      const ends = connectivity.filter((x) => x.landing.structureId === id);
+      if (ends.length !== 2 || !ends.every((x) => x.connected)) continue;
+      totals.crossable++;
+      const [from, to] = ends.map((x) => x.landing); const ux = -from.outX, uz = -from.outZ; const len = Math.hypot(to.x - from.x, to.z - from.z);
+      const heading = Math.atan2(uz, ux); const sx = from.x - ux * 1.5, sz = from.z - uz * 1.5;
+      const start = regions.classify(sx, sz, "ground");
+      const env = new kit.SurfaceDrivingEnvironment(regions); const kernel = new kit.DrivingKernel(env, key);
+      const placed = env.place(sx, sz, heading, start.regionId); if (!placed) continue;
+      let s = { ...kit.initialDrivingState(sx, sz, heading, start.regionId), ...placed };
+      const validator = new kit.SurfaceWorldValidator(regions, kit.polylineProgress([{ x: sx, z: sz }, { x: to.x + ux * 1.5, z: to.z + uz * 1.5 }]));
+      for (let tick = 0; tick < 4000; tick++) {
+        const lateral = -(s.x - from.x) * uz + (s.z - from.z) * ux;
+        const err = Math.atan2(Math.sin(heading - s.heading), Math.cos(heading - s.heading)) - lateral * 0.3;
+        const step = kernel.step(s, { forward: true, backward: false, left: err < -0.02, right: err > 0.02 });
+        assert.equal(validator.validate(s, step), "valid");
+        if (step.motion.blocked) break;
+        s = step.state;
+        if ((s.x - from.x) * ux + (s.z - from.z) * uz > len + 1.5) { totals.crossings++; break; }
+      }
+    }
+    const conflicts = regions.report.conflicts.length;
+    console.log(`Structure surface: seed ${seed}, tier ${tier}: render parity ok, ${JSON.stringify(c.counts)}, ${c.obstacles.length} obstacles, landings ${c.landings.map((l) => `${l.status}${l.step === null ? "" : `(${l.step.toFixed(2)})`}`).join(" ")}, ${regions.report.regions} regions, ${conflicts} conflicts.`);
+  }
+  assert.equal(totals.crossings, totals.crossable, `every bridge whose two landings join its region is crossed (${totals.crossings}/${totals.crossable})`);
+  console.log(`Structure surface: ${totals.bridges} bridges, ${totals.landings} landings — ${totals.connected} join the deck region ${JSON.stringify(reasons)}; ${totals.crossings}/${totals.crossable} bridges with both landings connected crossed tick-by-tick. Expressways stay on their own layers (no cross-layer portal). Flat decks over sloping approaches are reported, not opened.`);
+}
