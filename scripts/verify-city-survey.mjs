@@ -62,7 +62,8 @@ const summaries = [];
 const ACCEPT_BASE = 4_000_000_000;
 const acceptance = [];
 const ACCEPT_CEILING = { siteWithoutDoorRoad: 1, looseInlandRoadEnds: 16, acuteJunctions: 4, crowdedArterials: 2, bridgeheadContinuity: 5 };
-const progress = process.env.CITY_VERIFY_PROGRESS === "1";
+// Long default surveys report seed progress; callers may explicitly silence it.
+const progress = process.env.CITY_VERIFY_PROGRESS !== "0";
 // 2026-10-09 独立验收集（3_000_000_000 系）首测基线=实测值（棘轮起点，只降不升）：t1 门路 1（seed 3005341179
 // villa-complex 门链全败）、t1 断头 16、t3 断头 7/锐角 4、扎堆 t1 2/t3 1、桥头 t1 5/t10 3——调参集（2_000_000_000 系）上限不泛化的直接证据；逐项修复后归零回落。
 if (sampleSet !== "tuning") for (const { tier, seeds } of selectedTiers) {

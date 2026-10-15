@@ -13,7 +13,13 @@ const { createCityPlan: rawPlan, layoutCity, polygonDistance, MIAMI_COASTAL, sea
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL", "seasideStripContains", "promenadeSegments", "boulevardSegments", "seasideHotelCount", "encodeDistance", "decodeDistance", "distanceQuantizationError"],
 });
-const createCityPlan = (seed, tier, config) => cachedPlan(rawPlan, seed, tier, config);
+const createCityPlan = (seed, tier, config) => {
+  const trace = tier === 10 || process.env.CITY_VERIFY_PROGRESS === "1", began = performance.now();
+  if (trace) console.error(`City seaside: start ${seed}/t${tier} profile=${config?.profile ?? "default"}`);
+  const plan = cachedPlan(rawPlan, seed, tier, config);
+  if (trace) console.error(`City seaside: done ${seed}/t${tier} ${Math.round(performance.now() - began)}ms`);
+  return plan;
+};
 
 const normalizeAngle = (a) => { let r = a % (Math.PI * 2); if (r < 0) r += Math.PI * 2; return r; };
 const angleDelta = (a, b) => { const d = Math.abs(normalizeAngle(a) - normalizeAngle(b)); return Math.min(d, Math.PI * 2 - d); };
