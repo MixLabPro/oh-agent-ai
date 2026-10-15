@@ -1,3 +1,4 @@
+import { m, REAL } from "../../worldScale";
 import * as THREE from "three";
 import type { LandmarkCtx } from "../../models/landmarkContext";
 import { hashSeed } from "../../../cityModel";
@@ -52,7 +53,7 @@ const keeper = (host: LandmarkCtx["host"]): Keep => (item) => { host.disposables
 function addPalms(group: THREE.Group, keep: Keep, palms: Array<{ x: number; z: number; height: number; turn: number }>): void {
   if (!palms.length) return;
   const trunkGeometry = keep(new THREE.CylinderGeometry(0.22, 0.32, 1, 6).translate(0, 0.5, 0));
-  const frondGeometry = keep(new THREE.BoxGeometry(0.5, 0.08, 3.4).translate(0, 0, 1.7));
+  const frondGeometry = keep(new THREE.BoxGeometry(m(0.8), m(0.1), m(4)).translate(0, 0, m(2))); // 棕榈叶长 ~4 m
   const trunks = new THREE.InstancedMesh(trunkGeometry, keep(new THREE.MeshLambertMaterial({ color: "#a98462" })), palms.length);
   const fronds = new THREE.InstancedMesh(frondGeometry, keep(new THREE.MeshLambertMaterial({ color: "#2fbf77" })), palms.length * 7);
   const matrix = new THREE.Matrix4(); const quaternion = new THREE.Quaternion(); const euler = new THREE.Euler();
@@ -88,8 +89,8 @@ function drawGolf({ group, landmark, host }: LandmarkCtx): void {
       cap.position.set(x, 0.3, z); group.add(cap);
     }
   }
-  const pole = keep(new THREE.CylinderGeometry(0.06, 0.06, 3, 5).translate(0, 1.5, 0));
-  const flag = keep(new THREE.BoxGeometry(1.1, 0.7, 0.04).translate(0.55, 2.6, 0));
+  const pole = keep(new THREE.CylinderGeometry(m(0.04), m(0.04), m(2.5), 5).translate(0, m(1.25), 0)); // 旗杆 2.5 m
+  const flag = keep(new THREE.BoxGeometry(m(0.6), m(0.4), m(0.03)).translate(m(0.3), m(2.25), 0));
   const white = keep(new THREE.MeshLambertMaterial({ color: "#f4f4ef" })); const red = keep(new THREE.MeshLambertMaterial({ color: "#e0474c" }));
   for (const g of golf.greens) {
     const disc = new THREE.Mesh(keep(new THREE.CylinderGeometry(g.radius, g.radius, 0.05, 24)), green);
@@ -123,7 +124,7 @@ function drawGolf({ group, landmark, host }: LandmarkCtx): void {
     });
     trunk.castShadow = true; crown.castShadow = true; group.add(trunk, crown);
   }
-  addPalms(group, keep, golf.trees.filter((t) => t.palm).map((t) => ({ x: t.x, z: t.z, height: 4 + t.size * 2, turn: t.x * 0.37 + t.z })));
+  addPalms(group, keep, golf.trees.filter((t) => t.palm).map((t) => ({ x: t.x, z: t.z, height: m(REAL.palm.min) + t.size, turn: t.x * 0.37 + t.z })));
 }
 
 /** Prawn Island：拱顶摄影棚（墙 + 半圆筒屋面 + 卷帘门）、停车场（条纹 + 几辆车）、四脚水塔、沿岸棕榈。 */
@@ -146,7 +147,7 @@ function drawStudio({ group, landmark, host }: LandmarkCtx): void {
     const asphalt = flat(keep, "#5c6264", 0); const stripe = flat(keep, "#e8e4d6", 1);
     const pad = new THREE.Mesh(keep(new THREE.BoxGeometry(l.w, 0.05, l.d)), asphalt); pad.position.set(l.x, 0.3, l.z); group.add(pad);
     const line = keep(new THREE.BoxGeometry(0.15, 0.05, l.d * 0.38));
-    const car = keep(new THREE.BoxGeometry(1.7, 1.1, 3.6));
+    const car = keep(new THREE.BoxGeometry(m(REAL.car.width), m(REAL.car.height), m(REAL.car.length)));
     const colors = ["#f3f1ea", "#d0585f", "#2c6f9e", "#e6c14a"].map((c) => keep(new THREE.MeshLambertMaterial({ color: c })));
     for (let x = -l.w / 2 + 1.5; x <= l.w / 2 - 1.5; x += 2.6) for (const side of [-1, 1]) {
       const m = new THREE.Mesh(line, stripe); m.position.set(l.x + x, 0.34, l.z + side * l.d * 0.28); group.add(m);

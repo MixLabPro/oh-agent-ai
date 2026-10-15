@@ -9,6 +9,7 @@
  *
  * 岸线噪声 ±18%（geography.isletClearance）：一切放置都压在 0.8R 以内；码头按噪声上限 1.18R 估到岸距离，宁长勿短。
  */
+import { m, REAL } from "./worldScale";
 import { DetMath as Math } from "./detMath";
 
 /** 堤道中线相对小岛中心的北偏（占半径）。geography 按它把小岛中心放在堤道以南。 */
@@ -23,7 +24,8 @@ export type IsletEstate = {
 };
 
 /** 住宅台地半尺寸（islet-mansion 台地 34×26，乘 scale）。 */
-const HOUSE_HALF_W = 17; const HOUSE_HALF_D = 13;
+// 住宅台地 34 × 26 m（REAL.mansion，islet-mansion 模型按米建、渲染时整体乘 METER_MODEL_SCALE）。
+const HOUSE_HALF_W = m(REAL.mansion.plotWidth) / 2; const HOUSE_HALF_D = m(REAL.mansion.plotDepth) / 2;
 
 function hash(seed: number, salt: number): number {
   let h = (Math.imul(seed | 0, 0x9e3779b1) ^ Math.imul(salt | 0, 0x85ebca6b)) >>> 0;
@@ -40,7 +42,7 @@ export function isletEstate(radius: number, seed: number): IsletEstate {
   // 岛小环就小、住宅还是满尺寸——曾固定环路 0.5R，半径 < 95 的岛一栋住宅都放不下（CITY_SCALE_AUDIT 方案 A）。
   const scale = r >= 100 ? 1 : 0.85;
   const halfW = HOUSE_HALF_W * scale; const halfD = HOUSE_HALF_D * scale;
-  const loopWidth = 7;
+  const loopWidth = m(REAL.estateLoopRoad);
   const along = loopWidth / 2 + 3 + halfD; // 住宅中心离环路中线（台地后沿离路边 3）
   /** 给定环路半轴 ax，沿环路外侧每 30° 一个候选放住宅（台地四角都在岸线噪声下限内、离堤道 ≥ 10、彼此不重叠）。 */
   const ringHouses = (ax: number): IsletHouse[] => {
@@ -69,7 +71,7 @@ export function isletEstate(radius: number, seed: number): IsletEstate {
     if (trial.length > houses.length) { ax = candidate; houses = trial; }
   }
   const loop = { cx: 0, cz: -r * 0.08, ax, az: ax * 0.72, width: loopWidth };
-  const spur = { x: 0, z0: loop.cz + loop.az, z1: causewayZ, width: 6 };
+  const spur = { x: 0, z0: loop.cz + loop.az, z1: causewayZ, width: m(REAL.estateSpurRoad) };
 
   // ── 北侧大宅：堤道与北岸之间的条带够深就放一栋正常尺寸、面朝北；不够深就缩到 0.75 ──
   for (const grandScale of [1.1, 1, 0.85]) {
@@ -98,7 +100,7 @@ export function isletEstate(radius: number, seed: number): IsletEstate {
     if (Math.abs(x - spur.x) < spur.width / 2 + 2 && z > spur.z0 - 2 && z < spur.z1) continue;
     if (onLoop(x, z) || onHouse(x, z)) continue;
     if (hash(seed, n + 9001) < 0.35) continue; // 留空：不铺成均匀的树阵
-    palms.push({ x, z, height: 5.5 + hash(seed, n + 7001) * 4, turn: hash(seed, n + 5001) * Math.PI * 2 });
+    palms.push({ x, z, height: m(REAL.palm.min + hash(seed, n + 7001) * (REAL.palm.max - REAL.palm.min)), turn: hash(seed, n + 5001) * Math.PI * 2 });
   }
   return { loop, spur, houses, palms };
 }
@@ -135,8 +137,8 @@ export function isletGolf(radius: number, seed: number, roadZ: number): IsletGol
     if (ext < 18) return;
     const dir = i % 2 === 0 ? 1 : -1;
     const ax = -dir * ext; const bx = dir * ext;
-    fairways.push({ ax, az: z, bx, bz: z, width: 9 });
-    greens.push({ x: bx - dir * 2, z, radius: 4.5 });
+    fairways.push({ ax, az: z, bx, bz: z, width: m(30) }); // 球道宽 30 m
+    greens.push({ x: bx - dir * 2, z, radius: m(10) });     // 果岭半径 10 m
     bunkers.push({ x: bx - dir * 9, z: z + (hash(seed, i * 3) < 0.5 ? 5 : -5), rx: 2.6, rz: 1.6 });
     if (hash(seed, i * 3 + 1) < 0.6) bunkers.push({ x: ax * 0.2, z: z + (hash(seed, i * 3 + 2) < 0.5 ? 5.5 : -5.5), rx: 3.2, rz: 1.4 });
   });
@@ -188,7 +190,7 @@ export function isletStudio(radius: number, seed: number): IsletStudio {
     const a = (k / 14) * Math.PI * 2; const rr = usable * (0.82 + hash(seed, k) * 0.12);
     const x = Math.cos(a) * rr; const z = Math.sin(a) * rr;
     if (onRoadBand(x, z, 0, -4, 8)) continue;
-    palms.push({ x, z, height: 5 + hash(seed, 40 + k) * 3, turn: hash(seed, 80 + k) * Math.PI * 2 });
+    palms.push({ x, z, height: m(REAL.palm.min + hash(seed, 40 + k) * 4), turn: hash(seed, 80 + k) * Math.PI * 2 });
   }
   return { stages, lot, tower, palms };
 }

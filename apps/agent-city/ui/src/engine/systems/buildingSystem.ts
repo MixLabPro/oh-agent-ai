@@ -2,6 +2,7 @@
  * 会话楼系统：自 cityParts.ts 原样搬出（纯搬迁，见 docs/CITY_ENGINE_SPLIT_SPEC.md §4-6）。
  * 函数体与原方法逐字一致，仅 `this.` → `host.`；cityParts 里保留同名一行转发。
  */
+import { m, REAL } from "../worldScale";
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../../cityModel";
 import { HOTEL_CROWN_MAX_FINS, hotelCrownPlan, type CrownPiece } from "../cityHotelCrown";
@@ -153,14 +154,14 @@ export function buildRuntimes(host: BuildingSystemHost): void {
       if (host.formOf(building) === "tower" && zone !== "waterfront" && hashSeed(`cylinder:${building.id}`) < 0.14 && cylinderCount < 64) { runtime.cylinder = cylinderCount; cylinderCount += 1; }
       runtime.shaftPrimary = shaftCursor[runtime.facade];
       mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
-      (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
+      (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / m(REAL.floorHeight))));
       (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftPrimary, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
       instanceMap.set(runtime.shaftPrimary, building.id);
       shaftCursor[runtime.facade] += 1;
       if (wantsUpper) {
         runtime.shaftUpper = shaftCursor[runtime.facade];
         mesh.setColorAt(runtime.shaftUpper, runtime.paletteWall.clone().multiplyScalar(0.94));
-        (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftUpper, Math.max(2, Math.round((building.height * 0.28) / 3.1)));
+        (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftUpper, Math.max(2, Math.round((building.height * 0.28) / m(REAL.floorHeight))));
         (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftUpper, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
         instanceMap.set(runtime.shaftUpper, building.id);
         shaftCursor[runtime.facade] += 1;
@@ -863,7 +864,7 @@ export function buildOceanDrive(host: BuildingSystemHost): void {
   let signIndex = 0;
   buildings.forEach((building, index) => {
     const y = Math.max(0.3, host.layout.terrain.height(building.x, building.z));
-    const height = building.floors * 3.1 + 1.2;
+    const height = building.floors * m(REAL.floorHeight) + m(REAL.groundFloorExtra);
     host.compose(building.x, y, building.z, building.yaw, building.width, height, building.depth);
     bodies.setMatrixAt(index, host.matrix);
     bodies.setColorAt(index, host.color.set(walls[Math.floor(building.seed * walls.length) % walls.length]));

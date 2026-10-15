@@ -1,4 +1,8 @@
-# City 比例尺审计（1 单位 ≈ 1 米）
+# City 比例尺审计
+
+> **2026-10-15 定稿：1 世界单位 = 2 米。** 唯一来源 `apps/agent-city/ui/src/engine/worldScale.ts`
+>（`METERS_PER_UNIT`、`m(米)`、`METER_MODEL_SCALE`、真实参考尺寸表 `REAL`）。下文第 1–6 节是按「1 单位 = 1 米」做的
+> 第一轮评估，留作记录；第 7 节是改成 2 米之后的对照与改动。
 
 2026-10-15。基准约定：**1 世界单位 = 1 米，1 平方单位 = 1 平方米**。此前文档只写「长度沿用现有世界单位，不擅自等同于米」
 （`CITY_MODEL_PHYSICAL_INVARIANTS_SPEC.md:44`），没有定义；本文先按米评估现状，再给调整方案。**本文只评估，没有改任何代码。**
@@ -145,3 +149,26 @@
 `layoutCity`：`adjacentFree` / `mergeParcels` / `commit`；`Parcel.mergedWith` 记并入的地块 id，刷新与跨档重排时据此重建。
 只在本区剩余空地块有富余（剩余 − 1 ≥ 剩余会话 × 1.15）时并，近满载的城市不并。
 2000 会话：并入 255 栋、massing 0、同街区重叠 0、压路 0；同档加会话不缩塔楼；跨档重排后仍有约 10–60% 的塔楼回到单宽（岛重排时邻地块被别的楼先占了）。
+
+## 7. 改为 1 单位 = 2 米（2026-10-15）
+
+按 1 米读时偏小一半的是规划层（地块、路幅、街区、岛、海湾）；按 2 米读，它们全部落进真实范围，**规划层一个数不改、基线不变**。
+需要换算的只有按真实米建模的渲染物件，全部改为经 `worldScale` 取尺寸：
+
+| 对象 | 真实尺寸（REAL） | 世界单位 | 位置 |
+|---|---|---|---|
+| 会话地块 / 楼 | 14.4 × 16 m；楼约 13 × 22 m | 7.2 × 8（不变） | 规划层 |
+| 支路 / 次干 / 主干 / 高架 | 10 / 16 / 24 / 21 m | 5 / 8 / 12 / 10.5（不变） | 规划层 |
+| 层高 | 3.2 m（+首层 1.2） | 1.6 | `systems/buildingSystem.ts`（窗格层数、Ocean Drive 层高） |
+| 人 | 1.75 m | ×METER_MODEL_SCALE | `systems/seasideSystem.ts` |
+| 轿车 / 车速 | 4.5 × 1.8 × 1.5 m / 8.5–14 m/s | m() | `systems/ambientSystem.ts` |
+| 船 / 飞桥游艇 | 12 m / 28 m | m() | `systems/ambientSystem.ts` |
+| 码头小艇 / 栈桥 | 7–12 m / 宽 3 m | m() | `systems/seasideSystem.ts` |
+| 路灯 | 8 m | 4 | `render/nightLighting.ts` |
+| 树（棕榈/阔叶/松/灌木） | 8–14 / 9–12 / 12–18 / 1.5–2 m | m() | `cityFlora.ts` |
+| 伞 / 躺椅 / 沙排场 / 救生塔 | 2.4 m / 0.7 × 2 m / 16 × 8 m / 小屋 3.2 m | m() | `systems/seasideSystem.ts` |
+| 豪宅（含码头、游艇） | 台地 34 × 26 m | ×METER_MODEL_SCALE | `render/landmarks/isletMansion.ts`、`cityIsletEstate.ts` |
+| 豪宅岛环路 / 支路 / 球道 / 果岭 | 8 / 6 / 30 / 半径 10 m | m() | `cityIsletEstate.ts`、`render/landmarks/isletGrounds.ts` |
+
+方案 A（按 1 米放大的车、路灯、游艇）随之退回到真实尺寸；人行道 1.8（= 3.6 m）保留。
+**未换算、按风格化保留**：地标（电视塔、歌剧院、庄园 villa-complex 约 130 m 长等）、背景楼体量、路缘、灯光光斑。

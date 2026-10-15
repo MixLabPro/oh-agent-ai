@@ -2,6 +2,7 @@
  * 夜景照明系统（路灯 / 光斑 / 灯带 / 霓虹 / 昼夜亮度驱动）：自 cityParts.ts 原样搬出（纯搬迁，见 docs/CITY_ENGINE_SPLIT_SPEC.md）。
  * 函数体与原方法逐字一致，仅 `this.` → `host.`；host 是 CityParts 本身，下面的接口只列出这里实际用到的成员。
  */
+import { m, REAL } from "../worldScale";
 import * as THREE from "three";
 import { LIGHT_BUDGET, lampTier, nightFactor, windowRate } from "../cityLightBudget";
 import { activeTheme } from "../cityTheme";
@@ -103,11 +104,11 @@ export function buildNightLights(host: NightHost): NightLights {
     poolRadius *= 0.6 + 0.4 * tier; // N3：路灯按道路等级分档——主干最亮最大，支路/步道小而暗
     headMesh.setColorAt(lamps, host.color.setScalar(0.5 + 0.5 * tier));
     poolMesh.setColorAt(lamps, host.color.setScalar(0.4 + 0.6 * tier));
-    // 杆高 6.4：行车道路灯 6–10 m，人行灯 3–5；曾一律 4.6。灯头同步抬高，光斑半径/落点不动。
-    host.compose(x, base, z, 0, 1, 6.4, 1);
+    // 杆高 8 m（REAL.lamp）：行车道路灯 6–10 m。灯头同步，光斑半径/落点不动。
+    host.compose(x, base, z, 0, 1, m(REAL.lamp.height), 1);
     poles.setMatrixAt(lamps, host.matrix);
     // 灯头悬在路中心一侧（臂长 0.7），朝路面。
-    host.compose(x - nx * 0.45, base + 6.35, z - nz * 0.45, yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
+    host.compose(x - nx * 0.45, base + m(REAL.lamp.height) - 0.05, z - nz * 0.45, yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
     headMesh.setMatrixAt(lamps, host.matrix);
     host.compose(x - nx * poolReach, base + 0.12, z - nz * poolReach, 0, poolRadius, 1, poolRadius);
     poolMesh.setMatrixAt(lamps, host.matrix);
