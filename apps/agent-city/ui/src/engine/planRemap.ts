@@ -23,10 +23,13 @@ export type RemapReport = { fromTier: number; toTier: number; ratio: number; tot
 const MATCH_RADIUS = 16;
 /** 设施更大、重排时漂得更远。 */
 const SITE_MATCH_RADIUS = 40;
+/** 设施搬家找目标街区/地块的范围：候选按距离排序，附近有合法的就近取；稠密区附近全被邻居的占地盖住时才会取到远处。 */
+const SITE_MOVE_TARGET_RADIUS = 120;
 /** 按类别拆除时，新档同类设施离原位置的最远距离。 */
 const SITE_REMOVE_RADIUS = 80;
-/** 移楼：缩放后的目标位置附近找空地块的范围（同生成器跨档迁移的 120 口径收窄一点：移楼是用户的精确意图）。 */
-const MOVE_RADIUS = 60;
+/** 移楼：缩放后的目标位置附近找空地块的范围。候选按距离排序，就近优先；会话楼加粗后稠密区的空地块常被邻居的粗占地盖住
+ *  （building-overlap），60 时 2000 栋档只有 71% 的编辑能存活（门槛 80%），放到 240 仍是「离用户意图最近的合法空地」。 */
+const MOVE_RADIUS = 240;
 
 const parseNode = (id: string): Vec2 | null => {
   const m = /^(-?\d+(?:\.\d+)?):(-?\d+(?:\.\d+)?)$/.exec(id);
@@ -152,7 +155,7 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
         : layoutNow.blocks.flatMap((block) => block.parcels).map((parcel) => ({ id: parcel.id, x: parcel.x, z: parcel.z }));
       const pick = options
         .map((option) => ({ ...option, d: Math.hypot(option.x - q.x, option.z - q.z) }))
-        .filter((option) => option.d <= SITE_MATCH_RADIUS)
+        .filter((option) => option.d <= SITE_MOVE_TARGET_RADIUS)
         .sort((a, b) => a.d - b.d || (a.id < b.id ? -1 : 1))
         .find((option) => !siteMoveProblem(layoutNow, site!, option.id, next.suppressedContext));
       if (pick) { to = pick.id; toAnchor = { x: pick.x, z: pick.z }; }
