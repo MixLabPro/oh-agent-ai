@@ -197,7 +197,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   {
     // 港口：离核心最近的一段海岸内侧（码头离市中心不远）。
     // 取离核心 ≥150 的最近岸点：核心贴海时（用户种子）曾取到市政广场旁的岸点，再被避让推进内陆，港口落在市中心（真机截图）。
-    const byDistance = [...outerShore].sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
+    // 开湾时港口只放西岛外岸：东岛外岸是整段海滩（海滨带窗口 ~160°），港口落在里面会和海滩带贴脸
+    // （seed 3668340084/1 档实测：港口离海滨带仅 12）。西岸没有岸点时才退回全部外岸。
+    const westShore = geo.maxWaterSpan > 140 ? outerShore.filter((p) => p.x < riverX(p.z) - riverWidth(p.z)) : outerShore;
+    const byDistance = [...(westShore.length ? westShore : outerShore)].sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
     const shore = byDistance.find((p) => Math.hypot(p.x - core.x, p.z - core.z) >= 150) ?? byDistance[0];
     // 中心只内移 10：码头半边伸向水面（buildMarina 的栈桥由此入海）。
     const toCore = Math.max(1, Math.hypot(core.x - shore.x, core.z - shore.z));

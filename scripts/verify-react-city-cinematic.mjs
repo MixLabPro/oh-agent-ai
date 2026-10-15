@@ -93,7 +93,12 @@ if (process.argv.includes("--report") && seed === Number(process.env.SEED ?? see
 
 // 片长随岛的尺寸增长（规模档位放大岛）：上限按岛半径线性放宽，基准 520 半径对应 120s。
 // 片长随岛的尺寸增长（规模档位放大岛）：绕岛一圈的航线在基准岛上约 90–125s。
-const lengthCap = 130 * Math.max(1, layout.islandRadius / 520);
+// 开湾后城区横跨两座岛和海湾，城区跨度（urbanBounds 长边）比岛半径涨得更快：seed 7 岛半径 598 但跨度 1686，
+// 航线长 8145（基线 reference 岛 ≈1100 跨度 / ~107 s）。上限同时按岛半径与城区跨度放宽，取大者；
+// 折返类缺陷（曾有一个字卡点被外推 750 横穿市中心，片长 202 s）仍然超限。
+const { left, right, north, south } = layout.urbanBounds;
+const urbanSpan = Math.max(right - left, south - north);
+const lengthCap = 130 * Math.max(1, layout.islandRadius / 520, urbanSpan / 1100);
 if (cut === "full") assert(plan.durationSec >= 35 && plan.durationSec <= lengthCap, `film length ${plan.durationSec.toFixed(1)}s out of 35–${lengthCap.toFixed(0)}s`);
 else assert(plan.durationSec >= 18 && plan.durationSec <= 55, `short cut ${plan.durationSec.toFixed(1)}s out of 18–55s`);
 assert(report.speed.max <= 122, `cruise speed peaks at ${report.speed.max} u/s (cap 120)`);

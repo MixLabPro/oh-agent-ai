@@ -208,9 +208,20 @@ function planRoute(layout: CityLayout, model: CityModel, heights: Map<string, { 
       // 让路线在城区旁兜一个弯再出来；侧推距离放宽到 750。
       const reversal = turn > (150 * Math.PI) / 180;
       side = reversal || len < 0.3 ? { x: -din.z, z: din.x } : { x: side.x / len, z: side.z / len };
+      let pushed = 0;
       for (let step = 0; step < (reversal ? 25 : 10) && turnAt(index).turn > LIMIT; step += 1) {
         keys[index].pos[0] += side.x * 30;
         keys[index].pos[2] += side.z * 30;
+        pushed += 1;
+      }
+      // 外推达到 180（6 步，约一个控制点间距）就是在绕圈：该点多半是「环绕一圈的最后一个点」，后面紧跟径向外飞的收尾拉升，
+      // 回折本身来自这个点太靠里（seed 7：外推 750 横穿市中心，片长 135 s → 202 s）。字卡并到前一个无字卡的控制点，
+      // 删掉这个点——镜头仍在，路线不再为它兜圈。前一点已有字卡则保留原来的外推。
+      if (pushed >= 6 && keys[index - 1].card === undefined) {
+        keys[index - 1].card = keys[index].card;
+        keys.splice(index, 1);
+        changed = true;
+        break;
       }
       if (turnAt(index).turn > LIMIT) continue; // 推不开就接受这一处（守卫会报出来）
       changed = true;

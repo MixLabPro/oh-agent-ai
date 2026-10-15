@@ -107,6 +107,30 @@
   "spinners": 0,
   "windows": 0
  },
+ "islet-mansion": {
+  "hash": "c9f9483581b3bd12",
+  "meshes": 76,
+  "spinners": 0,
+  "windows": 0
+ },
+ "islet-mansion+neon": {
+  "hash": "60a91c541cff4a33",
+  "meshes": 76,
+  "spinners": 0,
+  "windows": 0
+ },
+ "islet-grounds": {
+  "hash": "f6d988d6804a41d0",
+  "meshes": 4,
+  "spinners": 0,
+  "windows": 0
+ },
+ "islet-grounds+neon": {
+  "hash": "f6d988d6804a41d0",
+  "meshes": 4,
+  "spinners": 0,
+  "windows": 0
+ },
  "suspension-bridge": {
   "hash": "4cbb24adea83f8fc",
   "meshes": 38,

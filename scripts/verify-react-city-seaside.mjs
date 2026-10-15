@@ -109,7 +109,10 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
       const coastalTraffic = plan.carPaths.find((path) => path.some((point) => Math.hypot(point.x - routeSample.boulevard.x, point.z - routeSample.boulevard.z) < 0.01));
       assert.ok(coastalTraffic, `seed ${seed}: 至少一条机动车回路应经过滨海大道`);
       assert.deepEqual(coastalTraffic[0], coastalTraffic.at(-1), `seed ${seed}: 滨海车流回路必须闭合，不可在端点瞬移`);
-      const roadPairs = new Set(plan.roadEdges.map((edge) => edge.points.map((point) => `${point.x}:${point.z}`).sort().join("/")));
+      // 车路径按折线逐段走：地面走廊重绘（relineEdges/relineSplits）会产出多点边，所以按「相邻点对」建集合，
+      // 而不是把整条边所有点拼成一个键（那样多点边上的每一步都会被误判成离路）。
+      const roadPairs = new Set(plan.roadEdges.flatMap((edge) => edge.points.slice(1).map((point, i) =>
+        [edge.points[i], point].map((p) => `${p.x}:${p.z}`).sort().join("/"))));
       for (let i = 1; i < coastalTraffic.length; i += 1) {
         assert.ok(roadPairs.has([coastalTraffic[i - 1], coastalTraffic[i]].map((point) => `${point.x}:${point.z}`).sort().join("/")),
           `seed ${seed}: 滨海车流只能沿已渲染道路移动 (${JSON.stringify([coastalTraffic[i - 1], coastalTraffic[i]])})`);
