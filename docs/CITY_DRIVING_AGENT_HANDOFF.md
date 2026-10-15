@@ -127,3 +127,13 @@ architecture测试覆盖：同核逐tick终态、不同调度批一致、整车�
 规则、锁定数值、十五城证据与限制见 [CITY_SURFACE_REGIONS_NOTES.md](CITY_SURFACE_REGIONS_NOTES.md)。新增必跑：`node scripts/verify-city-surface-regions.mjs [--cities]`、`node scripts/verify-city-driving-surface.mjs [--cities]`。
 
 接续优先级：Agent A 修路口扇面坡地细分与急弯带子自折叠（十五城报告中的conflicts/excluded可直接定位），再产出桥/高架顶面与渠化岛；Agent B 实现CollisionIndex并接入 `validateMotion`，再做portal与SafeRecovery；Agent C 用同一区域边界做TOI/滑动以替换整步拒绝。不得为让城市变绿而放宽aliasTolerance、余量或把closed改成curb。
+
+## 10. A5增量交付（2026-10-15）
+
+编译器缺陷已修复：`groundRoadCompiler.ts` 改为精确贴地判定，不贴地的条带/扇区按渲染地形三角网裁成凸片（`engine/surface/terrainClip.ts`，规范交点保证无T形接点）；带子不再沿线插行，必要时收窄斜接，凹条带改用过凹角的对角线，闭合环线首尾斜接焊接。
+
+- 十五城：贴地偏差 ≤0.019（修复前0.33）；车行片段边界全部是流形；顶点数基本持平。
+- 驾驶层：高差冲突0、排除片段0，600/600直路试跑通过。
+- 基线：七个平地夹具仍与重构前逐字节一致；closed-loop、wavy-tee与十五城对照 `corrected` 段。这是**有意的几何变更**，不要再改回重构前基线。
+
+见 [CITY_GROUND_SURFACE_TERRAIN_FIT_NOTES.md](CITY_GROUND_SURFACE_TERRAIN_FIT_NOTES.md)。Agent A剩余：桥/高架顶面（structureCompiler + compileSurface聚合 + roadSystem消费）、渠化岛、尽端铺面、portal、0/90/500会话矩阵、SurfaceStore接CityEngine；另有seed 7 tier 3一个人行道转角扇面自重叠（修改前就存在，不影响支撑）。

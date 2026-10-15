@@ -29,5 +29,30 @@
     "65537/1": "0259942eaffb8b673d5ad0864dbf295024d65c30b7fb73051a86a88185b4ac43",
     "65537/2": "9d4b8d832b1566ab6cf04c5f294b31f9bf9f95720d1c7b85c09dd53c8aec04b0",
     "65537/3": "de1174fe4738de034eae38475f52cd5aa06f1327d2d40f0597b6b54565570bd2"
+  },
+  "corrected": {
+    "revision": "terrain-conforming-v1",
+    "reason": "Exact terrain fit: strips/sectors deviating > ROAD_SURFACE_LIFT/2 from the rendered terrain are split along the terrain triangulation (pre-refactor ribbons sank up to 0.25 below terrain; fans overlapped ribbons with 0.30 height gaps). Closed loops weld at a mitred seam; narrowed miters at stubs and reflex-corner diagonals stop strip folds. Flat fixtures not listed here still equal the pre-refactor digests above.",
+    "fixtures": {
+      "closed-loop": "a399ae1cead2aa69050b9dbc6971a14a6f06307ef62d52e36df1b73323fb7046",
+      "wavy-tee": "36cc302e6567366ceb98610dc9bba846bc7d20b2dab97a846405f3418bd70da8"
+    },
+    "generatedPlans": {
+      "1/1": "12e716665d0af5a4834da13d38575cb959e3c12480cb79ce157791369c0725c6",
+      "1/2": "e46b7bdc78a1d2c86522a7ea5d77ca69a067b23e1bb2fcf12153cb9ea86898f5",
+      "1/3": "a87026be526b1c817b535157329ecc0e237313cc0a9928db12f8c828c6de8312",
+      "7/1": "b2c68882087241b5836735bdbaee23a7789e477f5c6e46ed070aa05ad2316d67",
+      "7/2": "25b5b6de88575e1149401563a771440195067869cdfceb4fcfc5854d56de9ab5",
+      "7/3": "1f5a5d98582e04ea40cc09e2db3ee6bbf0cd601fb5ecbcdb9f7915ec660d25c4",
+      "42/1": "9b3fc8399d5ab3f3b7939e43606861903815d8da66182fdf2f50f9354bbc0d9d",
+      "42/2": "0a2e90dff9477c6bf0e4fe71290ceba7eddd8fb07b0535a89cac04b4e9354732",
+      "42/3": "6c03fd86c5d29256a5e61d251d766393dd9279dc656877aa8802361d1725c5a0",
+      "2026/1": "9ff9788ba09b5a5389fc285d0d2a3ff23c7023cfe7385808bd10634438ff75b0",
+      "2026/2": "038707a62fb09cdd72d21cbc35cf5e81d9b49f068f3dbab49eb088e43b16814f",
+      "2026/3": "2f770f936f2bacb31acd4397be774c81c4f50aba632116ca15d804efe1cd084d",
+      "65537/1": "7c6b0d7550e067c0e9b867a47af95374aa3c23ed814d74df79d55755f32262b9",
+      "65537/2": "8effc1347b80562dae21c541551b6beed8b315d8d87881f526513a81d88d935a",
+      "65537/3": "100832b88ac1ea5e91fb842730624bc8e3cffa86fb8d84229859a23983e71ffc"
+    }
   }
 }

@@ -3,7 +3,8 @@
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { roadPaintPlan } from "../cityRoadPaint";
 import { cornerArc, junctionIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline, type JunctionArm, type RoadJunction } from "../cityRoadJunctions";
-import { terrainSurfaceHeight } from "./terrainSampling";
+import { TERRAIN_SEGMENTS, terrainSurfaceHeight } from "./terrainSampling";
+import { clipConvexToTerrain, edgeCrossings, triangulateConvex, type ClipPoint } from "./terrainClip";
 
 /** Same transfer function as the project's Three.js linear-sRGB working space.
  * Fixed local #rrggbb palette only; no CSS parser or global color-management state. */
@@ -24,14 +25,15 @@ export type GroundRoadPiece = Readonly<{
   source: Readonly<{ kind: "road"; id: string; edgeIds: readonly string[]; fromNode: string; toNode: string }>
     | Readonly<{ kind: "junction"; id: string }>;
   layer: number; firstIndex: number; indexCount: number; firstVertex: number; vertexCount: number;
+  /** Exact max |surface − (rendered terrain + lift)| over the piece; > ROAD_SURFACE_LIFT/2 is a defect. */
+  terrainDeviation: number;
 }>;
 
 /** 路面抬升（防 z-fighting 的同时低于路缘盒基面 0.02 + 盒高）；层间再靠 polygonOffset 分开。 */
 export const ROAD_SURFACE_LIFT = 0.04;
-const ALONG_STEP = 3;
 /** 填充圆弧每段 ≤ 20°（路缘实体仍按 12°）：填充是平贴地面的色块，弦高差肉眼不可辨，顶点省四成。 */
 const FILL_ARC_STEP = Math.PI / 9;
-const ACROSS_STEP = 4;
+
 
 /** 宽度 → 层（0 = 人行道，1 = 路口填充，2–4 = 支路 / 次干 / 主干）。 */
 export function roadLayerOf(width: number): 2 | 3 | 4 {
@@ -109,17 +111,48 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
   const index = junctionIndex(plan);
   const layers = [newBuilder(), newBuilder(), newBuilder(), newBuilder(), newBuilder()];
   const pieces: GroundRoadPiece[] = [];
-  const recordPiece = (b: Builder, layer: number, id: string, kind: GroundRoadPiece["kind"], source: GroundRoadPiece["source"], emit: () => void) => {
+  const recordPiece = (b: Builder, layer: number, id: string, kind: GroundRoadPiece["kind"], source: GroundRoadPiece["source"], emit: () => number | void) => {
     const firstIndex = b.index.length; const firstVertex = b.count;
-    emit();
+    const deviation = emit();
     if (b.index.length > firstIndex) pieces.push(Object.freeze({ id, kind, source: Object.freeze(source), layer,
-      firstIndex, indexCount: b.index.length - firstIndex, firstVertex, vertexCount: b.count - firstVertex }));
+      firstIndex, indexCount: b.index.length - firstIndex, firstVertex, vertexCount: b.count - firstVertex,
+      terrainDeviation: typeof deviation === "number" ? deviation : 0 }));
   };
   const color = new LinearColor();
   const heightAt = (x: number, z: number) => terrainSurfaceHeight(layout, x, z) + ROAD_SURFACE_LIFT;
-  /** 中点处渲染地形高度等于两端线性插值（容差 0.02 = 抬升量的一半，最坏也不钻到地下）= 这一截下面的地形当平面，不再切。 */
+  /** 路面与渲染地形的允许偏差（抬升量的一半：最坏也不钻到地下，两片叠置路面高差 ≤ 0.04）。 */
   const PLANAR_TOLERANCE = ROAD_SURFACE_LIFT / 2;
-  const planarMid = (p: Vec2, q: Vec2, mid: Vec2) => Math.abs(heightAt(mid.x, mid.z) - (heightAt(p.x, p.z) + heightAt(q.x, q.z)) / 2) <= PLANAR_TOLERANCE;
+  // 只查中点会漏：渲染地形是 extent/192 网格上的分段线性面，中点恰好落在线性插值上时
+  // 四分之一处仍可偏 0.3（十五城实测带子最低到 −0.29，路面埋进地形；与路口扇面叠置高差 0.30，
+  // 驾驶区域判 height-conflict 关闭路口）。分段线性差的极值只在断点上：边与地形网格线
+  // （x、z 两组 + 每格对角线 gx+gz=整数）的交点，以及三角形内部的地形顶点——全部查一遍是精确最大偏差。
+  const cellSize = layout.extent / TERRAIN_SEGMENTS; const half0 = layout.extent / 2;
+  const lineDeviation = (px: number, pz: number, qx: number, qz: number) => {
+    const hp = heightAt(px, pz); const hq = heightAt(qx, qz);
+    const gx0 = (px + half0) / cellSize; const gz0 = (pz + half0) / cellSize; const gx1 = (qx + half0) / cellSize; const gz1 = (qz + half0) / cellSize;
+    let worst = 0;
+    const probe = (t: number) => { if (t > 0 && t < 1) worst = Math.max(worst, Math.abs(heightAt(px + (qx - px) * t, pz + (qz - pz) * t) - (hp + (hq - hp) * t))); };
+    for (const [g0, g1] of [[gx0, gx1], [gz0, gz1], [gx0 + gz0, gx1 + gz1]]) {
+      if (g0 === g1) continue;
+      for (let k = Math.ceil(Math.min(g0, g1)); k <= Math.floor(Math.max(g0, g1)); k += 1) probe((k - g0) / (g1 - g0));
+    }
+    return worst;
+  };
+  const triangleDeviation = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number) => {
+    let worst = Math.max(lineDeviation(ax, az, bx, bz), lineDeviation(bx, bz, cx, cz), lineDeviation(cx, cz, ax, az));
+    const ha = heightAt(ax, az); const hb = heightAt(bx, bz); const hc = heightAt(cx, cz);
+    const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+    if (Math.abs(d) < 1e-12) return worst;
+    const i0 = Math.ceil((Math.min(ax, bx, cx) + half0) / cellSize); const i1 = Math.floor((Math.max(ax, bx, cx) + half0) / cellSize);
+    const j0 = Math.ceil((Math.min(az, bz, cz) + half0) / cellSize); const j1 = Math.floor((Math.max(az, bz, cz) + half0) / cellSize);
+    for (let i = i0; i <= i1; i += 1) for (let j = j0; j <= j1; j += 1) {
+      const x = -half0 + i * cellSize; const z = -half0 + j * cellSize;
+      const wa = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d; const wb = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d; const wc = 1 - wa - wb;
+      if (wa < 0 || wb < 0 || wc < 0) continue;
+      worst = Math.max(worst, Math.abs(heightAt(x, z) - (wa * ha + wb * hb + wc * hc)));
+    }
+    return worst;
+  };
   /** 法线取地形真值梯度（中心差分 1）：同一位置的重叠顶点法线一致，层间不因光照差闪烁。 */
   const normalAt = (x: number, z: number) => {
     const gx = (layout.terrain.height(x + 1, z) - layout.terrain.height(x - 1, z)) / 2;
@@ -134,50 +167,144 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
     return b.count++;
   };
 
-  /** 沿线采样的带子：地形不平处二分细分（最短 1.5）、横截面不平时横向 ≤ ACROSS_STEP；折点用两侧方向的角平分线 + 斜接系数（上限 2，锐折不炸尖）。 */
+  const grid = { cellSize, half: half0 };
+  type Attrs = { u: number; v: number; run: number[]; ends: number[]; edges: number[]; zebra: number[]; color: LinearColor };
+  /** Conforming emission for one piece: vertices shared by exact XZ across all its polygons. */
+  const conformingEmitter = (b: Builder, existing: readonly (ClipPoint & { index: number })[]) => {
+    // Keyed by GPU (Float32) quantisation: two canonical points 1e-9 apart are one vertex, else
+    // they become a zero-area triangle after upload (seed 1 tier 2). Existing row/rim vertices first.
+    const keyOf = (p: ClipPoint) => `${Math.fround(p.x)},${Math.fround(p.z)}`;
+    const memo = new Map<string, number>(existing.map((p) => [keyOf(p), p.index]));
+    const index = (p: ClipPoint & { index?: number }, attrsAt: (p: ClipPoint) => Attrs) => {
+      if (p.index !== undefined) return p.index;
+      const key = keyOf(p); let i = memo.get(key);
+      if (i === undefined) { i = vertex(b, p.x, p.z, attrsAt(p)); memo.set(key, i); }
+      return i;
+    };
+    const centroidOf = (piece: readonly ClipPoint[]) => () => ({ x: piece.reduce((n, p) => n + p.x, 0) / piece.length, z: piece.reduce((n, p) => n + p.z, 0) / piece.length });
+    const emit = (triangles: [ClipPoint, ClipPoint, ClipPoint][], attrsAt: (p: ClipPoint) => Attrs) => {
+      for (const [x, y, z] of triangles) pushUpTriangle(b, index(x, attrsAt), index(y, attrsAt), index(z, attrsAt));
+    };
+    return {
+      /** Fails the tolerance: split along the terrain triangulation (deviation 0). */
+      clip: (corners: readonly ClipPoint[], attrsAt: (p: ClipPoint) => Attrs) => {
+        for (const piece of clipConvexToTerrain(grid, corners)) emit(triangulateConvex(piece, centroidOf(piece)), attrsAt);
+      },
+      /** Passes, but a neighbour was clipped: carry the neighbour's crossings on the shared edges. */
+      refine: (corners: readonly ClipPoint[], sharedEdges: readonly boolean[], attrsAt: (p: ClipPoint) => Attrs) => {
+        const ring: ClipPoint[] = [];
+        corners.forEach((c, k) => { ring.push(c); if (sharedEdges[k]) ring.push(...edgeCrossings(grid, c, corners[(k + 1) % corners.length])); });
+        emit(triangulateConvex(ring, centroidOf(corners)), attrsAt);
+      },
+    };
+  };
+
+  /** 带子：每个路点一行（折点用两侧方向的角平分线 + 斜接系数，上限 2，锐折不炸尖）、相邻两行一个条带。
+   *  条带两三角贴地（精确偏差 ≤ PLANAR_TOLERANCE）就照旧两三角——平地字节不变；否则按地形三角网裁成凸片。
+   *  旧实现只查中点：带子最低处比「地形 + 抬升」低 0.29（埋进地形），与路口扇面叠置高差 0.30；
+   *  而沿线二分插行又在折点内侧斜接伸出的那一段里把四边形翻面（5 宽 50°–90° 折点的 non-manifold）。
+   *  闭合环线（首尾同点）的接缝也是折点：首尾各斜接一次并共用同一行，旧实现两端垂直截断、在角上交叠。 */
   const ribbon = (points: Vec2[], lengths: number[], width: number, b: Builder, attrsBase: { run: number[]; ends: number[]; edges: number[]; zebra: number[]; color: LinearColor }) => {
     const half = width / 2;
-    const samples: Array<{ x: number; z: number; u: number; nx: number; nz: number; miter: number }> = [];
+    const last = points.length - 1;
+    const closed = last >= 3 && points[0].x === points[last].x && points[0].z === points[last].z;
     const dirOf = (i: number) => {
       const a = points[i]; const c = points[i + 1]; const len = Math.hypot(c.x - a.x, c.z - a.z) || 1;
       return { x: (c.x - a.x) / len, z: (c.z - a.z) / len };
     };
-    for (let i = 0; i < points.length - 1; i += 1) {
-      const d = dirOf(i);
-      const a = points[i]; const c = points[i + 1];
+    const miterAt = (d: { x: number; z: number }, e: { x: number; z: number }) => {
+      const mx = -(d.z + e.z); const mz = d.x + e.x; const ml = Math.hypot(mx, mz);
+      if (ml <= 1e-6) return null;
+      const nx = mx / ml; const nz = mz / ml;
+      return { nx, nz, miter: Math.min(2, 1 / Math.max(0.5, nx * -d.z + nz * d.x)) };
+    };
+    const samples: Array<{ x: number; z: number; u: number; nx: number; nz: number; miter: number }> = [];
+    for (let i = 0; i < last; i += 1) {
+      const d = dirOf(i); const a = points[i]; const c = points[i + 1];
       const segment = lengths[i + 1] - lengths[i];
-      const at = (t: number, v: number) => ({ x: a.x + (c.x - a.x) * t - d.z * v, z: a.z + (c.z - a.z) * t + d.x * v });
-      // 自适应细分：只有渲染地形在这一截下面不是一个平面时才切——岛内低平原整片是平的，
-      // 均匀 3 单位一切的第一版在档 2 城里堆出 ~20 万顶点（≈ 20 MB 顶点属性），绝大多数切在平地上。
-      const ts = [0];
-      const split = (t0: number, t1: number, depth: number) => {
-        const tm = (t0 + t1) / 2;
-        const bent = depth < 7 && (t1 - t0) * segment > 1.5 && [-half, 0, half].some((v) => !planarMid(at(t0, v), at(t1, v), at(tm, v)));
-        if (bent) { split(t0, tm, depth + 1); split(tm, t1, depth + 1); } else ts.push(t1);
-      };
-      split(0, 1, 0);
-      for (let k = i === 0 ? 0 : 1; k < ts.length; k += 1) {
-        const t = ts[k];
+      for (const t of i === 0 ? [0, 1] : [1]) {
         let nx = -d.z; let nz = d.x; let miter = 1;
-        if (k === ts.length - 1 && i + 1 < points.length - 1) {
-          const e = dirOf(i + 1);
-          const mx = -(d.z + e.z); const mz = d.x + e.x; const ml = Math.hypot(mx, mz);
-          if (ml > 1e-6) { nx = mx / ml; nz = mz / ml; miter = Math.min(2, 1 / Math.max(0.5, nx * -d.z + nz * d.x)); }
+        const j = t === 0 ? i : i + 1; // the point this row sits on
+        const bend = t === 1 && i + 1 < last ? miterAt(d, dirOf(i + 1)) : closed && (t === 0 || i + 1 === last) ? miterAt(dirOf(last - 1), dirOf(0)) : null;
+        if (bend) {
+          ({ nx, nz, miter } = bend);
+          // The mitred inner corner reaches half·miter·|n·d| along the road; past a neighbouring
+          // row that folds the strip (seed 7: a 1.4 stub after a 64° bend). Narrow only then.
+          const before = j > 0 ? lengths[j] - lengths[j - 1] : lengths[last] - lengths[last - 1];
+          const after = j < last ? lengths[j + 1] - lengths[j] : lengths[1] - lengths[0];
+          const along = Math.abs(nx * d.x + nz * d.z);
+          const limit = 0.9 * Math.min(before, after);
+          if (half * miter * along > limit) miter = Math.max(1e-3, limit / (half * along));
         }
         samples.push({ x: a.x + (c.x - a.x) * t, z: a.z + (c.z - a.z) * t, u: lengths[i] + segment * t, nx, nz, miter });
       }
     }
-    // 横向：整条带子横截面都是平面（两边与中线共线）就不切，否则按 ≤ ACROSS_STEP 切。
-    const flatAcross = samples.every((p) => planarMid({ x: p.x - p.nx * half * p.miter, z: p.z - p.nz * half * p.miter }, { x: p.x + p.nx * half * p.miter, z: p.z + p.nz * half * p.miter }, p));
-    const across = flatAcross ? 1 : Math.max(1, Math.ceil(width / ACROSS_STEP));
-    const rows = samples.map((sample) => Array.from({ length: across + 1 }, (_, j) => {
-      const v = -half + (width * j) / across;
-      return vertex(b, sample.x + sample.nx * v * sample.miter, sample.z + sample.nz * v * sample.miter, { ...attrsBase, u: sample.u, v });
+    // Closed seam: the closing row is the opening row, bit for bit, so the mesh welds into a ring.
+    if (closed) samples[samples.length - 1] = { ...samples[0], u: lengths[last] };
+    type RowPoint = ClipPoint & { index: number; u: number; v: number };
+    const rows: RowPoint[][] = samples.map((sample) => [0, 1].map((j) => {
+      const v = -half + width * j;
+      const x = sample.x + sample.nx * v * sample.miter; const z = sample.z + sample.nz * v * sample.miter;
+      return { x, z, u: sample.u, v, index: vertex(b, x, z, { ...attrsBase, u: sample.u, v }) };
     }));
-    for (let r = 1; r < rows.length; r += 1) for (let j = 0; j < across; j += 1) {
-      const a = rows[r - 1][j]; const c = rows[r - 1][j + 1]; const d = rows[r][j]; const e = rows[r][j + 1];
-      pushUpTriangle(b, a, d, c); pushUpTriangle(b, c, d, e);
+    // Each strip L0,R0,R1,L1 is two triangles. A convex strip keeps the original diagonal R0–L1
+    // (byte parity); a strip made concave by a narrowed miter splits through its reflex corner.
+    type Tri = [RowPoint, RowPoint, RowPoint];
+    const strips: { tris: [Tri, Tri]; pass: [boolean, boolean] }[] = [];
+    let deviation = 0;
+    for (let r = 1; r < rows.length; r += 1) {
+      const [a, c] = rows[r - 1]; const [d, e] = rows[r];
+      const quad = [a, c, e, d];
+      const turn = quad.map((q, k) => { const p0 = quad[(k + 3) % 4]; const p2 = quad[(k + 1) % 4]; return (q.x - p0.x) * (p2.z - q.z) - (q.z - p0.z) * (p2.x - q.x); });
+      const convex = turn.every((t) => t >= 0) || turn.every((t) => t <= 0);
+      const majority = Math.sign(turn.reduce((n, t) => n + Math.sign(t), 0));
+      const reflexAtAorE = !convex && (Math.sign(turn[0]) !== majority || Math.sign(turn[2]) !== majority);
+      const tris: [Tri, Tri] = reflexAtAorE ? [[a, c, e], [a, e, d]] : [[a, d, c], [c, d, e]];
+      const pass = tris.map(([p, q, w]) => {
+        const dev = triangleDeviation(p.x, p.z, q.x, q.z, w.x, w.z);
+        if (dev <= PLANAR_TOLERANCE) deviation = Math.max(deviation, dev);
+        return dev <= PLANAR_TOLERANCE;
+      }) as [boolean, boolean];
+      strips.push({ tris, pass });
     }
+    const emitter = conformingEmitter(b, rows.flat());
+    const rowOf = new Map<RowPoint, number>(); rows.forEach((row, r) => row.forEach((p) => rowOf.set(p, r)));
+    /** Is the triangle holding row edge `row` (as a full edge) in strip s clipped? */
+    const clippedAtRow = (s: number, row: number) => {
+      const strip = strips[s]; if (!strip) return false;
+      return strip.tris.some((tri, t) => !strip.pass[t] && tri.filter((p) => rowOf.get(p) === row).length === 2);
+    };
+    for (let s = 0; s < strips.length; s += 1) {
+      const { tris, pass } = strips[s];
+      const [a, c] = rows[s]; const [d, e] = rows[s + 1];
+      // Strip attributes: invert the bilinear strip map for (along, across) of interior points.
+      const attrsAt = (p: ClipPoint): Attrs => {
+        let u = 0.5; let w = 0.5;
+        for (let k = 0; k < 8; k += 1) {
+          const lx = a.x + (d.x - a.x) * u; const lz = a.z + (d.z - a.z) * u; const rx = c.x + (e.x - c.x) * u; const rz = c.z + (e.z - c.z) * u;
+          const fx = lx + (rx - lx) * w - p.x; const fz = lz + (rz - lz) * w - p.z;
+          const sx = (d.x - a.x) * (1 - w) + (e.x - c.x) * w; const sz = (d.z - a.z) * (1 - w) + (e.z - c.z) * w;
+          const wx = rx - lx; const wz = rz - lz; const det = sx * wz - sz * wx;
+          if (Math.abs(det) < 1e-12) break;
+          u -= (fx * wz - fz * wx) / det; w -= (sx * fz - sz * fx) / det;
+        }
+        u = Math.min(1, Math.max(0, u)); w = Math.min(1, Math.max(0, w));
+        return { ...attrsBase, u: a.u + (d.u - a.u) * u, v: -half + width * w };
+      };
+      tris.forEach((tri, t) => {
+        // Which edges are shared with a clipped neighbour (row above/below, or this strip's diagonal)?
+        const shared = tri.map((p, k) => {
+          const q = tri[(k + 1) % 3]; const rp = rowOf.get(p)!; const rq = rowOf.get(q)!;
+          if (rp === rq) return rp === s ? clippedAtRow(s - 1, s) : clippedAtRow(s + 1, s + 1);
+          const isDiagonal = tris[1 - t].includes(p) && tris[1 - t].includes(q);
+          return isDiagonal && !pass[1 - t];
+        });
+        if (!pass[t]) emitter.clip(tri, attrsAt);
+        else if (shared.some(Boolean)) emitter.refine(tri, shared, attrsAt);
+        else pushUpTriangle(b, tri[0].index, tri[1].index, tri[2].index);
+      });
+    }
+    return deviation;
   };
 
   // ── 路段带 ──
@@ -214,26 +341,35 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
     const attrs = { u: 0, v: 0, run: [0, 0, 0, sidewalk ? PIECE_SIDEWALK : PIECE_FILL], ends: [0, 0, -1, -1], edges: [0, 0, 0, 0], zebra: [-1, -1], color: fill.set(hex).clone() };
     const segments = closed ? ring.length : ring.length - 1;
     if (segments < 1) return;
-    // 平地上一圈只要「圆心 + 环」一层（顶点共享）；扇面下的地形不平才按 ≤ ALONG_STEP 径向分层。
-    const lerp = (p: Vec2, q: Vec2, t: number) => ({ x: p.x + (q.x - p.x) * t, z: p.z + (q.z - p.z) * t });
-    let flat = true;
-    for (let k = 0; k < segments && flat; k += 1) {
-      const p = ring[k]; const q = ring[(k + 1) % ring.length];
-      flat = planarMid(center, p, lerp(center, p, 0.5)) && planarMid(p, q, lerp(p, q, 0.5)) && planarMid(center, lerp(p, q, 0.5), lerp(center, lerp(p, q, 0.5), 0.5));
-    }
-    const reach = Math.max(...ring.map((p) => Math.hypot(p.x - center.x, p.z - center.z)));
-    const steps = flat ? 1 : Math.max(1, Math.ceil(reach / ALONG_STEP));
+    // 平地上一圈只要「圆心 + 环」一层（顶点共享）。扇区贴地（精确偏差 ≤ PLANAR_TOLERANCE）照旧一个三角形；
+    // 否则按地形三角网裁成凸片，相邻扇区共享的径向边带上同样的交点（无 T 形接点）。
+    // 旧版三个中点测试漏判，坡地扇面与路段带叠置高差到 0.3。
     const middle = vertex(b, center.x, center.z, attrs);
-    let previous: number[] | null = null;
-    for (let i = 1; i <= steps; i += 1) {
-      const row = ring.map((p) => vertex(b, center.x + (p.x - center.x) * (i / steps), center.z + (p.z - center.z) * (i / steps), attrs));
-      for (let k = 0; k < segments; k += 1) {
-        const n = (k + 1) % ring.length;
-        if (!previous) pushUpTriangle(b, middle, row[k], row[n]);
-        else { pushUpTriangle(b, previous[k], row[k], previous[n]); pushUpTriangle(b, previous[n], row[k], row[n]); }
-      }
-      previous = row;
+    // Rim positions keep the original `center + (p − center)·1` arithmetic (byte parity with flat baselines).
+    const rimXZ = ring.map((p) => ({ x: center.x + (p.x - center.x) * 1, z: center.z + (p.z - center.z) * 1 }));
+    const row = rimXZ.map((p) => vertex(b, p.x, p.z, attrs));
+    const hub = { x: center.x, z: center.z, index: middle };
+    const rim = rimXZ.map((p, k) => ({ x: p.x, z: p.z, index: row[k] }));
+    const pass: boolean[] = []; let deviation = 0;
+    for (let k = 0; k < segments; k += 1) {
+      const p = rimXZ[k]; const q = rimXZ[(k + 1) % ring.length];
+      const dev = triangleDeviation(center.x, center.z, p.x, p.z, q.x, q.z);
+      pass.push(dev <= PLANAR_TOLERANCE);
+      if (dev <= PLANAR_TOLERANCE) deviation = Math.max(deviation, dev);
     }
+    const emitter = conformingEmitter(b, [hub, ...rim]);
+    const constant = () => attrs;
+    for (let k = 0; k < segments; k += 1) {
+      const n = (k + 1) % ring.length;
+      // Radial edge k is shared with sector k−1, edge n with sector k+1 (cyclic only when closed).
+      const before = k > 0 ? pass[k - 1] : closed ? pass[segments - 1] : true;
+      const after = k + 1 < segments ? pass[k + 1] : closed ? pass[0] : true;
+      if (pass[k] && before && after) { pushUpTriangle(b, middle, row[k], row[n]); continue; }
+      // Corners hub → rim k → rim n: edge 0 is radial k, edge 2 is radial n.
+      if (!pass[k]) emitter.clip([hub, rim[k], rim[n]], constant);
+      else emitter.refine([hub, rim[k], rim[n]], [!before, false, !after], constant);
+    }
+    return deviation;
   };
   const circle = (c: Vec2, radius: number) => Array.from({ length: 16 }, (_, k) => ({ x: c.x + Math.cos((k / 16) * Math.PI * 2) * radius, z: c.z + Math.sin((k / 16) * Math.PI * 2) * radius }));
   for (const junction of plan) {
@@ -270,7 +406,8 @@ export function compileGroundRoadSurface(layout: Pick<CityLayout, "roadEdges" | 
   }
   return Object.freeze({ input: Object.freeze({ roadEdges: layout.roadEdges, terrain: layout.terrain, extent: layout.extent }), layers, pieces: Object.freeze(pieces),
     readiness: "geometry-only" as const,
-    unresolved: Object.freeze(["boundary-union-and-portals", "channelized-islands-and-curbs", "bridge-and-expressway-decks", "cul-de-sac-surfaces"]) });
+    // Same-layer union and curb/closed semantics live in surfaceRegions; still missing here:
+    unresolved: Object.freeze(["validated-portals", "channelized-islands", "bridge-and-expressway-decks", "cul-de-sac-surfaces"]) });
 }
 
 /** Legacy geometry API for existing guards/callers. */

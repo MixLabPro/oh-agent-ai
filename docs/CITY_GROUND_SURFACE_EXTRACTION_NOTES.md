@@ -43,3 +43,7 @@ npm --prefix apps/agent-city/ui run build
 2. 提取桥梁、高架实际BOX矩阵顶面；路缘/护栏/桥墩独立静态障碍；尽端铺面也要纳入。
 3. SurfaceStore负责immutable buffer所有权、内容身份及与显示layout revision的关联，再把编译结果稳定提供给驾驶snapshot。当前原始数组仍为兼容renderer的可变数组，禁止消费者原地改写；输入引用检查不能代替内容hash，也不检测原地修改terrain/roads。
 4. 加入最终显示剪枝/修复后的0/90/500会话矩阵、预算与性能证据，再接世界查询和自动试跑。当前不能据此判定任何真实道路已通畅。
+
+## A5修订（2026-10-15）
+
+坡地路面贴地与折点折叠已修复，见 [A5贴地记录](CITY_GROUND_SURFACE_TERRAIN_FIT_NOTES.md)。上文的「重构前基线」仍保留在 `fixtures` / `generatedPlans`，七个平地夹具继续与之逐字节一致；closed-loop、wavy-tee与十五城改为对照 `corrected` 段，附原因说明。接续工作第1、2项中的「边界union」和「路缘语义」已由 surfaceRegions 承担；桥/高架、渠化岛、尽端铺面、portal仍待做。
