@@ -1,6 +1,6 @@
 {
  "380/day": {
-  "all": "36745c6892fc7162",
+  "all": "30dee31c2e8261eb",
   "sections": {
    "city-beach": "1:0a616620156f",
    "city-beach-furniture": "3:aabd8546bcee",
@@ -20,10 +20,6 @@
    "city-garden-trees": "1:5a461e05aac7",
    "city-infrastructure-decorative": "1:ab875e06c580",
    "city-landmark-airport": "100:522fa8e7da91",
-   "city-landmark-district:claude-code": "8:a6f019b403c7",
-   "city-landmark-district:codex": "8:332c4a0a1ca1",
-   "city-landmark-district:dsh": "8:162d8424c5a6",
-   "city-landmark-district:harness:zcode": "8:eb1702bf155f",
    "city-landmark-ferris-wheel": "91:453d357a4641",
    "city-landmark-islet-grounds": "28:7efc43b44a1d",
    "city-landmark-islet-mansion": "523:ddd68cb90e01",
@@ -58,6 +54,9 @@
    "city-vice-context-rooftops": "1:1150c8533a50",
    "city-volleyball-courts": "1:95c85bff7f6b",
    "city-yachts": "1:2ba44b3222d5",
+   "district-landmark-cars": "3:864cbbb50386",
+   "district-landmark-site": "70:ea081cd30730",
+   "district-tower": "28:04b4fce714a8",
    "unnamed:Mesh": "41:29d369dcf4b9",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:cccb757f99c7",
@@ -65,7 +64,7 @@
   }
  },
  "380/night": {
-  "all": "7cd6632c0aaa3351",
+  "all": "799af000c1e66f55",
   "sections": {
    "city-beach": "1:0a616620156f",
    "city-beach-furniture": "3:aabd8546bcee",
@@ -85,10 +84,6 @@
    "city-garden-trees": "1:5a461e05aac7",
    "city-infrastructure-decorative": "1:ab875e06c580",
    "city-landmark-airport": "100:35873497c7b3",
-   "city-landmark-district:claude-code": "8:1a0c67f9701b",
-   "city-landmark-district:codex": "8:0f6cdace6926",
-   "city-landmark-district:dsh": "8:4e9fdef666fa",
-   "city-landmark-district:harness:zcode": "8:f2896582beb1",
    "city-landmark-ferris-wheel": "91:453d357a4641",
    "city-landmark-islet-grounds": "28:7efc43b44a1d",
    "city-landmark-islet-mansion": "523:ddd68cb90e01",
@@ -123,6 +118,9 @@
    "city-vice-context-rooftops": "1:1150c8533a50",
    "city-volleyball-courts": "1:95c85bff7f6b",
    "city-yachts": "1:2ba44b3222d5",
+   "district-landmark-cars": "3:864cbbb50386",
+   "district-landmark-site": "70:2317c3960c54",
+   "district-tower": "28:d4050061b81b",
    "unnamed:Mesh": "41:8e629db84fd1",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:cccb757f99c7",
@@ -130,7 +128,7 @@
   }
  },
  "1600/day": {
-  "all": "7b3e85e54445b246",
+  "all": "28b0e2ba78c46d58",
   "sections": {
    "city-beach": "1:c9fee4068adf",
    "city-beach-furniture": "3:78189443ee11",
@@ -149,10 +147,6 @@
    "city-infrastructure-decorative": "1:666eff9776f7",
    "city-landmark-airport": "100:c2d075ab33da",
    "city-landmark-arch": "31:0effe2352fb9",
-   "city-landmark-district:claude-code": "8:8f383fd87c36",
-   "city-landmark-district:codex": "8:278892b560d2",
-   "city-landmark-district:dsh": "8:383ddcefe79f",
-   "city-landmark-district:harness:zcode": "8:a6ebbc28f723",
    "city-landmark-ferris-wheel": "91:cd4a92ecd486",
    "city-landmark-islet-grounds": "79:abb23f19824b",
    "city-landmark-islet-mansion": "1486:3bbb3f4a1eec",
@@ -187,6 +181,9 @@
    "city-vice-context-rooftops": "1:b517b8536875",
    "city-volleyball-courts": "1:bd1c39bd9f49",
    "city-yachts": "1:2ba44b3222d5",
+   "district-landmark-cars": "4:a21acf5ea20a",
+   "district-landmark-site": "75:02db0de370f1",
+   "district-tower": "28:20e9fcdbd6f4",
    "unnamed:Mesh": "41:6b55e6cc319d",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:cb8852d6a0f5",
@@ -194,7 +191,7 @@
   }
  },
  "1600/night": {
-  "all": "e1c6ecb97329ebef",
+  "all": "1c250f7e5a484a72",
   "sections": {
    "city-beach": "1:c9fee4068adf",
    "city-beach-furniture": "3:78189443ee11",
@@ -213,10 +210,6 @@
    "city-infrastructure-decorative": "1:666eff9776f7",
    "city-landmark-airport": "100:1517d70f0a54",
    "city-landmark-arch": "31:0effe2352fb9",
-   "city-landmark-district:claude-code": "8:d77a44051d06",
-   "city-landmark-district:codex": "8:326521ecf57c",
-   "city-landmark-district:dsh": "8:89598f0e5cc2",
-   "city-landmark-district:harness:zcode": "8:272c0599c9d4",
    "city-landmark-ferris-wheel": "91:cd4a92ecd486",
    "city-landmark-islet-grounds": "79:abb23f19824b",
    "city-landmark-islet-mansion": "1486:3bbb3f4a1eec",
@@ -251,6 +244,9 @@
    "city-vice-context-rooftops": "1:b517b8536875",
    "city-volleyball-courts": "1:bd1c39bd9f49",
    "city-yachts": "1:2ba44b3222d5",
+   "district-landmark-cars": "4:a21acf5ea20a",
+   "district-landmark-site": "75:856e2b791031",
+   "district-tower": "28:bb06d156cf42",
    "unnamed:Mesh": "41:a7b5375cec46",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:cb8852d6a0f5",

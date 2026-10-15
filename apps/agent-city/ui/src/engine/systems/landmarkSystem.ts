@@ -13,7 +13,8 @@ import type { LandmarkHost } from "../models/landmarkContext";
 import { createMaterialFactory } from "../render/landmarkMaterials";
 import type { NightLights } from "../render/types";
 import { DISTRICT_LANDMARK_RENDER_GEOMETRY } from "../models/layoutPlacementGeometry";
-import { landmarkGrowth, landmarkRoom } from "../models/districtLandmarkFootprint";
+import { landmarkSite } from "../models/districtLandmarkFootprint";
+import { buildDistrictLandmarkSite } from "../render/landmarks/districtLandmarkSite";
 import { m, REAL } from "../worldScale";
 
 export interface LandmarkSystemHost {
@@ -84,7 +85,9 @@ export function applyDistrictLandmarkGrowth(host: LandmarkSystemHost, cursor: nu
     const id = group.name.slice("city-landmark-district:".length);
     const started = live ? undefined : host.model.buildings.filter((b) => b.districtId === id && b.startedAt <= cursor).length;
     const full = host.districtLandmarkHeight(id);
-    group.scale.y = started === undefined ? 1 : Math.max(0.05, host.districtLandmarkHeight(id, started) / full);
+    // 只拉伸塔身（裙楼与前院的停车场、树不随会话数长高）；旧结构没有 district-tower 时退回整组。
+    const target = group.getObjectByName("district-tower") ?? group;
+    target.scale.y = started === undefined ? 1 : Math.max(0.05, host.districtLandmarkHeight(id, started) / full);
   }
 }
 
@@ -96,9 +99,10 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
   for (const spot of host.layout.districtLandmarks ?? []) {
     const palette = paletteFor(spot.districtId);
     const h = host.districtLandmarkHeight(spot.districtId);
-    // 地基随楼高放大（按会话楼「高楼加宽」的策略），只在地标已预留的整块街区里放大。
+    // 地基随楼高放大（按会话楼「高楼加宽」的策略），只在地标已预留的整块街区里放大；街区里其余部分做前院（停车场、绿化）。
     const parcels = host.layout.blocks.flatMap((block) => block.parcels);
-    const grow = landmarkGrowth(h, landmarkRoom(spot, parcels));
+    const site = landmarkSite(spot, parcels, h);
+    const grow = site.grow;
     const day = createRenderCanvas(); day.width = 64; day.height = 64;
     const dctx = day.getContext("2d");
     if (dctx) {
@@ -135,14 +139,22 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
     group.name = `city-landmark-district:${spot.districtId}`;
     group.position.set(spot.x, Math.max(0.3, spot.y), spot.z);
     group.rotation.y = spot.yaw;
+    // 场地（裙楼幕墙、大门、前院）整体放进一个按朝路方向旋转的子组；塔身放在裙楼顶的 district-tower 里——
+    // 回放时只拉伸塔身（applyDistrictLandmarkGrowth），裙楼与停车场不跟着压扁。
+    const built = buildDistrictLandmarkSite(site, spot.districtId, palette.accent, neon, host);
+    group.add(built.group);
+    const tower = new THREE.Group();
+    tower.name = "district-tower";
+    tower.position.set(site.podium.cu, built.podiumTop, site.podium.cv);
+    built.group.add(tower);
     const add = (geometry: THREE.BufferGeometry, material: THREE.Material, y: number) => {
       const mesh = new THREE.Mesh(geometry, material); mesh.position.y = y; mesh.castShadow = true; mesh.receiveShadow = true;
-      group.add(mesh); host.disposables.push(geometry);
+      tower.add(mesh); host.disposables.push(geometry);
     };
-    add(new THREE.BoxGeometry(DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtWidth * grow, 4, DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth * grow).translate(0, 2, 0), trim, 0); // 裙楼
-    let y = 4;
+    let y = 0;
+    const shaftHeight = h - built.podiumTop;
     for (const [w, share] of [[12, 0.55], [9.5, 0.27], [7, 0.18]] as Array<[number, number]>) {
-      const height = (h - 4) * share;
+      const height = shaftHeight * share;
       const width = w * grow;
       const tier = new THREE.BoxGeometry(width, height, width).translate(0, height / 2, 0);
       const uv = tier.getAttribute("uv") as THREE.BufferAttribute;
