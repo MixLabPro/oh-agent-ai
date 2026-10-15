@@ -13,6 +13,8 @@ import type { LandmarkHost } from "../models/landmarkContext";
 import { createMaterialFactory } from "../render/landmarkMaterials";
 import type { NightLights } from "../render/types";
 import { DISTRICT_LANDMARK_RENDER_GEOMETRY } from "../models/layoutPlacementGeometry";
+import { landmarkGrowth, landmarkRoom } from "../models/districtLandmarkFootprint";
+import { m, REAL } from "../worldScale";
 
 export interface LandmarkSystemHost {
   model: CityModel;
@@ -91,6 +93,9 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
   for (const spot of host.layout.districtLandmarks ?? []) {
     const palette = paletteFor(spot.districtId);
     const h = host.districtLandmarkHeight(spot.districtId);
+    // 地基随楼高放大（按会话楼「高楼加宽」的策略），只在地标已预留的整块街区里放大。
+    const parcels = host.layout.blocks.flatMap((block) => block.parcels);
+    const grow = landmarkGrowth(h, landmarkRoom(spot, parcels));
     const day = createRenderCanvas(); day.width = 64; day.height = 64;
     const dctx = day.getContext("2d");
     if (dctx) {
@@ -110,11 +115,12 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
         lctx.fillRect(6 + cell * 13 + 1, floor * 64 + 16, 11, 34);
       }
     }
-    const floors = Math.max(8, Math.round(h / 4));
+    // 窗格按真实层高 3.2 m 铺（曾按每 4 单位一层 = 8 m 一层，窗户比旁边的会话楼大一倍多）。
+    const floors = Math.max(8, Math.round(h / m(REAL.floorHeight)));
     const dayTexture = new THREE.CanvasTexture(day as HTMLCanvasElement);
     const litTexture = new THREE.CanvasTexture(lit as HTMLCanvasElement);
     for (const texture of [dayTexture, litTexture]) { texture.colorSpace = THREE.SRGBColorSpace; texture.wrapS = texture.wrapT = THREE.RepeatWrapping; }
-    dayTexture.repeat.set(3, floors); litTexture.repeat.set(3, floors / 4);
+    dayTexture.repeat.set(Math.max(3, Math.round(3 * grow)), floors); litTexture.repeat.set(Math.max(3, Math.round(3 * grow)), floors / 4);
     const pastel = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.55);
     const wall = new THREE.MeshLambertMaterial({ map: dayTexture, color: pastel, emissive: new THREE.Color("#3a3936"), emissiveMap: dayTexture });
     host.landmarkWindows.push({ material: wall, day: dayTexture, lit: litTexture, dayEmissive: new THREE.Color("#3a3936") });
@@ -128,15 +134,15 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
       const mesh = new THREE.Mesh(geometry, material); mesh.position.y = y; mesh.castShadow = true; mesh.receiveShadow = true;
       group.add(mesh); host.disposables.push(geometry);
     };
-    add(new THREE.BoxGeometry(DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtWidth, 4, DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth).translate(0, 2, 0), trim, 0); // 裙楼
+    add(new THREE.BoxGeometry(DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtWidth * grow, 4, DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth * grow).translate(0, 2, 0), trim, 0); // 裙楼
     let y = 4;
     for (const [w, share] of [[12, 0.55], [9.5, 0.27], [7, 0.18]] as Array<[number, number]>) {
       const height = (h - 4) * share;
-      add(new THREE.BoxGeometry(w, height, w).translate(0, height / 2, 0), wall, y);
-      add(new THREE.BoxGeometry(w + 0.6, 0.45, w + 0.6), glow, y + height);                      // 每级霓虹勾边
+      add(new THREE.BoxGeometry(w * grow, height, w * grow).translate(0, height / 2, 0), wall, y);
+      add(new THREE.BoxGeometry(w * grow + 0.6, 0.45, w * grow + 0.6), glow, y + height);                      // 每级霓虹勾边
       y += height;
     }
-    add(new THREE.CylinderGeometry(0.2, 0.5, 9, 6).translate(0, 4.5, 0), trim, y);              // 塔尖
+    add(new THREE.CylinderGeometry(0.2 * grow, 0.5 * grow, 9, 6).translate(0, 4.5, 0), trim, y);              // 塔尖
     host.group.add(group);
     host.disposables.push(dayTexture, litTexture, wall, trim, glow);
   }
