@@ -85,11 +85,11 @@ export function buildBoats(host: AmbientHost): { mesh: THREE.InstancedMesh; boat
       });
     }
   });
-  // 船体按 11.5 m 的样船建模，按 REAL.boat / REAL.yacht 的真实长度换算到世界单位。
+  // 船体按 11.5 长 × 4 宽的样船建模，长/宽/高三轴各自换算到 REAL.boat / REAL.yacht 的真实尺寸——
+  // 曾按船长等比放大：28 m 游艇高 16 m、宽 9.7 m（真船宽 6.5、水线以上 ~9），像一栋漂着的楼。
   const hull = new THREE.BoxGeometry(11.5, 2, 4).translate(0, 1, 0);
   const cabin = new THREE.BoxGeometry(4.3, 1.8, 2.9).translate(1.4, 2.9, 0);
-  const boatScale = m(REAL.boat.length) / 11.5;
-  const geometry = mergeGeometries([hull, cabin]).scale(boatScale, boatScale, boatScale);
+  const geometry = mergeGeometries([hull, cabin]).scale(m(REAL.boat.length) / 11.5, m(REAL.boat.height) / 3.8, m(REAL.boat.beam) / 4);
   const material = new THREE.MeshLambertMaterial({ color: "#f2efe6" });
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(boats.length, 1));
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -108,8 +108,9 @@ export function buildBoats(host: AmbientHost): { mesh: THREE.InstancedMesh; boat
     const radarArch = new THREE.BoxGeometry(0.3, 2.2, 2.4).translate(-3.6, 5.4, 0);
     const bowSpray = new THREE.ConeGeometry(0.5, 2.5, 4).rotateZ(-Math.PI / 2).translate(6.5, 0.8, 0);
     // 飞桥游艇 28 m（REAL.yacht，Vice 式比斯坎湾游艇）。
-    const yachtScale = m(REAL.yacht.length) / 11.5;
-    const yachtGeometry = mergeGeometries([hull.clone(), cabin.clone(), flybridge, radarArch, bowSpray]).scale(yachtScale, yachtScale, yachtScale);
+    // 样船总高 6.5（雷达拱顶）、宽 4（飞桥 2.4 内收）。
+    const yachtGeometry = mergeGeometries([hull.clone(), cabin.clone(), flybridge, radarArch, bowSpray])
+      .scale(m(REAL.yacht.length) / 11.5, m(REAL.yacht.height) / 6.5, m(REAL.yacht.beam) / 4);
     const yachtMaterial = new THREE.MeshLambertMaterial({ color: "#f8f6f0" });
     const yachtMesh = new THREE.InstancedMesh(yachtGeometry, yachtMaterial, yachtCount);
     yachtMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);

@@ -46,9 +46,12 @@ export const REAL = {
   lifeguardTower: { legHeight: 2.0, hutWidth: 3.2, hutHeight: 2.4, hutDepth: 2.6 },
   /** 沙滩排球场 16 × 8，网高 2.43。 */
   volleyballCourt: { length: 16, width: 8, netHeight: 2.43 },
-  boat: { length: 12, beam: 3.6 },
-  /** 飞桥游艇（Vice 式比斯坎湾游艇）。 */
-  yacht: { length: 28, beam: 6.5 },
+  /** 小型机动艇：水线以上（含驾驶舱）约 3.8 m。 */
+  boat: { length: 12, beam: 3.6, height: 3.8 },
+  /** 飞桥游艇（Vice 式比斯坎湾游艇）：水线以上到雷达拱约 9 m。 */
+  yacht: { length: 28, beam: 6.5, height: 9 },
+  /** 海鸟（军舰鸟 / 褐鹈鹕）翼展。 */
+  bird: { wingspan: 2.2 },
   marinaBoat: { min: 7, max: 12, beam: 2.8 },
   pier: { width: 3 },
   /** 海湾豪宅：主楼约 22 × 12 m、两层；整块住宅台地约 34 × 26 m。 */
@@ -57,3 +60,35 @@ export const REAL = {
   estateLoopRoad: 8,
   estateSpurRoad: 6,
 } as const;
+
+/**
+ * 视觉放大（用户 2026-10-15：「有些物体，为了视觉效果可以调整大小」）。真实尺寸放进城市里有两类东西会读不出来：
+ * 远看只剩一个像素的小东西（鸟），和要当天际线锚点的地标（灯塔、凯旋门、庄园）。它们允许按这里的倍数放大——
+ * 但放大是**登记过的例外**，不是默认：没在这里的东西一律按 REAL 真实尺寸。
+ */
+export const VISUAL_BOOST = {
+  /** 鸟群在 130–220 m 高空绕城：真实 2.2 m 翼展在常用机位下不到 2 像素，放大 2.5 倍（≈5.5 m）刚好读出 V 字队形。 */
+  bird: 2.5,
+} as const;
+
+/**
+ * 模型尺寸政策：每个地标/大件模型的真实世界参考高度（米）+ 允许的比例区间 [min, max]（实测高 ÷ 参考高）。
+ * 区间 = 1 附近是「按真实尺寸」；> 1 是登记过的视觉放大，< 1 是登记过的压低（比如不压过会话楼天际线）——
+ * 两种偏离都必须写理由。scripts/verify-city-world-scale.mjs 在 Node 里构建每个模型（cap = 70 的基准城市）量高度，
+ * 超出区间或缺条目即失败。参考值取同类真实建筑的常见高度，不对应任何单体。
+ */
+export const SIZE_POLICY: Record<string, { real: number; range: readonly [number, number]; why: string }> = {
+  "tv-tower": { real: 200, range: [0.65, 1.1], why: "城市电视塔 150–350 m；塔高随会话楼天际线封顶（min(cap, 70)），不压过数据楼，所以允许略矮" },
+  "twin-towers": { real: 180, range: [0.75, 1.1], why: "双子办公塔 150–250 m" },
+  "twist-tower": { real: 180, range: [0.65, 1.1], why: "扭转住宅塔 150–250 m；与电视塔同样随天际线封顶" },
+  "arch": { real: 50, range: [0.9, 1.7], why: "凯旋门式拱门 ~50 m；作为广场轴线端点放大，远景读出拱洞" },
+  "sail-opera": { real: 60, range: [0.75, 1.2], why: "帆形歌剧院壳顶 ~65 m" },
+  "lighthouse": { real: 35, range: [0.9, 2.3], why: "岬角灯塔 25–45 m；海岸线上唯一的竖向标记，放大以在全景里读出红白条纹" },
+  "ferris-wheel": { real: 110, range: [0.75, 1.2], why: "滨海摩天轮 60–135 m" },
+  "pagoda": { real: 60, range: [0.75, 1.4], why: "楼阁式塔 40–70 m" },
+  "villa-complex": { real: 25, range: [0.9, 2.1], why: "地中海庄园钟塔 ~25 m（主楼两层 ~9 m）；岸线地标，按 1 单位≈1 米建模，等于放大近 2 倍。占地被规划半径 34 与地面物理声明钉住，不随比例尺缩" },
+  "islet-mansion": { real: 9, range: [0.8, 1.3], why: "海湾两层豪宅 ~8–9 m" },
+  "islet-grounds": { real: 12, range: [0.8, 1.4], why: "岛内场地：棕榈/旗杆/摄影棚 ~10–15 m" },
+  "suspension-bridge": { real: 65, range: [0.8, 1.3], why: "悬索桥主塔高出桥面 ≈ 主跨 / 8–10：基准城市主跨 ~550 m → 55–70 m" },
+  "airport": { real: 60, range: [0.75, 1.5], why: "机场塔台 40–90 m" },
+};
