@@ -2,8 +2,9 @@
 import * as THREE from "three";
 import { CarVisuals } from "../game/CarVisuals";
 import { DrivingWorld } from "../game/DrivingWorld";
+import { DrivingKernel } from "../game/driving/DrivingKernel";
 import { DrivingInput } from "../game/DrivingInput";
-import { DRIVING_DT, initialDrivingState, stepDriving, type DrivingEnvironment } from "../game/DrivingSimulation";
+import { DRIVING_DT, initialDrivingState, type DrivingEnvironment } from "../game/DrivingSimulation";
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const stage = element<HTMLElement>("stage");
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -49,6 +50,10 @@ for (const x of [-29, -13, 3, 23, 32]) for (const z of [-29, 29]) {
 const world = new DrivingWorld([{ id: "pad", layer: "ground", minX: -35, maxX: 35, minZ: -24, maxZ: 24, base: 0, slopeX: 0, slopeZ: 0, connections: [] }], obstacles);
 let reason = "";
 const environment: DrivingEnvironment = { move: (previous, desired) => { const result = world.move(previous, desired); reason = result.reason ?? ""; return result; } };
+const kernel = new DrivingKernel(environment, {
+  baseSnapshotHash: "synthetic-pad-v1", vehicleConfigHash: "coral-coast-v1", kernelBuildId: "arcade-wrapper-v1",
+  physicsVersion: 1, collisionVersion: 1, queryVersion: 1,
+});
 const car = new CarVisuals(); scene.add(car.root);
 let state = initialDrivingState(-22, 0); let prior = state;
 let paused = true; let previousTime = 0; let accumulator = 0; let frame = 0; let hudAt = 0;
@@ -93,7 +98,7 @@ const tick = (now: number) => {
   const dt = Math.min(rawDt, 0.1);
   if (!paused) {
     accumulator += dt; let steps = 0;
-    while (accumulator >= DRIVING_DT && steps < 5) { prior = state; state = stepDriving(state, input.snapshot(), environment); accumulator -= DRIVING_DT; steps++; }
+    while (accumulator >= DRIVING_DT && steps < 5) { prior = state; state = { ...kernel.step(state, input.snapshot()).state }; accumulator -= DRIVING_DT; steps++; }
     if (steps === 5 && accumulator >= DRIVING_DT) accumulator = 0;
   }
   const alpha = paused ? 1 : accumulator / DRIVING_DT;

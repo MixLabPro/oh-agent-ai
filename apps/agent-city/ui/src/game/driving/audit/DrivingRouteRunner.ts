@@ -1,0 +1,92 @@
+import { DrivingKernel } from "../DrivingKernel";
+import type { DrivingState } from "../../DrivingSimulation";
+import { auditKeyId, freezeAuditCase, validateManifest } from "./AuditIdentity";
+import type { AuditCause, AuditKey, AuditObserver, AuditRunState, RoadAuditCase, RoadAuditCaseResult, RoutePilot } from "./contracts";
+
+/** Resumable, renderer-free execution. advance(N) is deterministic work, not wall
+ * time. Caller schedules small batches and checks cancellation/revision each time.
+ * No recovery/reset API: any reset is a separate case with a separate start. */
+export class DrivingRouteRunner {
+  private current: Readonly<DrivingState>;
+  private ticks = 0;
+  private noProgressTicks = 0;
+  private bestProgress = -Infinity;
+  private runState: AuditRunState = "queued";
+  private terminal: RoadAuditCaseResult | null = null;
+  private readonly identity: string;
+  readonly key: AuditKey;
+  readonly test: RoadAuditCase;
+  constructor(key: AuditKey, test: RoadAuditCase, private readonly kernel: DrivingKernel,
+    private readonly pilot: RoutePilot, private readonly observer: AuditObserver) {
+    for (const field of ["baseSnapshotHash", "vehicleConfigHash", "kernelBuildId", "physicsVersion", "collisionVersion", "queryVersion"] as const) {
+      if (kernel.identity[field] !== key[field]) throw new Error("kernel-audit-identity-mismatch");
+    }
+    validateManifest({ key, units: test.units.map((id) => ({ id, kind: "directed-edge" as const })), exclusions: [], cases: [test] });
+    this.identity = auditKeyId(key); this.key = Object.freeze({ ...key });
+    // Freeze the supplied plan, not just its top-level reference.
+    this.test = freezeAuditCase(test);
+    if (!Number.isSafeInteger(test.maxTicks) || test.maxTicks < 1 || !Number.isSafeInteger(test.maxNoProgressTicks) || test.maxNoProgressTicks < 1 || test.maxNoProgressTicks > test.maxTicks || !test.units.length || !test.gates.length) throw new Error("invalid-runner-case");
+    this.current = this.test.start;
+  }
+  get state(): Readonly<DrivingState> { return this.current; }
+  get simulatedTicks(): number { return this.ticks; }
+  get status(): AuditRunState { return this.runState; }
+  get result(): RoadAuditCaseResult | null { return this.terminal; }
+  cancel(): void {
+    if (this.terminal) return;
+    this.finish("cancelled"); this.runState = "cancelled";
+  }
+  advance(maxTicks: number, currentKey: AuditKey): RoadAuditCaseResult | null {
+    if (!Number.isSafeInteger(maxTicks) || maxTicks < 1 || maxTicks > 10000) throw new Error("invalid-audit-batch");
+    // Even a completed result becomes stale if the snapshot/config changes.
+    if (auditKeyId(currentKey) !== this.identity) {
+      this.finish("unconfirmed", true); this.runState = "stale"; return this.terminal;
+    }
+    if (this.terminal) return this.terminal;
+    if (this.runState === "queued") {
+      let validation;
+      try { validation = this.observer.begin(this.current); }
+      catch { this.finish("unconfirmed"); return this.terminal; }
+      if (validation !== "valid") {
+        this.finish(validation === "simulation-invalid" ? "simulation-invalid" : "route-deviation");
+        return this.terminal;
+      }
+    }
+    this.runState = "running";
+    for (let i = 0; i < maxTicks && !this.terminal; i++) {
+      let input;
+      try { input = this.pilot.input(this.current, this.ticks); }
+      catch { this.finish("pilot-failed"); break; }
+      if (!input || ![input.forward, input.backward, input.left, input.right].every((value) => typeof value === "boolean")) {
+        this.finish("pilot-failed"); break;
+      }
+      let next;
+      try { next = this.kernel.step(this.current, input); }
+      catch { this.finish("simulation-invalid"); break; }
+      this.ticks++;
+      let observation;
+      try { observation = this.observer.observe(this.current, next, this.ticks); }
+      catch { this.finish("unconfirmed"); break; }
+      this.current = next.state;
+      if (!Number.isFinite(observation.progress)) { this.finish("simulation-invalid"); break; }
+      if (observation.status === "route-deviation" || observation.status === "simulation-invalid") {
+        this.finish(observation.status); break;
+      }
+      if (observation.status === "complete") { this.finish("none"); break; }
+      if (observation.status !== "continue") { this.finish("unconfirmed"); break; }
+      if (observation.progress > this.bestProgress + 1e-4) {
+        this.bestProgress = observation.progress; this.noProgressTicks = 0;
+      } else if (!observation.plannedStop) this.noProgressTicks++;
+      if (this.ticks >= this.test.maxTicks) this.finish("budget-exhausted");
+      else if (this.noProgressTicks >= this.test.maxNoProgressTicks) this.finish("pilot-failed");
+    }
+    return this.terminal;
+  }
+  private finish(cause: AuditCause, replace = false): void {
+    if (this.terminal && !replace) return;
+    this.terminal = Object.freeze({ key: this.key, caseId: this.test.id,
+      verdict: cause === "none" ? "passed" : "inconclusive", cause,
+      coveredUnits: Object.freeze(cause === "none" ? [...this.test.units] : []), simulatedTicks: this.ticks });
+    this.runState = "complete";
+  }
+}

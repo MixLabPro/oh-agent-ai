@@ -3,14 +3,14 @@
  * use continuous swept SAT against a conservatively rotation-expanded vehicle OBB.
  */
 import type { DrivingEnvironment, DrivingMotion, DrivingMoveResult, DrivingState } from "./DrivingSimulation";
-import { CAR_DIMENSIONS } from "./carDimensions";
+import { DRIVING_FOOTPRINT } from "./driving/vehicleFootprint";
+export { DRIVING_FOOTPRINT } from "./driving/vehicleFootprint";
 export type DrivingSurface = {
   id: string; layer: string; minX: number; maxX: number; minZ: number; maxZ: number;
   /** y = base + slopeX*x + slopeZ*z */
   base: number; slopeX: number; slopeZ: number; connections: readonly string[];
 };
 export type DrivingObstacle = { id: string; minX: number; maxX: number; minZ: number; maxZ: number; layer: string };
-export const DRIVING_FOOTPRINT = Object.freeze({ halfLength: CAR_DIMENSIONS.length / 2, halfWidth: Math.max(CAR_DIMENSIONS.width / 2, CAR_DIMENSIONS.track / 2 + Math.hypot(CAR_DIMENSIONS.wheelRadius, CAR_DIMENSIONS.wheelWidth / 2)), wheelbase: CAR_DIMENSIONS.wheelbase, track: CAR_DIMENSIONS.track });
 const EPS = 1e-7;
 const height = (s: DrivingSurface, x: number, z: number) => s.base + s.slopeX * x + s.slopeZ * z;
 const contains = (s: DrivingSurface, x: number, z: number) => x >= s.minX && x <= s.maxX && z >= s.minZ && z <= s.maxZ;
