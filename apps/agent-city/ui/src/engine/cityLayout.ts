@@ -99,6 +99,10 @@ export type CityLayout = {
   /** 尽端回车点（形态批 §5-3，加性）：计划层 classifyEndpoints 判为 cul-de-sac 的合法尽端，
    *  生长剪枝（G1）删掉所在支路后已不存在于最终路网的点被剔除——回车圈只画在真实路尽头。 */
   culDeSacEnds?: Vec2[];
+  /** 路口环岛（planner/junctionRings.ts）：中心岛由 roadSystem.buildJunctionIslands 画。 */
+  junctionRings?: Array<{ x: number; z: number; radius: number; width: number; kind: "major" | "minor" }>;
+  /** 高架立交匝道（planner/highwayRamps.ts）：桥面端 → 地面端，由 roadSystem.buildHighwayRamps 画。 */
+  highwayRamps?: Array<{ points: Vec2[]; width: number; side: 1 | -1 }>;
   districtLandmarks?: DistrictLandmark[];
   terrain: TerrainField; extent: number; coast: Vec2[]; river: Vec2[]; publicSites: PublicSite[];
   parkTrees: Array<Vec2 & { y: number; seed: number }>;
@@ -749,6 +753,18 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
   // Retain the exact accepted frontage host and its proved route, not a new
   // nearest-road approximation after display pruning.
   const serviceSelection = new Set(selection);
+  // 市政广场周边的路口属于公共骨架。长边中点可能在服务圆之外，不能因此把广场入口裁成两岔。
+  const civicSites = plan.publicSites.filter((site) => site.kind === "civic");
+  const civicNodes = new Set(plan.roadNodes.filter((node) => civicSites.some((site) =>
+    Math.hypot(node.x - site.x, node.z - site.z) <= site.radius + 20)).map((node) => node.id));
+  for (const edge of plan.roadEdges) if (!edge.bridge && (civicNodes.has(edge.from) || civicNodes.has(edge.to))) serviceSelection.add(edge.id);
+  // 高架和匝道的落地点同样是固定服务入口。附近为避让走廊、没有建筑时，8 宽宿主也不能随活动剪枝消失。
+  const highwayLandings = [
+    ...(plan.highwayRamps ?? []).map((ramp) => ramp.points[ramp.points.length - 1]),
+    ...plan.highways.filter((run) => run.length > 1 && Math.hypot(run[0].x - run[run.length - 1].x, run[0].z - run[run.length - 1].z) > 0.01)
+      .flatMap((run) => [run[0], run[run.length - 1]]),
+  ];
+  for (const edge of plan.roadEdges) if (!edge.bridge && highwayLandings.some((point) => polylineDistance([edge.points], point) <= 0.02)) serviceSelection.add(edge.id);
   const edgeById = new Map(plan.roadEdges.map((edge) => [edge.id, edge]));
   const unresolvedParcelFrontage: string[] = [];
   const unsupportedAuxiliaryFrontage = auxiliaryParcels.filter(parcel => used.has(parcel.id)).map(parcel => parcel.id).sort();

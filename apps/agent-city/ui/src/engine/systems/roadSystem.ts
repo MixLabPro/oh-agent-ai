@@ -4,10 +4,12 @@
  */
 
 import * as THREE from "three";
+import { m } from "../worldScale";
+import { segmentDistance } from "../roadGeometry";
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { cornerArc, curbClearance, junctionIndex, pavementIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
-import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../render/shared";
+import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_DECK_Y, expresswayDeckHeights } from "../render/shared";
 
 /** 本系统读写的 CityParts 成员（精确清单；CityParts 以 `this as unknown as RoadHost` 传入）。 */
 export interface RoadHost {
@@ -307,7 +309,8 @@ export function buildDistrictExpressways(host: RoadHost): void {
       const a = points[index - 1];
       const b = points[index];
       const length = Math.hypot(b.x - a.x, b.z - a.z);
-      if (length < 6) continue;
+      // 出口曲线/落地段会有不足 6 的合法短边；跳过它们会留下断桥和孤立桥墩。
+      if (length < 1e-3) continue;
       const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
       const mx = (a.x + b.x) / 2;
       const mz = (a.z + b.z) / 2;
@@ -322,7 +325,25 @@ export function buildDistrictExpressways(host: RoadHost): void {
       const sideX = Math.sin(yaw);
       const sideZ = Math.cos(yaw);
       for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: top, z: mz + sideZ * offset, sx: slant, sy: 0.05, sz: 0.3, yaw, pitch, color: "#c6c6bb" });
-      for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: top, z: mz + sideZ * offset, sx: slant, sy: 0.55, sz: 0.3, yaw, pitch, color: "#b9bcb2" });
+      for (const offset of [-5.1, 5.1]) {
+        const start = { x: a.x + sideX * offset, z: a.z + sideZ * offset }, end = { x: b.x + sideX * offset, z: b.z + sideZ * offset };
+        // 合流处留护栏开口；否则匝道虽然接上桥面，车道仍被高架护栏横截。
+        const merging = (from: Vec2, to: Vec2) => (host.layout.highwayRamps ?? []).some((ramp) => ramp.points.slice(0, Math.ceil(ramp.points.length * 0.4) + 1)
+          .some((point) => segmentDistance(point, from, to) < ramp.width / 2 + 0.5));
+        if (!merging(start, end)) pieces.push({ x: mx + sideX * offset, y: top, z: mz + sideZ * offset, sx: slant, sy: 0.55, sz: 0.3, yaw, pitch, color: "#b9bcb2" });
+        else {
+          // 只切合流口，不能因一条长桥面段碰到匝道而删掉整段护栏。
+          const steps = Math.ceil(length / 6);
+          for (let k = 0; k < steps; k += 1) {
+            const from = { x: start.x + (end.x - start.x) * k / steps, z: start.z + (end.z - start.z) * k / steps };
+            const to = { x: start.x + (end.x - start.x) * (k + 1) / steps, z: start.z + (end.z - start.z) * (k + 1) / steps };
+            if (merging(from, to)) continue;
+            const t = (k + 0.5) / steps;
+            pieces.push({ x: (from.x + to.x) / 2, y: ya + (yb - ya) * t + EXPRESSWAY_DECK_THICKNESS, z: (from.z + to.z) / 2,
+              sx: slant / steps, sy: 0.55, sz: 0.3, yaw, pitch, color: "#b9bcb2" });
+          }
+        }
+      }
     }
   }
   if (!pieces.length) return;
@@ -346,6 +367,85 @@ export function buildDistrictExpressways(host: RoadHost): void {
   mesh.name = "city-district-expressways";
   host.group.add(mesh);
   host.disposables.push(geometry, mesh.material);
+}
+
+/** 高架立交匝道（planner/highwayRamps.ts）：与区界高架同一视觉语言（桥面板 / 护栏 / 车道边线 / 墩柱），
+ *  匝道完全离开主桥幅后，桥面高度才沿剩余路程 smoothstep 降到地面以上 0.3，
+ *  落在干道 T 口上。墩柱每 18 一根，桥面离地 < 1.5 的落地段不立墩。 */
+export function buildHighwayRamps(host: RoadHost): void {
+  const ramps = host.layout.highwayRamps ?? [];
+  if (!ramps.length) return;
+  type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; pitch: number; color: string };
+  const pieces: Piece[] = [];
+  const groundAt = (x: number, z: number) => Math.max(0, host.layout.terrain.height(x, z));
+  const highwayDistance = (point: Vec2) => {
+    let nearest = Infinity;
+    for (const run of host.layout.highways ?? []) {
+      for (let i = 1; i < run.length; i += 1) nearest = Math.min(nearest, segmentDistance(point, run[i - 1], run[i]));
+    }
+    return nearest;
+  };
+  for (const ramp of ramps) {
+    const pts = ramp.points;
+    const along: number[] = [0];
+    for (let i = 1; i < pts.length; i += 1) along.push(along[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
+    const total = along[along.length - 1] || 1;
+    // 整个匝道横截面离开主桥之后才开始下降，不能按固定百分比提前钻入桥面。
+    const clearIndex = (host.layout.highways ?? []).length ? pts.findIndex((p) => highwayDistance(p) >= (EXPRESSWAY_DECK_WIDTH + ramp.width) / 2 + 0.5) : -1;
+    const mergeEnd = clearIndex >= 0 ? along[clearIndex] : total * 0.4;
+    const heights = pts.map((p, i) => {
+      const t = Math.max(0, (along[i] - mergeEnd) / Math.max(1, total - mergeEnd)), e = t * t * (3 - 2 * t);
+      const ground = groundAt(p.x, p.z) + 0.3 - EXPRESSWAY_DECK_THICKNESS;
+      return EXPRESSWAY_DECK_Y + (ground - EXPRESSWAY_DECK_Y) * e;
+    });
+    let nextPier = 9;
+    for (let i = 1; i < pts.length; i += 1) {
+      const a = pts[i - 1], b = pts[i];
+      const length = Math.hypot(b.x - a.x, b.z - a.z);
+      if (length < 1e-3) continue;
+      const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+      const ya = heights[i - 1], yb = heights[i];
+      const pitch = Math.atan2(yb - ya, length);
+      const slant = Math.hypot(length, yb - ya);
+      const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2, my = (ya + yb) / 2;
+      pieces.push({ x: mx, y: my, z: mz, sx: slant + 0.4, sy: EXPRESSWAY_DECK_THICKNESS, sz: ramp.width, yaw, pitch, color: "#6a7071" });
+      const sideX = Math.sin(yaw), sideZ = Math.cos(yaw);
+      // 两端留出开放的分流/地面 T 口，护栏不伸进主桥或横穿干道。
+      if (along[i - 1] >= mergeEnd && total - along[i] >= 10) {
+        for (const offset of [-(ramp.width / 2 - 0.15), ramp.width / 2 - 0.15]) pieces.push({ x: mx + sideX * offset, y: my + EXPRESSWAY_DECK_THICKNESS, z: mz + sideZ * offset, sx: slant, sy: 0.55, sz: 0.3, yaw, pitch, color: "#b9bcb2" });
+      }
+      for (const offset of [-(ramp.width / 2 - 0.7), ramp.width / 2 - 0.7]) {
+        const point = { x: mx + sideX * offset, z: mz + sideZ * offset };
+        // 重叠桥幅内沿用主线标线；匝道边线不能横穿主线车道。
+        if (highwayDistance(point) <= EXPRESSWAY_DECK_WIDTH / 2 + 0.4) continue;
+        pieces.push({ x: point.x, y: my + EXPRESSWAY_DECK_THICKNESS, z: point.z, sx: slant, sy: 0.05, sz: 0.18, yaw, pitch, color: "#e4dfc9" });
+      }
+      while (nextPier <= along[i]) {
+        const t = (nextPier - along[i - 1]) / length;
+        const px = a.x + (b.x - a.x) * t, pz = a.z + (b.z - a.z) * t, py = ya + (yb - ya) * t;
+        const bed = Math.max(-3, host.layout.terrain.height(px, pz));
+        if (py - bed >= 1.5) pieces.push({ x: px, y: bed, z: pz, sx: 1.4, sy: py - bed + 0.05, sz: ramp.width - 1.5, yaw, pitch: 0, color: "#a9aaa0" });
+        nextPier += 18;
+      }
+    }
+  }
+  const mesh = new THREE.InstancedMesh(BOX.clone(), new THREE.MeshLambertMaterial({ color: "#ffffff" }), pieces.length);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  pieces.forEach((piece, index) => {
+    host.positionVector.set(piece.x, piece.y, piece.z);
+    host.euler.set(0, piece.yaw, piece.pitch, "YZX");
+    host.quaternion.setFromEuler(host.euler);
+    host.euler.set(0, 0, 0, "XYZ");
+    host.scaleVector.set(piece.sx, piece.sy, piece.sz);
+    host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector);
+    mesh.setMatrixAt(index, host.matrix);
+    mesh.setColorAt(index, host.color.set(piece.color));
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  mesh.name = "city-highway-ramps";
+  host.group.add(mesh);
+  host.disposables.push(mesh.geometry, mesh.material);
 }
 
 /** 尽端回车圈半径（形态批 §5-3）：所在路段半宽 + 2.5，夹在 6–9——与路宽协调
@@ -395,6 +495,49 @@ export function buildCulDeSacBulbs(host: RoadHost): void {
     rims.setMatrixAt(index, host.matrix);
   });
   for (const mesh of [discs, rims]) { mesh.count = ends.length; mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
+}
+
+/** 路口环岛的中心岛（planner/junctionRings.ts）：草坪圆盘 + 浅色路缘；主干环岛中间三棵棕榈 + 一圈花坛，支路小环一棵棕榈。
+ *  环道本身是普通路段，由路面系统照常铺；这里只画环道内缘以内的岛。编辑器删掉环道后（岛周围剩不到 3 条路段）不画。 */
+export function buildJunctionIslands(host: RoadHost): void {
+  const rings = (host.layout.junctionRings ?? []).filter((ring) => host.layout.roadEdges.filter((edge) => {
+    const a = edge.points[0], b = edge.points[edge.points.length - 1];
+    const m = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+    return Math.abs(Math.hypot(m.x - ring.x, m.z - ring.z) - ring.radius) < 1.5;
+  }).length >= 3);
+  if (!rings.length) return;
+  const disc = new THREE.CylinderGeometry(1, 1, 1, 28).translate(0, 0.5, 0);
+  const curbs = host.makeInstanced(disc, new THREE.MeshLambertMaterial({ color: "#cbc6ba" }), rings.length);
+  const lawns = host.makeInstanced(disc.clone(), new THREE.MeshLambertMaterial({ color: "#6f9f58" }), rings.length);
+  const beds = host.makeInstanced(new THREE.TorusGeometry(1, 0.12, 6, 28).rotateX(Math.PI / 2), new THREE.MeshLambertMaterial({ color: "#d9577a" }), rings.length);
+  curbs.name = "city-junction-island-curb"; lawns.name = "city-junction-island-lawn"; beds.name = "city-junction-island-bed";
+  const palms: Array<{ x: number; y: number; z: number; h: number }> = [];
+  let bedCount = 0;
+  rings.forEach((ring, index) => {
+    const y = Math.max(0, host.layout.terrain.height(ring.x, ring.z));
+    const island = Math.max(1, ring.radius - ring.width / 2 - 0.6);
+    host.positionVector.set(ring.x, y, ring.z); host.quaternion.identity();
+    host.scaleVector.set(island + 0.35, 0.28, island + 0.35); host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector); curbs.setMatrixAt(index, host.matrix);
+    host.positionVector.set(ring.x, y + 0.05, ring.z);
+    host.scaleVector.set(island, 0.28, island); host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector); lawns.setMatrixAt(index, host.matrix);
+    if (ring.kind === "major") {
+      host.positionVector.set(ring.x, y + 0.36, ring.z); host.scaleVector.set(island * 0.62, 1, island * 0.62);
+      host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector); beds.setMatrixAt(bedCount, host.matrix); bedCount += 1;
+      for (let k = 0; k < 3; k += 1) { const a = (k / 3) * Math.PI * 2 + ring.x * 0.01; palms.push({ x: ring.x + Math.cos(a) * island * 0.3, y: y + 0.33, z: ring.z + Math.sin(a) * island * 0.3, h: m(9 + k * 1.5) }); }
+    } else palms.push({ x: ring.x, y: y + 0.33, z: ring.z, h: m(8) });
+  });
+  for (const mesh of [curbs, lawns]) { mesh.count = rings.length; mesh.instanceMatrix.needsUpdate = true; mesh.receiveShadow = true; }
+  beds.count = bedCount; beds.instanceMatrix.needsUpdate = true;
+  const trunks = host.makeInstanced(new THREE.CylinderGeometry(0.1, 0.16, 1, 6).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#8a6a4a" }), palms.length);
+  const crowns = host.makeInstanced(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshLambertMaterial({ color: "#3fa86b" }), palms.length);
+  trunks.name = "city-junction-island-palm-trunk"; crowns.name = "city-junction-island-palm-crown";
+  palms.forEach((palm, index) => {
+    host.quaternion.identity();
+    host.positionVector.set(palm.x, palm.y, palm.z); host.scaleVector.set(1, palm.h, 1); host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector); trunks.setMatrixAt(index, host.matrix);
+    const r = palm.h * 0.32;
+    host.positionVector.set(palm.x, palm.y + palm.h, palm.z); host.scaleVector.set(r, r * 0.28, r); host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector); crowns.setMatrixAt(index, host.matrix);
+  });
+  for (const mesh of [trunks, crowns]) { mesh.count = palms.length; mesh.instanceMatrix.needsUpdate = true; mesh.castShadow = true; }
 }
 
 type AddPart = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt?: number, yaw?: number) => void;

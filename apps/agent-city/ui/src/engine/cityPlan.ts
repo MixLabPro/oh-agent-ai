@@ -43,6 +43,8 @@ import { mergeFragmentEdges } from "./planner/fragmentEdges";
 import { finishDeadEnds } from "./planner/deadEnds";
 import { connectGroundJunctions } from "./planner/junctions";
 import { buildLandingCircles } from "./planner/landing";
+import { buildJunctionRings, type JunctionRing } from "./planner/junctionRings";
+import { planHighwayRamps, type HighwayRamp } from "./planner/highwayRamps";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 import { clearsHighways, polygonDistance, roadNodeId, SegmentIndex, segmentDistance } from "./roadGeometry";
 import { targetParcels } from "./scaleTier";
@@ -650,12 +652,43 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
 
+  // ── 路口环岛（planner/junctionRings.ts）：度 ≥5 / ≥3 条主干交汇建主干环岛，支路三岔/十字路口稀疏建小环。
+  // 放在落地环之后、solve 之前：街区随后按最终路网生成，自然绕开环岛；被引用的折线（干道、岸路、滨海路、车流）同步改写成绕环。
+  let junctionRings: JunctionRing[] = [];
+  {
+    const pinned = new Set<string>([
+      ...[...publicSites, ...landmarks].flatMap((site) => site.access ? [site.access.nodeId] : []),
+      ...primaryAnchorNodeIds,
+      ...ringRuns.flatMap((run) => [run[0], run[run.length - 1]].map((p) => roadNodeId(keyOf(p)))),
+    ]);
+    const report = buildJunctionRings({ network, world: connectorWorld, core, random, routes: [carPaths, trunkRuns, coastRoadRuns, coastalRoadRuns], pinned });
+    junctionRings = report.rings;
+    if (junctionRings.length) {
+      for (let t = parkTrees.length - 1; t >= 0; t -= 1) {
+        const tree = parkTrees[t];
+        if (junctionRings.some((ring) => Math.hypot(tree.x - ring.x, tree.z - ring.z) < ring.radius + ring.width / 2 + 3)) parkTrees.splice(t, 1);
+      }
+    }
+  }
+
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
   const repairCtx: RepairContext = { network, connectionLog, siteObligations, demandCatalogue: declaredSiteDemands, primaryAnchorNodeId: primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]), coastRoadRuns, coastalRunCount, riverRoadRuns: coastRoadRuns.slice(coastalRunCount) };
   const solveReport = skipSolve ? null : solvePlan(repairCtx);
   if (skipSolve) initializeRepairPlanningWorld(repairCtx);
+  // ── 高架立交匝道（planner/highwayRamps.ts）：高架跨越干道处做菱形立交，匝道走廊随后与高架一起作为街区生成的避让。
+  let highwayRamps: HighwayRamp[] = [];
+  {
+    highwayRamps = planHighwayRamps({ highways: ringRuns, roads: [...network.edges.values()], buildable, sites: reservations() }).ramps;
+    if (highwayRamps.length) {
+      for (let t = parkTrees.length - 1; t >= 0; t -= 1) {
+        const tree = parkTrees[t];
+        if (highwayRamps.some((ramp) => ramp.points.some((p, k) => k > 0 && segmentDistance(tree, ramp.points[k - 1], p) < ramp.width / 2 + 3))) parkTrees.splice(t, 1);
+      }
+    }
+  }
+
   let generatedParcels = 0;
   let roadBlockReport: RoadBlockReport | null = null;
   const derivedFinalization = runRepairDerivedFinalization(repairCtx, (draft) => {
@@ -672,7 +705,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const generated = generateRoadBlocks({ faces, roads,
       primaryAnchorNodeId: draft.primaryAnchorNodeId ?? null,
       networkVersion: draft.network.version,
-      districtFor: () => "", zoneFor, buildable, sites: [...draft.publicSites, ...draft.landmarks], highways: draft.ringRuns,
+      // 环岛中心岛按预留地处理：不在里面切地块（半径取到环道内缘）。
+      districtFor: () => "", zoneFor, buildable, sites: [...draft.publicSites, ...draft.landmarks, ...junctionRings.map((ring, i) => ({ id: `junction-ring:${i}`, x: ring.x, z: ring.z, radius: Math.max(1, ring.radius - ring.width / 2) }))], highways: [...draft.ringRuns, ...highwayRamps.map((ramp) => ramp.points)],
       reserved: (point) => !!seaside && seasideStripContains(seaside, point, 1), maxCandidates,
       presentationSupportsHoles: true });
     roadBlockReport = generated.report;
@@ -805,7 +839,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 死胡同回车圈。classifyEndpoints 经 diagnoseNetwork 调用，只读（verify-city-intent
   // 已证诊断前后 plan 深比较一致），不改任何路网/用地字段，计划基线哈希不受影响。
   const plan = { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
-    urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks, seaside, islets: geo.islets, waterEdges: geo.waterEdges,
+    urbanBounds, bridges, boundsRadius, carPaths, junctionRings, highwayRamps, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks, seaside, islets: geo.islets, waterEdges: geo.waterEdges,
     // 修复可能合并掉一个 civic 节点；只在骨架预先声明的锚点集合内重绑，不能选附近支路。
     connections: connectionLog, primaryAnchorNodeId: repairCtx.primaryAnchorNodeId ?? null, junctionReport, solveReport, siteObligations,
     demandCatalogue: repairCtx.demandCatalogue?.map((demand) => ({ ...demand })),

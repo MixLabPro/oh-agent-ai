@@ -23,4 +23,7 @@ assert.equal(JSON.stringify({ host, long }), before, "admission must not modify 
 assert.ok(roadCandidateCrowding([], [
   { a: { x: 0, z: 0 }, b: { x: 160, z: 0 }, arterial: true }, long,
 ]), "a batch cannot introduce mutually crowded arterials either");
+const laterSplitHost = road("long-sloping", [{ x: -10.34, z: 399.83 }, { x: -5.12, z: 471.64 }]);
+assert.ok(roadCandidateCrowding([laterSplitHost], [{ a: { x: 20.69, z: 406.52 }, b: { x: 15.31, z: 458.83 }, arterial: true }]),
+  "a corridor conflict must be refused before a later junction split exposes it");
 console.log("City road admission: shared final predicate, 8/12-wide and bent hosts, both-direction overlap, shared-node and bridge semantics, read-only passed.");

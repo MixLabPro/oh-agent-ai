@@ -288,6 +288,8 @@ export function buildSkeleton(opts: {
   // 批次 5-2：出口接驳弦的净空/可走校验改走连接器共享的 corridor validator（connect.ts），
   // 不再当 69 特例——公式同源（re-stick 净空 5.25 + hypot(88,88)/2 + 1，向上取整 = 69）。
   // 落点以NetworkPatch拓扑细分，继承宿主等级/宽度/结构而不按默认arterial重建。
+  const EXIT_CONE = (60 * Math.PI) / 180; // 出口接驳弦与环线切线的最大夹角
+  const EXIT_STEP = 8;                    // 接驳曲线采样间距（世界单位）
   const chordClearance = reStickClearance(88, 88); // 88 = 高架双车道幅面（clearsHighways 同尺寸）
   for (let r = ringRuns.length - 1; r >= 0; r -= 1) {
     const points = ringRuns[r];
@@ -296,25 +298,73 @@ export function buildSkeleton(opts: {
     while (points.length > 6 && !safe(points[0])) points.shift();
     while (points.length > 6 && !safe(points[points.length - 1])) points.pop();
     if (points.length <= 6) { ringRuns.splice(r, 1); continue; }
+    // 出口接驳弦（闸道）：高架在这里落地并入干道，是「高架 ↔ 普通道路」的过渡段，必须顺着环线走、顺着干道并入。
+    // 曾取「离端点最近的干道点」：弦的方向与环线切线没有任何约束，端点落在出口之前时环线要「走过头再折回」，
+    // 成了一根 150°–180° 的尖刺（基线 11 条高架里 10 条有；开湾后环线断成更多段，更显眼），或一条斜插的长弦。
+    // 现在：① 只接受朝前的出口（弦与环线切线夹角 ≤ EXIT_CONE）；前方没有就把环线末端往回缩一个点再找（最多 8 个）；
+    // ② 弦做成三次曲线——起点切线 = 环线切线，终点切线 = 干道方向（与行进同向），按 EXIT_STEP 采样，
+    // 每段都要过「可走」与「不切近广场」校验，不过则退回直线弦（仍满足朝前）。
     const exits: Vec2[] = [];
-    for (const end of [points[0], points[points.length - 1]]) {
-      const candidates: Array<{ p: Vec2; distance: number }> = [];
-      for (const edge of edges.values()) {
-        if (edge.bridge) continue;
-        const [a, b] = edge.points;
-        const dx = b.x - a.x; const dz = b.z - a.z;
-        const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
-        const p = key({ x: a.x + t * dx, z: a.z + t * dz });
-        if (Math.hypot(p.x - core.x, p.z - core.z) < 110) continue; // 出口不能落在环岛附近：高架贴到市政广场（半径 44 + 避让 ≈ 69）会把广场推离核心点
-        if (!chordClearsDisc(end, p, core, chordClearance)) continue; // 出口接驳弦本身也不得切近广场：端点 ≥110 不够，弦可从核心旁切过（seed 2002199309 实测弦离核心 56.7，把广场推走 72）；69 = re-stick 净空刚过线
-        const distance = Math.hypot(p.x - end.x, p.z - end.z);
-        if (walkableCorridor(geo, end, p)) candidates.push({ p, distance });
+    const exitCurves: Vec2[][] = [[], []];
+    const unit = (v: Vec2): Vec2 => { const l = Math.hypot(v.x, v.z) || 1; return { x: v.x / l, z: v.z / l }; };
+    // 接驳弦/曲线不得压公共用地与地标（与 verify-react-city-geography 同口径：桥面半宽 5.25 + 半径 + 1）：
+    // 曲线比直弦外拱，曾把高架送到港口上（seed 3576928465 间距 29.5）。
+    const sitesClear = (a: Vec2, b: Vec2) => [...publicSites, ...landmarks].every((site) => !site.radius || chordClearsDisc(a, b, site, 5.25 + site.radius + 1));
+    const pickExit = (fromStart: boolean): { p: Vec2; curve: Vec2[] } | null => {
+      for (let trim = 0; trim <= 8 && points.length > 6; trim += 1) {
+        const i = fromStart ? 0 : points.length - 1; const j = fromStart ? 1 : points.length - 2;
+        const end = points[i];
+        const tangent = unit({ x: end.x - points[j].x, z: end.z - points[j].z });
+        const candidates: Array<{ p: Vec2; distance: number; host: Vec2; score: number }> = [];
+        for (const edge of edges.values()) {
+          if (edge.bridge) continue;
+          const [a, b] = edge.points;
+          const dx = b.x - a.x; const dz = b.z - a.z;
+          const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+          const p = key({ x: a.x + t * dx, z: a.z + t * dz });
+          if (Math.hypot(p.x - core.x, p.z - core.z) < 110) continue; // 出口不能落在环岛附近：高架贴到市政广场（半径 44 + 避让 ≈ 69）会把广场推离核心点
+          if (!chordClearsDisc(end, p, core, chordClearance) || !sitesClear(end, p)) continue; // 出口接驳弦本身也不得切近广场：端点 ≥110 不够，弦可从核心旁切过（seed 2002199309 实测弦离核心 56.7，把广场推走 72）；69 = re-stick 净空刚过线
+          const distance = Math.hypot(p.x - end.x, p.z - end.z);
+          // 朝前：弦与环线切线的夹角不超过 EXIT_CONE（距离 < 1 的出口就在端点上，不受限）。
+          const cosine = distance > 1 ? (tangent.x * (p.x - end.x) + tangent.z * (p.z - end.z)) / distance : 1;
+          if (cosine < Math.cos(EXIT_CONE)) continue;
+          // 偏好更直的出口：距离 × (1 + 3·(1 − cos 偏角))；贴着锥边的近出口会让接驳处出现明显折角。
+          if (walkableCorridor(geo, end, p)) candidates.push({ p, distance, host: unit({ x: dx, z: dz }), score: distance * (1 + 3 * (1 - cosine)) });
+        }
+        candidates.sort((a, b) => a.score - b.score);
+        const best = candidates[0];
+        if (best) {
+          // 三次曲线：起点切线 = 环线切线，终点切线 = 干道方向（取与行进同向的一侧）。
+          const chord = { x: best.p.x - end.x, z: best.p.z - end.z };
+          const arrive = best.host.x * chord.x + best.host.z * chord.z >= 0 ? best.host : { x: -best.host.x, z: -best.host.z };
+          const steps = Math.max(3, Math.ceil(best.distance / EXIT_STEP));
+          // 控制柄由长到短依次试：外拱的曲线擦到水边/山坡（采样点不可建）时，换更贴近弦的曲线，最后才退回直线。
+          let curve: Vec2[] = [];
+          if (best.distance > 6) for (const handle of [0.45, 0.3, 0.18]) {
+            const h = best.distance * handle;
+            const c1 = { x: end.x + tangent.x * h, z: end.z + tangent.z * h }, c2 = { x: best.p.x - arrive.x * h, z: best.p.z - arrive.z * h };
+            const samples: Vec2[] = [];
+            for (let k = 1; k < steps; k += 1) {
+              const q = k / steps, o = 1 - q;
+              samples.push(key({ x: o * o * o * end.x + 3 * o * o * q * c1.x + 3 * o * q * q * c2.x + q * q * q * best.p.x, z: o * o * o * end.z + 3 * o * o * q * c1.z + 3 * o * q * q * c2.z + q * q * q * best.p.z }));
+            }
+            const path = [end, ...samples, best.p];
+            if (path.every((q, k) => k === 0 || (chordClearsDisc(path[k - 1], q, core, chordClearance) && sitesClear(path[k - 1], q) && walkableCorridor(geo, path[k - 1], q)))) { curve = samples; break; }
+          }
+          return { p: best.p, curve };
+        }
+        if (fromStart) points.shift(); else points.pop();
       }
-      candidates.sort((a, b) => a.distance - b.distance);
-      if (candidates[0]) exits.push(candidates[0].p);
+      return null;
+    };
+    for (const [slot, fromStart] of ([[0, true], [1, false]] as const)) {
+      const picked = pickExit(fromStart);
+      if (!picked) break;
+      exits.push(picked.p);
+      exitCurves[slot] = fromStart ? [...picked.curve].reverse() : picked.curve;
     }
     if (exits.length !== 2) { ringRuns.splice(r, 1); continue; }
-    ringRuns[r] = [exits[0], ...points, exits[1]].filter((p, i, all) => i === 0 || Math.hypot(p.x - all[i - 1].x, p.z - all[i - 1].z) > 0.01);
+    ringRuns[r] = [exits[0], ...exitCurves[0], ...points, ...exitCurves[1], exits[1]].filter((p, i, all) => i === 0 || Math.hypot(p.x - all[i - 1].x, p.z - all[i - 1].z) > 0.01);
     for (const endpoint of exits) {
       const at = keyOf(endpoint), nodeId = `${at.x}:${at.z}`;
       const hosts = [...edges.values()].filter((edge) => !edge.bridge && edge.from !== nodeId && edge.to !== nodeId

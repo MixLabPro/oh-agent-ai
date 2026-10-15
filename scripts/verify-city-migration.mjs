@@ -15,7 +15,8 @@ function load(file) {
 const { replayStartMs } = load("replayRange.ts");
 const from = new Date(2025, 9, 3).getTime(), to = new Date(2026, 9, 3).getTime();
 const event = new Date(2026, 8, 15, 12).toISOString();
-assert.equal(replayStartMs([{ first_event_at: event }], from, to), new Date(2026, 8, 15).getTime());
+assert.equal(replayStartMs([{ first_event_at: event }], from, to), Date.parse(event));
+assert.equal(replayStartMs([{ first_event_at: new Date(2026, 8, 20).toISOString() }, { first_event_at: event }], from, to), Date.parse(event));
 assert.equal(replayStartMs([], from, to), from);
 assert.equal(replayStartMs([{ first_event_at: "bad" }], from, to), from);
 assert.equal(replayStartMs([{ first_event_at: new Date(from - 86400000).toISOString() }], from, to), from);
@@ -46,7 +47,9 @@ for (let i = 0; i < birdPositions.length; i += 1) for (let j = i + 1; j < birdPo
     birdPositions[i][2] - birdPositions[j][2],
   ));
 }
-assert.ok(nearestBirds > 10, `bird instances must remain visually separated (nearest: ${nearestBirds.toFixed(1)})`);
+const { m, REAL, VISUAL_BOOST } = load("engine/worldScale.ts");
+// Separation is a physical clearance: preserve at least one rendered wingspan after the world-scale migration.
+assert.ok(nearestBirds > m(REAL.bird.wingspan * VISUAL_BOOST.bird), `bird instances must remain visually separated (nearest: ${nearestBirds.toFixed(1)})`);
 const firstFlockY = birdPositions.slice(0, 7).reduce((sum, p) => sum + p[1], 0) / 7;
 const secondFlockY = birdPositions.slice(7).reduce((sum, p) => sum + p[1], 0) / 7;
 assert.ok(Math.abs(secondFlockY - firstFlockY) > 30, "separate flocks occupy distinct altitude bands");

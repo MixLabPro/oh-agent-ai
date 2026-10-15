@@ -33,7 +33,7 @@ import { buildGroundSpill, buildSeaMountains, buildTerrain, buildWater, type Ter
 import { applyFlora, buildTrees, type NatureHost } from "./systems/natureSystem";
 import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type AmbientHost } from "./systems/ambientSystem";
 import { buildRoadSurface, type RoadSurfaceHost } from "./systems/roadSurfaceSystem";
-import { buildInfrastructure, buildCulDeSacBulbs, buildChannelizedJunctions, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
+import { buildInfrastructure, buildCulDeSacBulbs, buildJunctionIslands, buildChannelizedJunctions, buildDistrictExpressways, buildHighwayRamps, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
 import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
@@ -178,8 +178,10 @@ export class CityParts {
       this.buildRoadSurface();
       this.buildInfrastructure();
       this.buildCulDeSacBulbs();
+      buildJunctionIslands(this as unknown as RoadHost);
       this.buildChannelizedJunctions();
       this.buildDistrictExpressways();
+      buildHighwayRamps(this as unknown as RoadHost);
       this.nightLights = this.buildNightLights();
       this.buildPublicSites();
       this.buildMarina();
@@ -714,12 +716,13 @@ export class CityParts {
    *  被初始化为「已完工」（closed 的 builtFraction=1，civic 全 1），回放中若任由
    *  动画循环追赶，整城会先闪满高、再被压回时间轴进度——数据加载不应改变城市
    *  已呈现的样子。 */
-  snapToTargets(): void {
+  snapToTargets(all = false): void {
     this.contextProgress.set(this.contextTarget);
     this.writeContext();
     for (const runtime of this.runtimes) {
-      if (!runtime.settled) continue; // 新楼交给 update 循环长入
+      if (!all && !runtime.settled) continue; // 新楼交给 update 循环长入
       runtime.display = runtime.target;
+      if (all) runtime.settled = true;
       this.applyConstruction(runtime, true);
     }
     for (let index = 0; index < this.civicTarget.length; index += 1) {

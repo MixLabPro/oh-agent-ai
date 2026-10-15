@@ -61,7 +61,7 @@ export function hydratePlanningPlan(snapshot: PlanningPlanSnapshot, input: Plann
     || !plan.derivedFinalization?.ok || !plan.capacity?.satisfied || plan.planningOutcome?.status === "failed"
     || !Array.isArray(plan.roadNodes) || !Array.isArray(plan.roadEdges) || !Array.isArray(plan.blocks)) throw new Error("invalid-planning-snapshot");
   const collections = ["publicSites", "landmarks", "bridges", "parkTrees", "highways", "carPaths", "districtAnchors",
-    "coastRoads", "riverRoadRuns", "coast", "culDeSacEnds", "siteObligations"] as const;
+    "coastRoads", "riverRoadRuns", "coast", "culDeSacEnds", "siteObligations", "junctionRings", "highwayRamps"] as const;
   if (collections.some(key => !Array.isArray(plan[key]))) throw new Error("incomplete-planning-snapshot");
   const point = (value: { x: number; z: number }) => !!value && Number.isFinite(value.x) && Number.isFinite(value.z);
   const nodes = new Map(plan.roadNodes.map(node => [node.id, node]));

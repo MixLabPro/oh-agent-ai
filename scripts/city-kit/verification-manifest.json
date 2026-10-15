@@ -22,6 +22,8 @@
   { "id": "verify-city-road-blocks", "file": "verify-city-road-blocks.mjs", "env": {}, "shared": false },
   { "id": "verify-city-required-placement", "file": "verify-city-required-placement.mjs", "env": {}, "shared": false },
   { "id": "verify-city-road-admission", "file": "verify-city-road-admission.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-junction-rings", "file": "verify-city-junction-rings.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-highway-ramps", "file": "verify-city-highway-ramps.mjs", "env": {}, "shared": false },
   { "id": "verify-city-causeway-primary", "file": "verify-city-causeway-primary.mjs", "env": {}, "shared": false },
   { "id": "verify-city-world", "file": "verify-city-world.mjs", "env": {}, "shared": false },
   { "id": "verify-city-access-capabilities", "file": "verify-city-access-capabilities.mjs", "env": {}, "shared": false },
@@ -260,5 +262,6 @@
   { "id": "verify-plan-bulldozer", "file": "verify-plan-bulldozer.mjs", "env": {}, "shared": false },
   { "id": "verify-plan-remap", "file": "verify-plan-remap.mjs", "env": {}, "shared": false },
   { "id": "verify-plan-repair-copy", "file": "verify-plan-repair-copy.mjs", "env": {}, "shared": false },
-  { "id": "verify-city-import-boundary", "file": "verify-city-import-boundary.mjs", "env": {}, "shared": false }
+  { "id": "verify-city-import-boundary", "file": "verify-city-import-boundary.mjs", "env": {}, "shared": false },
+  { "id": "verify-city-replay-snap", "file": "verify-city-replay-snap.mjs", "env": {}, "shared": false }
 ]

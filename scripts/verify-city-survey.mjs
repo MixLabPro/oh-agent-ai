@@ -43,6 +43,15 @@ const TIER_CEILING = {
   5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 1, bridgeheadContinuity: 1 },
   10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 0, bridgeheadContinuity: 1 },
 };
+// 可按档位/样本集分片并行跑；默认仍执行全部 240 座，不改种子、数量或验收上限。
+let sampleSet = "all", selectedTier = null;
+for (let i = 2; i < process.argv.length; i += 1) {
+  const flag = process.argv[i], value = process.argv[++i];
+  if (flag === "--set" && ["all", "acceptance", "tuning"].includes(value)) sampleSet = value;
+  else if (flag === "--tier" && TIERS.some(({ tier }) => String(tier) === value)) selectedTier = Number(value);
+  else throw new Error("Usage: verify-city-survey.mjs [--set all|acceptance|tuning] [--tier 1|3|5|10]");
+}
+const selectedTiers = TIERS.filter(({ tier }) => selectedTier === null || tier === selectedTier);
 const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/constraints.ts": ["CONSTRAINTS"], "engine/planner/score.ts": ["scorePlan"],
@@ -56,7 +65,7 @@ const ACCEPT_CEILING = { siteWithoutDoorRoad: 1, looseInlandRoadEnds: 16, acuteJ
 const progress = process.env.CITY_VERIFY_PROGRESS === "1";
 // 2026-10-09 独立验收集（3_000_000_000 系）首测基线=实测值（棘轮起点，只降不升）：t1 门路 1（seed 3005341179
 // villa-complex 门链全败）、t1 断头 16、t3 断头 7/锐角 4、扎堆 t1 2/t3 1、桥头 t1 5/t10 3——调参集（2_000_000_000 系）上限不泛化的直接证据；逐项修复后归零回落。
-for (const { tier, seeds } of TIERS) {
+if (sampleSet !== "tuning") for (const { tier, seeds } of selectedTiers) {
   const ceiling = { ...CEILING, ...(TIER_CEILING[tier] ?? {}) };
   const islands = new Map(CONSTRAINTS.map((c) => [c.id, []]));
   for (let i = 0; i < seeds; i += 1) {
@@ -78,8 +87,8 @@ for (const { tier, seeds } of TIERS) {
   acceptance.push(`t${tier}: ${residual || "clean"}`);
   if (progress) console.error(`City acceptance: passed ${acceptance.at(-1)}`);
 }
-console.log(`City acceptance (independent seeds, never used for tuning): ${acceptance.join(" | ")}.`);
-for (const { tier, seeds } of TIERS) {
+if (sampleSet !== "tuning") console.log(`City acceptance (independent seeds, never used for tuning): ${acceptance.join(" | ")}.`);
+if (sampleSet !== "acceptance") for (const { tier, seeds } of selectedTiers) {
   const ceiling = { ...CEILING, ...(TIER_CEILING[tier] ?? {}) };
   const islands = new Map(CONSTRAINTS.map((c) => [c.id, []]));
   let scoreSum = 0;
@@ -102,4 +111,4 @@ for (const { tier, seeds } of TIERS) {
   const residual = [...islands].map(([id, l]) => `${id} ${l.length}`).filter((x) => !x.endsWith(" 0")).join(", ");
   summaries.push(`t${tier}(${seeds}): ${residual || "clean"}; score ${(scoreSum / seeds).toFixed(3)}`);
 }
-console.log(`City survey: 4 tiers — ${summaries.join(" | ")} (all within ceilings).`);
+if (sampleSet !== "acceptance") console.log(`City survey: ${selectedTiers.length} tiers — ${summaries.join(" | ")} (all within ceilings).`);
