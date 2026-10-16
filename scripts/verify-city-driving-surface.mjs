@@ -12,6 +12,7 @@ const m = await loadCity({
   "engine/surface/buildGroundSnapshot.ts": ["buildGroundSurfaceSnapshot"],
   "game/driving/surfaceFootprint.ts": ["footprintSupport", "validateMotion", "DEFAULT_FOOTPRINT_PARAMS", "segmentTouchesConvex"],
   "game/driving/SurfaceDrivingWorld.ts": ["SurfaceDrivingEnvironment", "SurfaceWorldValidator", "polylineProgress"],
+  "game/driving/CollisionIndex.ts": ["buildCollisionIndex", "carBody", "polytopesIntersect", "boxPoly"],
   "game/driving/vehicleFootprint.ts": ["DRIVING_FOOTPRINT"],
   "game/driving/DrivingKernel.ts": ["DrivingKernel"],
   "game/driving/audit/DrivingRouteRunner.ts": ["DrivingRouteRunner"],
@@ -24,7 +25,7 @@ const { grid, patch, regionsOf } = makeFixtures(m);
   const { createRequire } = await import("node:module");
   const { buildSync } = createRequire(new URL("../apps/agent-city/ui/package.json", import.meta.url))("esbuild");
   for (const file of ["engine/surface/surfaceRegions.ts", "engine/surface/compileSurface.ts", "engine/surface/structureCompiler.ts", "engine/surface/citySurfacePort.ts",
-    "engine/surface/terrainClip.ts", "game/driving/surfaceFootprint.ts", "game/driving/SurfaceDrivingWorld.ts"]) {
+    "engine/surface/terrainClip.ts", "game/driving/surfaceFootprint.ts", "game/driving/SurfaceDrivingWorld.ts", "game/driving/CollisionIndex.ts", "game/driving/citySolids.ts"]) {
     const built = buildSync({ entryPoints: [new URL(`../apps/agent-city/ui/src/${file}`, import.meta.url).pathname], bundle: true, write: false, platform: "node", format: "esm", metafile: true });
     for (const input of Object.keys(built.metafile.inputs)) {
       assert.ok(!/node_modules|engine\/systems|engine\/render|host\.ts|cityPlan\.ts|cityLayout\.ts|\/data\/|CityEngine|react/i.test(input), `${file} leaked runtime dependency ${input}`);
@@ -197,7 +198,76 @@ const forward = { forward: true, backward: false, left: false, right: false };
   assert.equal(leakRun.result.cause, "simulation-invalid", "penetrating the curb is a simulation defect, never a pass");
   assert.equal(leakRun.result.verdict, "inconclusive");
 }
-console.log("Driving surface: whole-body coverage (islands/holes between wheels, lateral margin, necks), swept hull for jumps and rotation, alias/step/region seams, slope/twist, layers, kernel+runner integration and leaky-environment detection passed.");
+// ── Cross-layer portal driving + solid collision (CollisionIndex) ──
+{
+  const portal = { id: "portal:ramp:road", fromPatch: "ramp", toPatch: "road", fromBoundary: { loop: 0, firstSegment: 0, segmentCount: 1 }, toBoundary: { loop: 0, firstSegment: 0, segmentCount: 1 },
+    permittedDirection: "both", clearance: 2.2, maxHeightMismatch: 0.1, validated: false };
+  const roadP = patch("road", "carriageway", grid(-10, -4, 40, 4, 25, 4));
+  const rampP = patch("ramp", "ramp", grid(30, -4, 70, 4, 20, 4, (x) => (x - 30) * 0.05), "ramp:0");
+  const snap = { revision: "fixture-rev", geometryVersion: 1, patches: [roadP, rampP], portals: [portal], renderBatches: [], report: { candidateLength: 0, geometricallyEligibleLength: 0, issues: [] } };
+  const regions = m.buildSurfaceRegions(snap, m.buildSurfaceIndex(snap)); assert.equal(regions.status, "ready");
+  const region = regions.regions[0].id;
+  // The ramp slab (0.9 thick under its top face) is itself a solid: harmless to a car on it, a ceiling to one under it.
+  const slope = 0.05; const n = Math.hypot(slope, 1); const normal = { x: -slope / n, y: 1 / n, z: 0 };
+  const slab = { id: "slab", role: "expressway-deck", kind: "box", center: { x: 50 - normal.x * 0.45, y: 1 - normal.y * 0.45, z: 0 },
+    halfAxes: [{ x: 20, y: 1, z: 0 }, { x: normal.x * 0.45, y: normal.y * 0.45, z: 0 }, { x: 0, y: 0, z: 4 }] };
+  const collision = m.buildCollisionIndex([slab]);
+  const climb = (solids) => {
+    const env = new m.SurfaceDrivingEnvironment(regions, F, FP, solids); const kernel = new m.DrivingKernel(env, key);
+    const validator = new m.SurfaceWorldValidator(regions, m.polylineProgress([{ x: 0, z: 0 }, { x: 66, z: 0 }]), F, FP, solids);
+    let s = { ...m.initialDrivingState(0, 0, 0, region), ...env.place(0, 0, 0, region, 0) }; assert.equal(validator.validateStart(s), "valid");
+    const layers = new Set();
+    for (let tick = 0; tick < 3000 && s.x < 66; tick++) {
+      const step = kernel.step(s, { forward: true, backward: false, left: s.heading > 0.01, right: s.heading < -0.01 });
+      assert.equal(validator.validate(s, step), "valid", `tick ${tick}`);
+      assert.ok(!step.motion.blocked, `climb blocked at x ${s.x.toFixed(2)}: ${step.motion.reason}`);
+      s = step.state; layers.add(m.footprintSupport(regions, s, region).layerId);
+    }
+    return { s, layers };
+  };
+  for (const solids of [undefined, collision]) {
+    const { s, layers } = climb(solids);
+    assert.ok(s.x >= 66 && s.y > 1.7, "the kernel drives from the road over the portal up the ramp");
+    assert.deepEqual([...layers].sort(), ["ground", "ramp:0"]); assert.equal(s.surfaceId, region, "a portal keeps the surface id");
+  }
+  const groundUnder = m.footprintSupport(regions, { x: 37, z: 0, heading: 0, y: 0 }, region);
+  assert.ok(groundUnder.ok && Math.abs(groundUnder.y) < 1e-6, "the road continues under the ramp's low end");
+  assert.equal(m.footprintSupport(regions, { x: 37, z: 0, heading: 0, y: 0 }, region, F, FP, collision).reason, "collision", "0.35 under the slab is no clearance");
+  assert.ok(m.footprintSupport(regions, { x: 37, z: 0, heading: 0, y: 0.35 }, region, F, FP, collision).ok, "on the ramp at the same XZ is fine");
+
+  // Solids on a straight road: a parked box blocks the kernel; an environment that ignores it is caught.
+  const box = (id, x0, x1, y0, y1, z0 = -3, z1 = 3) => ({ id, role: "building", kind: "box", center: { x: (x0 + x1) / 2, y: (y0 + y1) / 2, z: (z0 + z1) / 2 },
+    halfAxes: [{ x: (x1 - x0) / 2, y: 0, z: 0 }, { x: 0, y: (y1 - y0) / 2, z: 0 }, { x: 0, y: 0, z: (z1 - z0) / 2 }] });
+  const parked = m.buildCollisionIndex([box("parked", 0, 2, 0, 3, -1, 1)]);
+  const env = new m.SurfaceDrivingEnvironment(straight, F, FP, parked); const kernel = new m.DrivingKernel(env, key);
+  const validator = new m.SurfaceWorldValidator(straight, m.polylineProgress([{ x: -40, z: 0 }, { x: 40, z: 0 }]), F, FP, parked);
+  let s = { ...m.initialDrivingState(-40, 0, 0, road), ...env.place(-40, 0, 0, road) }; let blocked = false;
+  for (let tick = 0; tick < 2000 && !blocked; tick++) {
+    const step = kernel.step(s, forward); assert.equal(validator.validate(s, step), "valid");
+    blocked = step.motion.blocked; if (blocked) assert.match(step.motion.reason, /^collision:building:parked/); s = step.state;
+  }
+  assert.ok(blocked && s.x < 0 - F.halfLength && s.x > -6, `stopped in front of the box (x ${s.x.toFixed(2)})`);
+  const leaky = new m.DrivingKernel(new m.SurfaceDrivingEnvironment(straight), key);
+  let t = { ...s }; let caught = false;
+  for (let tick = 0; tick < 200 && !caught; tick++) { const step = leaky.step(t, forward); caught = validator.validate(t, step) === "simulation-invalid"; t = step.state; }
+  assert.ok(caught, "driving through a solid is a simulation defect for the independent validator");
+  // A 0.05-thin wall cannot be tunnelled by one long step; an overhead slab blocks only below 1.25.
+  const wall = m.buildCollisionIndex([box("wall", 10, 10.05, 0, 3)]);
+  assert.equal(m.validateMotion(straight, { x: 5, z: 0, heading: 0 }, { x: 15, z: 0, heading: 0 }, road, F, FP, wall).reason, "collision");
+  assert.ok(m.validateMotion(straight, { x: 5, z: 0, heading: 0 }, { x: 15, z: 0, heading: 0 }, road, F, FP).ok);
+  assert.equal(m.validateMotion(straight, { x: 15, z: 0, heading: 0 }, { x: 25, z: 0, heading: 0 }, road, F, FP, m.buildCollisionIndex([box("low", 20, 30, 1.0, 1.4)])).reason, "collision");
+  assert.ok(m.validateMotion(straight, { x: 15, z: 0, heading: 0 }, { x: 25, z: 0, heading: 0 }, road, F, FP, m.buildCollisionIndex([box("high", 20, 30, 2.0, 2.4)])).ok);
+  // Rotating in place sweeps the corners: a post just outside the static body but inside the swept arc.
+  const reachBody = Math.hypot(F.halfLength + FP.longitudinalMargin, F.halfWidth + FP.lateralMargin);
+  const post = m.buildCollisionIndex([box("post", -0.05, 0.05, 0, 2, reachBody - 0.15, reachBody - 0.05)]);
+  assert.ok(m.footprintSupport(straight, { x: 0, z: 0, heading: 0 }, road, F, FP, post).ok, "the post is clear of the static body");
+  assert.equal(m.validateMotion(straight, { x: 0, z: 0, heading: 0 }, { x: 0, z: 0, heading: Math.PI / 2 }, road, F, FP, post).reason, "collision");
+  // SAT is exact for rotated boxes: corner-to-corner near miss vs touch.
+  const unit = (cx, rot) => m.boxPoly({ x: cx, y: 0, z: 0 }, [{ x: Math.cos(rot), y: 0, z: Math.sin(rot) }, { x: 0, y: 1, z: 0 }, { x: -Math.sin(rot), y: 0, z: Math.cos(rot) }]);
+  assert.equal(m.polytopesIntersect(unit(0, 0), unit(1 + Math.SQRT2 + 1e-6, Math.PI / 4)), false);
+  assert.equal(m.polytopesIntersect(unit(0, 0), unit(1 + Math.SQRT2 - 1e-6, Math.PI / 4)), true);
+}
+console.log("Driving surface: whole-body coverage (islands/holes between wheels, lateral margin, necks), swept hull for jumps and rotation, alias/step/region seams, slope/twist, layers, kernel+runner integration and leaky-environment detection, cross-layer portal climb, solid collision (blocking, leaky detection, thin wall, ceiling, swept rotation, exact SAT) passed.");
 
 if (process.argv.includes("--cities")) {
   const { cachedPlan } = await import("./city-kit/index.mjs");

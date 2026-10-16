@@ -10,7 +10,8 @@ import { pavementIndex, renderRoadEdges } from "../cityRoadJunctions";
 import { createRenderCanvas } from "../renderCanvas";
 import type { CityLayout } from "../cityLayout";
 import { culDeSacBulbRadius } from "../systems/roadSystem";
-import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "./shared";
+import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH } from "./shared";
+import { expresswayRun } from "../surface/structureCompiler";
 import type { NightLights } from "./types";
 
 /** 立面 uniforms 里夜景用到的那几项（完整 FacadeUniforms 仍在 cityParts.ts，另一路搬迁中，这里只取结构子集）。 */
@@ -167,8 +168,8 @@ export function buildNightLights(host: NightHost): NightLights {
   }
   // 高架：桥面两侧交错路灯，灯头朝路中心。立在行车面（板顶）上；光斑圆心落到桥面中线、
   // 半径不超过半幅桥宽——地面路灯的 9.5 光斑在 10.5 宽桥面上大半悬空，看起来是灯光穿透到桥下。
-  for (const run of host.layout.highways ?? []) {
-    const heights = expresswayDeckHeights(run, (x, z) => host.layout.terrain.height(x, z));
+  for (const highway of host.layout.highways ?? []) {
+    const { points: run, heights } = expresswayRun(host.layout, highway);
     let carry = 0;
     for (let i = 1; i < run.length; i += 1) {
       const a = run[i - 1]; const b = run[i];
@@ -189,8 +190,8 @@ export function buildNightLights(host: NightHost): NightLights {
   for (const mesh of [headMesh, poolMesh]) if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   // 高架灯带：沿环线两侧护栏上沿的发光细条（桥面高 8.2，护栏在 ±5.1）。
   let strip = 0;
-  for (const run of host.layout.highways ?? []) {
-    const heights = expresswayDeckHeights(run, (x, z) => host.layout.terrain.height(x, z));
+  for (const highway of host.layout.highways ?? []) {
+    const { points: run, heights } = expresswayRun(host.layout, highway);
     for (let i = 1; i < run.length && strip < 2190; i += 1) {
       const a = run[i - 1]; const b = run[i];
       const length = Math.hypot(b.x - a.x, b.z - a.z);

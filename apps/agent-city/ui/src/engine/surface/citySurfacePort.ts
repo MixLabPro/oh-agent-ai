@@ -11,10 +11,15 @@ import { compileCitySurface, type CitySurfaceCompilation } from "./compileSurfac
 import type { CompiledGroundRoadSurface } from "./groundRoadCompiler";
 import { SurfaceStore, type SurfaceHasher } from "./SurfaceStore";
 import type { CompiledCitySurface } from "./types";
+import type { CollisionIndex, SolidInput } from "../../game/driving/CollisionIndex";
+import { cityCollisionIndex } from "../../game/driving/citySolids";
 
-export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface }>;
+/** `solids`: the scene's rendered solid obstacles, read once per capture (display state at that moment). */
+export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface; solids?: () => readonly SolidInput[] }>;
 export type CitySurfaceCapture =
   | Readonly<{ status: "ready"; revision: string; compilation: CitySurfaceCompilation;
+      /** Structure obstacles + deck slabs + scene solids, frozen with this capture. */
+      collision: CollisionIndex;
       /** Defensive copy, or null once the city changed since this capture. */
       read: () => CompiledCitySurface | null }>
   | Readonly<{ status: "stale" | "cancelled" | "unavailable" }>;
@@ -38,7 +43,8 @@ export class CitySurfacePort {
     if (signal?.aborted) return Object.freeze({ status: "cancelled" });
     if (generation !== this.generation || publication.status !== "published") return Object.freeze({ status: "stale" });
     const revision = publication.revision;
-    const capture = Object.freeze({ status: "ready" as const, revision, compilation, read: () => (generation === this.generation ? this.store.read(revision) : null) });
+    const collision = cityCollisionIndex(compilation.obstacles, source.solids?.() ?? []);
+    const capture = Object.freeze({ status: "ready" as const, revision, compilation, collision, read: () => (generation === this.generation ? this.store.read(revision) : null) });
     this.cached = { source, capture };
     return capture;
   }

@@ -9,7 +9,7 @@
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { renderRoadEdges } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
-import { EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "./structureProfiles";
+import { EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, expresswayDeckHeights } from "./structureProfiles";
 import { terrainSurfaceHeight } from "./terrainSampling";
 
 /** Road surface lift (same constant as groundRoadCompiler.ROAD_SURFACE_LIFT; kept here to avoid a cycle). */
@@ -132,14 +132,55 @@ export function bridgeDeckParts(edge: RoadEdge, layout: BridgeLayoutInput): BoxP
 /** Railing inner face, measured from the deck centreline (railings are 0.3 wide at width/2 − 0.15). */
 export const bridgeDrivableHalf = (edge: RoadEdge) => edge.width / 2 - 0.3;
 
+/** Rendered road-surface top at a point that lies on an ordinary ground road (within half its
+ * width of a non-bridge render edge), else null. Expressway ramp ends land on it. */
+export function groundRoadTopAt(layout: BridgeLayoutInput, x: number, z: number): number | null {
+  if (!Array.isArray(layout.roadEdges) || !Number.isFinite(layout.extent)) return null;
+  for (const edge of renderRoadEdges(layout.roadEdges)) {
+    if (edge.bridge || edge.structure === "deck") continue;
+    for (let i = 1; i < edge.points.length; i += 1) {
+      const a = edge.points[i - 1]; const b = edge.points[i];
+      const dx = b.x - a.x; const dz = b.z - a.z; const ll = dx * dx + dz * dz;
+      const t = ll === 0 ? 0 : Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / ll));
+      if (Math.hypot(x - a.x - dx * t, z - a.z - dz * t) <= edge.width / 2) return terrainSurfaceHeight(layout, x, z) + ROAD_LIFT;
+    }
+  }
+  return null;
+}
+/** Longest deck piece inside a ramp zone: the eased ramp profile is sampled at least this densely. */
+export const EXPRESSWAY_RAMP_PIECE = 10;
+type ExpresswayLayout = Pick<CityLayout, "terrain"> & Partial<Pick<CityLayout, "extent" | "roadEdges">>;
+/** The drawn expressway run: polyline segments that reach into a ramp zone are split into ≤ RAMP_PIECE
+ * collinear pieces, and each point gets its deck-bottom height (ends landed on the rendered road).
+ * Renderer, night lamps and the driving surface all read this one run.
+ * 规划给的高架在两端各有一条 137–280 长的单段支线，与环线成 ~30° 锐角汇入。只按折线点取高时 ease
+ * 剖面一次也没被采样：支线是一整块直坡板，汇入处比环线桥面低 0.6–1.1、从侧面插进环线板里，
+ * 驾驶面因此在汇入楔形区高差冲突，上了匝道也到不了桥面。 */
+export function expresswayRun(layout: ExpresswayLayout, run: ReadonlyArray<{ x: number; z: number }>): { points: Vec2[]; heights: number[] } {
+  const closed = run.length > 1 && Math.hypot(run[0].x - run[run.length - 1].x, run[0].z - run[run.length - 1].z) < 0.01;
+  let total = 0; for (let i = 1; i < run.length; i += 1) total += Math.hypot(run[i].x - run[i - 1].x, run[i].z - run[i - 1].z);
+  const points: Vec2[] = run.length ? [{ x: run[0].x, z: run[0].z }] : [];
+  let along = 0;
+  for (let i = 1; i < run.length; i += 1) {
+    const a = run[i - 1]; const b = run[i]; const length = Math.hypot(b.x - a.x, b.z - a.z);
+    const inRamp = !closed && (along < EXPRESSWAY_RAMP || along + length > total - EXPRESSWAY_RAMP);
+    const pieces = inRamp ? Math.max(1, Math.ceil(length / EXPRESSWAY_RAMP_PIECE)) : 1;
+    for (let k = 1; k < pieces; k += 1) points.push({ x: a.x + (b.x - a.x) * (k / pieces), z: a.z + (b.z - a.z) * (k / pieces) });
+    points.push({ x: b.x, z: b.z });
+    along += length;
+  }
+  const heights = points.length ? expresswayDeckHeights(points, (x, z) => layout.terrain.height(x, z), (x, z) => groundRoadTopAt(layout as BridgeLayoutInput, x, z)) : [];
+  return { points, heights };
+}
+
 export type ExpresswayPiece = BoxPart & Readonly<{ highway: number; segment: number }>;
 /** District expressways: piers, then per segment deck + lane lines + rails (buildDistrictExpressways order).
  * Segments shorter than 6 are not drawn — and therefore not driveable. */
-export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain">): ExpresswayPiece[] {
+export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"> & Partial<Pick<CityLayout, "extent" | "roadEdges">>): ExpresswayPiece[] {
   const pieces: ExpresswayPiece[] = [];
-  (layout.highways ?? []).forEach((points, highway) => {
+  (layout.highways ?? []).forEach((run, highway) => {
     const push = (p: BoxPart, segment: number) => pieces.push(Object.freeze({ ...p, highway, segment }));
-    const heights = expresswayDeckHeights(points, (x, z) => layout.terrain.height(x, z));
+    const { points, heights } = expresswayRun(layout, run);
     // Piers every ~34 units by mileage, anchored into the terrain or riverbed
     // (over water the pier reaches below the surface — a real bridge span).
     let accumulated = 0;

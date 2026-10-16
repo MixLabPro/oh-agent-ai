@@ -6,8 +6,9 @@
  * 桥面若除两端落地区外不压任何地面车行面（跨河），就放进 "ground"——两端与路面的叠置由
  * surfaceRegions 的 alias 规则判：高差 ≤ aliasTolerance 即接通，否则是 conflict/step，关闭；
  * 这就是同层落地的「portal」，不另造连接。压着地面路（立交）的桥面与全部高架各自成层，
- * 跨层 portal 尚未实现，所以它们的入口一律关闭——当前十五城里这些入口在渲染上本来就有
- * ≥ 0.26 的台阶（高架匝道止于地面 + 0.3），见 landings 报告。 */
+ * 入口处输出跨层 portal **候选**（结构端片段 ↔ 端头下方的地面车行片段，立交只取两端落地节点
+ * 的片段）；是否接通由 surfaceRegions 用精确叠置点复核（validated 恒为 false，编译器不自证）。
+ * 高架匝道端原来止于 terrain.height + 0.3，比路面高 0.24–0.26；现在端面落到渲染路面上。 */
 import type { CityLayout, Vec2 } from "../cityLayout";
 import { renderRoadEdges } from "../cityRoadJunctions";
 import { buildGroundSurfaceSnapshot } from "./buildGroundSnapshot";
@@ -20,10 +21,12 @@ import {
 } from "./structureCompiler";
 import { conformMesh, terrainFit } from "./terrainClip";
 import type { SurfaceRegionsBuild } from "./surfaceRegions";
-import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch } from "./types";
+import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch, SurfacePortal } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 2;
+export const CITY_SURFACE_GEOMETRY_VERSION = 3;
+/** Vertical clearance a portal promises nothing about beyond its seam (solids are the collision layer's). */
+const PORTAL_CLEARANCE = 2.2;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
 const LANDING_ZONE = 3;
 
@@ -37,7 +40,7 @@ export type StructureLanding = Readonly<{
   outX: number; outZ: number;
   deckY: number; groundY: number | null; step: number | null;
   /** aligned: same layer and |step| within tolerance; step: too high/low; no-ground: nothing to land on;
-   *  layered: deck is on its own layer — no cross-layer portal exists yet. */
+   *  layered: deck is on its own layer — it connects only through a portal the regions validate. */
   status: "aligned" | "step" | "no-ground" | "layered";
 }>;
 export type CitySurfaceCompilation = Readonly<{
@@ -75,6 +78,21 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
   const patches: SurfacePatch[] = [...groundSnapshot.patches];
   const obstacles: StructureObstacle[] = [];
   const landings: StructureLanding[] = [];
+  const portals: SurfacePortal[] = [];
+  /** Portal candidate: `upper`'s loop segment nearest the seam point ↔ `lower`'s outer loop. */
+  const portal = (upper: SurfacePatch, lowerId: string, seam: Vec2) => {
+    const lower = patches.find((p) => p.id === lowerId);
+    const upperLoop = upper.boundaryLoops.findIndex((l) => !l.hole); const lowerLoop = lower ? lower.boundaryLoops.findIndex((l) => !l.hole) : -1;
+    if (!lower || upperLoop < 0 || lowerLoop < 0 || (lower.kind !== "carriageway" && lower.kind !== "junction")) return;
+    const loop = upper.boundaryLoops[upperLoop].vertices; let best = 0; let bestD = Infinity;
+    loop.forEach((p, i) => { const q = loop[(i + 1) % loop.length]; const d = Math.hypot((p.x + q.x) / 2 - seam.x, (p.z + q.z) / 2 - seam.z); if (d < bestD) { bestD = d; best = i; } });
+    const id = `portal:${upper.id}:${lowerId}`;
+    if (portals.some((x) => x.id === id)) return;
+    portals.push(Object.freeze({ id, fromPatch: upper.id, toPatch: lowerId,
+      fromBoundary: Object.freeze({ loop: upperLoop, firstSegment: best, segmentCount: 1 }),
+      toBoundary: Object.freeze({ loop: lowerLoop, firstSegment: 0, segmentCount: lower.boundaryLoops[lowerLoop].vertices.length }),
+      permittedDirection: "both", clearance: PORTAL_CLEARANCE, maxHeightMismatch: tolerance, validated: false }));
+  };
   const add = (id: string, kind: SurfaceKind, layerId: string, source: SurfacePatch["source"], triangles: readonly (readonly [P3, P3, P3])[]) => {
     const { vertices, indices } = meshOf(triangles);
     if (!indices.length) { issues.push({ source, reason: "degenerate", detail: "empty" }); return null; }
@@ -145,8 +163,17 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       overpass = groundPatchesAt(a.x + ux * s - uz * w, a.z + uz * s + ux * w).some((id) => !landingPatch(id) && s > LANDING_ZONE && s < len - LANDING_ZONE);
     }
     const layerId = overpass ? `bridge:${edge.id}` : "ground";
-    add(`bridge:${edge.id}`, "bridge-deck", layerId, source, quad(top));
-    for (const p of parts) if (p.role === "bridge-railing" || p.role === "bridge-pier") obstacles.push(Object.freeze({ id: `${source.id}:${p.role}:${obstacles.length}`, role: p.role, shape: "box", corners: Object.freeze(boxCorners(p)) }));
+    const deckPatch = add(`bridge:${edge.id}`, "bridge-deck", layerId, source, quad(top));
+    // Overpass: portal candidates to the landing nodes' ground pieces under each end zone.
+    if (overpass && deckPatch) for (const [s0, s1, seam] of [[-0.5, LANDING_ZONE, a], [len - LANDING_ZONE, len + 0.5, b]] as const) {
+      const ids = new Set<string>();
+      for (let s = s0; s <= s1 + 1e-9; s += 0.5) for (let w = -half; w <= half + 1e-9; w += Math.max(0.5, half / 4)) {
+        for (const id of groundPatchesAt(a.x + ux * s - uz * w, a.z + uz * s + ux * w)) if (landingPatch(id)) ids.add(id);
+      }
+      for (const id of [...ids].sort()) portal(deckPatch, id, seam);
+    }
+    // The slab itself is a solid too: it is what a car under a low deck end would hit (clearance).
+    for (const p of parts) if (p.role === "bridge-railing" || p.role === "bridge-pier" || p.role === "bridge-deck") obstacles.push(Object.freeze({ id: `${source.id}:${p.role}:${obstacles.length}`, role: p.role, shape: "box", corners: Object.freeze(boxCorners(p)) }));
     for (const [end, p, out] of [["from", a, -1], ["to", b, 1]] as const) {
       // The seam is the deck's end edge, 0.25 past the node: compare the ground just outside it with
       // the deck top extrapolated along its pitch to the same point.
@@ -168,15 +195,16 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
   let expresswaySegments = 0;
   const pieces = expresswayPieces(layout);
   for (const piece of pieces) {
-    if (piece.role === "expressway-rail" || piece.role === "expressway-pier") {
+    if (piece.role === "expressway-rail" || piece.role === "expressway-pier" || piece.role === "expressway-deck") {
       obstacles.push(Object.freeze({ id: `expressway:${piece.highway}:${piece.role}:${obstacles.length}`, role: piece.role, shape: "box", corners: Object.freeze(boxCorners(piece)) }));
-      continue;
+      if (piece.role !== "expressway-deck") continue;
     }
     if (piece.role !== "expressway-deck") continue;
     expresswaySegments++;
     add(`expressway:${piece.highway}:${String(piece.segment).padStart(4, "0")}`, Math.abs(piece.rz) > 1e-4 ? "ramp" : "expressway-deck",
       `expressway:${piece.highway}`, { kind: "structure", id: `expressway:${piece.highway}` }, quad(boxTopFace(piece, EXPRESSWAY_DRIVABLE_HALF)));
   }
+  const patchById = new Map(patches.map((p) => [p.id, p]));
   (layout.highways ?? []).forEach((points, highway) => {
     const closed = Math.hypot(points[0].x - points[points.length - 1].x, points[0].z - points[points.length - 1].z) < 0.01;
     if (closed) return;
@@ -188,16 +216,23 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       const y = end === "from" ? (top[0].y + top[3].y) / 2 : (top[1].y + top[2].y) / 2;
       const g = groundY(p.x, p.z);
       const q = points[end === "from" ? 1 : points.length - 2]; const l = Math.hypot(p.x - q.x, p.z - q.z) || 1;
-      landings.push(Object.freeze({ structureId: `expressway:${highway}`, end, layerId: `expressway:${highway}`, x: p.x, z: p.z, outX: (p.x - q.x) / l, outZ: (p.z - q.z) / l, deckY: y, groundY: g, step: g === null ? null : y - g, status: "layered" }));
+      const outX = (p.x - q.x) / l; const outZ = (p.z - q.z) / l;
+      landings.push(Object.freeze({ structureId: `expressway:${highway}`, end, layerId: `expressway:${highway}`, x: p.x, z: p.z, outX, outZ, deckY: y, groundY: g, step: g === null ? null : y - g, status: "layered" }));
+      // Ramp end: portal candidates to every ground carriageway under the end zone of the deck.
+      const deckPatch = patchById.get(`expressway:${highway}:${String(piece.segment).padStart(4, "0")}`);
+      if (!deckPatch) continue;
+      const ids = new Set<string>();
+      for (let s = -0.25; s <= 3 + 1e-9; s += 0.5) for (let w = -EXPRESSWAY_DRIVABLE_HALF; w <= EXPRESSWAY_DRIVABLE_HALF + 1e-9; w += EXPRESSWAY_DRIVABLE_HALF / 4) {
+        for (const id of groundPatchesAt(p.x - outX * s - outZ * w, p.z - outZ * s + outX * w)) ids.add(id);
+      }
+      for (const id of [...ids].sort()) portal(deckPatch, id, p);
     }
   });
 
   const surface: CompiledCitySurface = Object.freeze({
     revision: "unpublished", geometryVersion: CITY_SURFACE_GEOMETRY_VERSION,
-    patches: Object.freeze(patches), portals: Object.freeze([]), renderBatches: groundSnapshot.renderBatches,
-    report: Object.freeze({ candidateLength: groundSnapshot.report.candidateLength, geometricallyEligibleLength: 0,
-      // Remaining structural gap: decks on their own layer have no cross-layer portal.
-      issues: Object.freeze([...issues, { source: { kind: "structure", id: "cross-layer-portals" }, reason: "unsupported" } as SurfaceCompileIssue]) }),
+    patches: Object.freeze(patches), portals: Object.freeze(portals), renderBatches: groundSnapshot.renderBatches,
+    report: Object.freeze({ candidateLength: groundSnapshot.report.candidateLength, geometricallyEligibleLength: 0, issues: Object.freeze(issues) }),
   });
   return Object.freeze({ surface, ground, obstacles: Object.freeze(obstacles), landings: Object.freeze(landings),
     counts: Object.freeze({ bridges, expresswaySegments, flares: channel.flares.length, islands: channel.islands.length, culDeSacs: discs.length }) });

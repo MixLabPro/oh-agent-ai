@@ -72,8 +72,8 @@ A6 的发现：原来的桥面是一块平板，顶面取两岸**原始**地形�
 
 ## 未完成（移交）
 
-- 跨层portal（立交桥、高架匝道；高架匝道末端在渲染上本来就有约0.26的台阶）。
-- CollisionIndex 接入 `obstacles`；SafeRecovery；正式开放图与审计（B/C/D）。
+- ~~跨层portal~~、~~CollisionIndex~~：B2 已完成（匝道端落到路面、匝道区加密采样、portal v4、固体碰撞），见 [B2记录](CITY_PORTALS_AND_COLLISION_NOTES.md)。
+- SafeRecovery；正式开放图与审计（B/C/D）。
 - 宿主端口已接CityEngine，但尚无运行时消费方（GameRuntime/CarAdapter属E）；编译在主线程同步执行，Worker是后续项。
 - 含修复补丁（planPatch）的显示布局未纳入会话矩阵；原生bundle性能与内存未测。
 - 已存在的守卫失败（与本轮无关，在744f926上就失败）：`verify-city-culdesac-bulbs`（380会话布局 `culDeSacEnds` 为空）、`verify-city-scene-baseline`（场景图摘要不一致）。
