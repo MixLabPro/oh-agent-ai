@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {loadCity} from "./city-kit/index.mjs";
 const k=await loadCity({
-  "game/driving/CollisionIndex.ts":["buildCollisionIndex"],
+  "game/driving/CollisionIndex.ts":["buildCollisionIndex","boxPoly"],
   "game/driving/DrivingCollision.ts":["sweepBody"],
   "game/driving/DrivingCollisionSolver.ts":["resolveDrivingCollision"],
   "game/driving/ContinuousDrivingEnvironment.ts":["ContinuousDrivingEnvironment"],
@@ -41,6 +41,18 @@ const world={isCurrent:()=>true,constrain:(from,to)=>({ok:true,pose:to}),body:p=
 const slide=k.resolveDrivingCollision(wall,world,pose(),pose(10,8),dims);
 assert.equal(slide.status,"moved",JSON.stringify(slide));assert.ok(slide.pose.x<4.499);close(slide.pose.z,8,1e-4);assert.ok(slide.contacts.length>0);
 assert.ok(slide.distance<=Math.hypot(10,8)+1e-6,"projection cannot add energy/path length");
+// Starting just inside the contact skin must permit a sustained tangent slide.
+const resting=pose(4.49895,0),tangent=k.resolveDrivingCollision(wall,world,resting,pose(4.49895,1),dims);
+assert.equal(tangent.status,"moved",JSON.stringify(tangent));close(tangent.pose.z,1,1e-8);
+assert.equal(k.sweepBody(wall,resting,pose(4.49895,1),dims).status,"clear");
+// Large immutable worlds use a cached broadphase tree; distant solids do not
+// consume a full linear-scan budget on every tick alongside the same wall.
+const distant=Array.from({length:12000},(_,i)=>{const x=1000+i*2,y=1,z=0,poly=k.boxPoly({x,y,z},[{x:0.1,y:0,z:0},{x:0,y:0.1,z:0},{x:0,y:0,z:0.1}]);
+  return {id:`far-${String(i).padStart(5,"0")}`,role:"test",minX:x-0.1,maxX:x+0.1,minY:y-0.1,maxY:y+0.1,minZ:z-0.1,maxZ:z+0.1,poly};});
+const indexedWorld=Object.freeze([...wall,...distant]);let sustained=resting,maxSustainedTests=0;
+for(let tick=0;tick<300;tick++){const next={...sustained,z:sustained.z+0.03};const moved=k.resolveDrivingCollision(indexedWorld,world,sustained,next,dims);
+  assert.equal(moved.status,"moved",`sustained slide tick ${tick}: ${moved.reason}`);if(tick>0)maxSustainedTests=Math.max(maxSustainedTests,moved.tests);sustained=moved.pose;}
+assert.ok(sustained.z>8.9);assert.ok(maxSustainedTests<2000,`broadphase query still scans too much: ${maxSustainedTests}`);
 const corner=k.resolveDrivingCollision(solids(box("x",5,1,0,0.001,3,100),box("z",0,1,5,20,3,0.001)),world,pose(),pose(10,10),dims);
 assert.ok(corner.pose.x<4.499&&corner.pose.z<4.699);assert.ok(corner.contacts.length<=5);
 const headon=k.resolveDrivingCollision(wall,world,pose(),pose(10),dims);

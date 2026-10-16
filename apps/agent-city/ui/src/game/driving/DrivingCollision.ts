@@ -24,6 +24,25 @@ function poly(p:BodyPose,d:CollisionDimensions) {
     scale({x:c*sp*sr+s*cr,y:-cp*sr,z:s*sp*sr-c*cr},d.halfWidth)]);
 }
 class Budget extends Error{}
+type SolidBounds=Readonly<{minX:number;minY:number;minZ:number;maxX:number;maxY:number;maxZ:number}>;
+type SolidTree=SolidBounds & Readonly<{left?:SolidTree;right?:SolidTree;solids?:readonly Solid[]}>;
+const solidTrees=new WeakMap<readonly Solid[],SolidTree|null>();
+function unionBounds(a:SolidBounds,b:SolidBounds):SolidBounds{return {minX:Math.min(a.minX,b.minX),minY:Math.min(a.minY,b.minY),minZ:Math.min(a.minZ,b.minZ),maxX:Math.max(a.maxX,b.maxX),maxY:Math.max(a.maxY,b.maxY),maxZ:Math.max(a.maxZ,b.maxZ)};}
+function solidTree(solids:readonly Solid[],spend:()=>void):SolidTree|null {
+  if(solidTrees.has(solids))return solidTrees.get(solids)!;
+  for(const s of solids){spend();if(![s.minX,s.minY,s.minZ,s.maxX,s.maxY,s.maxZ].every(Number.isFinite)||s.minX>s.maxX||s.minY>s.maxY||s.minZ>s.maxZ)throw new TypeError("invalid-solid-bounds");}
+  const build=(items:Solid[]):SolidTree|null=>{
+    if(!items.length)return null;
+    let bounds:SolidBounds=items[0];for(let i=1;i<items.length;i++)bounds=unionBounds(bounds,items[i]);
+    if(items.length<=8)return {...bounds,solids:Object.freeze(items.slice().sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0))};
+    const spans=[bounds.maxX-bounds.minX,bounds.maxY-bounds.minY,bounds.maxZ-bounds.minZ],axis=spans[0]>=spans[1]&&spans[0]>=spans[2]?"x":spans[1]>=spans[2]?"y":"z";
+    const lo=axis==="x"?"minX":axis==="y"?"minY":"minZ",hi=axis==="x"?"maxX":axis==="y"?"maxY":"maxZ";
+    items.sort((a,b)=>((a[lo]+a[hi])-(b[lo]+b[hi]))||(a.id<b.id?-1:a.id>b.id?1:0));
+    const mid=items.length>>>1;return {...bounds,left:build(items.slice(0,mid))!,right:build(items.slice(mid))!};
+  };
+  const tree=build(solids.slice());solidTrees.set(solids,tree);return tree;
+}
+function overlapsBounds(a:SolidBounds,b:SolidBounds):boolean{return a.minX<=b.maxX&&a.maxX>=b.minX&&a.minY<=b.maxY&&a.maxY>=b.minY&&a.minZ<=b.maxZ&&a.maxZ>=b.minZ;}
 /** source must be an immutable snapshot, owned by the caller's versioned world. */
 export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dimensions:CollisionDimensions,options:Partial<SweepLimits>={}):BodySweep {
   const p={...DEFAULT_SWEEP_LIMITS,...options};let tests=0;
@@ -43,10 +62,13 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
   const shape=poly(from,dimensions);
   const candidates:Solid[]=[];
   try {
-    for(const solid of solids){spend();if(solid.maxX<Math.min(from.x,to.x)-radius-p.skin||solid.minX>Math.max(from.x,to.x)+radius+p.skin||
-      solid.maxY<Math.min(from.y,to.y)-radius-p.skin||solid.minY>Math.max(from.y,to.y)+radius+p.skin||solid.maxZ<Math.min(from.z,to.z)-radius-p.skin||solid.minZ>Math.max(from.z,to.z)+radius+p.skin)continue;
-      if(solid.poly.vertices.length>p.maxPolyVertices)throw new Budget();
-      candidates.push(solid);if(candidates.length>p.maxCandidates)throw new Budget();}
+    const query:SolidBounds={minX:Math.min(from.x,to.x)-radius-p.skin,minY:Math.min(from.y,to.y)-radius-p.skin,minZ:Math.min(from.z,to.z)-radius-p.skin,
+      maxX:Math.max(from.x,to.x)+radius+p.skin,maxY:Math.max(from.y,to.y)+radius+p.skin,maxZ:Math.max(from.z,to.z)+radius+p.skin};
+    const root=solidTree(solids,spend),stack=root?[root]:[];
+    while(stack.length){spend();const node=stack.pop()!;if(!overlapsBounds(node,query))continue;
+      if(node.solids){for(const solid of node.solids){spend();if(!overlapsBounds(solid,query))continue;if(solid.poly.vertices.length>p.maxPolyVertices)throw new Budget();
+        candidates.push(solid);if(candidates.length>p.maxCandidates)throw new Budget();}}
+      else{if(node.right)stack.push(node.right);if(node.left)stack.push(node.left);}}
     candidates.sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
     let best:SweepContact|null=null;
     for(const solid of candidates) {
@@ -65,10 +87,12 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
       let contact:SweepContact|null=null;
       if(!movingAngles) {
         let enter=0,exit=1,normal:V3={x:1,y:0,z:0},initialGap=-Infinity,possible=true;
+        const startAxes:Array<{gap:number;normal:V3;slack:number}>=[];
         for(const axis of axes(shape)) {
           spend();const len=length(axis);if(len<1e-12)continue;const n=scale(axis,1/len),a=project(shape.vertices,n),b=project(solid.poly.vertices,n),v=dot(delta,n);
           const slack=64*Number.EPSILON*Math.max(1,...a.map(Math.abs),...b.map(Math.abs));
           const gap=Math.max(a[0]-b[1],b[0]-a[1]);
+          startAxes.push({gap,normal:scale(n,a[0]-b[1]>=b[0]-a[1]?1:-1),slack});
           if(gap>initialGap&&enter===0)normal=scale(n,a[0]-b[1]>=b[0]-a[1]?1:-1);
           initialGap=Math.max(initialGap,gap);
           if(Math.abs(v)<1e-15){if(gap>=p.skin-slack){possible=false;break;}continue;}
@@ -76,6 +100,16 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
           const lo=Math.min(t0,t1),hi=Math.max(t0,t1);
           if(lo>enter){enter=lo;normal=scale(n,v>0?-1:1);}exit=Math.min(exit,hi);
           if(enter>exit||exit<0||enter>1){possible=false;break;}
+        }
+        // A pose may begin inside the conservative skin after B re-fits a sloped
+        // support surface. Tangential or outward translation must be allowed to
+        // leave that skin; only inward motion toward a nearest active SAT plane
+        // remains a t=0 contact. Otherwise every frame re-hits the same wall and
+        // burns its entire slide budget without advancing.
+        if(possible&&initialGap<=p.skin) {
+          const tolerance=Math.max(p.skin*1e-6,64*Number.EPSILON*magnitude);
+          const nearest=startAxes.filter(x=>x.gap>=initialGap-tolerance);
+          if(nearest.length&&nearest.every(x=>dot(delta,x.normal)>=-1e-12*Math.max(1,length(delta))))possible=false;
         }
         if(possible){
           if(initialGap< -magnitude*256*Number.EPSILON)return result("unresolved","initial-overlap");
@@ -104,5 +138,5 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
       if(contact&&(!best||contact.time<best.time))best=contact;
     }
     return best?result("contact","solid",best):result("clear","none");
-  }catch(error){if(error instanceof Budget)return result("unresolved","budget");throw error;}
+  }catch(error){if(error instanceof Budget)return result("unresolved","budget");if(error instanceof TypeError&&error.message==="invalid-solid-bounds")return result("unresolved","invalid-input");throw error;}
 }
