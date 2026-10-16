@@ -124,6 +124,8 @@ export type PassabilityOptions = Readonly<{
   /** Dynamic engine: C's continuous kernel (default) or the legacy whole-step-rejection environment. */
   engine?: "continuous" | "legacy";
   collider?: AuditCollider;
+  /** Pilot factory (D's RoutePilot); default B's CorridorPilot. The key's controllerVersion names it. */
+  pilot?: (path: readonly P[], cruise: number) => RoutePilot;
 }>;
 /** Calibrated collision box for the continuous engine (not the wheel footprint): the footprint plus the
  * product SPEC clearance (lateral 0.2, longitudinal 0.1), body from 0.1 above the support to 1.25. */
@@ -381,7 +383,7 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
     policy: { cruiseSpeed: cruise, maxReverseSpeed: 0 }, maxTicks: Math.ceil(((length + 10) / cruise) * 60 * 2 + 600), maxNoProgressTicks: 240 };
   let run: RoadAuditCaseResult | null = null;
   try {
-    const runner = new DrivingRouteRunner(key, test, kernelFor(), new CorridorPilot(route.path, cruise), new GateAuditObserver(test, validatorFor()));
+    const runner = new DrivingRouteRunner(key, test, kernelFor(), options.pilot ? options.pilot(route.path, cruise) : new CorridorPilot(route.path, cruise), new GateAuditObserver(test, validatorFor()));
     for (let guard = 0; !runner.result && guard < 10000; guard++) { runner.advance(250, key); if (!world.isCurrent()) { runner.cancel(); break; } }
     run = runner.result;
   } catch (error) {

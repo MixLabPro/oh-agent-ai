@@ -191,3 +191,15 @@ A批次剩余项不再是几何问题：跨层portal（立交、高架匝道）�
 - 场景代理和凸包外包的固体永远不当「挡住」的证据；只有规划、没有场景的 capture 永远不给「通过」。
 
 详见 [CITY_PASSABILITY_AND_RECOVERY_NOTES.md](CITY_PASSABILITY_AND_RECOVERY_NOTES.md)。这些结果不能替代 D 的完整用例覆盖，也不能据此开放整张路网。
+
+## 15. B4（2026-10-16）——审计改用 C 的连续内核
+
+- **身份与轨迹**：key 按 C 的版本校准，`vehicleConfigHash` 覆盖碰撞体与求解参数。门和走廊按实际分段轨迹判定；`GateAuditObserver` 没有分段轨迹时行为不变（兼容）。
+- **出生恢复**：起点与固体重叠时先用 SafeRecovery 恢复，再作为新用例运行。
+- **性能**：动态试跑里对世界是否最新的检查做了节流，每 tick 从约 103 ms 降到约 1.1 ms。
+- **十五城结果**：722 条有向路线，716 条通过（与旧环境是同一批）、0 条挡住、6 条无结论。
+- **交给 C 的问题**：贴墙滑动时碰撞查询预算耗尽（`continuous-collision:budget`），有合成复现和真实城市复现。
+- **交给宿主端口负责方的问题**：正式驾驶入口每步调用的 `isCurrent()` 开销很大。
+
+B 批次（审计、恢复）到此完成。下一步是 D 的用例规划器，以及更强的驾驶员。详见 [CITY_PASSABILITY_AND_RECOVERY_NOTES.md](CITY_PASSABILITY_AND_RECOVERY_NOTES.md)。
+

@@ -98,3 +98,26 @@ node scripts/verify-city-road-passability.mjs                         # 合成�
 PASSABILITY_EDGES=12 node scripts/verify-city-road-passability.mjs --cities   # 15 个真实渲染场景
 node scripts/verify-city-safe-recovery.mjs                             # 恢复：最近合法位姿、界限、预算、不跨区域、提交绑定
 ```
+
+## B4：动态试跑切到 C 的连续内核（2026-10-16）
+
+- **默认引擎**：动态试跑改用 C 的连续驾驶环境和内核：`ContinuousDrivingEnvironment` + `createContinuousDrivingKernel`，每个用例新建一个 `ContinuousWorldValidator`，外层再套 `CorridorValidator`。旧的整步拒绝环境保留为 `engine: "legacy"`，用于对比。
+- **身份**：key 必须带 C 的物理/碰撞/查询版本（2/2/3），以及覆盖碰撞体与求解参数的 `vehicleConfigHash`（`continuousAuditKeyFields()`）。旧引擎的 key 一律判 `key-engine-mismatch`，不复用旧结论。固体索引有被拒绝的固体时，结果为 inconclusive。
+- **按实际轨迹判定**：`GateAuditObserver` 沿 `motion.trajectory` 逐段判断穿门。没有分段轨迹时，退化为 `previous → next` 这一段，和原来完全相同（兼容）。走廊约束同样检查轨迹上的每一个点。
+- **出生恢复**：起点与固体重叠时，先由 SafeRecovery 恢复，再作为新用例（`<id>:recovered`）重跑。SafeRecovery 新增 0.1 的净空余量，恢复出的位姿不能只是「刚好不接触」。
+- **性能**：宿主 capture 的 `isCurrent()` 每次调用都会重新采集场景代理；C 在每个支撑分段都调用它，导致真实场景每 tick 约 103 ms（669 个固体）。现在动态试跑用一个节流、锁存的检查（每 1000 次调用才真查一次），降到约 1.1 ms/tick。staleness 是单调的，而且每个结论返回前都会做一次真实检查，所以试跑途中世界变了，只会让结果作废，不会产生结论（有守卫）。正式驾驶入口 `createCityCarSession` 每步也调用同一个检查，需要宿主端口负责方处理。
+
+### 十五城对比（30 条边/场景，722 条有向路线）
+
+| 引擎 | passed | blocked | inconclusive |
+| --- | --- | --- | --- |
+| legacy（整步拒绝） | 716 | 0 | 6：5 条 `pilot-failed`，1 条 `unconfirmed` |
+| continuous（C） | 716 | 0 | 6：3 条 `simulation-invalid`，2 条 `pilot-failed`，1 条 `unconfirmed` |
+
+- **通过集合完全相同**：两个引擎通过的是同一批 716 条路线。
+- **6 条无结论路线分布在 3 条边上**：
+  - 0/42 的 `-172.59:542.83/…`：正向起点在界内找不到安全位姿（`start-unrecoverable`）；反向是 `pilot-failed`。
+  - 500/42 的 `-103.81:-388.59/…`：双向都是 `simulation-invalid`。
+  - 500/65537 的 `-136.97:-232.97/…`：一向 `pilot-failed`，一向 `simulation-invalid`。
+- **新增的 `simulation-invalid` 是 C 的问题**：逐 tick 追踪 500/42 正向，车贴着高架桥墩滑了 229 个 tick，然后那一步返回 `continuous-collision:budget`（`queryStatus: unresolved`），复核器按规则判为模拟无效。合成复现已交给 C：6 宽道路、停放盒中心 (−40, 1, 1.2)、半尺寸 (1, 1, 0.6)、车从 (−40.18, −0.47) 出发，第 38 个 tick 出现。
+- **审计处理正确**：这些都是 inconclusive，不是 blocked。C 修好后，应优先复测这几条。
