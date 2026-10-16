@@ -74,6 +74,12 @@ export class SurfaceDrivingEnvironment implements DrivingEnvironment {
     return { x: desired.x, z: desired.z, heading: desired.heading, y: s.y, pitch: s.pitch, roll: s.roll, surfaceId: s.regionId, blocked: false };
   }
   /** Spawn/reset entry: a pose is legal only with an explicit region id; no "nearest surface". */
+  /** Layer-scoped region lookup for spawn validation; null when not drivable on that layer. */
+  regionAt(x: number, z: number, layerId: string): string | null {
+    if (this.regions.status !== "ready") return null;
+    const state = this.regions.classify(x, z, layerId);
+    return state.status === "drivable" ? state.regionId : null;
+  }
   place(x: number, z: number, heading: number, regionId: string, y?: number): Readonly<{ y: number; pitch: number; roll: number }> | null {
     if (!collisionCurrent(this.regions,this.collision)) return null;
     const pose={x,z,heading,y};
