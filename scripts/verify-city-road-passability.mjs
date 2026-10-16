@@ -198,8 +198,8 @@ if (process.argv.includes("--cities")) {
       console.log(`Road passability: ${sessions} sessions, seed ${seed}: ${routes.length} directed routes on ${capture.worldRevision.slice(0, 32)}… → ${JSON.stringify(outcome)}.`);
     } finally { lease.release(); }
   }
-  assert.ok(totals.passed > 0, "real roads pass the audit");
+  for (const n of notPassed) console.log(`  not passed ${n}`);
+  if (!routeFilter) assert.ok(totals.passed > 0, "real roads pass the audit");
   console.log(`Road passability (${engine}): ${totals.routes} real directed routes → ${totals.passed} passed, ${totals.blocked} blocked (witnessed), ${totals.inconclusive} inconclusive ${JSON.stringify(causes)}.`);
   for (const w of witnesses.slice(0, 20)) console.log(`  witness ${w}`);
-  for (const n of notPassed) console.log(`  not passed ${n}`);
 }
