@@ -1,16 +1,37 @@
-/** Frozen host -> shared car kernel bridge. Architectural mesh collision is an
- * explicit missing capability: never turn a structure-only query into city entry.
+/** Frozen host -> shared car kernel bridge. Exact architectural render-mesh
+ * collision remains an explicit missing capability; building/landmark boxes enter
+ * through the whitelisted scene proxies so a city with buildings is drivable with
+ * conservative collision instead of being refused outright.
  */
 import type { CityDrivingWorldCapture } from "../../engine/CityEngine";
+import type { ReadyCitySurfaceCapture } from "../../engine/surface/citySurfacePort";
 import { buildSurfaceIndex } from "../../engine/surface/SurfaceIndex";
 import { buildSurfaceRegions } from "../../engine/surface/surfaceRegions";
 import { initialDrivingState, DRIVING_PHYSICS_VERSION } from "../DrivingSimulation";
 import { DrivingKernel } from "../driving/DrivingKernel";
-import { buildCollisionIndex, COLLISION_RULES_VERSION, type CollisionDimensions } from "../driving/CollisionIndex";
+import { boxSolidFromCorners, buildVersionedCollisionIndex, COLLISION_RULES_VERSION, type CollisionDimensions, type SolidInput } from "../driving/CollisionIndex";
 import { createStructureCollisionBinding, SurfaceDrivingEnvironment } from "../driving/SurfaceDrivingWorld";
 import { SURFACE_FOOTPRINT_RULES_VERSION } from "../driving/surfaceFootprint";
 import { CarAdapter, type CarPresentation } from "./CarAdapter";
 import { GameRuntime } from "./GameRuntime";
+
+/** Conservative combined budget: a proxy flood cannot silently disable entry. */
+const COMBINED_SOLID_LIMIT = 4096;
+
+/** Structures (exact descriptors) + whitelisted scene proxies (buildings/landmarks),
+ * capped; overflow is an explicit unavailable, never a silent half-collision. */
+type CityDrivingSnapshot = NonNullable<ReturnType<ReadyCitySurfaceCapture["readWorld"]>>;
+function combinedSolidInputs(world: CityDrivingSnapshot | null): readonly SolidInput[] | null {
+  if (!world) return null;
+  if (world.obstacles.length + world.sceneSolids.length > COMBINED_SOLID_LIMIT) return null;
+  const combined: SolidInput[] = [];
+  for (const obstacle of world.obstacles) {
+    if (obstacle.shape === "box") combined.push(boxSolidFromCorners(obstacle.id, obstacle.role, obstacle.corners));
+    else combined.push({ id: obstacle.id, role: obstacle.role, kind: "prism", ring: obstacle.ring, yMin: obstacle.yMin, yMax: obstacle.yMax });
+  }
+  for (const proxy of world.sceneSolids) combined.push(proxy);
+  return combined;
+}
 
 export type CityCarHost = Readonly<{ captureDrivingWorld(signal?: AbortSignal): Promise<CityDrivingWorldCapture> }>;
 export type CityCarRequest = Readonly<{
@@ -20,7 +41,7 @@ export type CityCarRequest = Readonly<{
   present(frame: CarPresentation): void;
 }>;
 export type CityCarEntry =
-  | Readonly<{ status: "ready"; worldRevision: string; coverage: "structures-only"; adapter: CarAdapter }>
+  | Readonly<{ status: "ready"; worldRevision: string; coverage: "structures-and-scene-proxies"; adapter: CarAdapter }>
   | Readonly<{ status: "unavailable"; reason: string }>;
 export async function createCityCarSession(host: CityCarHost, runtime: GameRuntime, request: CityCarRequest,
   signal?: AbortSignal): Promise<CityCarEntry> {
@@ -36,15 +57,17 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     const leaseCurrent = capture.isLeaseCurrent;
     const snapshot = capture.readWorld();
     if (!snapshot || snapshot.revision !== capture.worldRevision || snapshot.surface.revision !== capture.revision) return unavailable("revision-mismatch");
-    // Exact architectural render geometry is captured, but this collision path
-    // currently supports only the structural boxes/prisms. No permissive fallback.
-    if (snapshot.renderedSolids.length > 0) return unavailable("unavailable-rendered-collision");
+    // Exact architectural render meshes are captured but not yet consumed for
+    // collision; buildings/landmarks participate through the whitelisted scene
+    // proxies so a city WITH buildings is drivable under conservative collision.
     if (!request.collider.vehicleConfigHash) return unavailable("invalid-vehicle-config");
     const surfaceIndex = buildSurfaceIndex(snapshot.surface);
     if (surfaceIndex.status !== "ready") return unavailable(`surface-index:${surfaceIndex.reason}`);
     const regions = buildSurfaceRegions(snapshot.surface, surfaceIndex);
     if (regions.status !== "ready") return unavailable(`surface-regions:${regions.reason}`);
-    const collision = buildCollisionIndex({ revision: capture.worldRevision, obstacles: snapshot.obstacles });
+    const solids = combinedSolidInputs(snapshot);
+    if (!solids) return unavailable("scene-solids-over-budget");
+    const collision = buildVersionedCollisionIndex(capture.worldRevision, solids);
     if (collision.status !== "ready") return unavailable(`collision-index:${collision.reason}`);
     const binding = createStructureCollisionBinding({ surfaceRevision: capture.revision, worldRevision: capture.worldRevision,
       index: collision.index, dimensions: request.collider.dimensions, centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent });
@@ -65,7 +88,7 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     transferred = true;
     const entered = await runtime.enter({ revision: capture.worldRevision, isCurrent: leaseCurrent,
       setFrameHook: capture.setFrameHook, release: () => { signal?.removeEventListener("abort", cancel); capture.release(); } }, adapter);
-    return entered ? Object.freeze({ status: "ready", worldRevision: capture.worldRevision, coverage: "structures-only", adapter }) : unavailable(runtime.snapshot.reason ?? "runtime-refused");
+    return entered ? Object.freeze({ status: "ready", worldRevision: capture.worldRevision, coverage: "structures-and-scene-proxies", adapter }) : unavailable(runtime.snapshot.reason ?? "runtime-refused");
   } catch (error) {
     return unavailable(error instanceof Error ? error.message : "city-car-entry-failed");
   } finally {

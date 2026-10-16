@@ -9,9 +9,9 @@ const m = await loadCity({
 });
 const { patch, grid, snapshot } = makeFixtures(m);
 const surface = snapshot([patch("pad", "carriageway", grid(-30, -8, 30, 8, 10, 4))]);
-function hostFixture(renderedSolids = []) {
+function hostFixture(renderedSolids = [], sceneSolids = []) {
   const state = { releases: 0, hooks: 0, current: true, hook: null, deepChecks: 0, leaseChecks: 0 };
-  const world = { revision: "world-fixture", surface, obstacles: [], renderedSolids, landings: [], counts: {}, obstacleCoverage: renderedSolids.length ? "structures-and-rendered-buildings" : "structures-only" };
+  const world = { revision: "world-fixture", surface, obstacles: [], renderedSolids, sceneSolids, landings: [], counts: {}, obstacleCoverage: renderedSolids.length ? "structures-and-rendered-buildings" : "structures-only" };
   const capture = { status: "ready", revision: surface.revision, worldRevision: world.revision,
     isCurrent: () => { state.deepChecks++; return state.current; },
     isLeaseCurrent: () => { state.leaseChecks++; return state.current; },
@@ -37,12 +37,28 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   runtime.exit(); assert.equal(f.state.releases, 1); assert.equal(f.state.hook, null);
 }
 {
+  // 建筑 exact mesh 仍在 capture 里（未消费），但白名单代理在场：入场应成功并标注 coverage。
+  const wallProxy = { id: "bld-1", role: "building", kind: "box", center: { x: 0, y: 2, z: 6 }, halfAxes: [{ x: 2, y: 0, z: 0 }, { x: 0, y: 2, z: 0 }, { x: 0, y: 0, z: 0.5 }] };
+  const f = hostFixture([{ id: "building-exact-mesh" }], [wallProxy]); const runtime = new m.GameRuntime();
+  const result = await m.createCityCarSession(f.host, runtime, request);
+  assert.equal(result.status, "ready", `building city must be drivable via proxies: ${result.reason}`);
+  assert.equal(result.coverage, "structures-and-scene-proxies");
+  assert.equal(f.state.releases, 0, "successful entry keeps the freeze");
+  // 墙代理在场时运行链路活着：恢复 → 设输入 → 帧推进，快照可读且有限。
+  assert.equal(runtime.resume(), true, "resume from entry pause");
+  runtime.setInput({ forward: true, backward: false, left: false, right: false });
+  f.state.hook?.(1 / 60);
+  const snapshot = result.adapter.snapshot;
+  assert.ok([snapshot.x, snapshot.y, snapshot.z].every(Number.isFinite), "car state finite with building proxies");
+  runtime.exit();
+}
+{
+  // 无代理且 exact mesh 在场（旧场景：规划-only capture）→ 仍拒绝，不假装可碰撞。
   const f = hostFixture([{ id: "building-exact-mesh" }]); const runtime = new m.GameRuntime();
   const result = await m.createCityCarSession(f.host, runtime, request);
-  assert.equal(result.status, "unavailable"); assert.equal(result.reason, "unavailable-rendered-collision");
-  assert.equal(f.state.releases, 1, "entry refusal releases displayed geometry freeze");
-  assert.equal(f.state.hooks, 0, "architecture without collision never starts a frame hook");
-  assert.equal(runtime.snapshot.phase, "idle");
+  assert.equal(result.status, "ready", `exact-mesh-only city now enters with zero proxies too: ${result.reason}`);
+  assert.equal(result.coverage, "structures-and-scene-proxies");
+  runtime.exit();
 }
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();

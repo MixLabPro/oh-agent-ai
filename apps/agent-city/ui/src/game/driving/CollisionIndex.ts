@@ -327,6 +327,7 @@ export type { Poly as CollisionPoly };
 /** Legacy static-source callers retain hit/report/solids; versioned callers also get CCD. */
 export function buildCollisionIndex(inputs: readonly SolidInput[], params?: CollisionParams): CollisionIndex;
 export function buildCollisionIndex(inputs: Readonly<{revision:string;obstacles:readonly StructureObstacle[]}>, params?: Partial<CollisionLimits>): CollisionIndexBuild;
+
 export function buildCollisionIndex(inputs: readonly SolidInput[] | Readonly<{revision:string;obstacles:readonly StructureObstacle[]}>, params: Partial<CollisionLimits> | CollisionParams = {}): CollisionIndex | CollisionIndexBuild {
   if (!Array.isArray(inputs)) return buildFrozenCollisionIndex(inputs as Readonly<{revision:string;obstacles:readonly StructureObstacle[]}>,params as Partial<CollisionLimits>);
   const obstacles: StructureObstacle[]=inputs.map(input=>input.kind === "box"
@@ -335,4 +336,18 @@ export function buildCollisionIndex(inputs: readonly SolidInput[] | Readonly<{re
   const built=buildFrozenCollisionIndex({revision:"legacy-static-unversioned",obstacles},{maxCandidates:params.maxCandidates ?? DEFAULT_COLLISION_LIMITS.maxCandidates},{...DEFAULT_COLLISION_PARAMS,...params} as CollisionParams);
   if(built.status!=="ready")throw new Error(`collision-index-${built.reason}`);
   return built.index;
+}
+
+/** Mixed exact-structure + whitelisted-scene solids under a versioned revision.
+ * Same budget semantics as the frozen build; overflow/invalid → unresolved, never a partial index. */
+export function buildVersionedCollisionIndex(revision: string, solids: readonly SolidInput[], params?: CollisionParams): CollisionIndexBuild {
+  try {
+    const obstacles: StructureObstacle[] = solids.map((input) => input.kind === "box"
+      ? ({ id: input.id, role: input.role, shape: "box", corners: boxPoly(input.center, input.halfAxes).vertices.map((v) => ({ ...v })) } as StructureObstacle)
+      : ({ id: input.id, role: input.role, shape: "prism", ring: input.ring, yMin: input.yMin, yMax: input.yMax } as StructureObstacle));
+    return buildFrozenCollisionIndex({ revision, obstacles }, { maxCandidates: DEFAULT_COLLISION_LIMITS.maxCandidates }, params ?? DEFAULT_COLLISION_PARAMS);
+  } catch (error) {
+    if (error instanceof Budget) return Object.freeze({ status: "unresolved", reason: "budget" });
+    return Object.freeze({ status: "unresolved", reason: "invalid-input" });
+  }
 }
