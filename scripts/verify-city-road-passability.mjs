@@ -110,6 +110,9 @@ const audit = (world, r = route, options) => m.auditRoute(world, keyFor(world.wo
   let current = true; const world = worldOf([road(), ...walks], { current: () => current });
   current = false;
   const r = audit(world); assert.equal(r.verdict, "inconclusive"); assert.equal(r.detail, "stale-world");
+  // Stale MID-RUN: the run's own currency check is throttled, the verdict's is not — the result is discarded.
+  let calls = 0; const midRun = worldOf([road(), ...walks], { current: () => ++calls < 20 });
+  const discarded = audit(midRun); assert.equal(discarded.verdict, "inconclusive"); assert.equal(discarded.detail, "stale-world");
   const fresh = worldOf([road(), ...walks]);
   const mismatch = m.auditRoute(fresh, keyFor("another-world"), route);
   assert.equal(mismatch.verdict, "inconclusive"); assert.equal(mismatch.detail, "key-world-mismatch");

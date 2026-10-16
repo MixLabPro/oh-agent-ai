@@ -52,7 +52,17 @@ export type PassabilityWorld = Readonly<{
   /** "complete" when every rendered solid family is represented in `dynamic` (exactly or by a proxy). */
   coverage: "complete" | "structures-only";
   isCurrent: () => boolean;
+  /** Throttled, latching view of isCurrent for per-segment calls inside the dynamic run. The host check
+   * re-samples the scene (CitySurfacePort.sourceCurrent) and dominated C runs at ~100 ms/tick. Staleness is
+   * monotonic (generation bump / latched source), and every verdict re-checks the real isCurrent before it
+   * is returned — a change mid-run can only discard a result, never produce one. */
+  runCurrent: () => boolean;
 }>;
+/** Real check at most once per `every` calls; false latches. */
+export function throttledCurrent(isCurrent: () => boolean, every = 1000): () => boolean {
+  let calls = 0; let ok = isCurrent();
+  return () => { if (!ok) return false; if (++calls >= every) { calls = 0; ok = isCurrent(); } return ok; };
+}
 /** Roles the region rules already bound exactly (or a hull would over-approximate): never cut evidence. */
 const NON_EVIDENCE_ROLES: ReadonlySet<string> = new Set(["island", "bridge-railing", "expressway-rail", "bridge-deck", "expressway-deck"]);
 
@@ -73,7 +83,7 @@ export function passabilityWorld(snapshot: CityDrivingSnapshot, regions: Surface
   // Buildings are covered only by captured scene proxies (conservative supersets of the rendered meshes).
   // Rendered buildings without proxies, or a capture with no scene at all, would be driven through unseen.
   const coverage = snapshot.sceneSolids.length > 0 || (options.declareNoBuildings === true && snapshot.renderedSolids.length === 0) ? "complete" : "structures-only";
-  return Object.freeze({ status: "ready", world: Object.freeze({ worldRevision: snapshot.revision, surfaceRevision: snapshot.surface.revision, regions, exact, dynamic, coverage, isCurrent }) });
+  return Object.freeze({ status: "ready", world: Object.freeze({ worldRevision: snapshot.revision, surfaceRevision: snapshot.surface.revision, regions, exact, dynamic, coverage, isCurrent, runCurrent: throttledCurrent(isCurrent) }) });
 }
 
 /** A directed route: a legal corridor (centreline + half width) from its first point to an exit gate at
@@ -338,7 +348,7 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
     let env: ContinuousDrivingEnvironment;
     try {
       env = new ContinuousDrivingEnvironment(regions, { surfaceRevision: regions.revision, worldRevision: world.worldRevision, solidRevision: world.worldRevision,
-        solids: world.dynamic.solids(), dimensions: collider.dimensions, centerHeight: collider.centerHeight, isCurrent: world.isCurrent }, footprint, params);
+        solids: world.dynamic.solids(), dimensions: collider.dimensions, centerHeight: collider.centerHeight, isCurrent: world.runCurrent }, footprint, params);
     } catch (error) { return finish("inconclusive", "unconfirmed", `continuous-world:${error instanceof Error ? error.message : "error"}`, witness, null, "passed", witness ? "blocked" : "passed"); }
     validatorFor = () => new CorridorValidator(new ContinuousWorldValidator(env, polylineProgress(route.path)), route.path, route.halfWidth);
     kernelFor = () => createContinuousDrivingKernel(env, { worldRevision: world.worldRevision, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId });
