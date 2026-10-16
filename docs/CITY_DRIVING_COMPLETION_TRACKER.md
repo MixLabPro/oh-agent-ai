@@ -13,7 +13,7 @@
 | A：42/2 桥头、其他局部冲突 | **待处理，桥面/桥头原型已撤出活动代码**；`-319.94:707.54/-328.75:712.17` 桥长约 9.95，192 精度的岸侧横断面为 V 形。纵横分块 BOX 可改善静态连通，但整车引道试跑仍失败：384 精度下短桥起点 excessive-slope，长桥 `145.25:-689.12/186.19:-660.49` 在接缝前车底接触底板。长桥在提交版本 7 也有连续查询失败，已独立重放。下一步处理真实桥头/引道工程几何；不能仅按静态连通放行。 实验补丁保存在 `/tmp/agent-city-bank-loft-prototype.patch`，不属于已验收实现。规划层 `roadApproachMaxSlope=6` 是历史岸边引道豁免，远大于车辆的 0.3 rad 限制；单靠接缝 BOX 无法使真实陡坡可驾驶。 |
 | B：安全恢复、逐路静态审计、观察器接线 | 用户/协作方负责；已有 `SafeRecovery`、`RoadPassabilityAudit`，合并其最终证据后核对真实流程，不另建同名协议。 |
 | D1：全量场景用例及结果 | 协作方发布结果；需要按最终几何版本重新生成证据，旧 key 不可继承。 |
-| D2：开放图、证据存储、可定位故障的出生路线 | 有界内存证据库及 runner/B 审计/调度取消接线已实现，见 `CITY_AUDIT_EVIDENCE_NOTES.md`；默认 600 tick、32 片段、8 MiB，同内核一致性及失效/淘汰回归通过，界面消费仍待 E。**仍待完成** `ReleasedDrivingGraph`、故障分解；只释放同 key 下静态与 mandatory 动态均通过的单元，边界须复跑，pending/blocked/inconclusive 不混用。 |
+| D2：开放图、证据存储、可定位故障的出生路线 | 有界内存证据库及 runner/B 审计/调度取消接线已实现，见 `CITY_AUDIT_EVIDENCE_NOTES.md`；默认 600 tick、32 片段、8 MiB，同内核一致性及失效/淘汰回归通过，界面消费仍待 E。`ReleasedDrivingGraph` 最小切片已实现（`verify-city-driving-release-graph.mjs`，入 game 模块链）：发布门复检 ready+边界 hash、green 子集只含 passed、图与 key/租约绑定失效。**仍待完成** 故障分解出生路线、审计界面消费（E）。pending/blocked/inconclusive 不混入图。 |
 | 正式出生点 | **待完成** 产品定义与显式 pose/layer/id 元数据、安全验证。最长道路中点只保留为审计诊断起点。 |
 | E：正式驾驶宿主入口 | **待完成** 精确建筑网格碰撞消费、连续内核接入、开放条件。当前 `createCityCarSession` 仍拒绝 `renderedSolids`，仅具备租约和结构场景基础。 |
 | E：HUD、本地审计界面、原生 bundle 验收 | **待完成**。原生仅构建 `.app` 后通过 `open` 启动；未验收前不得声称正式驾驶可用。 |
