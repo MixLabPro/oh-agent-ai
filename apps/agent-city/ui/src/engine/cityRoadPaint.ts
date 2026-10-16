@@ -10,16 +10,17 @@ export function roadPaintPlan(edges: RoadEdge[]) {
   const visited = new Set<string>();
   // startEdge/endEdge：run 两端各自是哪条边——路口标线（cityTextures）要按「这条边在该路口是主路还是次路」
   // 决定中线虚线的内缩与停止线，而 run 是合并后的折线，不带边身份就只能按方向猜。
-  const runs: Array<{ width: number; kind: RoadEdge["kind"]; points: Vec2[]; from: string; to: string; startEdge: RoadEdge; endEdge: RoadEdge }> = [];
+  const runs: Array<{ width: number; kind: RoadEdge["kind"]; points: Vec2[]; from: string; to: string; startEdge: RoadEdge; endEdge: RoadEdge; edgeIds: string[] }> = [];
   const continuation = (edge: RoadEdge, node: string) => {
     const list = adjacency.get(node)!;
     if (list.length !== 2) return undefined;
     return list.find((next) => next !== edge && !next.bridge && next.width === edge.width && next.kind === edge.kind);
   };
   const walk = (first: RoadEdge, start: string) => {
+    const edgeIds: string[] = [];
     const points: Vec2[] = []; let edge = first; let node = start; let last = first;
     while (!visited.has(edge.id)) {
-      visited.add(edge.id); last = edge;
+      visited.add(edge.id); edgeIds.push(edge.id); last = edge;
       const oriented = edge.from === node ? edge.points : [...edge.points].reverse();
       points.push(...(points.length ? oriented.slice(1) : oriented));
       node = edge.from === node ? edge.to : edge.from;
@@ -27,7 +28,7 @@ export function roadPaintPlan(edges: RoadEdge[]) {
       if (!next || visited.has(next.id)) break;
       edge = next;
     }
-    runs.push({ width: first.width, kind: first.kind, points, from: start, to: node, startEdge: first, endEdge: last });
+    runs.push({ width: first.width, kind: first.kind, points, from: start, to: node, startEdge: first, endEdge: last, edgeIds });
   };
   const surface = edges.filter((edge) => !edge.bridge);
   // Start at a boundary so a chain is not split at an arbitrary input edge.

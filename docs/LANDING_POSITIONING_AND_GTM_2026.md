@@ -1,5 +1,7 @@
 # Agent Vitals landing positioning and GTM (2026-09)
 
+> 2026-10-15: The next landing revision leads with desktop-agent history visualization and Agent City. See [Landing City-first redesign spec](LANDING_CITY_FIRST_REDESIGN_SPEC.md) for the new page positioning and conversion path. Historical channel findings below remain context, not current launch verification; privacy and truthful coverage requirements still apply.
+
 ## Brand and privacy promise
 
 - **Product brand:** Agent Vitals 智能体监测

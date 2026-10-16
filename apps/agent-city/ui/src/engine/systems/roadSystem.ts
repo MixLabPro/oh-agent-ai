@@ -6,8 +6,10 @@
 import * as THREE from "three";
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { cornerArc, curbClearance, junctionIndex, pavementIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline } from "../cityRoadJunctions";
-import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
-import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../render/shared";
+import { BOX } from "../render/shared";
+import { bridgeDeckParts, channelizedGeometry, culDeSacDiscs, expresswayPieces, FLARE_LIFT, flareTriangles, trussBars } from "../surface/structureCompiler";
+import { conformMesh, terrainFit } from "../surface/terrainClip";
+export { culDeSacBulbRadius } from "../surface/structureCompiler";
 
 /** 本系统读写的 CityParts 成员（精确清单；CityParts 以 `this as unknown as RoadHost` 传入）。 */
 export interface RoadHost {
@@ -28,7 +30,7 @@ const LEGACY_CURB_TRIM = 5.5;
 
 /** Batched city furniture and waterfront infrastructure, not selectable data. */
 export function buildInfrastructure(host: RoadHost): void {
-  type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number; yaw?: number };
+  type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number; yaw?: number; pitch?: number; order?: "XYZ" | "YZX" | "YXZ" };
   const parts: Part[] = [];
   const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0, yaw = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt, yaw });
   // Curbs and street lights are real geometry; asphalt and markings share the atlas.
@@ -85,29 +87,9 @@ export function buildInfrastructure(host: RoadHost): void {
   for (const edge of roadEdges) {
     // Bridge spans need actual geometry; the terrain atlas is below the river surface.
     if (edge.bridge) {
-      const [a, b] = edge.points;
-      const length = Math.hypot(b.x - a.x, b.z - a.z);
-      const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
-      const x = (a.x + b.x) / 2; const z = (a.z + b.z) / 2;
-      // Deck top meets the level plain; unlike atlas roads it remains above water.
-      const deckTop = Math.max(host.layout.terrain.height(a.x, a.z), host.layout.terrain.height(b.x, b.z));
-      add(x, deckTop - 0.4, z, length + 0.5, 0.4, edge.width, "#6a7071", 0, yaw);
-      for (const side of [-1, 1]) {
-        const offset = side * (edge.width / 2 - 0.15);
-        add(x + Math.sin(yaw) * offset, deckTop, z + Math.cos(yaw) * offset, length, 0.65, 0.3, "#b9bcb2", 0, yaw);
-        const lineOffset = side * (edge.width / 2 - 0.65);
-        add(x + Math.sin(yaw) * lineOffset, deckTop + 0.015, z + Math.cos(yaw) * lineOffset, length, 0.025, 0.12, "#e4dfc9", 0, yaw);
-      }
-      for (let distance = 2; distance < length - 1; distance += 6) {
-        const t = (distance + 1) / length;
-        add(a.x + (b.x - a.x) * t, deckTop + 0.015, a.z + (b.z - a.z) * t, Math.min(2, length - distance), 0.025, 0.14, "#dfd1a5", 0, yaw);
-      }
-      for (let distance = 16; distance < length - 12; distance += 32) {
-        const t = distance / length;
-        const px = a.x + (b.x - a.x) * t; const pz = a.z + (b.z - a.z) * t;
-        const bed = host.layout.terrain.height(px, pz);
-        add(px, bed, pz, 1.6, Math.max(0.1, deckTop - 0.35 - bed), edge.width - 0.6, "#a9aaa0", 0, yaw);
-      }
+      // 桥面/护栏/车道线/桥墩：描述符与驾驶路面共用（surface/structureCompiler），这里只组实例。
+      // 桥面随引道起伏成斜板（YZX：先俯仰后转向，同高架），两端落在桥头路面上。
+      for (const p of bridgeDeckParts(edge, host.layout)) parts.push({ x: p.x, y: p.y, z: p.z, sx: p.sx, sy: p.sy, sz: p.sz, color: p.color, tilt: p.rx, yaw: p.ry, pitch: p.rz, order: p.order });
       continue;
     }
     // 沿路段的实际方向摆放（G2 起各片区街网朝向不同；曾只认水平/竖直两种方向）。
@@ -151,12 +133,13 @@ export function buildInfrastructure(host: RoadHost): void {
   const mesh = host.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), parts.length);
   parts.forEach((part, index) => {
     host.positionVector.set(part.x, part.y, part.z);
-    host.euler.set(part.tilt ?? 0, part.yaw ?? 0, 0);
+    host.euler.set(part.tilt ?? 0, part.yaw ?? 0, part.pitch ?? 0, part.order ?? "XYZ");
     host.quaternion.setFromEuler(host.euler);
     host.scaleVector.set(part.sx, part.sy, part.sz);
     host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector);
     mesh.setMatrixAt(index, host.matrix); mesh.setColorAt(index, host.color.set(part.color));
   });
+  host.euler.set(0, 0, 0, "XYZ");
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   mesh.count = parts.length;
@@ -171,63 +154,27 @@ export function buildInfrastructure(host: RoadHost): void {
  *  不是一口一 Mesh；喇叭抬 0.035（路漆 0.02–0.05 的既有 z-fighting 规避惯例，
  *  路缘盒基面 0.02 / 沙滩带 0.05 之间）。 */
 export function buildChannelizedJunctions(host: RoadHost): void {
-  const mouths = channelizedTPlan(renderRoadEdges(host.layout.roadEdges));
-  if (!mouths.length) return;
+  const { flares, islands } = channelizedGeometry(host.layout);
+  if (!islands.length) return;
   const terrain = host.layout.terrain;
-  // 与地面贴图（cityTextures 路漆盘）同色的沥青：喇叭就是「路口变宽」本身，不另配色。
-  const asphaltOf = (edge: { kind: string }) => (edge.kind === "arterial" ? "#505b60" : "#646c6b");
   const flareTop = new THREE.Color();
   const islandTop = new THREE.Color("#87a86f");
   const islandSide = new THREE.Color("#cbc6ba");
-  const FLARE_LIFT = 0.035;
   const flarePositions: number[] = [];
   const flareColors: number[] = [];
   const islandPositions: number[] = [];
   const islandColors: number[] = [];
-  /** 喇叭渐变：从口部（d0，半宽 w/2+extra）线性收到正常路幅（d0+length，半宽 w/2），
-   *  沿边按 ~4.5 单位切片贴地取样（同沙滩带的细分惯例）。 */
-  const flare = (arm: ChannelizedArm, x: number, z: number) => {
-    const width = arm.edge.width;
-    const extra = Math.min(2.3, 0.45 * width);
-    const d0 = 2.2;
-    const length = 9 + width * 0.55;
-    const slices = Math.max(1, Math.ceil(length / 4.5));
-    const nx = -arm.dir.z; const nz = arm.dir.x;
-    const color = flareTop.set(asphaltOf(arm.edge));
-    const at = (d: number, half: number, sign: number) => {
-      const px = x + arm.dir.x * d + nx * half * sign;
-      const pz = z + arm.dir.z * d + nz * half * sign;
-      return [px, terrain.height(px, pz) + FLARE_LIFT, pz];
-    };
-    const left: number[] = [];
-    const right: number[] = [];
-    for (let s = 0; s <= slices; s += 1) {
-      const t = s / slices;
-      const half = width / 2 + extra * (1 - t);
-      left.push(...at(d0 + length * t, half, 1));
-      right.push(...at(d0 + length * t, half, -1));
+  // 喇叭贴「渲染地形 + FLARE_LIFT」并按地形三角网保形（与路面同一判定）：曾按 terrain.height 真值取高，
+  // 坡地上与贴渲染地形的路面错开，正是路面曾埋进地形的同一类缺陷。平地 / 线性坡与旧几何一致。
+  const fit = terrainFit(host.layout, FLARE_LIFT);
+  for (const flare of flares) {
+    const color = flareTop.set(flare.color);
+    for (const triangle of conformMesh(fit, FLARE_LIFT / 2, flareTriangles(flare)).triangles) {
+      for (const p of triangle) { flarePositions.push(p.x, fit.heightAt(p.x, p.z), p.z); flareColors.push(color.r, color.g, color.b); }
     }
-    for (let s = 0; s < slices; s += 1) {
-      const a = left.slice(s * 3, s * 3 + 3); const b = left.slice((s + 1) * 3, (s + 1) * 3 + 3);
-      const c = right.slice((s + 1) * 3, (s + 1) * 3 + 3); const e = right.slice(s * 3, s * 3 + 3);
-      for (const vertex of [a, b, c, a, c, e]) { flarePositions.push(...vertex); flareColors.push(color.r, color.g, color.b); }
-    }
-  };
-  /** 水滴形分流岛（低多边形棱台）：口部一侧圆头、向内收尖，顶面抬 0.22，侧壁插入地下 0.18。 */
-  const ISLAND_PROFILE = [
-    { d: 0.0, w: 1.0 }, { d: 0.16, w: 1.14 }, { d: 0.58, w: 0.55 }, { d: 1.0, w: 0.0 },
-    { d: 0.58, w: -0.55 }, { d: 0.16, w: -1.14 }, { d: 0.0, w: -1.0 },
-  ];
-  const island = (arm: ChannelizedArm, x: number, z: number) => {
-    const extra = Math.min(2.3, 0.45 * arm.edge.width);
-    const start = 2.2 + 2.2;
-    const length = 4.4 + arm.edge.width * 0.3;
-    const half = Math.min(0.8, extra * 0.4);
-    const nx = -arm.dir.z; const nz = arm.dir.x;
-    const ring = ISLAND_PROFILE.map((point) => ({
-      x: x + arm.dir.x * (start + length * point.d) + nx * half * point.w,
-      z: z + arm.dir.z * (start + length * point.d) + nz * half * point.w,
-    }));
+  }
+  /** 水滴形分流岛（低多边形棱台）：顶面抬 0.22，侧壁插入地下 0.18。 */
+  for (const { ring } of islands) {
     const top = ring.map((point) => [point.x, terrain.height(point.x, point.z) + 0.22, point.z]);
     const bottom = ring.map((point) => [point.x, terrain.height(point.x, point.z) - 0.18, point.z]);
     const centroid = [
@@ -240,11 +187,6 @@ export function buildChannelizedJunctions(host: RoadHost): void {
       for (const vertex of [top[k], top[next], centroid]) { islandPositions.push(...vertex); islandColors.push(islandTop.r, islandTop.g, islandTop.b); }
       for (const vertex of [top[k], top[next], bottom[next], top[k], bottom[next], bottom[k]]) { islandPositions.push(...vertex); islandColors.push(islandSide.r, islandSide.g, islandSide.b); }
     }
-  };
-  for (const mouth of mouths) {
-    flare(mouth.stem, mouth.x, mouth.z);
-    flare(mouth.host, mouth.x, mouth.z);
-    island(mouth.stem, mouth.x, mouth.z);
   }
   const build = (positions: number[], colors: number[], name: string, castShadow: boolean) => {
     const geometry = new THREE.BufferGeometry();
@@ -268,54 +210,8 @@ export function buildChannelizedJunctions(host: RoadHost): void {
  *  沿规划折线分段铺装 —— harness 城区之间可辨认的硬边界。 */
 export function buildDistrictExpressways(host: RoadHost): void {
   type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; pitch?: number; color: string };
-  const pieces: Piece[] = [];
-  for (const points of host.layout.highways ?? []) {
-    const heights = expresswayDeckHeights(points, (x, z) => host.layout.terrain.height(x, z));
-    // Piers every ~34 units by mileage, anchored into the terrain or riverbed
-    // (over water the pier reaches below the surface — a real bridge span).
-    let accumulated = 0;
-    let nextPier = 0;
-    for (let index = 0; index < points.length; index += 1) {
-      const point = points[index];
-      if (index > 0) accumulated += Math.hypot(point.x - points[index - 1].x, point.z - points[index - 1].z);
-      if (accumulated >= nextPier) {
-        nextPier = accumulated + 34;
-        const groundY = Math.max(-3, host.layout.terrain.height(point.x, point.z));
-        // 墩顶止于桥面底面（咬合 0.05）：桥面板在任何视角下都完整包住墩顶，
-        // 不会出现"桥墩穿透路面"的视觉交叠。
-        // BOX 以底面为原点：y 是墩底而不是中心。曾按「中心」写成 (地面+墩顶)/2，
-        // 桥墩悬在半空且戳出桥面（截图里河中那个方块）。
-        const pierTop = heights[index] + 0.05;
-        if (pierTop - groundY < 1.5) continue; // 匝道落地段不需要桥墩
-        // 桥墩随该点处桥面走向旋转（横截面垂直于桥），盖梁宽度覆盖桥面。
-        const neighbor = points[Math.min(index + 1, points.length - 1)];
-        const prev = points[Math.max(index - 1, 0)];
-        const pierYaw = -Math.atan2(neighbor.z - prev.z, neighbor.x - prev.x);
-        pieces.push({ x: point.x, y: groundY, z: point.z, sx: 1.8, sy: pierTop - groundY, sz: 8.4, yaw: pierYaw, color: "#a9aaa0" });
-      }
-    }
-    for (let index = 1; index < points.length; index += 1) {
-      const a = points[index - 1];
-      const b = points[index];
-      const length = Math.hypot(b.x - a.x, b.z - a.z);
-      if (length < 6) continue;
-      const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
-      const mx = (a.x + b.x) / 2;
-      const mz = (a.z + b.z) / 2;
-      const ya = heights[index - 1];
-      const yb = heights[index];
-      const my = (ya + yb) / 2;
-      const pitch = Math.atan2(yb - ya, length);
-      const slant = Math.hypot(length, yb - ya);
-      const top = my + EXPRESSWAY_DECK_THICKNESS;
-      pieces.push({ x: mx, y: my, z: mz, sx: slant + 0.5, sy: EXPRESSWAY_DECK_THICKNESS, sz: EXPRESSWAY_DECK_WIDTH, yaw, pitch, color: "#6a7071" });
-      // 车道线/护栏沿桥面横向偏移（offset 之前被忽略，全叠在中线上），且要在桥面顶面（deckY+0.9）之上。
-      const sideX = Math.sin(yaw);
-      const sideZ = Math.cos(yaw);
-      for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: top, z: mz + sideZ * offset, sx: slant, sy: 0.05, sz: 0.3, yaw, pitch, color: "#c6c6bb" });
-      for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: top, z: mz + sideZ * offset, sx: slant, sy: 0.55, sz: 0.3, yaw, pitch, color: "#b9bcb2" });
-    }
-  }
+  // 桥墩、桥面、车道线、护栏：描述符与驾驶路面共用（surface/structureCompiler）。
+  const pieces: Piece[] = expresswayPieces(host.layout).map((p) => ({ x: p.x, y: p.y, z: p.z, sx: p.sx, sy: p.sy, sz: p.sz, yaw: p.ry, pitch: p.rz, color: p.color }));
   if (!pieces.length) return;
   const geometry = BOX.clone();
   const mesh = new THREE.InstancedMesh(geometry, new THREE.MeshLambertMaterial({ color: "#ffffff" }), pieces.length);
@@ -339,26 +235,14 @@ export function buildDistrictExpressways(host: RoadHost): void {
   host.disposables.push(geometry, mesh.material);
 }
 
-/** 尽端回车圈半径（形态批 §5-3）：所在路段半宽 + 2.5，夹在 6–9——与路宽协调
- *  （支路 5 宽 → 6，主干/大道 12 宽 → 8.5）。守夜灯（nightLighting）同用此口径。 */
-export function culDeSacBulbRadius(roadWidth: number): number {
-  return Math.max(6, Math.min(9, roadWidth / 2 + 2.5));
-}
-
 /** 尽端回车圈（backlog 形态批 §5-3，docs/CITY_PLANNER_V2_FINDINGS.md §5）：合法尽端
  *  （layout.culDeSacEnds，EndpointRole cul-de-sac）几何上是路戛然而止——在路尽头铺一块
  *  平贴地面的回车圆盘 + 路缘色描边。纯渲染装饰，不改路网拓扑；一个 InstancedMesh 装全部
  *  圆盘、一个装全部描边（同 buildTrussBridges 的合并批模式，不逐端点建 Mesh）。
  *  高度按地形中心取样、法向贴合坡度（中心差分梯度），颜色用桥面/路缘同款涂装。 */
 export function buildCulDeSacBulbs(host: RoadHost): void {
-  const ends = host.layout.culDeSacEnds ?? [];
+  const ends = culDeSacDiscs(host.layout);
   if (!ends.length) return;
-  // 所在点最宽的 incident 路段决定回车圈半径（找到的多为唯一悬挂边）。
-  const widthAt = new Map<string, number>();
-  for (const edge of renderRoadEdges(host.layout.roadEdges)) {
-    if (edge.bridge) continue;
-    for (const id of [edge.from, edge.to]) widthAt.set(id, Math.max(widthAt.get(id) ?? 0, edge.width));
-  }
   const discs = host.makeInstanced(new THREE.CylinderGeometry(1, 1, 1, 20).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#6a7071" }), ends.length);
   const rims = host.makeInstanced(new THREE.RingGeometry(0.86, 1, 28).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: "#cbc6ba" }), ends.length);
   discs.name = "city-culdesac-bulb-disc";
@@ -366,13 +250,9 @@ export function buildCulDeSacBulbs(host: RoadHost): void {
   discs.receiveShadow = true;
   const up = new THREE.Vector3(0, 1, 0);
   const normal = new THREE.Vector3();
-  const height = host.layout.terrain.height;
-  ends.forEach((end: Vec2, index: number) => {
-    const radius = culDeSacBulbRadius(widthAt.get(`${end.x}:${end.z}`) ?? 9);
-    const base = Math.max(0, height(end.x, end.z));
-    // 圆盘贴合地形坡度：沿半径的两轴中心差分求梯度，法向 = (-gx, 1, -gz)。
-    const gx = (height(end.x + radius, end.z) - height(end.x - radius, end.z)) / (2 * radius);
-    const gz = (height(end.x, end.z + radius) - height(end.x, end.z - radius)) / (2 * radius);
+  // 半径、基准高与坡度梯度来自描述符（与驾驶路面的回车圈顶面同一份）。
+  ends.forEach(({ x, z, radius, base, gx, gz }, index: number) => {
+    const end = { x, z };
     normal.set(-gx, 1, -gz).normalize();
     host.quaternion.setFromUnitVectors(up, normal);
     host.positionVector.set(end.x, base + 0.02, end.z);
@@ -391,44 +271,15 @@ export function buildCulDeSacBulbs(host: RoadHost): void {
 /** 红色穿式桁架桥（backlog L-7）：悬索桥之外、跨距 40–160 的过河桥加一套格构桁架——上下弦 + 竖杆 + 交替斜腹杆，
  *  深红涂装。只换造型不改路网（同悬索桥做法）；桥面高度与 buildInfrastructure 一致。 */
 export function buildTrussBridges(host: RoadHost): void {
-  const suspension = (host.layout.landmarks ?? []).find((l) => l.kind === "suspension-bridge");
-  const bridges = (host.layout.bridges ?? []).filter((b) => b.length >= 40 && b.length <= 160
-    && !(suspension && Math.hypot(b.from.x - suspension.x, b.from.z - suspension.z) < 1));
-  if (!bridges.length) return;
+  const bars = trussBars(host.layout);
+  if (!bars.length) return;
   const unit = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
   const red = new THREE.MeshLambertMaterial({ color: "#a8322a" });
-  const bars: Array<[number, number, number, number, number, number, number, number]> = []; // x y z len thick rotY tilt
-  for (const bridge of bridges) {
-    const dx = bridge.to.x - bridge.from.x; const dz = bridge.to.z - bridge.from.z; const len = Math.hypot(dx, dz);
-    const ux = dx / len; const uz = dz / len; const nx = -uz; const nz = ux;
-    const yaw = -Math.atan2(dz, dx);
-    const deckY = Math.max(host.layout.terrain.height(bridge.from.x, bridge.from.z), host.layout.terrain.height(bridge.to.x, bridge.to.z));
-    const H = 7; const panels = Math.max(4, Math.round(len / 9)); const step = len / panels;
-    for (const side of [-1, 1]) {
-      const ox = nx * side * 6.6; const oz = nz * side * 6.6;
-      const at = (t: number) => ({ x: bridge.from.x + ux * t + ox, z: bridge.from.z + uz * t + oz });
-      const mid = at(len / 2);
-      bars.push([mid.x, deckY + H, mid.z, len, 0.6, yaw, 0, 0]);          // 上弦
-      bars.push([mid.x, deckY + 0.2, mid.z, len, 0.6, yaw, 0, 0]);        // 下弦
-      for (let i = 0; i <= panels; i += 1) {
-        const p = at(i * step);
-        bars.push([p.x, deckY, p.z, 0.45, H, yaw, 0, 1]);                 // 竖杆
-        if (i < panels) {
-          const q = at((i + 0.5) * step);
-          bars.push([q.x, deckY, q.z, 0.4, Math.hypot(step, H), yaw, (i % 2 ? 1 : -1) * Math.atan2(step, H), 1]); // 斜腹杆
-        }
-      }
-    }
-    // 顶部横撑（每两格一根），让桁架从远处读成「穿式」而不是两片护栏。
-    for (let i = 0; i <= panels; i += 2) {
-      const t = i * step; const x = bridge.from.x + ux * t; const z = bridge.from.z + uz * t;
-      bars.push([x, deckY + H, z, 13.2, 0.5, yaw + Math.PI / 2, 0, 0]);
-    }
-  }
   const mesh = new THREE.InstancedMesh(unit, red, bars.length);
   bars.forEach(([x, y, z, a, b, rotY, tilt, vertical], i) => {
     host.positionVector.set(x, y, z);
-    host.euler.set(0, rotY, vertical ? tilt : 0, "YXZ");
+    // tilt: diagonal lean for vertical members, span pitch for chords (deck follows the approaches).
+    host.euler.set(0, rotY, tilt, "YXZ");
     // 横向件：长度沿局部 x；竖向件：高度沿局部 y、绕局部 z 倾斜成斜腹杆。
     if (vertical) host.scaleVector.set(a, b, a); else host.scaleVector.set(a, b, b);
     if (!vertical) host.positionVector.y -= b / 2;

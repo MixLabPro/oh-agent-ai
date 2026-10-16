@@ -25,10 +25,11 @@ export type RepairInfo = {
   canUndo: boolean;
   canRedo: boolean;
   saveFailed: boolean;
+  savePending: boolean;
 };
 
 const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], drawMode: "straight", drawVia: null, siteTurn: 0, preview: null, message: null };
-const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, generatorChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false };
+const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, generatorChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false, savePending: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
   const enabled = planDevEnabled();
@@ -47,7 +48,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     let status = session.status();
     // 城市升/降了一档，或生成器换了版本：自动把补丁搬到新地图（路线图 SPEC P0-2），不等用户进修复模式。
     if (status.tierChanged && session.remapForTier()) { status = session.status(); controllerRef.current?.refresh(); }
-    setInfo({ counts: status.counts, staleCount: status.stale.length, tierChanged: status.tierChanged, generatorChanged: status.generatorChanged, remap: status.remap, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed });
+    setInfo({ counts: status.counts, staleCount: status.stale.length, tierChanged: status.tierChanged, generatorChanged: status.generatorChanged, remap: status.remap, canUndo: status.canUndo, canRedo: status.canRedo, saveFailed: status.saveFailed, savePending: status.savePending });
     if (auditOpen.current) setIssues(session.audit());
   }, []);
 
@@ -55,7 +56,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
   const ensure = useCallback((): { session: PlanRepairSession; controller: RepairController } | null => {
     const current = engine.current;
     if (!enabled || !current) return null;
-    if (!installed.current) installed.current = installPlanRepairDebug(current);
+    if (!installed.current) { installed.current = installPlanRepairDebug(current); installed.current.session.onSaveSettled = syncInfo; }
     const session = installed.current.session;
     if (!controllerRef.current) {
       const controller = new RepairController({
@@ -122,7 +123,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     if (!current || !controller) return;
     const overlay = new ParcelOverlay();
     current.addOverlay(overlay.group);
-    current.setRepairHook({ onClick: (click) => controller.click(click), onMove: (ground, ray) => controller.hover(ground, ray) });
+    current.setRepairHook({ onClick: (click) => controller.click(click), onMove: (ground, ray) => controller.hover(ground, ray), onSecondary: () => controller.back() });
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;

@@ -40,6 +40,7 @@ import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 import { buildingFrame, isSelectionGesture } from "./cityCameraInteraction";
 import type { ReturnCameraView } from "../game/types";
+import { CitySurfacePort, type CitySurfaceCapture } from "./surface/citySurfacePort";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -56,7 +57,7 @@ export type CameraOwner = "orbit" | "cinematic" | "game";
 export type RepairRay = { origin: { x: number; y: number; z: number }; direction: { x: number; y: number; z: number } };
 export type RepairClick = { pickedId: string | null; ground: { x: number; z: number } | null; ray: RepairRay };
 /** onMove：指针移动时的地面点（离开画布/朝天为 null）——画路/橡皮擦的悬停预览用。 */
-export type RepairHook = { onClick(click: RepairClick): void; onMove?(ground: { x: number; z: number } | null, ray: RepairRay | null): void };
+export type RepairHook = { onClick(click: RepairClick): void; onMove?(ground: { x: number; z: number } | null, ray: RepairRay | null): void; /** 右键轻点（不拖动）：修复模式里用来退一步。 */ onSecondary?(): void };
 
 export type CityEngineOptions = {
   canvas: RenderCanvas;
@@ -97,9 +98,12 @@ export class CityEngine {
   private parts: CityParts | null = null;
   /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
+  /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
+  private readonly surfacePort = new CitySurfacePort();
   /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
   private baseLayout: CityLayout | null = null;
   private repairHook: RepairHook | null = null;
+  private secondaryDown: { id: number; x: number; y: number; at: number } | null = null;
   private planPatchValue: PlanPatchV1 | null = null;
   private planResult: PatchedLayout | null = null;
   private model: CityModel | null = null;
@@ -261,6 +265,7 @@ export class CityEngine {
       this.hoveredId = null;
       this.parts?.setHovered(null);
       this.options.onHover?.(null, 0, 0);
+      this.secondaryDown = event.button === 2 && event.isPrimary ? { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() } : null;
       this.pointerDown = event.button === 0 && event.isPrimary ? { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now(), moved: 0 } : null;
       interactiveCanvas.focus({ preventScroll: true });
       if (this.cinematic) this.stopCinematic();
@@ -271,6 +276,12 @@ export class CityEngine {
       this.noteActivity();
     };
     const onPointerUp = (event: PointerEvent) => {
+      const secondary = this.secondaryDown;
+      this.secondaryDown = null;
+      if (secondary && secondary.id === event.pointerId && this.repairHook?.onSecondary && this.cameraOwner !== "game"
+        && Math.hypot(event.clientX - secondary.x, event.clientY - secondary.y) < 5 && performance.now() - secondary.at < 500) {
+        this.repairHook.onSecondary();
+      }
       const down = this.pointerDown;
       this.pointerDown = null;
       this.noteActivity();
@@ -630,6 +641,7 @@ export class CityEngine {
     if (seed === this.seed) return;
     const first = this.seed === null;
     this.seed = seed;
+    this.surfacePort.invalidate();
     this.layout = null;
     this.baseLayout = null;
     this.planResult = null;
@@ -645,6 +657,7 @@ export class CityEngine {
     if (this.seed === null) return;
     // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
     const previousDisplays = this.parts ? this.parts.displaySnapshot() : null;
+    this.surfacePort.invalidate();
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
@@ -1082,7 +1095,7 @@ export class CityEngine {
     this.cursorMs = ms;
     if (options?.playing !== undefined) this.playing = options.playing;
     if (options?.speed !== undefined) this.playbackSpeed = options.speed;
-    if (ms !== null) this.parts?.applyCursor(ms, false, this.playbackSpeed * 1000);
+    if (ms !== null) { this.parts?.applyCursor(ms, false, this.playbackSpeed * 1000); this.parts?.snapToTargets(true); } // 时间跳变（开始回放/拖时间轴）：直接是那一刻的城市
     else if (this.model) this.parts?.applyCursor(this.model.windowEndMs, true);
     this.noteActivity();
   }
@@ -1872,8 +1885,15 @@ export class CityEngine {
     this.lowFpsWindows = this.highFpsWindows = 0;
   }
 
+  /** Capture the drivable surface of the city as currently drawn (lazy compile + local SHA-256
+   *  revision). Stale once the layout/seed changes; the caller must re-capture, never reuse. */
+  captureDrivingSurface(signal?: AbortSignal): Promise<CitySurfaceCapture> {
+    return this.surfacePort.capture(this.parts?.drivingSurfaceSource() ?? null, signal);
+  }
+
   dispose(): void {
     this.disposed = true;
+    this.surfacePort.invalidate();
     this.stopLoop();
     this.gameFrame = null;
     this.cameraOwner = "orbit";

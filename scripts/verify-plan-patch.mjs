@@ -37,13 +37,13 @@ const {
   applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
   pruneStalePatch, patchGeneratorVersion, patchMatchesLayout, CITY_GENERATOR_VERSION,
   appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
-  curvePoints, polylineMinRadius, minCurveRadius, auditLayout, buildCityModel, createCityPlan, layoutCity, MIAMI_COASTAL,
+  curvePoints, polylineMinRadius, minCurveRadius, auditLayout, tagAuditOrigins, buildCityModel, createCityPlan, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
   "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP", "pruneStalePatch", "patchGeneratorVersion", "patchMatchesLayout", "CITY_GENERATOR_VERSION"],
   "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "roadRun", "validateRestyle"],
   "engine/planGeometry.ts": ["curvePoints", "polylineMinRadius", "minCurveRadius"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_WIDTH", "EXPRESSWAY_RAMP"],
-  "engine/planAudit.ts": ["auditLayout"],
+  "engine/planAudit.ts": ["auditLayout", "tagAuditOrigins"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/cityPlan.ts": ["createCityPlan"],
@@ -730,6 +730,20 @@ const snap = (layout) => JSON.stringify({
   assert.equal(read.highwayOps.length, 2, "valid viaduct ops are read back; malformed ones are dropped");
   const plain = fresh(); plain.roadOps = [{ t: "drop", edge: "x" }];
   assert.equal(hashPlanPatch(plain), hashPlanPatch({ ...plain, highwayOps: [] }), "an empty viaduct log does not change the patch fingerprint");
+}
+
+// (w) 体检来源标注：生成城市自带的问题标 generated，补丁带来的新问题标 edit，补丁失效条目不标。
+{
+  const base = [{ id: "buildingOverRoad:a", severity: "error", rule: "buildingOverRoad", at: { x: 0, z: 0 }, detail: "x", entities: ["a"] }];
+  const patched = [...base,
+    { id: "buildingOverRoad:b", severity: "error", rule: "buildingOverRoad", at: { x: 1, z: 1 }, detail: "y", entities: ["b"] },
+    { id: "patchStale:road-add:r1", severity: "info", rule: "patchStale", at: null, detail: "z", entities: ["r1"] }];
+  const tagged = tagAuditOrigins(patched, base);
+  assert.equal(tagged[0].origin, "generated", "an issue already in the unedited city is the generator's");
+  assert.equal(tagged[1].origin, "edit", "a new issue after edits comes from the edits");
+  assert.equal(tagged[2].origin, undefined, "stale patch entries are not city issues and carry no origin");
+  assert.ok(tagAuditOrigins(base, null).every((issue) => issue.origin === "generated"), "no patch → everything is the generated city's");
+  assert.equal(base[0].origin, undefined, "tagging does not mutate its input");
 }
 
 console.log("City plan patch: corners are filleted when a stroke turns off a dead end, the seaside promenade follows waterfront roads, viaducts are drawn/extended/cut with honest stale entries, deterministic (building moves order-independent, road ops replayed in log order), building-move replay is a no-op, stale entries degrade honestly (missing/locked/occupied/collision/tier/context/duplicate/degenerate), node moves re-key ids/edges/cul-de-sacs, drawn roads snap to nodes/split host edges/create free ends and halves of a split can be dropped later, failed adds leave no half-done split, edge drops prune nodes and filter car paths, building-move blockers (occupied/missing/road/slope/buildable/highway/overlap) hold, storage coercion never throws, layout audit is severity-sorted and quiet on generated cities, layout pins place moved buildings before road pruning and survive refresh.");

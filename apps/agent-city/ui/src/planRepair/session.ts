@@ -7,7 +7,7 @@
  * 存档始终读取，补丁随会话生效；没有补丁时引擎的 planPatch 为空，地图与未编辑时逐字节一致。
  */
 import type { CityEngine } from "../engine/CityEngine";
-import { auditLayout, type PlanIssue } from "../engine/planAudit";
+import { auditLayout, tagAuditOrigins, type PlanIssue } from "../engine/planAudit";
 import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, patchGeneratorVersion, patchMatchesLayout, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
 import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
@@ -66,6 +66,9 @@ export class PlanRepairSession {
   private redoStack: Array<PlanPatchV1 | null> = [];
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private saveFailed = false;
+  private savePending = false;
+  /** 存档写完（成功或失败）后回调：面板据此把「保存中」换成「已保存 / 仅临时」。 */
+  onSaveSettled: (() => void) | null = null;
   private loadTicket = 0;
   private dryRunMemo: { key: string; preview: RoadPreview } | null = null;
   /** 最近一次跨档重定位的报告（面板横幅读它；用户点「知道了」清掉）。 */
@@ -122,8 +125,11 @@ export class PlanRepairSession {
   private scheduleSave(): void {
     if (!this.loaded) return; // 没读过存档就写会覆盖其它种子的补丁
     clearTimeout(this.saveTimer);
+    this.savePending = true;
     this.saveTimer = setTimeout(() => {
-      void cityPlanPatchStore("write", this.store).then((result) => { this.saveFailed = result === null; }).catch(() => { this.saveFailed = true; });
+      this.savePending = true;
+      void cityPlanPatchStore("write", this.store).then((result) => { this.saveFailed = result === null; }).catch(() => { this.saveFailed = true; })
+        .finally(() => { this.savePending = false; this.onSaveSettled?.(); });
     }, SAVE_DEBOUNCE_MS);
   }
 
@@ -616,7 +622,10 @@ export class PlanRepairSession {
   audit(): PlanIssue[] {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
     if (!layout || !model) return [];
-    return auditLayout(layout, model, this.engine.planPatched?.stale ?? []);
+    const issues = auditLayout(layout, model, this.engine.planPatched?.stale ?? []);
+    // 同一问题在未编辑的生成城市里就有 → 标「生成时就有」，否则是用户的修改造成的：用户据此判断该撤销自己的修改还是接受生成器的残余。
+    const generated = this.engine.generatedLayout;
+    return tagAuditOrigins(issues, generated && this.engine.planPatch ? auditLayout(generated, model, []) : null);
   }
 
   status() {
@@ -624,7 +633,7 @@ export class PlanRepairSession {
     const patch = this.engine.planPatch;
     return {
       ready: !!layout, seed: layout?.seed ?? null, cityTier: layout?.scaleTier ?? null, patchTier: patch?.scaleTier ?? null,
-      patch, stale: this.engine.planPatched?.stale ?? [], saveFailed: this.saveFailed,
+      patch, stale: this.engine.planPatched?.stale ?? [], saveFailed: this.saveFailed, savePending: this.savePending,
       // tierChanged = 「补丁对不上当前地图、需要重定位」：跨档或生成器换代都算（界面胶水据此自动调 remapForTier）。
       // generatorChanged 只用来选文案：档位没变、是生成器换了。
       tierChanged: !!patch && !!layout && !patchMatchesLayout(patch, layout.scaleTier),

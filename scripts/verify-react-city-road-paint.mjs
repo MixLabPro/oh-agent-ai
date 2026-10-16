@@ -81,7 +81,9 @@ const { buildChannelizedJunctions } = channelMod.exports;
 const renderChannels = (edges, height = () => 0) => {
   const group = new THREE.Group();
   const disposables = [];
-  buildChannelizedJunctions({ layout: { roadEdges: edges, terrain: { height } }, group, disposables });
+  // extent: flares now follow the RENDERED terrain triangulation (extent/192 grid), like the road
+  // surface; every real CityLayout carries it. Flat and linear terrain render exactly as before.
+  buildChannelizedJunctions({ layout: { roadEdges: edges, terrain: { height }, extent: 400 }, group, disposables });
   const byName = Object.fromEntries(group.children.map((mesh) => [mesh.name, mesh]));
   return { group, byName, disposables };
 };

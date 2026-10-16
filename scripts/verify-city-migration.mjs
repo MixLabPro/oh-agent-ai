@@ -15,7 +15,8 @@ function load(file) {
 const { replayStartMs } = load("replayRange.ts");
 const from = new Date(2025, 9, 3).getTime(), to = new Date(2026, 9, 3).getTime();
 const event = new Date(2026, 8, 15, 12).toISOString();
-assert.equal(replayStartMs([{ first_event_at: event }], from, to), new Date(2026, 8, 15).getTime());
+assert.equal(replayStartMs([{ first_event_at: event }], from, to), Date.parse(event), "replay starts when the first session building starts, not at that day's midnight");
+assert.equal(replayStartMs([{ first_event_at: new Date(2026, 8, 20).toISOString() }, { first_event_at: event }], from, to), Date.parse(event), "…the earliest of several sessions");
 assert.equal(replayStartMs([], from, to), from);
 assert.equal(replayStartMs([{ first_event_at: "bad" }], from, to), from);
 assert.equal(replayStartMs([{ first_event_at: new Date(from - 86400000).toISOString() }], from, to), from);

@@ -1,0 +1,58 @@
+{
+  "sourceCommit": "744f926a",
+  "sourceFile": "apps/agent-city/ui/src/engine/systems/roadSurfaceSystem.ts",
+  "precision": "Float32 attributes / Uint32 indices",
+  "fixtures": {
+    "empty": "f63626a3d18b001b1994e47287dd39790f43e3dd896e1aec20865e766060417c",
+    "straight": "713dda6d8d877f3e0381ae50c2456a452dd1612f97540051f095f76a78ca7095",
+    "bend": "29917d6a974a152b79a53c2fea178afdb33845db283239afe5f7ee907499936f",
+    "tee": "43d8f92c08f0f75e9187bdab5691a34219110039aba1e5395942565f23713a36",
+    "skew": "d72e2ed4bef71932a8e807e0834c6d79a3d7d3b3f75c205a4f4194fc3fca469c",
+    "width-transition": "1b4b1f9dbbbc652c092f893e9816df23a9c60aa3c21656bb8f57743adad61b3d",
+    "bridge-boundary": "e72e8365acd04f5abcf382c5681009db5ac91192886207adc848442d54fd87da",
+    "closed-loop": "49cf6de194efd444075a82fe092d155d51ea9bf37f7b5e4d76af1e2b90bce34b",
+    "wavy-tee": "41e23ed57d99890ffa7b703a8c54b3dc55c931a522b3400ded6ec71e84525c9a"
+  },
+  "generatedPlans": {
+    "1/1": "94285d5c39a9256aa34fa8fb75c4996c0f21adbe23fcb300f0d8b474e436f7a9",
+    "1/2": "aa13abde43a06eb13f789755681adaaba6af4f6057d37858795eb5ffaa61740f",
+    "1/3": "9b5a1960003c60824ae64876c260857f48bf2f5a97984c98c12d78dd89178d55",
+    "7/1": "0793611eb9d0a86d4ddf6541ad7ee4857ec222560ff52d02d9b986ab5113d3fb",
+    "7/2": "ccf0e3eb7a4b473b5132d778c52c3b76edc7170c6f9f45aebbabe53c8000db29",
+    "7/3": "dfff63c89667998aa0a813d3ac489ae432a146305e66515e3557b44523e674b3",
+    "42/1": "271a8e9074d092ab3e239e9b9bea6eaabf822ee2032105363b6af695c7b2f710",
+    "42/2": "953531f5b4ab40ed5319ada1177b6e97e0e5e1051abd5627ffcd86f2de97117a",
+    "42/3": "aecc3001d71afdb8f77926317895dc0ddc048dc797830964a6f4613eea7be903",
+    "2026/1": "677e5541a3121856589e13e1597f66e9d93541badad1dd89bbdb31b1c68c29d4",
+    "2026/2": "052a821884cd965e9de5d883c6b2c6435874237756e635d4315399a8dc133ccb",
+    "2026/3": "4ef4053d4ffc98205181ae49d0ab0256a0ee895a21300625f7dcdee38b0a6d6b",
+    "65537/1": "0259942eaffb8b673d5ad0864dbf295024d65c30b7fb73051a86a88185b4ac43",
+    "65537/2": "9d4b8d832b1566ab6cf04c5f294b31f9bf9f95720d1c7b85c09dd53c8aec04b0",
+    "65537/3": "de1174fe4738de034eae38475f52cd5aa06f1327d2d40f0597b6b54565570bd2"
+  },
+  "corrected": {
+    "revision": "terrain-conforming-v1",
+    "reason": "Exact terrain fit: strips/sectors deviating > ROAD_SURFACE_LIFT/2 from the rendered terrain are split along the terrain triangulation (pre-refactor ribbons sank up to 0.25 below terrain; fans overlapped ribbons with 0.30 height gaps). Closed loops weld at a mitred seam; narrowed miters at stubs and reflex-corner diagonals stop strip folds. Flat fixtures not listed here still equal the pre-refactor digests above. Fans that are not star-shaped from their hub (offset sidewalk arcs) are ear-clipped; a self-intersecting closed taper outline uses its convex hull.",
+    "fixtures": {
+      "closed-loop": "a399ae1cead2aa69050b9dbc6971a14a6f06307ef62d52e36df1b73323fb7046",
+      "wavy-tee": "36cc302e6567366ceb98610dc9bba846bc7d20b2dab97a846405f3418bd70da8"
+    },
+    "generatedPlans": {
+      "1/1": "12e716665d0af5a4834da13d38575cb959e3c12480cb79ce157791369c0725c6",
+      "1/2": "e46b7bdc78a1d2c86522a7ea5d77ca69a067b23e1bb2fcf12153cb9ea86898f5",
+      "1/3": "a87026be526b1c817b535157329ecc0e237313cc0a9928db12f8c828c6de8312",
+      "7/1": "b2c68882087241b5836735bdbaee23a7789e477f5c6e46ed070aa05ad2316d67",
+      "7/2": "25b5b6de88575e1149401563a771440195067869cdfceb4fcfc5854d56de9ab5",
+      "7/3": "dd0d24740d4c515807dff9956779e4a894dd19d627948e12d150a2822ba092ff",
+      "42/1": "9b3fc8399d5ab3f3b7939e43606861903815d8da66182fdf2f50f9354bbc0d9d",
+      "42/2": "0a2e90dff9477c6bf0e4fe71290ceba7eddd8fb07b0535a89cac04b4e9354732",
+      "42/3": "6c03fd86c5d29256a5e61d251d766393dd9279dc656877aa8802361d1725c5a0",
+      "2026/1": "9ff9788ba09b5a5389fc285d0d2a3ff23c7023cfe7385808bd10634438ff75b0",
+      "2026/2": "038707a62fb09cdd72d21cbc35cf5e81d9b49f068f3dbab49eb088e43b16814f",
+      "2026/3": "2f770f936f2bacb31acd4397be774c81c4f50aba632116ca15d804efe1cd084d",
+      "65537/1": "7c6b0d7550e067c0e9b867a47af95374aa3c23ed814d74df79d55755f32262b9",
+      "65537/2": "8effc1347b80562dae21c541551b6beed8b315d8d87881f526513a81d88d935a",
+      "65537/3": "100832b88ac1ea5e91fb842730624bc8e3cffa86fb8d84229859a23983e71ffc"
+    }
+  }
+}
