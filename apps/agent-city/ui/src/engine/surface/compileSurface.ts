@@ -6,12 +6,13 @@
  * 桥面若除两端落地区外不压任何地面车行面（跨河），就放进 "ground"——两端与路面的叠置由
  * surfaceRegions 的 alias 规则判：高差 ≤ aliasTolerance 即接通，否则是 conflict/step，关闭；
  * 这就是同层落地的「portal」，不另造连接。压着地面路（立交）的桥面与全部高架各自成层，
- * 跨层 portal 尚未实现，所以它们的入口一律关闭——当前十五城里这些入口在渲染上本来就有
- * ≥ 0.26 的台阶（高架匝道止于地面 + 0.3），见 landings 报告。 */
+ * 跨层入口需通过实际端边及二维重叠走廊验证才能产生显式 portal；不满足者保持关闭。
+ * portal 是几何连接证据，车辆净空、碰撞和连续运动仍需独立验证。 */
 import type { CityLayout, Vec2 } from "../cityLayout";
 import { renderRoadEdges } from "../cityRoadJunctions";
 import { buildGroundSurfaceSnapshot } from "./buildGroundSnapshot";
-import { compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./groundRoadCompiler";
+import { assertGroundRoadSurfaceMatches, compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./groundRoadCompiler";
+import { buildLandingPortals, DEFAULT_LANDING_PORTAL_OPTIONS } from "./landingPortals";
 import { extractMeshBoundaries } from "./meshBoundaries";
 import { buildSurfaceIndex } from "./SurfaceIndex";
 import {
@@ -23,16 +24,19 @@ import type { SurfaceRegionsBuild } from "./surfaceRegions";
 import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 2;
+export const CITY_SURFACE_GEOMETRY_VERSION = 4;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
 const LANDING_ZONE = 3;
 
 type P3 = { x: number; y: number; z: number };
 export type StructureObstacle =
-  | Readonly<{ id: string; role: BoxPart["role"]; shape: "box"; corners: readonly P3[] }>
+  | Readonly<{ id: string; role: BoxPart["role"]; shape: "box"; corners: readonly P3[]; surfacePatchId?: string }>
   | Readonly<{ id: string; role: "island"; shape: "prism"; ring: readonly Vec2[]; yMin: number; yMax: number }>;
 export type StructureLanding = Readonly<{
   structureId: string; end: "from" | "to"; layerId: string; x: number; z: number;
+  patchId: string;
+  /** Actual inset top-face end edge, not a centre probe or a guessed road width. */
+  seam: Readonly<{ a: Readonly<P3>; b: Readonly<P3> }>;
   /** Unit vector along the span, pointing from the deck outward past this end. */
   outX: number; outZ: number;
   deckY: number; groundY: number | null; step: number | null;
@@ -66,10 +70,15 @@ function meshOf(triangles: readonly (readonly [P3, P3, P3])[]): { vertices: Floa
   return { vertices: new Float32Array(positions), indices: new Uint32Array(indices) };
 }
 const quad = (c: readonly P3[]): [P3, P3, P3][] => [[c[0], c[1], c[2]], [c[0], c[2], c[3]]];
+const seamOf = (top: readonly P3[], end: StructureLanding["end"]) => {
+  const owned = (p: P3) => Object.freeze({ x: Math.fround(p.x), y: Math.fround(p.y), z: Math.fround(p.z) });
+  return Object.freeze({ a: owned(end === "from" ? top[0] : top[1]), b: owned(end === "from" ? top[3] : top[2]) });
+};
 
 export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?: CompiledGroundRoadSurface; aliasTolerance?: number } = {}): CitySurfaceCompilation {
   const tolerance = options.aliasTolerance ?? 0.1;
   const ground = options.ground ?? compileGroundRoadSurface(layout);
+  assertGroundRoadSurfaceMatches(ground, layout);
   const groundSnapshot = buildGroundSurfaceSnapshot(ground);
   const issues: SurfaceCompileIssue[] = groundSnapshot.report.issues.filter((issue) => issue.reason !== "unsupported");
   const patches: SurfacePatch[] = [...groundSnapshot.patches];
@@ -146,6 +155,9 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     }
     const layerId = overpass ? `bridge:${edge.id}` : "ground";
     add(`bridge:${edge.id}`, "bridge-deck", layerId, source, quad(top));
+    // The slab is a solid too: lower-layer traffic must see the real underside,
+    // not just the support top and railings. Link it to its own supporting patch.
+    obstacles.push(Object.freeze({ id: `${source.id}:slab`, role: "bridge-deck", shape: "box", corners: Object.freeze(boxCorners(deck)), surfacePatchId: `bridge:${edge.id}` }));
     for (const p of parts) if (p.role === "bridge-railing" || p.role === "bridge-pier") obstacles.push(Object.freeze({ id: `${source.id}:${p.role}:${obstacles.length}`, role: p.role, shape: "box", corners: Object.freeze(boxCorners(p)) }));
     for (const [end, p, out] of [["from", a, -1], ["to", b, 1]] as const) {
       // The seam is the deck's end edge, 0.25 past the node: compare the ground just outside it with
@@ -156,7 +168,8 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       const g = groundY(p.x + ux * out * 0.3, p.z + uz * out * 0.3);
       const step = g === null ? null : deckY - g;
       const status = overpass ? "layered" : g === null ? "no-ground" : Math.abs(step!) <= tolerance ? "aligned" : "step";
-      landings.push(Object.freeze({ structureId: source.id, end, layerId, x: p.x, z: p.z, outX: ux * out, outZ: uz * out, deckY, groundY: g, step, status }));
+      const seam = seamOf(top, end);
+      landings.push(Object.freeze({ structureId: source.id, end, layerId, patchId: `bridge:${edge.id}`, seam, x: p.x, z: p.z, outX: ux * out, outZ: uz * out, deckY, groundY: g, step, status }));
     }
   }
   for (const bar of trussBars(layout)) {
@@ -174,8 +187,10 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     }
     if (piece.role !== "expressway-deck") continue;
     expresswaySegments++;
-    add(`expressway:${piece.highway}:${String(piece.segment).padStart(4, "0")}`, Math.abs(piece.rz) > 1e-4 ? "ramp" : "expressway-deck",
+    const patchId = `expressway:${piece.highway}:${String(piece.segment).padStart(4, "0")}`;
+    add(patchId, Math.abs(piece.rz) > 1e-4 ? "ramp" : "expressway-deck",
       `expressway:${piece.highway}`, { kind: "structure", id: `expressway:${piece.highway}` }, quad(boxTopFace(piece, EXPRESSWAY_DRIVABLE_HALF)));
+    obstacles.push(Object.freeze({ id: `${patchId}:slab`, role: "expressway-deck", shape: "box", corners: Object.freeze(boxCorners(piece)), surfacePatchId: patchId }));
   }
   (layout.highways ?? []).forEach((points, highway) => {
     const closed = Math.hypot(points[0].x - points[points.length - 1].x, points[0].z - points[points.length - 1].z) < 0.01;
@@ -188,7 +203,8 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       const y = end === "from" ? (top[0].y + top[3].y) / 2 : (top[1].y + top[2].y) / 2;
       const g = groundY(p.x, p.z);
       const q = points[end === "from" ? 1 : points.length - 2]; const l = Math.hypot(p.x - q.x, p.z - q.z) || 1;
-      landings.push(Object.freeze({ structureId: `expressway:${highway}`, end, layerId: `expressway:${highway}`, x: p.x, z: p.z, outX: (p.x - q.x) / l, outZ: (p.z - q.z) / l, deckY: y, groundY: g, step: g === null ? null : y - g, status: "layered" }));
+      const seam = seamOf(top, end);
+      landings.push(Object.freeze({ structureId: `expressway:${highway}`, end, layerId: `expressway:${highway}`, patchId: `expressway:${highway}:${String(piece.segment).padStart(4, "0")}`, seam, x: p.x, z: p.z, outX: (p.x - q.x) / l, outZ: (p.z - q.z) / l, deckY: y, groundY: g, step: g === null ? null : y - g, status: "layered" }));
     }
   });
 
@@ -196,10 +212,17 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     revision: "unpublished", geometryVersion: CITY_SURFACE_GEOMETRY_VERSION,
     patches: Object.freeze(patches), portals: Object.freeze([]), renderBatches: groundSnapshot.renderBatches,
     report: Object.freeze({ candidateLength: groundSnapshot.report.candidateLength, geometricallyEligibleLength: 0,
-      // Remaining structural gap: decks on their own layer have no cross-layer portal.
-      issues: Object.freeze([...issues, { source: { kind: "structure", id: "cross-layer-portals" }, reason: "unsupported" } as SurfaceCompileIssue]) }),
+      issues: Object.freeze([...issues]) }),
   });
-  return Object.freeze({ surface, ground, obstacles: Object.freeze(obstacles), landings: Object.freeze(landings),
+  const connections = buildLandingPortals({surface,landings},{...DEFAULT_LANDING_PORTAL_OPTIONS,aliasTolerance:tolerance});
+  const connectedSurface = connections.status === "ready" ? connections.surface : surface;
+  // Keep unsupported diagnostics for every closed/unresolved layered entry. A geometric
+  // portal is not a vehicle release, and does not implicitly merge height-layer regions.
+  const connectionIssues: SurfaceCompileIssue[] = connections.status !== "ready" || connections.decisions.some((d)=>d.status==="closed")
+    ? [{source:{kind:"structure",id:"cross-layer-portals"},reason:"unsupported"}] : [];
+  const publishedSurface: CompiledCitySurface = Object.freeze({...connectedSurface,
+    report:Object.freeze({...connectedSurface.report,issues:Object.freeze([...issues,...connectionIssues])})});
+  return Object.freeze({ surface: publishedSurface, ground, obstacles: Object.freeze(obstacles), landings: Object.freeze(landings),
     counts: Object.freeze({ bridges, expresswaySegments, flares: channel.flares.length, islands: channel.islands.length, culDeSacs: discs.length }) });
 }
 
