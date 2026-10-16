@@ -93,7 +93,13 @@ A6 的发现：原来的桥面是一块平板，顶面取两岸**原始**地形�
 
 ## 命令
 
+2026-10-16 后续修复（geometryVersion 7）：机场占路部件实际是堤道第一块桥面，现按地面道路高度采样抬升堤道剖面，底面保留 2 高净空；机场仍是装饰场景，不因此成为开放驾驶路线。区级地标检查渲染编译器的道路/人行道三角形，避免路口外扩填充区；新增真实街区中心候选，保留整面预留和 17 宽裙楼。桁架低位杆件在两岸各内退至多 8，避开桥头路口。全部碰撞体保留。
+
+`verify-city-road-obstructions.mjs` 按真实 Miami 配置构建 15 场景并检查所有结构与场景 proxy，没有发现静态物体占路的采样见证；这不代替整车动态审计。500/780 会话布局仍各有四个区级地标，11/17 个 civic，全部选址义务通过。机场连续碰撞回归明确比较旧几何挡车与新几何允许通过。详细未完成项见 [收尾检查表](CITY_DRIVING_COMPLETION_TRACKER.md)。
+
 ```sh
+node scripts/verify-city-airport-clearance.mjs            # 旧净空反例与修复后的实际网格连续穿越
+node scripts/verify-city-road-obstructions.mjs            # 所有结构及场景 proxy 的占路见证
 node scripts/verify-city-bridge-roll-transition.mjs       # seed 7/1 双向整车连续复核
 node scripts/verify-city-expressway-piers.mjs --cities    # 门式桥墩净空及十五城路面占用诊断
 node scripts/verify-city-expressway-piers.mjs --scenes    # 真实 Miami 渲染场景的桥墩占路诊断

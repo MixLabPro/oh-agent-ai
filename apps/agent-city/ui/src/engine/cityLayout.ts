@@ -14,6 +14,7 @@ import { measureLayoutCapacity } from "./planner/layoutCapacity";
 import { closestPolylineSegment } from "./planner/footprint";
 import { findBlockLotCandidate, LAYOUT_PLACEMENT_WORK_CONFIG } from "./planner/blockLotCandidates";
 import { inspectBlockPlacement, type BlockPlacementInput, type BlockPlacementResult } from "./planner/blockPlacement";
+import { compileGroundRoadSurface } from "./surface/groundRoadCompiler";
 import { civicMinimumSize, civicEnvelopeSize, GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE } from "./models/layoutPlacementGeometry";
 
 export type Vec2 = { x: number; z: number };
@@ -350,16 +351,29 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   // 城区地标（用户：地标尽量放在城区中心、与景观湖配套）：先于会话落楼，在花园（景观湖）街区旁最近的空地块占位，
   // 城区的楼再从花园向外长。曾在落楼之后取「离锚点最近的空地块」——内圈已被会话楼占满，地标落到城区边缘。
   const districtLandmarks: DistrictLandmark[] = [];
+  // Exact road and sidewalk footprints include junction fan corners that are outside
+  // the centreline capsules. Compile once for this layout, using the renderer's compiler.
+  const landmarkRoadPolygons = model.buildings.length ? compileGroundRoadSurface(plan).layers.flatMap(layer => {
+    const triangles: Vec2[][] = [];
+    for(let i=0;i<layer.index.length;i+=3) triangles.push([0,1,2].map(k=>{
+      const v=layer.index[i+k]*3;return {x:layer.positions[v],z:layer.positions[v+2]};
+    }));
+    return triangles;
+  }) : [];
   for (const district of ranked) {
     if (!model.buildings.some((building) => building.districtId === district.id)) continue;
     const garden = gardens.find((g) => g.districtId === district.id);
     const centre = garden ?? anchorOf.get(district.id)!;
     const candidates = plan.blocks.filter((block) => block.parcels.length && block.parcels.every((parcel) => !used.has(parcel.id)))
-      .flatMap((block) => block.parcels.map((parcel) => ({ block, parcel })))
+      .flatMap((block) => [...block.parcels.map((parcel) => ({ block, parcel })),
+        // The whole owning face is reserved, so also try its real centre. Session
+        // parcel centres alone hug sidewalks too closely for the 17-unit skirt.
+        { block, parcel: { ...block.parcels[0], x:block.x, z:block.z } }])
       .sort((a, b) => Math.hypot(a.parcel.x - centre.x, a.parcel.z - centre.z) - Math.hypot(b.parcel.x - centre.x, b.parcel.z - centre.z) || a.parcel.id.localeCompare(b.parcel.id));
     let placed = false, samples = 0, attempted = 0, reason = "no free real face";
     for (const { block, parcel } of candidates) {
       const evidence = inspectLayoutPlacement({ ...layoutPlacementEnvironment(plan, occupiedParcels()), block,
+        roadPolygons: landmarkRoadPolygons,
         footprint: { ...parcel, ...DISTRICT_LANDMARK_ENVELOPE } }, placementBudget);
       samples += evidence.terrainSamples; attempted += 1;
       if (evidence.ok) {

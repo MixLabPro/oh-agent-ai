@@ -354,5 +354,56 @@
         "buildDistrictExpressways": "e05dc217aba818a1768defee7e28b0019e72e3ecdc8d65858c533d2fdf6a32f9"
       }
     }
+  },
+  "bridgeheadTruss": {
+    "geometryVersion": 7,
+    "reason": "Set low truss members back eight units inside each bank to clear bridgehead junctions; all other road structure render groups unchanged.",
+    "plans": {
+      "1/1": {
+        "buildTrussBridges": "f8e557bed1eba00efdd845d6708c78019cf6235423673965e9dd77d7ca8b52af"
+      },
+      "1/2": {
+        "buildTrussBridges": "5d5fea0d985ef23001b7a878e84394a1bc6f4d82ce1835846c6ac32044b40388"
+      },
+      "1/3": {
+        "buildTrussBridges": "0d5167c1fe4ed8f6a8ae3f281be444e81e10a5a9076cd0fb5d82dba4228fc796"
+      },
+      "7/1": {
+        "buildTrussBridges": "e283171f801174cf069095fedbe3227f2fdfce614f0ec17bc0c70a43ab50dbd2"
+      },
+      "7/2": {
+        "buildTrussBridges": "cc5e658bdbeccbbbed79b85f88eac39830a7447521bf76fcd14d92c66bdf0226"
+      },
+      "7/3": {
+        "buildTrussBridges": "e715afd97bf71ff5cbb21fec2decc0f52384dc4ce0c1220db6d1d62f1d4004ff"
+      },
+      "42/1": {
+        "buildTrussBridges": "c90b9e89312b481867d9b92aea30f7f86b1069235673a21b79ec82f93d792c9c"
+      },
+      "42/2": {
+        "buildTrussBridges": "5c5605fa72ab793e3e03163b244843c6e48bcb75c1034484880c9bfca247b7e4"
+      },
+      "42/3": {
+        "buildTrussBridges": "d7d1b8835624dbea5cc847765522e75e2fe0ab2c03bdbadaa1f9ae5c38528194"
+      },
+      "2026/1": {
+        "buildTrussBridges": "092568086c111c5ea8b39166a357489d6ea96a0517366661f8a731c97382386d"
+      },
+      "2026/2": {
+        "buildTrussBridges": "336c0ca6d8b653973f6a2e74964b852ae4196088788d483cf170ebd7b522acdf"
+      },
+      "2026/3": {
+        "buildTrussBridges": "bd2d1054bdf654719b4b9f73a76cde8cf91148d39cc48bc21f1a77f3b0dfdb70"
+      },
+      "65537/1": {
+        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "65537/2": {
+        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "65537/3": {
+        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
   }
 }

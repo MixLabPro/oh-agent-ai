@@ -316,25 +316,29 @@ export function trussBars(layout: Pick<CityLayout, "landmarks" | "bridges" | "te
     // Follows the same pitched deck as bridgeDeckParts (chords pitched along the span, posts on the deck).
     const profile = bridgeDeckProfile(layout, bridge.from, bridge.to);
     const deckAt = (t: number) => profile.at(t / len);
-    const H = 7; const panels = Math.max(4, Math.round(len / 9)); const step = len / panels;
+    // Keep the low truss members inside the span: bank junction fans can cross
+    // behind a side girder even though the bridge centreline itself is clear.
+    const setback = Math.min(8, len / 4), trussLength = len - 2 * setback;
+    const H = 7; const panels = Math.max(4, Math.round(trussLength / 9)); const step = trussLength / panels;
     for (const side of [-1, 1]) {
       const ox = nx * side * 6.6; const oz = nz * side * 6.6;
       const at = (t: number) => ({ x: bridge.from.x + ux * t + ox, z: bridge.from.z + uz * t + oz });
       const mid = at(len / 2);
-      bars.push([mid.x, deckAt(len / 2) + H, mid.z, profile.slant, 0.6, yaw, profile.pitch, 0]);          // 上弦
-      bars.push([mid.x, deckAt(len / 2) + 0.2, mid.z, profile.slant, 0.6, yaw, profile.pitch, 0]);        // 下弦
+      const chordLength = trussLength / Math.cos(profile.pitch);
+      bars.push([mid.x, deckAt(len / 2) + H, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);          // 上弦
+      bars.push([mid.x, deckAt(len / 2) + 0.2, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);        // 下弦
       for (let i = 0; i <= panels; i += 1) {
-        const p = at(i * step);
-        bars.push([p.x, deckAt(i * step), p.z, 0.45, H, yaw, 0, 1]);                 // 竖杆
+        const station = setback + i * step, p = at(station);
+        bars.push([p.x, deckAt(station), p.z, 0.45, H, yaw, 0, 1]);                 // 竖杆
         if (i < panels) {
-          const q = at((i + 0.5) * step);
-          bars.push([q.x, deckAt((i + 0.5) * step), q.z, 0.4, Math.hypot(step, H), yaw, (i % 2 ? 1 : -1) * Math.atan2(step, H), 1]); // 斜腹杆
+          const q = at(station + step / 2);
+          bars.push([q.x, deckAt(station + step / 2), q.z, 0.4, Math.hypot(step, H), yaw, (i % 2 ? 1 : -1) * Math.atan2(step, H), 1]); // 斜腹杆
         }
       }
     }
     // 顶部横撑（每两格一根），让桁架从远处读成「穿式」而不是两片护栏。
     for (let i = 0; i <= panels; i += 2) {
-      const t = i * step; const x = bridge.from.x + ux * t; const z = bridge.from.z + uz * t;
+      const t = setback + i * step; const x = bridge.from.x + ux * t; const z = bridge.from.z + uz * t;
       bars.push([x, deckAt(t) + H, z, 13.2, 0.5, yaw + Math.PI / 2, 0, 0]);
     }
   }

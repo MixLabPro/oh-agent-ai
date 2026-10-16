@@ -64,7 +64,8 @@ export function planAirport(coast: Vec2[], core: Vec2, avoid: Vec2[], roads: Vec
 }
 
 /** 生成机场岛 + 堤道网格组（单一 Group，名字以 city-landmark-airport 开头供拾取）。 */
-export function buildAirport(plan: AirportPlan, disposables: Array<{ dispose: () => void }>, nightHead: THREE.Material | null): THREE.Group {
+export function buildAirport(plan: AirportPlan, disposables: Array<{ dispose: () => void }>, nightHead: THREE.Material | null,
+  roadTopAt?: (x: number, z: number) => number | null): THREE.Group {
   const group = new THREE.Group();
   group.name = "city-landmark-airport";
   const mat = (color: string) => { const m = new THREE.MeshLambertMaterial({ color }); disposables.push(m); return m; };
@@ -102,7 +103,7 @@ export function buildAirport(plan: AirportPlan, disposables: Array<{ dispose: ()
   add(new THREE.SphereGeometry(0.7, 8, 6), nightHead ?? mat("#ff3b3b"), 80, 37.2, 34);
   // 跑道边灯（夜间与路灯同批次材质，白天不亮）。
   if (nightHead) for (let x = -L / 2 + 14; x <= L / 2 - 14; x += 14) for (const z of [-30, -6]) add(new THREE.BoxGeometry(0.6, 0.4, 0.6), nightHead, x, 1.6, z);
-  buildCauseway(group, plan.shore, { x: plan.centre.x - plan.outward.x * (W / 2), z: plan.centre.z - plan.outward.z * (W / 2) }, mat, add);
+  buildCauseway(group, plan.shore, { x: plan.centre.x - plan.outward.x * (W / 2), z: plan.centre.z - plan.outward.z * (W / 2) }, mat, add, roadTopAt);
   return group;
 }
 
@@ -111,13 +112,31 @@ export function buildCauseway(
   group: THREE.Group, start: Vec2, end: Vec2,
   mat: (color: string) => THREE.Material,
   add: (geometry: THREE.BufferGeometry, material: THREE.Material, x: number, y: number, z: number, ry?: number, parent?: THREE.Object3D) => THREE.Mesh,
+  roadTopAt?: (x: number, z: number) => number | null,
 ): void {
   const span = Math.hypot(end.x - start.x, end.z - start.z);
   const yaw = -Math.atan2(end.z - start.z, end.x - start.x);
   const steps = Math.max(4, Math.round(span / 20));
+  // The causeway is scenery, not a released driving surface. Where it crosses a real
+  // ground road, its actual underside must leave headroom (formerly only 1.1 units).
+  // Probe the complete slab footprint, including a margin outside both side edges.
+  const clearances: number[] = [];
+  let shoreLift = 0;
+  for (let i = 0; i < steps; i++) {
+    let required = -Infinity;
+    if (roadTopAt) for (let s = i * span / steps - 1; s <= (i + 1) * span / steps + 1; s += 0.5) for (let side = -7; side <= 7; side += 0.5) {
+      const x = start.x + Math.cos(yaw) * s + Math.sin(yaw) * side;
+      const z = start.z - Math.sin(yaw) * s + Math.cos(yaw) * side;
+      const y = roadTopAt(x,z);
+      if (y !== null && Number.isFinite(y)) required = Math.max(required, y + 2 + 0.35);
+    }
+    clearances.push(required);
+    const tm = (i + 0.5) / steps, base = 2.2 + Math.sin(tm * Math.PI) * 1.6;
+    shoreLift = Math.max(shoreLift, (required - base) / (1 - tm));
+  }
   for (let i = 0; i < steps; i += 1) {
     const t0 = i / steps; const t1 = (i + 1) / steps; const tm = (t0 + t1) / 2;
-    const deck = 2.2 + Math.sin(tm * Math.PI) * 1.6;
+    const deck = Math.max(clearances[i], 2.2 + Math.sin(tm * Math.PI) * 1.6 + shoreLift * (1-tm));
     const x = start.x + (end.x - start.x) * tm; const z = start.z + (end.z - start.z) * tm;
     add(new THREE.BoxGeometry(span / steps + 0.2, 0.7, 12), mat("#8e9496"), x, deck, z, yaw, group);
     for (const side of [-1, 1]) add(new THREE.BoxGeometry(span / steps, 0.8, 0.3).translate(0, 0.4, 0), mat("#d9dcd6"), x + Math.sin(yaw) * side * 5.8, deck + 0.35, z + Math.cos(yaw) * side * 5.8, yaw, group);

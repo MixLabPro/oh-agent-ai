@@ -37,6 +37,7 @@ import { buildRoadSurface, type RoadSurfaceHost } from "./systems/roadSurfaceSys
 import { compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./surface/groundRoadCompiler";
 import type { CitySurfaceSource } from "./surface/citySurfacePort";
 import { collectSceneSolids } from "./surface/sceneSolids";
+import { groundRoadTopAt } from "./surface/structureCompiler";
 import { buildInfrastructure, buildCulDeSacBulbs, buildChannelizedJunctions, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
@@ -202,7 +203,8 @@ export class CityParts {
         const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
         const core = this.layout.core ?? { x: 0, z: 0 };
         const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges), (x, z) => this.layout.terrain.height(x, z) < -0.6);
-        if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null));
+        if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null,
+          (x,z) => groundRoadTopAt(this.layout,x,z)));
       }
       this.registerDrivingRoots("civic", () => this.buildCivics());
       this.registerDrivingRoots("landmark", () => this.buildLandmarks());
