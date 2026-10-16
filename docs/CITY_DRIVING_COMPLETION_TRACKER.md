@@ -15,7 +15,7 @@
 | D1：全量场景用例及结果 | 协作方发布结果；需要按最终几何版本重新生成证据，旧 key 不可继承。 |
 | D2：开放图、证据存储、可定位故障的出生路线 | 有界内存证据库及 runner/B 审计/调度取消接线已实现，见 `CITY_AUDIT_EVIDENCE_NOTES.md`；默认 600 tick、32 片段、8 MiB，同内核一致性及失效/淘汰回归通过，界面消费仍待 E。`ReleasedDrivingGraph` 最小切片已实现（`verify-city-driving-release-graph.mjs`，入 game 模块链）：发布门复检 ready+边界 hash、green 子集只含 passed、图与 key/租约绑定失效。**仍待完成** 故障分解出生路线、审计界面消费（E）。pending/blocked/inconclusive 不混入图。 |
 | 正式出生点 | **待完成** 产品定义与显式 pose/layer/id 元数据、安全验证。最长道路中点只保留为审计诊断起点。 |
-| E：正式驾驶宿主入口 | 建筑碰撞已通过白名单场景代理接入（`createCityCarSession` 消费 sceneSolids+结构合并索引，`structures-and-scene-proxies` 覆盖标注；exact mesh 仍未消费，代理是保守包络）。守卫 `verify-city-car-session`。**仍待完成** 连续内核城市驾驶验证、正式入口 UI、开放条件。 |
+| E：正式驾驶宿主入口 | 建筑碰撞现可同时接入白名单 `sceneSolids` 代理与 `renderedSolids` 逐实例保守包围盒，和结构体进入同一个有预算上限的碰撞索引；渲染盒模型建筑的投影边界与绘制 footprint 一致，非盒网格用不小于其绘制范围的 AABB。坏数据/超预算显式拒绝，coverage 标明来源。守卫：`verify-city-car-session.mjs`、`verify-city-car-rendered-collision.mjs`。**仍待完成** 连续内核城市驾驶验证、正式入口 UI、开放条件。 |
 | E：HUD、本地审计界面、原生 bundle 验收 | **待完成**。原生仅构建 `.app` 后通过 `open` 启动；未验收前不得声称正式驾驶可用。 |
 
 本地保存证据，禁止上传用户日志/分析数据。渲染基线只为经审阅的真实几何变化增加记录；保留历史基线和未通过结果，不通过改快照掩盖故障。

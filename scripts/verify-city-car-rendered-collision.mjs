@@ -31,9 +31,11 @@ function buildingSolid(id, at) {
 
 function hostFixture(renderedSolids = []) {
   const state = { releases: 0, hooks: 0, current: true, hook: null };
-  const world = { revision: "world-fixture", surface, obstacles: [], renderedSolids, landings: [], counts: {}, obstacleCoverage: renderedSolids.length ? "structures-and-rendered-buildings" : "structures-only" };
+  const world = { revision: "world-fixture", surface, obstacles: [], sceneSolids: [], renderedSolids, landings: [], counts: {}, obstacleCoverage: renderedSolids.length ? "structures-and-rendered-buildings" : "structures-only" };
   const capture = { status: "ready", revision: surface.revision, worldRevision: world.revision,
     isCurrent: () => state.current,
+    isLeaseCurrent: () => state.current,
+    verifyCurrent: () => state.current,
     readWorld: () => state.current ? world : null,
     setFrameHook: (hook) => { state.hook = hook; if (hook) state.hooks++; },
     release: () => { if (!state.current) return; state.current = false; state.releases++; state.hook = null; } };
