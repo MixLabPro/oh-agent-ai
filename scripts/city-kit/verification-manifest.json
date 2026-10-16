@@ -500,5 +500,11 @@
   {
     "id": "verify-city-driving-release-graph",
     "file": "verify-city-driving-release-graph.mjs"
+  },
+  {
+    "id": "verify-city-driving-spawns",
+    "file": "verify-city-driving-spawns.mjs",
+    "env": {},
+    "shared": false
   }
 ]

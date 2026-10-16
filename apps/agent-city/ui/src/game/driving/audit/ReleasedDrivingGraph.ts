@@ -13,9 +13,20 @@ export type ReleasedUnitStatus = "passed" | "blocked" | "pending" | "excluded";
 export type ReleasedDrivingUnit = Readonly<{
   unitId: string; kind: AuditUnitKind; status: ReleasedUnitStatus; reason: string;
 }>;
+/** Verified corridor centerline for a passed unit: the audited path polyline (XZ)
+ * plus the direction of travel at its start. Geometry comes from the manifest's
+ * cases — the same evidence the release policy verified — never re-derived. */
+export type ReleasedUnitGeometry = Readonly<{
+  unitId: string;
+  waypoints: readonly Readonly<{ x: number; z: number }>[];
+  startHeading: number;
+  halfWidth: number;
+}>;
 export type ReleasedDrivingGraph = Readonly<{
   graphVersion: number; key: AuditKey; releaseBoundaryHash: string;
   units: readonly ReleasedDrivingUnit[]; counts: Readonly<Record<"passed" | "blocked" | "pending" | "excluded", number>>;
+  /** Centerline geometry for passed units that have exactly one audited case. */
+  geometry: readonly ReleasedUnitGeometry[];
 }>;
 export type GraphLease = Readonly<{
   /** Cheap per-step freshness, mirroring the frozen-source fast check. */
@@ -43,7 +54,35 @@ export function publishDrivingGraph(
   return { ok: true, graph: Object.freeze({
     graphVersion: RELEASED_DRIVING_GRAPH_VERSION, key: manifest.key, releaseBoundaryHash: manifest.key.releaseBoundaryHash,
     units: Object.freeze(units), counts: Object.freeze(counts),
+    geometry: Object.freeze(unitGeometry(manifest, units)),
   }) };
+}
+
+/** Verified centerlines for passed units, extracted from the audited cases themselves.
+ * A unit covered by multiple cases has ambiguous geometry and is skipped — consumers
+ * must not treat a missing entry as a drivable centerline. */
+function unitGeometry(manifest: AuditManifest, units: readonly ReleasedDrivingUnit[]): readonly ReleasedUnitGeometry[] {
+  const byUnit = new Map<string, typeof manifest.cases[number][]>();
+  for (const item of manifest.cases) for (const unitId of item.units) {
+    const list = byUnit.get(unitId); if (list) list.push(item); else byUnit.set(unitId, [item]);
+  }
+  const out: ReleasedUnitGeometry[] = [];
+  for (const unit of units) {
+    if (unit.status !== "passed") continue;
+    const cases = byUnit.get(unit.unitId);
+    if (!cases || cases.length !== 1) continue;
+    const item = cases[0];
+    const waypoints = item.corridor.waypoints;
+    if (waypoints.length < 2) continue;
+    const first = waypoints[0], second = waypoints[1];
+    out.push(Object.freeze({
+      unitId: unit.unitId,
+      waypoints,
+      startHeading: Math.atan2(second.z - first.z, second.x - first.x),
+      halfWidth: item.gates[0]?.halfWidth ?? 0,
+    }));
+  }
+  return out;
 }
 
 /** Bind a published graph to a live lease; the handle dies with the lease, not with this call. */

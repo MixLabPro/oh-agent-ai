@@ -58,21 +58,41 @@ export type SpawnPointValidation = Readonly<{ id: string }>
   & ({ ok: true; x: number; z: number; heading: number; layerId: string; regionId: string }
     | { ok: false; reason: SpawnRejection });
 
-/** 从开放图各最大连通分量派生候选（§13.5：派生后须产品确认入库）。
- * 只读图数据，不触世界——确定性：同图同输出。候选=每个 kind=directed-edge 的
- * passed 单位中每分量最长者中点，朝向取该单元方向；layerId 由调用方随图外元数据
- * 提供（图内不复制层信息，避免第二真相源）。 */
+/** 从开放图派生候选（§13.5：派生后须产品确认入库）。只读图数据，确定性：同图同输出。
+ * 候选 = 每条有 verified centerline 的 passed directed-edge 单元的中点，朝向取
+ * 该单元审计方向的沿线切向；layerId 由调用方提供（图内不复制层信息，避免第二真相源）。
+ * 几何缺失的单元（多案例覆盖歧义、无案例）不出候选——宁可少，不伪造。 */
 export function deriveSpawnCandidates(
   graph: ReleasedDrivingGraph,
   layerOf: (unitId: string) => string,
 ): ReadonlyArray<Readonly<{ id: string; sourceUnitId: string; x: number; z: number; heading: number; layerId: string }>> {
-  const passed = graph.units.filter((unit) => unit.status === "passed" && unit.kind === "directed-edge");
-  // 单元 id 里编码的折线端点不足以取中点；此处保守用单元 id 稳定排序后逐分量
-  // 取中位单元 id 的哈希伪坐标不可取——派生必须真实。实际中点由调用方从图的
-  // 附带几何（ ReleasedDrivingGraph vNext 的 unitGeometry）提供；当前切片
-  // 图尚无逐单元几何，返回空候选并说明，不伪造坐标。
-  void passed; void layerOf;
-  return [];
+  const out: Array<{ id: string; sourceUnitId: string; x: number; z: number; heading: number; layerId: string }> = [];
+  const geometryByUnit = new Map(graph.geometry.map((entry) => [entry.unitId, entry]));
+  for (const unit of graph.units) {
+    if (unit.status !== "passed" || unit.kind !== "directed-edge") continue;
+    const geometry = geometryByUnit.get(unit.unitId);
+    if (!geometry || geometry.waypoints.length < 2) continue;
+    // 折线累计长度中点：站位在审计走廊中心线上，朝向沿该处切向。
+    const points = geometry.waypoints;
+    let total = 0;
+    const cumulative = [0];
+    for (let index = 1; index < points.length; index += 1) {
+      total += Math.hypot(points[index].x - points[index - 1].x, points[index].z - points[index - 1].z);
+      cumulative.push(total);
+    }
+    if (!(total > 0)) continue;
+    const target = total / 2;
+    let index = 1;
+    while (index < cumulative.length - 1 && cumulative[index] < target) index += 1;
+    const span = cumulative[index] - cumulative[index - 1] || 1;
+    const t = (target - cumulative[index - 1]) / span;
+    const a = points[index - 1], b = points[index];
+    const x = a.x + (b.x - a.x) * t;
+    const z = a.z + (b.z - a.z) * t;
+    const heading = Math.atan2(b.z - a.z, b.x - a.x);
+    out.push({ id: `spawn:${unit.unitId}`, sourceUnitId: unit.unitId, x, z, heading, layerId: layerOf(unit.unitId) });
+  }
+  return Object.freeze(out.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }
 
 /** 进入时四条校验（§13.5）。任一不过 → 该点不可用于出生。 */
