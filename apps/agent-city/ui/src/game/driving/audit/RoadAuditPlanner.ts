@@ -43,7 +43,7 @@ export type PlannerParams = Readonly<{
 export const DEFAULT_PLANNER_PARAMS: PlannerParams = Object.freeze({ edgeTrim: 6, minEdgeRun: 8, edgeMargin: 0.5,
   turnReach: 15, minTurnLeg: 5, turnMargin: 1.0, groundReach: 10, deckReach: 12, structureMargin: 0.5, spawnMargin: 1.0, filletRadius: 5, filletStep: 1 });
 
-export type PlannedRoute = PassabilityRoute & Readonly<{ kind: AuditUnitKind }>;
+export type PlannedRoute = PassabilityRoute & Readonly<{ kind: AuditUnitKind; /** Road units: the member edges. */ edgeIds?: readonly string[] }>;
 export type AuditPlan = Readonly<{
   worldRevision: string; plannerVersion: number; manifestHash: string;
   units: readonly AuditUnit[];
@@ -107,30 +107,38 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
   };
   const edges = [...input.roadEdges].filter((e) => e.points.length >= 2).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
-  // ── directed-edge: both directions ──
-  for (const e of edges) {
-    const L = lengthsOf(e.points); const total = L[L.length - 1]; const t = Math.min(params.edgeTrim, total / 4);
-    for (const dir of ["fwd", "rev"] as const) {
-      const id = `edge:${e.id}:${dir}`;
-      if (total - 2 * t < params.minEdgeRun) { exclude(id, "directed-edge", `edge-too-short:${total.toFixed(2)}`); continue; }
-      const path = slice(e.points, t, total - t);
-      route(id, "directed-edge", dir === "fwd" ? path : [...path].reverse(), e.width / 2 + params.edgeMargin);
-    }
-  }
-
-  // ── turn: every incoming → outgoing pair at a node, no U-turns ──
+  // Road network edges are short segments chained through degree-2 nodes (in real cities 230 of 264 nodes).
+  // A degree-2 node is a continuation, not a junction: the audited road is the maximal chain between
+  // junctions/dead ends, traversed both ways; turns exist only where three or more edges meet.
   const incident = new Map<string, { edge: PlannerEdge; atStart: boolean }[]>();
   for (const e of edges) for (const [node, atStart] of [[e.from, true], [e.to, false]] as const) {
     let list = incident.get(node); if (!list) incident.set(node, list = []); list.push({ edge: e, atStart });
   }
+  const degree = (n: string) => incident.get(n)?.length ?? 0;
+  const chains = roadChains(edges, incident);
+
+  // ── directed-edge: each road (chain between junctions) in both directions ──
+  for (const chain of chains) {
+    const L = lengthsOf(chain.points); const total = L[L.length - 1];
+    // Trim only at junction/dead ends (fans live there); a closed loop has no fan.
+    const t = chain.loop ? 0 : Math.min(params.edgeTrim, total / 4);
+    for (const dir of ["fwd", "rev"] as const) {
+      const id = `road:${chain.id}:${dir}`;
+      if (total - 2 * t < params.minEdgeRun) { exclude(id, "directed-edge", `road-too-short:${total.toFixed(2)}`); continue; }
+      const path = slice(chain.points, t, total - t);
+      route(id, "directed-edge", dir === "fwd" ? path : [...path].reverse(), chain.width / 2 + params.edgeMargin, { edgeIds: chain.edgeIds } as Partial<PassabilityRoute>);
+    }
+  }
+
+  // ── turn: every incoming → outgoing pair at a junction (degree ≥ 3), no U-turns ──
   for (const node of [...incident.keys()].sort()) {
     const list = incident.get(node)!;
-    if (list.length < 2) continue; // dead end: no legal turn (U-turns are not generated)
+    if (degree(node) < 3) continue; // dead ends have no turn; degree 2 is a continuation of one road
     for (const a of list) for (const b of list) {
       if (a.edge.id === b.edge.id && a.atStart === b.atStart) continue; // same end = U-turn
-      // Oriented polylines: incoming ends at the node, outgoing starts at it.
-      const inPts = a.atStart ? [...a.edge.points].reverse() : [...a.edge.points];
-      const outPts = b.atStart ? [...b.edge.points] : [...b.edge.points].reverse();
+      // Legs follow the whole roads through degree-2 continuations, so a short first segment is not a short leg.
+      const inPts = legPoints(a, node, incident, true);
+      const outPts = legPoints(b, node, incident, false);
       const id = `turn:${node}:${a.edge.id}:${a.atStart ? "rev" : "fwd"}>${b.edge.id}:${b.atStart ? "fwd" : "rev"}`;
       const Li = lengthsOf(inPts), Lo = lengthsOf(outPts);
       const inLen = Li[Li.length - 1], outLen = Lo[Lo.length - 1];
@@ -144,13 +152,19 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
   // ── structure-transition: each landing, onto and off the structure ──
   for (const l of [...input.landings].sort((x, y) => x.structureId < y.structureId ? -1 : x.structureId > y.structureId ? 1 : x.end < y.end ? -1 : 1)) {
     const base = `structure:${l.structureId}:${l.end}`;
-    const half = Math.hypot(l.seam.b.x - l.seam.a.x, l.seam.b.z - l.seam.a.z) / 2 + params.structureMargin;
-    const ground = { x: l.x + l.outX * params.groundReach, z: l.z + l.outZ * params.groundReach };
+    // Legal envelope: the wider of the deck's seam and the approach road (region boundaries still bound the deck).
+    const approachWidth = l.structureId.startsWith("bridge:") ? Math.max(0, ...[...(incident.get((() => { const b = edges.find((e) => e.id === l.structureId.slice(7)); return b ? (l.end === "from" ? b.from : b.to) : ""; })()) ?? [])].filter((x) => x.edge.id !== l.structureId.slice(7)).map((x) => x.edge.width)) : 0;
+    const half = Math.max(Math.hypot(l.seam.b.x - l.seam.a.x, l.seam.b.z - l.seam.a.z) / 2, approachWidth / 2) + params.structureMargin;
     const deck = { x: l.x - l.outX * params.deckReach, z: l.z - l.outZ * params.deckReach };
+    // Ground side along the ACTUAL approach: a bridge lands on a road node, whose approach bends often — a
+    // straight line along the span axis ran onto sidewalks. Expressway ramps land mid-road (straight, short).
+    const approach = bridgeApproach(l, edges, incident, params.groundReach);
+    const groundSide: P[] = approach ?? [{ x: l.x, z: l.z }, { x: l.x + l.outX * Math.min(params.groundReach, 6), z: l.z + l.outZ * Math.min(params.groundReach, 6) }];
     for (const dir of ["onto", "off"] as const) {
       const id = `${base}:${dir}`;
       if (l.status === "no-ground") { exclude(id, "structure-transition", "no-ground-landing"); continue; }
-      route(id, "structure-transition", dir === "onto" ? [ground, { x: l.x, z: l.z }, deck] : [deck, { x: l.x, z: l.z }, ground], half,
+      const onto = fillet([...[...groundSide].reverse(), deck], params.filletRadius, params.filletStep);
+      route(id, "structure-transition", dir === "onto" ? onto : [...onto].reverse(), half,
         dir === "onto" ? { startLayer: "ground", exitLayer: l.layerId } : { startLayer: l.layerId, exitLayer: "ground" });
     }
   }
@@ -176,6 +190,75 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
     routes.map((r) => [r.id, r.kind, r.halfWidth, r.startLayer ?? "ground", r.exitLayer ?? "ground", r.path.map((p) => [p.x, p.z])])]);
   return Object.freeze({ worldRevision: input.worldRevision, plannerVersion: ROAD_AUDIT_PLANNER_VERSION, manifestHash: `plan-v1:fnv64:${fnv64(canonical)}`,
     units: Object.freeze(units), exclusions: Object.freeze(exclusions), routes: Object.freeze(routes), counts: Object.freeze(counts) });
+}
+
+/** Ground-side polyline of a bridge landing, starting at the landing node and running `reach` along the
+ * incident road most aligned with the span (through degree-2 continuations); null when the structure is not
+ * a road-edge bridge (expressway ramps) or no approach exists. */
+function bridgeApproach(l: StructureLanding, edges: readonly PlannerEdge[], incident: Incident, reach: number): P[] | null {
+  if (!l.structureId.startsWith("bridge:")) return null;
+  const bridge = edges.find((e) => e.id === l.structureId.slice("bridge:".length));
+  if (!bridge) return null;
+  const node = l.end === "from" ? bridge.from : bridge.to;
+  let best: { edge: PlannerEdge; atStart: boolean } | null = null; let bestDot = -Infinity;
+  for (const x of incident.get(node) ?? []) {
+    if (x.edge.id === bridge.id) continue;
+    const pts = x.atStart ? x.edge.points : [...x.edge.points].reverse();
+    const d = { x: pts[1].x - pts[0].x, z: pts[1].z - pts[0].z }; const len = Math.hypot(d.x, d.z) || 1;
+    const dot = (d.x * l.outX + d.z * l.outZ) / len;
+    if (dot > bestDot || (dot === bestDot && best && x.edge.id < best.edge.id)) { bestDot = dot; best = x; }
+  }
+  if (!best) return null;
+  const leg = legPoints(best, node, incident, false);
+  const L = lengthsOf(leg);
+  return slice(leg, 0, Math.min(reach, L.at(-1)! * 0.8));
+}
+type Incident = Map<string, { edge: PlannerEdge; atStart: boolean }[]>;
+type Chain = { id: string; edgeIds: string[]; points: P[]; width: number; loop: boolean };
+/** Maximal chains of edges through degree-2 nodes. Stable: each chain starts at its smallest-id end edge. */
+function roadChains(edges: readonly PlannerEdge[], incident: Incident): Chain[] {
+  const used = new Set<string>(); const chains: Chain[] = [];
+  const deg = (n: string) => incident.get(n)?.length ?? 0;
+  const oriented = (e: PlannerEdge, fromNode: string) => (e.from === fromNode ? [...e.points] : [...e.points].reverse());
+  const walk = (first: PlannerEdge, startNode: string) => {
+    const ids: string[] = []; const pts: P[] = []; let width = Infinity; let e = first; let node = startNode;
+    for (;;) {
+      used.add(e.id); ids.push(e.id); width = Math.min(width, e.width);
+      const seg = oriented(e, node); pts.push(...(pts.length ? seg.slice(1) : seg));
+      node = e.from === node ? e.to : e.from;
+      if (deg(node) !== 2 || node === startNode) break;
+      const next = incident.get(node)!.find((x) => x.edge.id !== e.id)?.edge;
+      if (!next || used.has(next.id)) break;
+      e = next;
+    }
+    return { ids, pts, width, end: node };
+  };
+  // Chains start at a junction or dead end (degree ≠ 2); what remains are closed loops of degree-2 nodes.
+  for (const e of edges) for (const node of [e.from, e.to]) {
+    if (used.has(e.id) || deg(node) === 2) continue;
+    const w = walk(e, node);
+    chains.push({ id: [...w.ids].sort()[0], edgeIds: w.ids, points: dedupe(w.pts), width: w.width, loop: false });
+  }
+  for (const e of edges) if (!used.has(e.id)) {
+    const w = walk(e, e.from);
+    chains.push({ id: [...w.ids].sort()[0], edgeIds: w.ids, points: dedupe(w.pts), width: w.width, loop: w.end === e.from });
+  }
+  return chains.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+/** A turn leg along the whole road through degree-2 continuations; incoming ends at `node`, outgoing starts there. */
+function legPoints(first: { edge: PlannerEdge; atStart: boolean }, node: string, incident: Incident, incoming: boolean): P[] {
+  const pts: P[] = []; let e = first.edge; let at = node; const seen = new Set<string>();
+  for (let guard = 0; guard < 64; guard++) {
+    seen.add(e.id);
+    const seg = e.from === at ? [...e.points] : [...e.points].reverse();
+    pts.push(...(pts.length ? seg.slice(1) : seg));
+    at = e.from === at ? e.to : e.from;
+    if ((incident.get(at)?.length ?? 0) !== 2 || lengthsOf(pts).at(-1)! >= 30) break;
+    const next = incident.get(at)!.find((x) => x.edge.id !== e.id)?.edge;
+    if (!next || seen.has(next.id)) break;
+    e = next;
+  }
+  return incoming ? dedupe(pts).reverse() : dedupe(pts);
 }
 
 /** One deterministic audit start per connected component: the midpoint of its longest edge. */
@@ -260,7 +343,9 @@ function plannedCase(world: PassabilityWorld, r: PlannedRoute): RoadAuditCase {
 }
 
 export function executeAuditPlan(world: PassabilityWorld, plan: AuditPlan, keyFor: (worldRevision: string, manifestHash: string) => AuditKey,
-  options: PassabilityOptions & Readonly<{ onResult?: (r: PassabilityResult, index: number, total: number) => void; shouldStop?: () => boolean }> = {}): AuditPlanReport {
+  options: PassabilityOptions & Readonly<{ onResult?: (r: PassabilityResult, index: number, total: number) => void; shouldStop?: () => boolean;
+    /** Run only these cases (diagnostics/sampling); the frozen manifest keeps every case, unrun ones stay pending. */
+    only?: (route: PlannedRoute) => boolean }> = {}): AuditPlanReport {
   if (plan.worldRevision !== world.worldRevision) throw new Error("plan-world-mismatch");
   const key = keyFor(world.worldRevision, plan.manifestHash);
   if (key.manifestHash !== plan.manifestHash || key.baseSnapshotHash !== world.worldRevision || key.plannerVersion !== plan.plannerVersion) throw new Error("plan-key-mismatch");
@@ -270,6 +355,7 @@ export function executeAuditPlan(world: PassabilityWorld, plan: AuditPlan, keyFo
   const results: PassabilityResult[] = [];
   for (let i = 0; i < plan.routes.length; i++) {
     if (options.shouldStop?.()) break;
+    if (options.only && !options.only(plan.routes[i])) continue;
     const r = auditRoute(world, key, plan.routes[i], { ...options, pilot }); results.push(r); options.onResult?.(r, i, plan.routes.length);
   }
   const manifest: AuditManifest = { key, units: plan.units, exclusions: plan.exclusions, cases: plan.routes.map((r) => plannedCase(world, r)) };

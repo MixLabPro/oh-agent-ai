@@ -43,11 +43,16 @@ const plan = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: edges, la
   assert.equal(again.manifestHash, plan.manifestHash, "input order does not change the manifest");
   const moved = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: [...edges.slice(1), edge("e", "C", "E", C, { x: 41, z: 0 })], landings: [] });
   assert.notEqual(moved.manifestHash, plan.manifestHash, "geometry changes the manifest identity");
-  // A stub too short to audit stays in the denominator as a visible exclusion.
-  const stubbed = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: [...edges, edge("stub", "E", "X", E, { x: 48, z: 0 })], landings: [] });
-  const ex = stubbed.exclusions.filter((x) => x.unitId.startsWith("edge:stub:"));
-  assert.equal(ex.length, 2); assert.match(ex[0].reason, /^edge-too-short:/);
-  assert.ok(stubbed.units.some((u) => u.id === "edge:stub:fwd"), "excluded units remain in the manifest");
+  // A spur too short to audit (off the junction) stays in the denominator as a visible exclusion.
+  const stubbed = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: [...edges, edge("stub", "C", "X", C, { x: 6, z: 6 })], landings: [] });
+  const ex = stubbed.exclusions.filter((x) => x.unitId.startsWith("road:stub:"));
+  assert.equal(ex.length, 2); assert.match(ex[0].reason, /^road-too-short:/);
+  assert.ok(stubbed.units.some((u) => u.id === "road:stub:fwd"), "excluded units remain in the manifest");
+  // A road split into two segments through a degree-2 node is ONE road unit per direction, with no turns there.
+  const split = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: [...edges.filter((e) => e.id !== "e"), edge("e1", "C", "M", C, { x: 20, z: 0 }), edge("e2", "M", "E", { x: 20, z: 0 }, E)], landings: [] });
+  assert.equal(split.counts["directed-edge"].units, 8, "chains, not segments");
+  assert.ok(!split.units.some((u) => u.id.startsWith("turn:M:")), "a degree-2 node is a continuation, not a junction");
+  assert.deepEqual(split.routes.find((r) => r.id === "road:e1:fwd").edgeIds, ["e1", "e2"], "the road unit names its member edges");
   // Landings: dangling ends excluded, others get onto/off cases with their layers.
   const landing = (end, status, layerId) => ({ structureId: "bridge:b", end, layerId, x: 0, z: 0, patchId: "deck", seam: { a: { x: 0, y: 0, z: -2.5 }, b: { x: 0, y: 0, z: 2.5 } }, outX: -1, outZ: 0, deckY: 0, groundY: 0, step: 0, status });
   const structured = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: edges, landings: [landing("from", "aligned", "ground"), landing("to", "no-ground", "ground")] });
@@ -81,11 +86,11 @@ const plan = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: edges, la
   // with a witness; turns (legs ≤ 15) are untouched; the far spawn route is never counted as a pass.
   const report = m.executeAuditPlan(worldOf([box("pier", "expressway-pier", 19, 21, 0, 6, -3.2, 3.2)]), plan, keyFor);
   const v = (id) => report.results.find((r) => r.routeId === id);
-  assert.equal(v("edge:e:fwd").verdict, "blocked"); assert.equal(v("edge:e:rev").verdict, "blocked");
-  assert.ok(v("edge:e:fwd").witness.limits.includes("structure:pier"));
-  for (const id of ["edge:n:fwd", "edge:w:rev", "edge:s:fwd"]) assert.equal(v(id).verdict, "passed", id);
+  assert.equal(v("road:e:fwd").verdict, "blocked"); assert.equal(v("road:e:rev").verdict, "blocked");
+  assert.ok(v("road:e:fwd").witness.limits.includes("structure:pier"));
+  for (const id of ["road:n:fwd", "road:w:rev", "road:s:fwd"]) assert.equal(v(id).verdict, "passed", id);
   assert.equal(report.coverage["directed-edge"].blocked, 2);
-  assert.equal(report.release.units.find((u) => u.unitId === "edge:e:fwd").status, "blocked", "the release policy carries the witness");
+  assert.equal(report.release.units.find((u) => u.unitId === "road:e:fwd").status, "blocked", "the release policy carries the witness");
 }
 console.log("Audit planner: frozen deterministic manifest (directions, non-U turns, structure onto/off, spawn → farthest node), visible exclusions, one case per unit, release-policy execution with per-kind coverage, fault injection localised passed.");
 
@@ -93,6 +98,7 @@ if (process.argv.includes("--cities")) {
   const { sceneKit, buildParts } = await import("./city-kit/scene-parts.mjs");
   const kit = await sceneKit({ "engine/surface/citySurfacePort.ts": ["CitySurfacePort"], "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"], "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
     "game/driving/audit/RoadPassabilityAudit.ts": ["passabilityWorld"], "game/driving/audit/RoadAuditPlanner.ts": ["planRoadAudit", "executeAuditPlan"] });
+  void 0;
   const scenes = (process.env.PLANNER_SCENES ?? "0/1,90/7,500/42").split(",");
   const limit = Number(process.env.PLANNER_ROUTES ?? 0); // 0 = the whole manifest
   for (const scene of scenes) {
@@ -104,11 +110,11 @@ if (process.argv.includes("--cities")) {
       const snap = capture.readWorld();
       const world = kit.passabilityWorld(snap, kit.buildSurfaceRegions(snap.surface, kit.buildSurfaceIndex(snap.surface)), capture.isCurrent).world;
       const full = kit.planRoadAudit({ worldRevision: snap.revision, roadEdges: lease.source.layout.roadEdges, landings: snap.landings });
-      const plan = limit ? { ...full, routes: full.routes.filter((_, i) => i % Math.ceil(full.routes.length / limit) === 0) } : full;
+      const plan = full; const stride = limit ? Math.ceil(full.routes.length / limit) : 1;
       const t = Date.now();
-      const report = kit.executeAuditPlan(world, plan, keyFor);
+      const report = kit.executeAuditPlan(world, plan, keyFor, { only: (r) => full.routes.indexOf(r) % stride === 0 });
       const k = full.counts;
-      console.log(`Audit planner: ${scene}: manifest ${full.units.length} units (edges ${k["directed-edge"].units}, turns ${k.turn.units}, structures ${k["structure-transition"].units}, spawns ${k["spawn-access"].units}; excluded ${full.exclusions.length}), ran ${plan.routes.length} cases in ${((Date.now() - t) / 1000).toFixed(0)}s → ${report.summary}.`);
+      console.log(`Audit planner: ${scene}: manifest ${full.units.length} units (edges ${k["directed-edge"].units}, turns ${k.turn.units}, structures ${k["structure-transition"].units}, spawns ${k["spawn-access"].units}; excluded ${full.exclusions.length}), ran ${report.results.length} cases in ${((Date.now() - t) / 1000).toFixed(0)}s → ${report.summary}.`);
       const bad = report.results.filter((r) => r.verdict !== "passed");
       for (const r of bad.slice(0, 12)) console.log(`  ${r.routeId} ${r.verdict}:${r.cause} ${r.detail}`);
       assert.ok(report.results.every((r) => r.verdict !== "blocked" || r.witness), "blocked always carries a witness");
