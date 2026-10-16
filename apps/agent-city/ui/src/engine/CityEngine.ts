@@ -1926,14 +1926,16 @@ export class CityEngine {
     try {
       const capture = await this.drivingWorldPort.capture(lease.source, signal);
       if (capture.status !== "ready") { release(); return capture; }
+      const leaseCurrent = () => active && this.parts === parts && capture.isLeaseCurrent();
       const current = () => active && this.parts === parts && capture.isCurrent();
       const setFrameHook = (hook: ((dt: number) => void) | null) => {
         if (!hook) { if (this.drivingWorldFrame?.token === token) this.drivingWorldFrame = null; return; }
-        if (!current()) throw new Error("stale-driving-world");
+        if (!leaseCurrent()) throw new Error("stale-driving-world");
         if (this.cinematic || this.gameFrame || this.cameraOwner !== "orbit" || (this.drivingWorldFrame && this.drivingWorldFrame.token !== token)) throw new Error("driving-frame-already-owned");
-        this.drivingWorldFrame = { token, run: (dt) => { if (!current()) { this.drivingWorldFrame = null; hook(dt); return; } hook(dt); } };
+        this.drivingWorldFrame = { token, run: (dt) => { if (!leaseCurrent()) { this.drivingWorldFrame = null; hook(dt); return; } hook(dt); } };
       };
-      return Object.freeze({ ...capture, isCurrent: current, release, setFrameHook,
+      return Object.freeze({ ...capture, isCurrent: current, isLeaseCurrent: leaseCurrent, release, setFrameHook,
+        verifyCurrent: () => active && this.parts === parts && capture.verifyCurrent(),
         read: () => current() ? capture.read() : null,
         readWorld: () => current() ? capture.readWorld() : null,
         querySurface: (request: Parameters<ReadyCitySurfaceCapture["querySurface"]>[0]) => current() ? capture.querySurface(request) : Object.freeze({ status: "stale" as const }),

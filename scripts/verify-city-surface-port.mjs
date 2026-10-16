@@ -88,4 +88,24 @@ assert.equal(restoredScene.worldRevision, sceneCapture.worldRevision, "unchanged
 scenePort.invalidate(); scene = structuredClone(scene); scene[0].center.y += 1;
 const movedScene = await scenePort.capture(sceneSource);
 assert.notEqual(movedScene.worldRevision, restoredScene.worldRevision, "scene proxies participate in world content identity");
+// Frozen host leases expose a cheap revision check instead of re-collecting and
+// serializing the full scene proxy list on every runtime frame.
+let leaseCurrent = true, proxyReads = 0, leaseChecks = 0, renderedChecks = 0;
+const frozenPort = new CitySurfacePort(hash);
+const frozenCapture = await frozenPort.capture({ ...source,
+  solids: () => { proxyReads++; return scene; }, solidsCurrent: () => { leaseChecks++; return leaseCurrent; },
+  verifySolidsCurrent: () => { proxyReads++; return leaseCurrent; },
+  rendered: { solids: [], isCurrent: () => { renderedChecks++; return leaseCurrent; } },
+});
+assert.equal(frozenCapture.status, "ready");
+const proxyReadsAtPublish = proxyReads;
+const leaseChecksAtPublish = leaseChecks, renderedChecksAtPublish = renderedChecks;
+for (let i = 0; i < 100; i++) assert.equal(frozenCapture.isLeaseCurrent(), true);
+assert.equal(proxyReads, proxyReadsAtPublish, "per-frame freshness must not recollect scene solids");
+assert.equal(leaseChecks - leaseChecksAtPublish, 100);
+assert.equal(renderedChecks - renderedChecksAtPublish, 100, "fast checks only invoke the lease callbacks");
+assert.equal(frozenCapture.verifyCurrent(), true);
+assert.equal(proxyReads, proxyReadsAtPublish + 1, "deep verification still rechecks the source");
+leaseCurrent = false;
+assert.equal(frozenCapture.isCurrent(), false, "ending the freeze lease invalidates immediately");
 console.log("Surface port: owned surface/structural metadata, world content identity, concurrent capture sharing, per-caller cancellation, source replacement and invalidation during either hash passed.");

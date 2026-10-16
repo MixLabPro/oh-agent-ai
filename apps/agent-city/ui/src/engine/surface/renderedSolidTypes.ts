@@ -6,7 +6,7 @@ export type RenderedSolid = Readonly<{
   /** Column-major matrices, one per rendered instance; already includes matrixWorld. */
   transforms: Float64Array;
 }>;
-export type RenderedSolidSource = Readonly<{ solids: readonly RenderedSolid[]; isCurrent: () => boolean }>;
+export type RenderedSolidSource = Readonly<{ solids: readonly RenderedSolid[]; isCurrent: () => boolean; verifyCurrent?: () => boolean }>;
 export const RENDERED_SOLID_LIMITS = Object.freeze({ meshes: 20000, vertices: 1000000, instances: 100000, bytes: 32 * 1024 * 1024 });
 export function assertRenderedSolidBudget(solids: readonly RenderedSolid[]): void {
   let vertices = 0, instances = 0, bytes = 0;

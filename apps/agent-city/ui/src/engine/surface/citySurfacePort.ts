@@ -13,7 +13,9 @@ import { checkLandingSeams, type LandingSeamOptions, type LandingSeamReport } fr
 import { assertRenderedSolidBudget, copyRenderedSolids, type RenderedSolid, type RenderedSolidSource } from "./renderedSolidTypes";
 import type { SolidInput } from "../../game/driving/CollisionIndex";
 
-export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface; rendered?: RenderedSolidSource; solids?: () => readonly SolidInput[] }>;
+export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface; rendered?: RenderedSolidSource; solids?: () => readonly SolidInput[];
+  /** Optional O(1) lease check when scene solids are already frozen by their host. */ solidsCurrent?: () => boolean;
+  /** Deep source comparison for audit boundaries; never call this in a frame loop. */ verifySolidsCurrent?: () => boolean }>;
 type StructureMetadata = Pick<CitySurfaceCompilation, "obstacles" | "landings" | "counts">;
 export type CityDrivingSnapshot = StructureMetadata & Readonly<{
   revision: string;
@@ -32,7 +34,12 @@ export type ReadyCitySurfaceCapture = Readonly<{
   status: "ready";
   revision: string;
   worldRevision: string;
+  /** Deep source check retained for readers that need immediate freshness semantics. */
   isCurrent: () => boolean;
+  /** O(1) lease/revision check for the explicitly frozen runtime frame loop. */
+  isLeaseCurrent: () => boolean;
+  /** Expensive deep comparison for audit boundaries and session entry. */
+  verifyCurrent: () => boolean;
   /** Defensive copies; both reads fail once the host generation changes. */
   read: () => CompiledCitySurface | null;
   readWorld: () => CityDrivingSnapshot | null;
@@ -157,8 +164,8 @@ export class CitySurfacePort {
 
   async capture(source: CitySurfaceSource | null, signal?: AbortSignal): Promise<CitySurfaceCapture> {
     if (!source) { this.invalidate(); return Object.freeze({ status: signal?.aborted ? "cancelled" : "unavailable" }); }
-    if (this.source?.layout !== source.layout || this.source?.ground !== source.ground || this.source?.rendered !== source.rendered || this.source?.solids !== source.solids) {
-      this.invalidate(); this.source = Object.freeze({ layout: source.layout, ground: source.ground, rendered: source.rendered, solids: source.solids });
+    if (this.source?.layout !== source.layout || this.source?.ground !== source.ground || this.source?.rendered !== source.rendered || this.source?.solids !== source.solids || this.source?.solidsCurrent !== source.solidsCurrent || this.source?.verifySolidsCurrent !== source.verifySolidsCurrent) {
+      this.invalidate(); this.source = Object.freeze({ layout: source.layout, ground: source.ground, rendered: source.rendered, solids: source.solids, solidsCurrent: source.solidsCurrent, verifySolidsCurrent: source.verifySolidsCurrent });
     }
     if (signal?.aborted) return Object.freeze({ status: "cancelled" });
     if (this.cached?.isCurrent()) return this.cached;
@@ -184,17 +191,29 @@ export class CitySurfacePort {
     let sourceValid = true;
     const sourceCurrent = () => {
       if (!sourceValid) return false;
-      try { return sourceValid = (!source.rendered || source.rendered.isCurrent()) && (!source.solids || JSON.stringify(sceneSolidValues(source.solids())) === sceneIdentity); }
+      try { return sourceValid = (!source.rendered || source.rendered.isCurrent()) &&
+        (source.solidsCurrent ? source.solidsCurrent() : !source.solids || JSON.stringify(sceneSolidValues(source.solids())) === sceneIdentity); }
       catch { return sourceValid = false; }
     };
+    const verifySourceCurrent = () => {
+      if (!sourceCurrent()) return false;
+      try {
+        const rendered = source.rendered ? (source.rendered.verifyCurrent?.() ?? source.rendered.isCurrent()) : true;
+        const scene = source.verifySolidsCurrent ? source.verifySolidsCurrent()
+          : source.solidsCurrent ? source.solidsCurrent() : !source.solids || JSON.stringify(sceneSolidValues(source.solids())) === sceneIdentity;
+        return sourceValid = rendered && scene;
+      } catch { return sourceValid = false; }
+    };
     const publication = await this.store.publish(compilation.surface);
-    if (generation !== this.generation || publication.status !== "published" || !sourceCurrent()) return Object.freeze({ status: "stale" });
+    if (generation !== this.generation || publication.status !== "published" || !verifySourceCurrent()) return Object.freeze({ status: "stale" });
     const revision = publication.revision;
     const digest = await this.hash(canonicalCityWorldBytes(revision, metadata, source.rendered ? renderedSolids : undefined, source.solids ? sceneSolids : undefined));
-    if (generation !== this.generation || this.store.revision !== revision || !sourceCurrent()) return Object.freeze({ status: "stale" });
+    if (generation !== this.generation || this.store.revision !== revision || !verifySourceCurrent()) return Object.freeze({ status: "stale" });
     if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("invalid-world-digest");
     const worldRevision = `city-world-v1:sha256:${digest}`;
-    const isCurrent = () => generation === this.generation && this.store.revision === revision && sourceCurrent();
+    const leaseCurrent = () => generation === this.generation && this.store.revision === revision && sourceCurrent();
+    const verifyCurrent = () => generation === this.generation && this.store.revision === revision && verifySourceCurrent();
+    const isCurrent = verifyCurrent;
     const read = () => isCurrent() ? this.store.read(revision) : null;
     const readWorld = (): CityDrivingSnapshot | null => {
       const surface = read();
@@ -222,7 +241,8 @@ export class CitySurfacePort {
         ? Object.freeze({ status: "current", worldRevision, result: index.query(request) })
         : Object.freeze({ status: "unresolved", worldRevision, reason: index.reason });
     };
-    const capture: ReadyCitySurfaceCapture = Object.freeze({ status: "ready", revision, worldRevision, isCurrent, read, readWorld, checkStructures, checkLandings, querySurface });
+    const capture: ReadyCitySurfaceCapture = Object.freeze({ status: "ready", revision, worldRevision, isCurrent, isLeaseCurrent: leaseCurrent,
+      verifyCurrent, read, readWorld, checkStructures, checkLandings, querySurface });
     this.cached = capture;
     return capture;
   }

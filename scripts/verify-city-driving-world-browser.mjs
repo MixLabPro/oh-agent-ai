@@ -37,6 +37,10 @@ try {
       const solids = matchActual(a), roles = new Set(solids.map((s) => s.role));
       check(roles.has("building") && roles.has("landmark") && solids.some((s) => s.transforms.length > 16), "actual buildings, landmarks and instanced geometry present");
       check(a.readWorld().obstacleCoverage === "structures-and-rendered-buildings", "bounded coverage explicit");
+      const currentStarted = performance.now();
+      for (let i = 0; i < 1000; i++) check(a.isLeaseCurrent(), "fast frozen lease remains current");
+      check(performance.now() - currentStarted < 250, "per-frame lease checks avoid rescanning mesh buffers");
+      check(a.verifyCurrent(), "explicit deep validation at audit/session boundary");
       const mutatedCopy = a.readWorld(); mutatedCopy.renderedSolids[0].positions.fill(123);
       check(a.isCurrent() && a.readWorld().renderedSolids[0].positions[0] !== 123, "defensive typed array ownership");
       engine.parts.update(1, 10); check(a.isCurrent(), "frame cannot change frozen displayed geometry");
@@ -60,7 +64,7 @@ try {
       const tampered = await acquire();
       const shaft = engine.parts.shaftMeshes.find((m) => m.count > 0), value = shaft.instanceMatrix.array[13];
       shaft.instanceMatrix.array[13] = value + 1;
-      check(!tampered.isCurrent() && tampered.readWorld() === null, "unexpected live geometry mutation invalidates frozen handle");
+      check(tampered.readWorld() === null && !tampered.isLeaseCurrent(), "reading detects unexpected live geometry mutation and retires fast lease");
       shaft.instanceMatrix.array[13] = value; check(!tampered.isCurrent(), "restoring geometry cannot revive handle"); tampered.release();
       const disposedGeometry = await acquire(); shaft.geometry.dispose(); check(!disposedGeometry.isCurrent(), "geometry dispose invalidates frozen mesh"); disposedGeometry.release();
       const originalInfluences = shaft.morphTargetInfluences; shaft.morphTargetInfluences = [1];

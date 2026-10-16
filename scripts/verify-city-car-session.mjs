@@ -10,10 +10,12 @@ const m = await loadCity({
 const { patch, grid, snapshot } = makeFixtures(m);
 const surface = snapshot([patch("pad", "carriageway", grid(-30, -8, 30, 8, 10, 4))]);
 function hostFixture(renderedSolids = []) {
-  const state = { releases: 0, hooks: 0, current: true, hook: null };
+  const state = { releases: 0, hooks: 0, current: true, hook: null, deepChecks: 0, leaseChecks: 0 };
   const world = { revision: "world-fixture", surface, obstacles: [], renderedSolids, landings: [], counts: {}, obstacleCoverage: renderedSolids.length ? "structures-and-rendered-buildings" : "structures-only" };
   const capture = { status: "ready", revision: surface.revision, worldRevision: world.revision,
-    isCurrent: () => state.current,
+    isCurrent: () => { state.deepChecks++; return state.current; },
+    isLeaseCurrent: () => { state.leaseChecks++; return state.current; },
+    verifyCurrent: () => { state.deepChecks++; return state.current; },
     readWorld: () => state.current ? world : null,
     setFrameHook: (hook) => { state.hook = hook; if (hook) state.hooks++; },
     release: () => { if (!state.current) return; state.current = false; state.releases++; state.hook = null; } };
@@ -26,8 +28,12 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   const result = await m.createCityCarSession(f.host, runtime, request);
   assert.equal(result.status, "ready"); assert.equal(runtime.snapshot.phase, "paused");
   assert.equal(runtime.snapshot.revision, "world-fixture"); assert.equal(result.adapter.snapshot.surfaceId, "region:ground:pad");
-  runtime.resume(); runtime.setInput({ forward: true }); f.state.hook(1/60);
+  const entryChecks = f.state.deepChecks;
+  runtime.resume(); runtime.setInput({ forward: true });
+  for (let tick = 0; tick < 60; tick++) f.state.hook(1/60);
   assert.ok(result.adapter.snapshot.x > 0);
+  assert.equal(f.state.deepChecks, entryChecks, "frame loop and collision binding must not perform deep scene checks");
+  assert.ok(f.state.leaseChecks > 60, "runtime uses the cheap frozen lease check");
   runtime.exit(); assert.equal(f.state.releases, 1); assert.equal(f.state.hook, null);
 }
 {

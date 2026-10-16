@@ -32,7 +32,8 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
   const cancel = () => { if (transferred) runtime.exit(); else capture.release(); };
   signal?.addEventListener("abort", cancel, { once: true });
   try {
-    if (signal?.aborted || !capture.isCurrent()) return unavailable("stale-or-cancelled");
+    if (signal?.aborted || !capture.verifyCurrent()) return unavailable("stale-or-cancelled");
+    const leaseCurrent = capture.isLeaseCurrent;
     const snapshot = capture.readWorld();
     if (!snapshot || snapshot.revision !== capture.worldRevision || snapshot.surface.revision !== capture.revision) return unavailable("revision-mismatch");
     // Exact architectural render geometry is captured, but this collision path
@@ -46,7 +47,7 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     const collision = buildCollisionIndex({ revision: capture.worldRevision, obstacles: snapshot.obstacles });
     if (collision.status !== "ready") return unavailable(`collision-index:${collision.reason}`);
     const binding = createStructureCollisionBinding({ surfaceRevision: capture.revision, worldRevision: capture.worldRevision,
-      index: collision.index, dimensions: request.collider.dimensions, centerHeight: request.collider.centerHeight, isCurrent: capture.isCurrent });
+      index: collision.index, dimensions: request.collider.dimensions, centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent });
     const environment = new SurfaceDrivingEnvironment(regions, undefined, undefined, binding);
     const point = regions.classify(request.x, request.z, request.layerId);
     if (point.status !== "drivable") return unavailable(`spawn:${point.cause}`);
@@ -56,13 +57,13 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     const kernel = new DrivingKernel(environment, { baseSnapshotHash: capture.worldRevision,
       vehicleConfigHash: request.collider.vehicleConfigHash, kernelBuildId: "city-car-structure-kernel-v1",
       physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: COLLISION_RULES_VERSION, queryVersion: SURFACE_FOOTPRINT_RULES_VERSION });
-    const adapter = new CarAdapter({ revision: capture.worldRevision, kernel, isCurrent: capture.isCurrent,
+    const adapter = new CarAdapter({ revision: capture.worldRevision, kernel, isCurrent: leaseCurrent,
       validateSpawn: (state) => {
         const placed = environment.place(state.x, state.z, state.heading, state.surfaceId);
         return !!placed && (["y", "pitch", "roll"] as const).every((key) => Math.abs(placed[key] - state[key]) <= 1e-6);
       } }, spawn, request.present);
     transferred = true;
-    const entered = await runtime.enter({ revision: capture.worldRevision, isCurrent: capture.isCurrent,
+    const entered = await runtime.enter({ revision: capture.worldRevision, isCurrent: leaseCurrent,
       setFrameHook: capture.setFrameHook, release: () => { signal?.removeEventListener("abort", cancel); capture.release(); } }, adapter);
     return entered ? Object.freeze({ status: "ready", worldRevision: capture.worldRevision, coverage: "structures-only", adapter }) : unavailable(runtime.snapshot.reason ?? "runtime-refused");
   } catch (error) {

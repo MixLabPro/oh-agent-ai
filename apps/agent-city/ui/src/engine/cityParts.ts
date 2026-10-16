@@ -263,8 +263,10 @@ export class CityParts {
     }
     this.group.add(staticCity.group);
     this.drivingRoots = staticCity.drivingRoots.slice();
-    // Rendered scene proxies are sampled at capture, alongside the precise frozen mesh layer.
-    this.staticSource = Object.freeze({ layout: staticCity.layout, ground: staticCity.groundRoadSurface, solids: () => collectSceneSolids(this.group) });
+    // The legacy surface-only port carries the compiled road/structure geometry.
+    // Scene proxies belong to captureDrivingWorld(), where they are sampled under
+    // the explicit display-freeze lease below.
+    this.staticSource = Object.freeze({ layout: staticCity.layout, ground: staticCity.groundRoadSurface });
     this.water = staticCity.water;
     this.treeMesh = staticCity.treeMesh;
     this.carMesh = staticCity.carMesh;
@@ -550,10 +552,17 @@ export class CityParts {
     try {
       if (!this.drivingFrozenSource) {
         const rendered = captureRenderedSolids(this.drivingRoots);
-        let valid = true;
-        this.drivingFrozenSource = Object.freeze({ ...this.staticSource, rendered: Object.freeze({
-          solids: rendered.solids, isCurrent: () => valid && (valid = !this.drivingDisposed && this.drivingFreezeCount > 0 && rendered.isCurrent()),
-        }) });
+        const sceneSolids = Object.freeze(collectSceneSolids(this.group));
+        // Geometry and proxy transforms are captured once for this display lease.
+        // CityParts.update() and cursor/snap/reset writers are frozen while held,
+        // so frame checks need only test the lease identity instead of traversing
+        // every mesh buffer and re-collecting every proxy on every tick.
+        let frozenSource!: CitySurfaceSource;
+        const current = () => !this.drivingDisposed && this.drivingFreezeCount > 0 && this.drivingFrozenSource === frozenSource;
+        frozenSource = Object.freeze({ ...this.staticSource, solids: () => sceneSolids, solidsCurrent: current,
+          verifySolidsCurrent: () => current() && JSON.stringify(collectSceneSolids(this.group)) === JSON.stringify(sceneSolids),
+          rendered: Object.freeze({ solids: rendered.solids, isCurrent: current, verifyCurrent: () => current() && rendered.isCurrent() }) });
+        this.drivingFrozenSource = frozenSource;
       }
     } catch (error) { this.drivingFreezeCount--; throw error; }
     let active = true;

@@ -3,7 +3,7 @@
  * grazing/precision/budget never becomes a clear path. Input solids are the frozen
  * convex collision proxies supplied by B, not arbitrary renderer meshes. */
 import { boxPoly, type Solid, type V3, type CollisionPose, type CollisionDimensions } from "./CollisionIndex";
-export const DRIVING_COLLISION_VERSION = 2;
+export const DRIVING_COLLISION_VERSION = 3;
 export type BodyPose = CollisionPose;
 export type SweepLimits = Readonly<{skin:number;timeTolerance:number;maxTests:number;maxCandidates:number;maxIntervals:number;maxSourceSolids:number;maxPolyVertices:number;maxAxes:number}>;
 export const DEFAULT_SWEEP_LIMITS:SweepLimits=Object.freeze({skin:1e-4,timeTolerance:1e-7,maxTests:200000,maxCandidates:4096,maxIntervals:4096,maxSourceSolids:20000,maxPolyVertices:256,maxAxes:1024});
@@ -57,7 +57,12 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
   const angleMagnitude=Math.max(1,Math.abs(from.heading),Math.abs(to.heading),Math.abs(from.pitch),Math.abs(to.pitch),Math.abs(from.roll),Math.abs(to.roll));
   if(magnitude*256*Number.EPSILON>p.skin*0.01||angleMagnitude*radius*256*Number.EPSILON>p.skin*0.01)return result("unresolved","precision");
   const movingAngles=from.heading!==to.heading||from.pitch!==to.pitch||from.roll!==to.roll;
-  const speed=length(delta)+radius*(Math.abs(to.heading-from.heading)+Math.abs(to.pitch-from.pitch)+Math.abs(to.roll-from.roll));
+  const angleTravel=Math.abs(to.heading-from.heading)+Math.abs(to.pitch-from.pitch)+Math.abs(to.roll-from.roll);
+  const linearTravel=length(delta),speed=linearTravel+radius*angleTravel;
+  // For each body vertex under linearly interpolated Euler angles, the norm of
+  // its second derivative is at most radius * (sum of angular rates)^2.
+  // Translation is linear and contributes no curvature.
+  const curvature=radius*angleTravel*angleTravel;
   if(!Number.isFinite(speed))return result("unresolved","invalid-input");
   const shape=poly(from,dimensions);
   const candidates:Solid[]=[];
@@ -82,7 +87,37 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
         for(const axis of axes(body)){spend();const len=length(axis);if(len<1e-12)continue;const n=scale(axis,1/len),a=project(body.vertices,n),b=project(solid.poly.vertices,n);
           const left=a[0]-b[1],right=b[0]-a[1],roundoff=64*Number.EPSILON*Math.max(1,...a.map(Math.abs),...b.map(Math.abs));
           const g=Math.max(left,right)-roundoff;if(g>gap){gap=g;normal=scale(n,left>=right?1:-1);}}
-        return {gap,normal};
+        return {gap,normal,body};
+      };
+      const planeGap=(body:ReturnType<typeof poly>,n:V3)=>{
+        const a=project(body.vertices,n),b=project(solid.poly.vertices,n);
+        return a[0]-b[1]-64*Number.EPSILON*Math.max(1,...a.map(Math.abs),...b.map(Math.abs));
+      };
+      const rotatingPlaneClear=(a:number,b:number,body:ReturnType<typeof poly>)=>{
+        const center=interpolateBody(from,to,a),end=interpolateBody(from,to,b),width=b-a;
+        const dh=to.heading-from.heading,dp=to.pitch-from.pitch,dr=to.roll-from.roll;
+        const forward=scale(body.edges[0],1/dimensions.halfLength);
+        const angular={x:-dp*Math.sin(center.heading)-dr*forward.x,y:-dh-dr*forward.y,z:dp*Math.cos(center.heading)-dr*forward.z};
+        if(![angular.x,angular.y,angular.z].every(Number.isFinite))return false;
+        const extents=[dimensions.halfLength,dimensions.halfHeight,dimensions.halfWidth];
+        for(let axis=0;axis<3;axis++)for(const sign of [1,-1]){
+          const n=scale(body.edges[axis],sign/extents[axis]),derivative=cross(angular,n);let clear=true;
+          if(![n.x,n.y,n.z,derivative.x,derivative.y,derivative.z].every(Number.isFinite)||Math.abs(length(n)-1)>32*Number.EPSILON)continue;
+          for(const vertex of solid.poly.vertices){spend();const relative=sub(center,vertex),gap=dot(relative,n)-extents[axis];
+            const distance=Math.max(length(relative),length(sub(end,vertex)));
+            const roundoff=256*Number.EPSILON*Math.max(magnitude,distance,1);
+            if(gap-roundoff<=p.skin){clear=false;break;}
+            const rate=dot(delta,n)+dot(relative,derivative);
+            const second=distance*angleTravel*angleTravel+2*linearTravel*angleTravel;
+            if(![gap,rate,second].every(Number.isFinite)){clear=false;break;}
+            // Each solid vertex stays behind this rotating body-face plane:
+            // f(u) >= f(0)+f'(0)u-Mu²/2. The concave lower quadratic reaches
+            // its interval minimum at an endpoint, including a grazing start.
+            if(gap+Math.min(0,rate*width-second*width*width/2)-roundoff<=p.skin){clear=false;break;}
+          }
+          if(clear)return true;
+        }
+        return false;
       };
       let contact:SweepContact|null=null;
       if(!movingAngles) {
@@ -106,13 +141,13 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
         // leave that skin; only inward motion toward a nearest active SAT plane
         // remains a t=0 contact. Otherwise every frame re-hits the same wall and
         // burns its entire slide budget without advancing.
+        if(possible&&initialGap< -magnitude*256*Number.EPSILON)return result("unresolved","initial-overlap");
         if(possible&&initialGap<=p.skin) {
           const tolerance=Math.max(p.skin*1e-6,64*Number.EPSILON*magnitude);
           const nearest=startAxes.filter(x=>x.gap>=initialGap-tolerance);
           if(nearest.length&&nearest.every(x=>dot(delta,x.normal)>=-1e-12*Math.max(1,length(delta))))possible=false;
         }
         if(possible){
-          if(initialGap< -magnitude*256*Number.EPSILON)return result("unresolved","initial-overlap");
           // A body resting at the skin may leave it freely, including reversing.
           if(exit<=p.timeTolerance&&enter===0)continue;
           const time=Math.max(0,enter);contact={solidId:solid.id,time,timeUpper:time,normal,kind:"translation"};
@@ -120,19 +155,28 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
       } else {
         const start=separation(0);if(start.gap<0)return result("unresolved","initial-overlap");
         if(start.gap<=p.skin)return result("unresolved","rotation-at-contact");
-        const intervals:Array<{a:number;b:number;gap:number}>=[{a:0,b:best?.timeUpper??1,gap:start.gap}];let count=0;
+        type Sample=ReturnType<typeof separation>;
+        const endTime=best?.timeUpper??1;
+        const intervals:Array<{a:number;b:number;left:Sample;right:Sample}>=[{a:0,b:endTime,left:start,right:separation(endTime)}];let count=0;
         while(intervals.length){spend();if(++count>p.maxIntervals)throw new Budget();const interval=intervals.pop()!;
           if(best&&interval.a>best.timeUpper)continue;
-          if(interval.gap>p.skin+speed*(interval.b-interval.a))continue; // certified clear entire interval
-          const end=separation(interval.b);
-          if((interval.gap+end.gap-speed*(interval.b-interval.a))/2>p.skin)continue;
+          const {left,right:end}=interval,width=interval.b-interval.a;
+          if(left.gap>p.skin+speed*width)continue; // certified clear entire interval
+          if(rotatingPlaneClear(interval.a,interval.b,left.body))continue;
+          // A fixed separating plane bounds every intermediate vertex by its
+          // endpoint chord plus M*h²/8. This includes interior rotation extrema,
+          // while tangent translation no longer forces thousands of subdivisions.
+          const deviation=curvature*width*width/8+128*Number.EPSILON*magnitude;
+          if(Math.min(left.gap,planeGap(end.body,left.normal))-deviation>p.skin||
+            Math.min(end.gap,planeGap(left.body,end.normal))-deviation>p.skin)continue;
+          if((left.gap+end.gap-speed*width)/2>p.skin)continue;
           if(interval.b-interval.a<=p.timeTolerance&&end.gap<=p.skin){
             contact={solidId:solid.id,time:interval.a,timeUpper:interval.b,normal:end.normal,kind:"rotation"};break;
           }
           if(interval.b-interval.a<p.timeTolerance*1e-4)return result("unresolved","rotation-grazing");
           const mid=(interval.a+interval.b)/2;if(mid===interval.a||mid===interval.b)return result("unresolved","precision");
           const middle=separation(mid);
-          intervals.push({a:mid,b:interval.b,gap:middle.gap},{a:interval.a,b:mid,gap:interval.gap});
+          intervals.push({a:mid,b:interval.b,left:middle,right:end},{a:interval.a,b:mid,left,right:middle});
         }
       }
       if(contact&&(!best||contact.time<best.time))best=contact;
