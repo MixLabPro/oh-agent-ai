@@ -1,5 +1,13 @@
 # City-first landing implementation review
 
+## Post-domain UX polish (2026-10-16)
+
+- Clarified the bilingual hero: a private Mac app for Claude Code/Codex history. Preserved the brand headline; changed ambiguous app CTAs to release status and rewrote insight headlines as user questions. Download remains explicitly unavailable: no invented release, signup service or source link.
+- Reduced desktop scene height to 420px and phone height to 360px. Phone idle/loading/error previews hide inactive toolbar controls and keep the real city poster visible behind a compact entry prompt.
+- Rebuilt City from the current checkout after its newer City commits. Added closer, center-oriented framing only for embedded `presentation=landing`; native and standalone views keep their existing camera. Updated the fallback image from the rendered mock scene. Still 2000 synthetic sessions; no real records or new networking.
+- City production build, typecheck, camera interaction regressions (including native/standalone isolation), landing checks and whitespace checks passed. Browser confirmed ready desktop scene and 390px mobile width without document overflow; phone cold load creates no iframe before entry.
+- Screenshots: `docs/assets/oh-agent-2026-10-16/polish-desktop-en.jpg` and `polish-mobile-en.jpg`. These are local preview checks, not a production deployment or broad device/performance certification.
+
 ## City bundle source update (2026-10-16)
 
 - Rebuilt the embedded City from local main `744f926ae82e1ef5eb5e5cb910303b08b725e712`, using an isolated source snapshot. Applied only the existing landing presentation adaptations in `CityApp.tsx` and `CityExperience.tsx`; the native app bundle is unchanged.

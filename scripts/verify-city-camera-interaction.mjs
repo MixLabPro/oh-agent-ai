@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import vm from "node:vm";
+import { readFileSync } from "node:fs";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { buildSync } = createRequire(path.join(repo, "apps/desktop/ui-dev/package.json"))("esbuild");
 const THREE = createRequire(path.join(repo, "apps/agent-city/ui/package.json"))("three");
@@ -15,6 +16,19 @@ function load(file) {
   return module.exports;
 }
 const { buildingFrame, isSelectionGesture } = load("cityCameraInteraction.ts");
+// Landing framing is presentation-only: native and standalone previews retain their overview.
+const engineSource = readFileSync(path.join(repo, "apps/agent-city/ui/src/engine/CityEngine.ts"), "utf8");
+const homeSource = engineSource.slice(engineSource.indexOf("  private homeView()"), engineSource.indexOf("  private flyTo("))
+  .replace("private homeView(): { x: number; y: number; z: number }", "function homeView()").trim();
+const framing = { boundsRadius: 200, cityCenter: { x: 0, z: 0 }, camera: { aspect: 1.5 }, layout: null };
+const nativeHome = vm.runInNewContext(`(${homeSource})`, {}).call(framing);
+const landingWindow = { parent: {}, location: { search: "?presentation=landing" } };
+const landingHome = vm.runInNewContext(`(${homeSource})`, { window: landingWindow, URLSearchParams }).call(framing);
+assert.ok(landingHome.y < nativeHome.y && landingHome.z < nativeHome.z, "landing frames the city more closely");
+const standaloneWindow = { location: { search: "?presentation=landing" } };
+standaloneWindow.parent = standaloneWindow;
+const standaloneHome = vm.runInNewContext(`(${homeSource})`, { window: standaloneWindow, URLSearchParams }).call(framing);
+assert.equal(standaloneHome.y, nativeHome.y, "standalone/native overview does not inherit landing framing");
 assert.ok(buildingFrame(100, 10, 42, 0.5).distance > buildingFrame(100, 10, 42, 2).distance, "portrait views fit the horizontal FOV");
 assert.ok(buildingFrame(10, 60, 42, 1).distance > buildingFrame(10, 6, 42, 1).distance, "wide buildings affect framing");
 assert.ok(buildingFrame(4, 3, 42, 1).minDistance < 16, "small buildings permit closer inspection");

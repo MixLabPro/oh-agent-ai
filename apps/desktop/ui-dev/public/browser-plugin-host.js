@@ -78,7 +78,7 @@
         current = { pluginId: definition.id, commandNamespace: definition.commandNamespace, instanceId: `browser-plugin-${definition.id}-${++generation}`, status: "loading", error: null, items: [], revision: 0, pending: null, events: [], started: Date.now(), pulse: Date.now() };
         frame = document.createElement("iframe"); frame.title = `${definition.name} 浏览器预览`;
         frame.dataset.pluginId = definition.id;
-        frame.src = `/${definition.entry}?instanceId=${current.instanceId}&locale=${args.locale === "en" ? "en" : "zh-Hans"}`;
+        frame.src = `/${definition.entry}?instanceId=${current.instanceId}&locale=${args.locale === "zh-Hans" ? "zh-Hans" : "en"}`;
         frame.style.cssText = "position:fixed;border:0;z-index:10";
         document.body.append(frame); note("instance_created");
       } else if (!current || (args.instanceId && args.instanceId !== current.instanceId) || args.pluginId !== current.pluginId) throw new Error("stale_instance");
@@ -89,7 +89,7 @@
       }
       Object.assign(frame.style, { left: `${bounds.x}px`, top: `${bounds.y}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
       current.boundsSeq = 0;
-      send("locale", { locale: args.locale === "en" ? "en" : "zh-Hans" });
+      send("locale", { locale: args.locale === "zh-Hans" ? "zh-Hans" : "en" });
       return current.instanceId;
     }
     if (command === "plugin_close") {

@@ -785,11 +785,14 @@ export class CityEngine {
     const bounds = Math.max(120, this.boundsRadius);
     // Frame the city rather than leaving excessive ocean margin: screenshots
     // showed the street fabric occupying too little of the default view.
-    const fit = 0.95 * Math.max(1, 1 / this.camera.aspect);
+    // The embedded landing prioritizes the skyline; native overview is unchanged.
+    const landing = typeof window !== "undefined" && window.parent !== window
+      && new URLSearchParams(window.location.search).get("presentation") === "landing";
+    const fit = (landing ? 0.72 : 0.95) * Math.max(1, 1 / this.camera.aspect);
     // 海滨锚定取景（VICE B5）：有海滨带时，默认视角从海侧看向酒店街——
     // 「酒店—步道—棕榈—沙滩—浅海」的断面在首屏即可辨认（识别锚点）。
     const seaside = this.layout?.seaside;
-    if (seaside && !seaside.degraded && seaside.samples.length) {
+    if (!landing && seaside && !seaside.degraded && seaside.samples.length) {
       const valid = seaside.samples.filter((s) => s.valid);
       if (valid.length) {
         const mid = valid[Math.floor(valid.length / 2)];

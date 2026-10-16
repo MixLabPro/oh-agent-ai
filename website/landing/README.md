@@ -2,6 +2,14 @@
 
 Brand and copy updated to **Oh Agent** on 2026-10-16. Implemented against [the redesign spec](../../docs/LANDING_CITY_FIRST_REDESIGN_SPEC.md). English is the static default; `?lang=zh` selects Chinese. Language preference stays in localStorage. No analytics, accounts, uploaded sessions, external fonts or third-party scripts.
 
+Product overview: [repository README](../../README.md). Public website: <https://ohagent.ai/>.
+
+## Product promise and gameplay scope
+
+“Your agents built it. Now explore it.” The City is an explorable visualization of supported local Agent history, with usage/cost/session analysis as a complementary desktop view. It is not a productivity score or a promise of automatic cost savings.
+
+The production City source includes free-flight practice and ring challenges; driving implementation and validation are ongoing. **This landing's `presentation=landing` currently hides the game entry points.** Do not advertise the web demo as playable flying/driving until its entry controls, input help, pause/exit, fixture permissions and browser acceptance are implemented and checked. Free exploration is the current marketing description; a complete open-world game is not a release guarantee.
+
 ## Preview
 
 From this directory:
@@ -47,10 +55,10 @@ Checks cover actual translation keys, local assets, anchor targets, truthful sam
 
 The former `--allow-missing-shots` workflow belongs to the previous diagnostics-first design. Current evidence and pending work are tracked in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
 
-Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository root. The current share image is `assets/oh-agent-preview.jpg`; the deployment URL remains to be verified before launch. Oh Agent is the public-facing landing name; repository paths and native application identifiers retain project compatibility.
+Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository root. The current share image is `assets/oh-agent-preview.jpg`. The public domain is `https://ohagent.ai/`; subsequent local copy/render changes are not automatically proof of production deployment. Oh Agent is the public-facing name; repository paths and native application identifiers retain project compatibility.
 
 ## Public release
 
-On 2026-10-16 the configured public GitHub repository and releases API both returned 404 anonymously. The page therefore shows an explicit release-preparation state and does not link visitors to an unavailable download or source page. Before launch, verify repository visibility, downloadable assets, actual architecture/system requirements, signing and notarization; then update both locales and the verifier's release-state assertion. Nothing was published as part of this refactor.
+An earlier 2026-10-16 anonymous check of the configured GitHub repository and releases API returned 404. This is a historical result, not continuous visibility monitoring. The subsequent live-domain review confirmed that the page still shows release preparation rather than an available download. Before enabling download/source CTAs, recheck repository visibility, downloadable assets, actual architecture/system requirements, signing and notarization; then update both locales and the verifier's release-state assertion. Domain availability does not mean the desktop release is ready.
 
-Canonical and social metadata retain the existing configured GitHub Pages address. That deployment address must be verified or replaced before publication; it is not a claim that the preview is already live there.
+Canonical and social metadata point to `https://ohagent.ai/`. The domain was accessed successfully during the 2026-10-16 browser review. Cloudflare Pages project: `oh-agent-landing`; production alias: `oh-agent-landing.pages.dev`. Review deployment changes separately from local preview work; this README update does not deploy anything.

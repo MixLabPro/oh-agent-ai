@@ -1432,7 +1432,7 @@ html[data-av-lang="zh"] h2 {
   margin-top: 3px;
 }
 .hero .city-stage {
-  height: 490px;
+  height: 420px;
 }
 .hero .city-toolbar {
   padding: 10px 12px;
@@ -1510,7 +1510,7 @@ html[data-av-lang="zh"] .hero h1 {
     letter-spacing: .04em;
   }
   .hero .city-stage {
-    height: 480px;
+    height: 360px;
   }
   .hero .city-actions {
     gap: 4px;
@@ -1521,6 +1521,17 @@ html[data-av-lang="zh"] .hero h1 {
   .hero .source-strip {
     padding-top: 0;
   }
+  .hero .city-window:not([data-city-state="ready"]):not([data-city-state="updating"]) .city-actions { display: none; }
+  .hero .city-launch {
+    justify-content: flex-end;
+    padding: 20px 16px;
+    background: linear-gradient(transparent 15%, #08161138 42%, #081611ed 100%);
+  }
+  .hero .city-poster { filter: brightness(.9) saturate(.9); }
+  .hero .launch-symbol,.hero .city-launch h3,.hero .city-launch .text-link { display: none; }
+  .hero .city-launch p { margin: 0 0 14px; font-size: 13px; line-height: 1.6; }
+  .hero .lede { line-height: 1.75; margin-top: 18px; }
+  .hero .assurances { margin-top: 22px; }
 }
 
 @media(max-width:700px) {

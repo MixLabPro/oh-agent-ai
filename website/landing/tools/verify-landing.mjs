@@ -10,6 +10,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (name) => readFileSync(path.join(root, name), 'utf8');
 const html = read('index.html');
 const css = read('styles.css');
+const explorationCss = read('exploration.css');
+assert.doesNotMatch(explorationCss, /@import|https?:\/\//);
+assert.match(explorationCss, /prefers-reduced-motion/);
+assert.match(html, /id="play"/);
+assert.match(html, /DRIVING · IN DEVELOPMENT/);
+assert.match(html, /not recorded gameplay/);
+assert.match(html, /flying and driving controls are not enabled here/);
 const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1].split('?')[0]);
 for (const name of scripts) {
   assert.ok(!/^https?:/.test(name), 'Scripts must be same-origin');
@@ -28,6 +35,10 @@ assert.doesNotMatch(html, /Agent Vitals/);
 assert.doesNotMatch(read('i18n.js'), /Agent Vitals/);
 assert.match(html, /An estimate, not a bill/);
 assert.match(html, /Public download is being prepared/);
+assert.match(html, /A private Mac app for your Claude Code and Codex history/);
+assert.match(html, /data-i18n="nav.download">Release status/);
+assert.match(html, /Mac app is not available to download here yet/);
+assert.match(css, /city-window:not\(\[data-city-state="ready"\]\):not\(\[data-city-state="updating"\]\) \.city-actions/);
 assert.ok(html.indexOf('id="city"') < html.indexOf('id="insights"'));
 assert.ok(!html.includes('data-ascii'), 'No obsolete primary animation dependency');
 assert.ok(!/<a[^>]+href="https?:/.test(html), 'Unverified public links must not be enabled');
@@ -56,6 +67,24 @@ function translated(lang) {
 }
 translated('en');
 translated('zh');
+// The promotional selector changes only the illustrated preview, never game state.
+{
+  const world = { dataset: { exploration: 'flight' } };
+  const buttons = ['flight', 'drive'].map((mode) => ({ dataset: { explorationMode: mode }, attrs: {},
+    addEventListener(type, listener) { this[type] = listener; }, setAttribute(key, value) { this.attrs[key] = value; } }));
+  const panels = ['flight', 'drive'].map((mode) => ({ dataset: { explorationPanel: mode }, hidden: mode !== 'flight' }));
+  vm.runInNewContext(read('app.js'), { document: { querySelector: () => world,
+    querySelectorAll: (selector) => selector === '[data-exploration-mode]' ? buttons : selector === '[data-exploration-panel]' ? panels : [] } });
+  buttons[1].click();
+  assert.equal(world.dataset.exploration, 'drive');
+  assert.equal(buttons[1].attrs['aria-pressed'], 'true');
+  assert.equal(panels[0].hidden, true);
+  assert.equal(panels[1].hidden, false);
+  buttons[0].click();
+  assert.equal(world.dataset.exploration, 'flight');
+  assert.equal(buttons[1].attrs['aria-pressed'], 'false');
+  assert.equal(panels[0].hidden, false);
+}
 console.log('Content, assets, anchors, bilingual copy, privacy and cost basis: PASS');
 
 function host({ desktop = false, reduced = false } = {}) {
