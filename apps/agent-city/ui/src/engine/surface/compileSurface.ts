@@ -130,7 +130,7 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     const source = { kind: "structure" as const, id: `bridge:${edge.id}` };
     if (edge.points.length !== 2) { issues.push({ source, reason: "unsupported", detail: "invalid-mesh" }); continue; }
     bridges++;
-    const parts = bridgeDeckParts(edge, layout.terrain);
+    const parts = bridgeDeckParts(edge, layout);
     const deck = parts.find((p) => p.role === "bridge-deck")!;
     const top = boxTopFace(deck, bridgeDrivableHalf(edge));
     const [a, b] = edge.points; const len = Math.hypot(b.x - a.x, b.z - a.z); const ux = (b.x - a.x) / len; const uz = (b.z - a.z) / len;
@@ -147,10 +147,13 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     const layerId = overpass ? `bridge:${edge.id}` : "ground";
     add(`bridge:${edge.id}`, "bridge-deck", layerId, source, quad(top));
     for (const p of parts) if (p.role === "bridge-railing" || p.role === "bridge-pier") obstacles.push(Object.freeze({ id: `${source.id}:${p.role}:${obstacles.length}`, role: p.role, shape: "box", corners: Object.freeze(boxCorners(p)) }));
-    const deckY = top[0].y;
     for (const [end, p, out] of [["from", a, -1], ["to", b, 1]] as const) {
-      // Probe the ground road just past the deck's 0.25 overhang, outward from the span.
-      const g = groundY(p.x + ux * out * 0.75, p.z + uz * out * 0.75);
+      // The seam is the deck's end edge, 0.25 past the node: compare the ground just outside it with
+      // the deck top extrapolated along its pitch to the same point.
+      const slope = (top[1].y - top[0].y) / Math.hypot(top[1].x - top[0].x, top[1].z - top[0].z);
+      const nodeY = end === "from" ? (top[0].y + top[3].y) / 2 + slope * 0.25 : (top[1].y + top[2].y) / 2 - slope * 0.25;
+      const deckY = nodeY + slope * out * 0.3;
+      const g = groundY(p.x + ux * out * 0.3, p.z + uz * out * 0.3);
       const step = g === null ? null : deckY - g;
       const status = overpass ? "layered" : g === null ? "no-ground" : Math.abs(step!) <= tolerance ? "aligned" : "step";
       landings.push(Object.freeze({ structureId: source.id, end, layerId, x: p.x, z: p.z, outX: ux * out, outZ: uz * out, deckY, groundY: g, step, status }));

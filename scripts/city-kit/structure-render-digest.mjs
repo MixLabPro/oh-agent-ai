@@ -22,6 +22,15 @@ export async function structureRenderDigests(kit, layout) {
       for (const key of Object.keys(mesh.geometry.attributes).sort()) { const a = mesh.geometry.attributes[key].array; hash.update(key); hash.update(new Uint8Array(a.buffer, a.byteOffset, a.byteLength)); }
     }
     out[name] = hash.digest("hex");
+    if (name === "buildInfrastructure") {
+      // Curbs alone (colour #cbc6ba): bridge parts may change by design, curbs must not.
+      const curbs = createHash("sha256"); const m = new THREE.Matrix4(); const c = new THREE.Color(); const curb = new THREE.Color("#cbc6ba");
+      for (const mesh of meshes) if (mesh.isInstancedMesh && mesh.instanceColor) for (let i = 0; i < mesh.count; i++) {
+        mesh.getColorAt(i, c); if (!c.equals(curb)) continue;
+        mesh.getMatrixAt(i, m); curbs.update(new Uint8Array(new Float32Array(m.elements).buffer));
+      }
+      out["buildInfrastructure:curbs"] = curbs.digest("hex");
+    }
   }
   return out;
 }

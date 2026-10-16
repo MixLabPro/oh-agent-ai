@@ -149,3 +149,11 @@ architecture测试覆盖：同核逐tick终态、不同调度批一致、整车�
 **关键发现**：桥面是平板（取两岸原始地形高的较大值），引道却有坡。十五城里没有一座桥两端都连通，桥梁全部关闭并上报。开放桥梁需要另行做视觉修复（斜板或匝道），需产品确认。详见 [CITY_STRUCTURE_SURFACE_NOTES.md](CITY_STRUCTURE_SURFACE_NOTES.md)。
 
 A批次剩余项不再是几何问题：跨层portal（立交、高架匝道）与B/C/D的碰撞、恢复、开放图一起做。新增必跑：`verify-city-structure-surface [--cities]`、`verify-city-surface-sessions`。
+
+## 12. A7增量交付（2026-10-16）——桥面视觉修复
+
+经产品确认，桥面从平板改为两端贴合桥头路面的斜板，并带两端横坡的平均倾斜；护栏、桥墩、桁架、悬索桥都随同一剖面变化。区域规则 v3：桥面遮挡其下方更低的地面。
+
+十五城：37/56 个桥头连通（修复前 3 个），10 座桥两端连通且桥跨都能整段开过（修复前 0 座），7 座可从引道开到对岸引道。剩余未通的逐条记录在 [CITY_STRUCTURE_SURFACE_NOTES.md](CITY_STRUCTURE_SURFACE_NOTES.md) 的 A7 一节。路缘、高架、尽端、渠化口的渲染仍逐字节不变。
+
+正式开放仍需 D 的审计与开放图，本轮不自动开放任何桥。

@@ -30,7 +30,7 @@ const LEGACY_CURB_TRIM = 5.5;
 
 /** Batched city furniture and waterfront infrastructure, not selectable data. */
 export function buildInfrastructure(host: RoadHost): void {
-  type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number; yaw?: number };
+  type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number; yaw?: number; pitch?: number; order?: "XYZ" | "YZX" | "YXZ" };
   const parts: Part[] = [];
   const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0, yaw = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt, yaw });
   // Curbs and street lights are real geometry; asphalt and markings share the atlas.
@@ -88,7 +88,8 @@ export function buildInfrastructure(host: RoadHost): void {
     // Bridge spans need actual geometry; the terrain atlas is below the river surface.
     if (edge.bridge) {
       // 桥面/护栏/车道线/桥墩：描述符与驾驶路面共用（surface/structureCompiler），这里只组实例。
-      for (const p of bridgeDeckParts(edge, host.layout.terrain)) add(p.x, p.y, p.z, p.sx, p.sy, p.sz, p.color, p.rx, p.ry);
+      // 桥面随引道起伏成斜板（YZX：先俯仰后转向，同高架），两端落在桥头路面上。
+      for (const p of bridgeDeckParts(edge, host.layout)) parts.push({ x: p.x, y: p.y, z: p.z, sx: p.sx, sy: p.sy, sz: p.sz, color: p.color, tilt: p.rx, yaw: p.ry, pitch: p.rz, order: p.order });
       continue;
     }
     // 沿路段的实际方向摆放（G2 起各片区街网朝向不同；曾只认水平/竖直两种方向）。
@@ -132,12 +133,13 @@ export function buildInfrastructure(host: RoadHost): void {
   const mesh = host.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), parts.length);
   parts.forEach((part, index) => {
     host.positionVector.set(part.x, part.y, part.z);
-    host.euler.set(part.tilt ?? 0, part.yaw ?? 0, 0);
+    host.euler.set(part.tilt ?? 0, part.yaw ?? 0, part.pitch ?? 0, part.order ?? "XYZ");
     host.quaternion.setFromEuler(host.euler);
     host.scaleVector.set(part.sx, part.sy, part.sz);
     host.matrix.compose(host.positionVector, host.quaternion, host.scaleVector);
     mesh.setMatrixAt(index, host.matrix); mesh.setColorAt(index, host.color.set(part.color));
   });
+  host.euler.set(0, 0, 0, "XYZ");
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   mesh.count = parts.length;
@@ -276,7 +278,8 @@ export function buildTrussBridges(host: RoadHost): void {
   const mesh = new THREE.InstancedMesh(unit, red, bars.length);
   bars.forEach(([x, y, z, a, b, rotY, tilt, vertical], i) => {
     host.positionVector.set(x, y, z);
-    host.euler.set(0, rotY, vertical ? tilt : 0, "YXZ");
+    // tilt: diagonal lean for vertical members, span pitch for chords (deck follows the approaches).
+    host.euler.set(0, rotY, tilt, "YXZ");
     // 横向件：长度沿局部 x；竖向件：高度沿局部 y、绕局部 z 倾斜成斜腹杆。
     if (vertical) host.scaleVector.set(a, b, a); else host.scaleVector.set(a, b, b);
     if (!vertical) host.positionVector.y -= b / 2;

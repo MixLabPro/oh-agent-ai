@@ -20,8 +20,8 @@ import type { SurfaceIndexBuild, SurfaceQueryHit, SurfaceTriangle } from "./Surf
 import type { CompiledCitySurface, SurfaceKind, SurfacePatch } from "./types";
 
 /** Bump when classification, merge or boundary rules change; part of AuditKey.queryVersion inputs. */
-export const SURFACE_REGION_RULES_VERSION = 2;
-/** Float slack on every aliasTolerance comparison (v2). */
+export const SURFACE_REGION_RULES_VERSION = 3;
+/** Float slack on every aliasTolerance comparison (v2). v3: bridge decks occlude lower ground. */
 const ALIAS_EPSILON = 1e-6;
 
 export type SurfaceRegionParams = Readonly<{
@@ -184,6 +184,7 @@ function build(snapshot: CompiledCitySurface, index: Extract<SurfaceIndexBuild, 
   const pairDy = new Map<string, number>();
   const pairKey = (a: string, b: string) => a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
   let overlayTests = 0;
+  const kindOf = new Map(snapshot.patches.map((p) => [p.id, p.kind]));
   for (const id of [...members].sort()) {
     const patch = byId.get(id)!;
     for (let t = 0; t < patch.indices.length / 3; t++) {
@@ -195,12 +196,20 @@ function build(snapshot: CompiledCitySurface, index: Extract<SurfaceIndexBuild, 
         if (ref.patchId <= id || !members.has(ref.patchId)) continue;
         if (++overlayTests > params.maxOverlayTests) throw new BudgetError("overlay-budget");
         const b = index.triangle(ref)!;
-        let worst = -1;
+        // A bridge deck occludes the lower ground it covers (the bridgehead fans reach 1.5–2.3 under
+        // the span): only ground poking ABOVE the deck counts against the pair; continuity across
+        // the deck's end edge is judged by the boundary step rule.
+        const deckA = patch.kind === "bridge-deck"; const deckB = kindOf.get(ref.patchId) === "bridge-deck";
+        const occluding = deckA !== deckB;
+        let worst = -1; let touched = false;
         overlayPoints(a, b, (x, z) => {
           const wa = barycentric(a, x, z); const wb = barycentric(b, x, z);
+          touched = true;
           if (!wa || !wb) { worst = Infinity; return; }
-          worst = Math.max(worst, Math.abs(heightAt(a, wa) - heightAt(b, wb)));
+          const ha = heightAt(a, wa); const hb = heightAt(b, wb);
+          worst = Math.max(worst, occluding ? Math.max(0, deckA ? hb - ha : ha - hb) : Math.abs(ha - hb));
         });
+        if (touched && worst < 0) worst = 0;
         if (worst < 0) continue;
         const key = pairKey(id, ref.patchId);
         pairDy.set(key, Math.max(pairDy.get(key) ?? -1, worst));
@@ -237,7 +246,14 @@ function build(snapshot: CompiledCitySurface, index: Extract<SurfaceIndexBuild, 
     if (result.status !== "hit" && result.status !== "ambiguous") return blocked("closed", result.status);
     const hits = result.status === "hit" ? [result.hit] : result.candidates;
     let sidewalk = false; const drivable: SurfaceQueryHit[] = [];
+    // Bridge decks occlude lower ground on their layer; ground above a deck is a real obstruction.
+    const decks = hits.filter((hit) => hit.kind === "bridge-deck" && members.has(hit.patchId));
+    const deckTop = decks.length ? Math.max(...decks.map((hit) => hit.point.y)) : -Infinity;
     for (const hit of hits) {
+      if (decks.length && hit.kind !== "bridge-deck") {
+        if (hit.point.y > deckTop + params.aliasTolerance + ALIAS_EPSILON && hit.kind !== "sidewalk") return blocked("closed", "height-conflict");
+        continue;
+      }
       if (hit.kind === "island") return blocked("curb", "island");
       if (hit.kind === "sidewalk") sidewalk = true;
       else if (DRIVABLE.has(hit.kind)) {

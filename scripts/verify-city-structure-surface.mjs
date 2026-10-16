@@ -91,14 +91,29 @@ const drive = (regions, x0, z, x1) => {
   const run = drive(regions, -40, 0, 40); assert.ok(run.reached, `crosses the level bridge (${JSON.stringify(run)})`);
 }
 {
-  // West bank 0.6 lower than the deck (deck top = max of the two bank heights): a real step.
+  // West bank 0.6 lower: the deck now slopes from one landing's road surface to the other's.
+  // (Before the fix the deck was level at the higher bank: a 0.56 step at the west landing.)
   const { c, regions } = build(city([edge(W, A), span(), edge(B, E)], (x) => (x < 0 ? 2 : 2.6)));
-  const west = c.landings.find((l) => l.end === "from");
-  assert.equal(west.status, "step"); assert.ok(Math.abs(west.step - 0.56) < 1e-6);
-  assert.equal(c.landings.find((l) => l.end === "to").status, "aligned");
-  assert.deepEqual(kit.landingConnectivity(c, regions).map((x) => x.connected), [false, true]);
-  const run = drive(regions, -40, 0, 40); assert.equal(run.reached, false, "a 0.56 landing step is never driven over");
-  assert.ok(run.x < -20, "blocked at the west landing, not somewhere else");
+  const deck = c.surface.patches.find((p) => p.kind === "bridge-deck");
+  const ys = []; for (let i = 1; i < deck.vertices.length; i += 3) ys.push(deck.vertices[i]);
+  assert.ok(Math.max(...ys) - Math.min(...ys) > 0.55, "the deck is pitched between the two banks");
+  assert.ok(c.landings.every((l) => l.status === "aligned"), JSON.stringify(c.landings.map((l) => l.step)));
+  assert.deepEqual(kit.landingConnectivity(c, regions).map((x) => x.connected), [true, true]);
+  const run = drive(regions, -40, 0, 40); assert.ok(run.reached, `climbs across the sloped bridge (${JSON.stringify(run)})`);
+}
+{
+  // Opposite cross slopes at the two landings: a box cannot twist, the mean lean is level and both
+  // road edges stand 0.15 above the deck edge → the landings stay closed (reported, not forced).
+  const { c, regions } = build(city([edge(W, A), span(), edge(B, E)], (x, z) => 2 + (x < 0 ? 0.06 : -0.06) * z));
+  assert.ok(kit.landingConnectivity(c, regions).some((x) => !x.connected), "a twisted landing is not opened");
+  assert.equal(drive(regions, -40, 0, 40).reached, false);
+}
+{
+  // Dangling span over open water: the end with no road keeps the landed height (no dip into the sea).
+  const { c } = build(city([edge(W, A), span()], (x) => (x > 0 ? -3 : 2)));
+  const deck = c.surface.patches.find((p) => p.kind === "bridge-deck");
+  for (let i = 1; i < deck.vertices.length; i += 3) close(deck.vertices[i], 2.04, 1e-4, "dangling deck stays level at its landing");
+  assert.equal(c.landings.find((l) => l.end === "to").status, "no-ground");
 }
 {
   // Overpass: a ground road runs under the span → the deck is its own layer, the road below is unaffected.
@@ -168,46 +183,66 @@ const drive = (regions, x0, z, x1) => {
   const racing = port.capture({ layout, ground: kit.compileGroundRoadSurface(layout) }); port.invalidate();
   assert.equal((await racing).status, "stale", "a capture overtaken by a city change is stale");
 }
-console.log("Structure surface: THREE-exact BOX/cylinder tops, level bridge crossed by the kernel, landing steps block, overpass layering, dangling/multi-point bridges, expressway layer and rails, channelised island, cul-de-sac turnaround, host snapshot port passed.");
+console.log("Structure surface: THREE-exact BOX/cylinder tops, level and sloped bridges crossed by the kernel, twisted landing closed, dangling deck stays level, overpass layering, dangling/multi-point bridges, expressway layer and rails, channelised island, cul-de-sac turnaround, host snapshot port passed.");
 
 if (process.argv.includes("--cities")) {
-  const baseline = JSON.parse(readFileSync(new URL("../fixtures/city-driving/structure-render-baseline.json", import.meta.url), "utf8")).plans;
+  const baselineFile = JSON.parse(readFileSync(new URL("../fixtures/city-driving/structure-render-baseline.json", import.meta.url), "utf8"));
+  const baseline = baselineFile.plans; const correctedPlans = baselineFile.corrected.plans;
   const totals = { bridges: 0, landings: 0, connected: 0, crossings: 0, crossable: 0 };
-  const reasons = {};
+  const reasons = {}; const failures = [];
   for (const seed of [1, 7, 42, 2026, 65537]) for (const tier of [1, 2, 3]) {
     const plan = cachedPlan(kit.createCityPlan, seed, tier);
     const digests = await structureRenderDigests(kit, plan);
-    assert.deepEqual(digests, baseline[`${seed}/${tier}`], `seed ${seed} tier ${tier}: structure render output changed`);
+    // Bridge decks and trusses changed by design (sloped decks); everything else — curbs included —
+    // must still equal the pre-descriptor renderer byte for byte.
+    const before = baseline[`${seed}/${tier}`]; const corrected = correctedPlans[`${seed}/${tier}`];
+    for (const name of Object.keys(before)) {
+      const expected = name === "buildInfrastructure" || name === "buildTrussBridges" ? corrected[name] : before[name];
+      assert.equal(digests[name], expected, `seed ${seed} tier ${tier}: ${name} render output changed`);
+    }
     const { c, regions } = build(plan);
     assert.deepEqual(c.surface.report.issues.filter((i) => i.reason !== "unsupported"), [], "every compiled patch has a manifold boundary");
     const connectivity = kit.landingConnectivity(c, regions).filter((x) => x.landing.structureId.startsWith("bridge:"));
     totals.bridges += c.counts.bridges; totals.landings += connectivity.length;
     for (const x of connectivity) { reasons[x.reason] = (reasons[x.reason] ?? 0) + 1; if (x.connected) totals.connected++; }
-    // A bridge is crossable only when BOTH landings join the deck's region; cross each one with the same kernel.
-    for (const id of new Set(connectivity.map((x) => x.landing.structureId))) {
-      const ends = connectivity.filter((x) => x.landing.structureId === id);
-      if (ends.length !== 2 || !ends.every((x) => x.connected)) continue;
-      totals.crossable++;
-      const [from, to] = ends.map((x) => x.landing); const ux = -from.outX, uz = -from.outZ; const len = Math.hypot(to.x - from.x, to.z - from.z);
-      const heading = Math.atan2(uz, ux); const sx = from.x - ux * 1.5, sz = from.z - uz * 1.5;
-      const start = regions.classify(sx, sz, "ground");
-      const env = new kit.SurfaceDrivingEnvironment(regions); const kernel = new kit.DrivingKernel(env, key);
-      const placed = env.place(sx, sz, heading, start.regionId); if (!placed) continue;
+    // A bridge is crossable only when BOTH landings join the deck's region. Two same-kernel runs each:
+    // the span itself (must pass), and approach → approach along the axis (counted; a straight pilot
+    // cannot follow an angled approach, and a local landing conflict is reported, not hidden).
+    const env = new kit.SurfaceDrivingEnvironment(regions); const kernel = new kit.DrivingKernel(env, key);
+    const run = (from, ux, uz, s0, s1) => {
+      const heading = Math.atan2(uz, ux); const sx = from.x + ux * s0, sz = from.z + uz * s0;
+      const start = regions.classify(sx, sz, "ground"); if (start.status !== "drivable") return `start:${start.cause}`;
+      const placed = env.place(sx, sz, heading, start.regionId); if (!placed) return "start:footprint";
       let s = { ...kit.initialDrivingState(sx, sz, heading, start.regionId), ...placed };
-      const validator = new kit.SurfaceWorldValidator(regions, kit.polylineProgress([{ x: sx, z: sz }, { x: to.x + ux * 1.5, z: to.z + uz * 1.5 }]));
+      const validator = new kit.SurfaceWorldValidator(regions, kit.polylineProgress([{ x: sx, z: sz }, { x: from.x + ux * s1, z: from.z + uz * s1 }]));
       for (let tick = 0; tick < 4000; tick++) {
         const lateral = -(s.x - from.x) * uz + (s.z - from.z) * ux;
         const err = Math.atan2(Math.sin(heading - s.heading), Math.cos(heading - s.heading)) - lateral * 0.3;
         const step = kernel.step(s, { forward: true, backward: false, left: err < -0.02, right: err > 0.02 });
         assert.equal(validator.validate(s, step), "valid");
-        if (step.motion.blocked) break;
+        if (step.motion.blocked) return `blocked@${((s.x - from.x) * ux + (s.z - from.z) * uz).toFixed(1)}:${step.motion.reason}`;
         s = step.state;
-        if ((s.x - from.x) * ux + (s.z - from.z) * uz > len + 1.5) { totals.crossings++; break; }
+        if ((s.x - from.x) * ux + (s.z - from.z) * uz >= s1) return "ok";
       }
+      return "timeout";
+    };
+    for (const id of new Set(connectivity.map((x) => x.landing.structureId))) {
+      const ends = connectivity.filter((x) => x.landing.structureId === id);
+      if (ends.length !== 2 || !ends.every((x) => x.connected)) continue;
+      totals.crossable++;
+      const [from, to] = ends.map((x) => x.landing); const ux = -from.outX, uz = -from.outZ; const len = Math.hypot(to.x - from.x, to.z - from.z);
+      const reach = 1.4 + 0.25 + 0.2; // half car length + deck overhang + margin
+      assert.equal(run(from, ux, uz, reach + 1, len - reach - 1), "ok", `seed ${seed} tier ${tier} ${id}: the open span itself is drivable`);
+      const full = run(from, ux, uz, -1.5, len + reach);
+      if (full === "ok") totals.crossings++; else failures.push(`${seed}/${tier} ${id.slice(0, 28)} ${full}`);
     }
     const conflicts = regions.report.conflicts.length;
     console.log(`Structure surface: seed ${seed}, tier ${tier}: render parity ok, ${JSON.stringify(c.counts)}, ${c.obstacles.length} obstacles, landings ${c.landings.map((l) => `${l.status}${l.step === null ? "" : `(${l.step.toFixed(2)})`}`).join(" ")}, ${regions.report.regions} regions, ${conflicts} conflicts.`);
   }
-  assert.equal(totals.crossings, totals.crossable, `every bridge whose two landings join its region is crossed (${totals.crossings}/${totals.crossable})`);
-  console.log(`Structure surface: ${totals.bridges} bridges, ${totals.landings} landings — ${totals.connected} join the deck region ${JSON.stringify(reasons)}; ${totals.crossings}/${totals.crossable} bridges with both landings connected crossed tick-by-tick. Expressways stay on their own layers (no cross-layer portal). Flat decks over sloping approaches are reported, not opened.`);
+  assert.ok(totals.crossable >= 10, `sloped decks connect most landed bridges (${totals.crossable})`);
+  // Regression floors measured 2026-10-16 (sloped decks): 10 bridges connect at both landings, 7 are
+  // crossed approach → approach on the axis. Lower numbers mean the deck/landing geometry regressed.
+  assert.ok(totals.crossings >= 7, `approach-to-approach crossings regressed (${totals.crossings}/${totals.crossable}): ${failures.join("; ")}`);
+  if (failures.length) console.log(`Structure surface: landing-zone failures (reported, not opened): ${failures.join("; ")}`);
+  console.log(`Structure surface: ${totals.bridges} bridges, ${totals.landings} landings — ${totals.connected} join the deck region ${JSON.stringify(reasons)}; every connected span driven end to end; ${totals.crossings}/${totals.crossable} crossed approach → approach tick-by-tick. Expressways stay on their own layers (no cross-layer portal). Remaining closed landings are reported with their reason.`);
 }

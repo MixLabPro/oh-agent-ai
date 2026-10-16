@@ -13,6 +13,7 @@ const m = await loadCity({
 });
 const { grid, patch, snapshot, regionsOf } = makeFixtures(m);
 const P = m.DEFAULT_SURFACE_REGION_PARAMS;
+const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} vs ${b}`);
 const boundaryIn = (regions, regionId, x0, z0, x1, z1) => { const r = regions.segmentsInBox(regionId, x0, z0, x1, z1, 100000); assert.equal(r.status, "ok"); return r.segments; };
 
 // ── SurfaceIndex: exact cell coverage, not AABB area (seed 42 tier 2 regression) ──
@@ -156,6 +157,22 @@ const boundaryIn = (regions, regionId, x0, z0, x1, z1) => { const r = regions.se
   assert.equal(boundaryIn(regions, "region:ground:ground-road", -2.9, -2.9, 2.9, 2.9).length, 0);
 }
 
+// ── Bridge decks occlude the lower ground they cover (v3); ground above a deck obstructs ──
+{
+  const road = patch("road", "carriageway", grid(-20, -3, 0.5, 3, 4, 2, (x) => 1 + x * 0.05));
+  const fanBelow = patch("fan", "junction", grid(-3, -3, 3, 3, 12, 2, (x) => 1 + Math.min(x, 0.5) * 0.05 - Math.max(0, x - 0.5) * 0.3)); // matches the road, then drops toward the river
+  const deck = patch("deck", "bridge-deck", grid(0, -2.2, 30, 2.2, 6, 2, () => 1));
+  const { regions } = regionsOf([road, fanBelow, deck]);
+  assert.equal(regions.report.conflicts.length, 0, "ground sinking under a deck is occluded, not a conflict");
+  const onDeck = regions.classify(2.5, 0, "ground");
+  assert.equal(onDeck.status, "drivable"); assert.equal(onDeck.patchId, "deck"); close(onDeck.y, 1);
+  assert.equal(onDeck.regionId, regions.classify(-10, 0, "ground").regionId, "deck joins the approach through its landing");
+  const poke = patch("poke", "junction", grid(5, -1, 7, 1, 1, 1, () => 1.3));
+  const r2 = regionsOf([road, fanBelow, deck, poke]).regions;
+  assert.equal(r2.report.conflicts.length, 1, "ground standing 0.3 above the deck is an obstruction");
+  assert.equal(r2.classify(6, 0, "ground").cause, "height-conflict");
+}
+
 // ── Failure modes: mismatched revision, unresolved index, budgets ──
 {
   const road = patch("road", "carriageway", grid(-10, -3, 10, 3, 4, 2));
@@ -169,7 +186,7 @@ const boundaryIn = (regions, regionId, x0, z0, x1, z1) => { const r = regions.se
   const two = snapshot([road, patch("road2", "carriageway", grid(-3, -10, 3, 10, 2, 4))]);
   assert.equal(m.buildSurfaceRegions(two, m.buildSurfaceIndex(two), { ...P, maxOverlayTests: 1 }).reason, "overlay-budget");
 }
-console.log("Surface regions: exact index rasterisation, alias merge with exact overlay heights, conflict/step/seam boundaries, curb vs closed, islands and holes, unresolved patches fail closed, layer isolation, budgets passed.");
+console.log("Surface regions: exact index rasterisation, alias merge with exact overlay heights, conflict/step/seam boundaries, curb vs closed, islands and holes, unresolved patches fail closed, layer isolation, bridge-deck occlusion, budgets passed.");
 
 if (process.argv.includes("--cities")) {
   const { cachedPlan } = await import("./city-kit/index.mjs");
