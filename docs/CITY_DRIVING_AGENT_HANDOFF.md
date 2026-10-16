@@ -177,3 +177,17 @@ A批次剩余项不再是几何问题：跨层portal（立交、高架匝道）�
 - 15 个渲染场景：立在路上的固体只上报不打开，包括高架桥墩、机场部件、区级地标、桁架弦杆，每场景最多 7 个。
 
 详见 [CITY_PORTALS_AND_COLLISION_NOTES.md](CITY_PORTALS_AND_COLLISION_NOTES.md)。正式开放仍需 D 的审计与开放图。
+
+## 14. B3增量交付（2026-10-16）——逐路通行审计与安全恢复
+
+分工：B（审计、恢复）由主线维护；C（接触推进、有界滑动、路面距离：`DrivingSimulation.ts` / `DrivingKernel.ts` / `CollisionIndex.ts`）由另一方负责。本轮只消费 C 的现有接口。
+
+- `RoadPassabilityAudit`：每条路线返回以下三种之一，并绑定 world revision 与 AuditKey：
+  - 通过：动态试跑通过，且固体覆盖完整；
+  - 挡住：必带见证（拓扑不连通，或走廊直段截面的精确证明）；
+  - 无结论：其余一切，带原因。
+  它直接接宿主 capture（`auditCapture`），产出的 `StaticUnitEvidence` 可交给发布策略。
+- `SafeRecovery`：有界、确定性的最近合法位姿搜索。整车经独立验证，不跨区域，按同一 revision 提交。
+- 场景代理和凸包外包的固体永远不当「挡住」的证据；只有规划、没有场景的 capture 永远不给「通过」。
+
+详见 [CITY_PASSABILITY_AND_RECOVERY_NOTES.md](CITY_PASSABILITY_AND_RECOVERY_NOTES.md)。这些结果不能替代 D 的完整用例覆盖，也不能据此开放整张路网。
