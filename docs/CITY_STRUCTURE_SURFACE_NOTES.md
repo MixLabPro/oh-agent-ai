@@ -72,12 +72,13 @@ A6 的发现：原来的桥面是一块平板，顶面取两岸**原始**地形�
 
 ## 未完成（移交）
 
-2026-10-16后续：实体板底、宿主所有权/worldRevision和独立坡度/净空检查已开始补齐，见 [任务1/2实施记录](CITY_DRIVING_STRUCTURE_HOST_PROGRESS.md)。新端口使用readWorld()/checkStructures()，不再暴露原始compilation。几何版本为3；下列A6/A7剩余项仍需逐项关闭。
+2026-10-16 后续实现同时包含 [任务1/2实施记录](CITY_DRIVING_STRUCTURE_HOST_PROGRESS.md) 的宿主冻结与诊断，以及 [B2记录](CITY_PORTALS_AND_COLLISION_NOTES.md) 的跨层 portal、匝道落地和固体碰撞。以上 A6/A7 段落保留为历史证据；其中「跨层未实现」「匝道端约0.26台阶」及旧矩阵数量不代表合并后的现状。几何版本以 `CITY_SURFACE_GEOMETRY_VERSION` 为准。
 
-- 跨层portal（立交桥、高架匝道；高架匝道末端在渲染上本来就有约0.26的台阶）。
-- CollisionIndex 接入 `obstacles`；SafeRecovery；正式开放图与审计（B/C/D）。
-- 宿主端口已接CityEngine，但尚无运行时消费方（GameRuntime/CarAdapter属E）；编译在主线程同步执行，Worker是后续项。
-- 含修复补丁（planPatch）的显示布局未纳入会话矩阵；原生bundle性能与内存未测。
+- 跨层 portal、CollisionIndex：B2 已实现区域层复核与共享内核消费；匝道端落到路面、匝道区加密采样，相关证据见 B2 记录。入口端边、二维重叠走廊与局部坡变的独立检查也已加入，几何连接仍不是正式道路开放。
+- 新端口使用 `readWorld()` / `checkStructures()` 与 generation 校验，不再暴露可逃逸的原始 `compilation`。`captureDrivingWorld()` 显式冻结当前显示几何，租约释放后恢复显示；scene solids 与精确建筑网格的覆盖范围必须分别声明，不能把有结构碰撞等同于完整城市碰撞。
+- SafeRecovery；正式开放图与审计仍待完成（B/C/D）。
+- 宿主端口已接 CityEngine，GameRuntime/CarAdapter 与 `createCityCarSession` 已有冻结租约消费基础和合成生命周期验证；完整城市驾驶入口需具备声明范围内的障碍碰撞与正式开放条件，不能仅凭租约可读而启用。编译在主线程同步执行，Worker 是后续项。
+- 含修复补丁（planPatch）的显示布局已加入宿主版本失效与道路修改矩阵，具体命令/覆盖见任务1/2实施记录；原生 bundle 性能与内存仍未测。
 - 已存在的守卫失败（与本轮无关，在744f926上就失败）：`verify-city-culdesac-bulbs`（380会话布局 `culDeSacEnds` 为空）、`verify-city-scene-baseline`（场景图摘要不一致）。
 
 ## 命令

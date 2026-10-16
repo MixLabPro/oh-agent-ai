@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { loadCity } from './city-kit/index.mjs';
-const { buildCollisionIndex, boxCorners } = await loadCity({
-  'game/driving/CollisionIndex.ts':['buildCollisionIndex'],
+const { buildCollisionIndex, boxCorners, boxSolidFromCorners, carBody } = await loadCity({
+  'game/driving/CollisionIndex.ts':['buildCollisionIndex','boxSolidFromCorners','carBody'],
   'engine/surface/structureCompiler.ts':['boxCorners'],
 });
 const box=(id,x,y,z,sx,sy,sz,extra={})=>({id,role:'pier',shape:'box',corners:boxCorners({x,y,z,sx,sy,sz,rx:0,ry:0,rz:0,order:'XYZ',...extra})});
@@ -51,6 +51,15 @@ for(let i=0;i<30;i++){
 }
 const ordered=index([box('z',0,0,0,1,3,1),box('a',0,0,0,1,3,1)]).overlap(pose(),dims);
 assert.equal(ordered.contact.obstacleId,'a','simultaneous contact tie uses stable obstacle id');
+{
+ const c=box('legacy-box',0,0,0,1,3,1);const legacy=buildCollisionIndex([boxSolidFromCorners(c.id,'building',c.corners)]);
+ assert.equal(legacy.report.byRole.building,1);assert.equal(legacy.report.rejected,0);
+ assert.equal(legacy.hit(carBody({x:0,z:0,heading:0},{y:0,pitch:0,roll:0},1.4,.7)).status,'hit');
+ assert.equal(legacy.hit(carBody({x:10,z:0,heading:0},{y:0,pitch:0,roll:0},1.4,.7)).status,'clear');
+ assert.throws(()=>{legacy.solids()[0].poly.vertices[0].x=123;},TypeError,'compatibility solids are immutable too');
+ const budgeted=buildCollisionIndex([boxSolidFromCorners('first','building',c.corners),boxSolidFromCorners('second','building',c.corners)],{cellSize:8,maxCellsPerSolid:1,maxCandidates:1});
+ assert.equal(budgeted.hit(carBody({x:0,z:0,heading:0},{y:0,pitch:0,roll:0},1.4,.7)).status,'budget');
+}
 console.log('CollisionIndex: owned BVH, vertical separation, tilted solids, concave prism, fast/rotating/pitch CCD, stable ties, invalid input and closed budgets passed.');
 if(process.argv.includes('--cities')){
   const { cachedPlan }=await import('./city-kit/index.mjs');

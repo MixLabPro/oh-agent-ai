@@ -124,7 +124,7 @@
     }
   },
   "corrected": {
-    "reason": "Bridge decks slope between the rendered road surfaces at their landing nodes (ends with no road keep the landed height), lean with the mean landing cross slope, and railings/lane lines/dashes/piers/trusses stand on that face. Before, a level slab at the higher bank left 0.1–1.1 steps and no bridge connected at both ends. Every other system, curbs included, must still equal `plans`.",
+    "reason": "Bridge decks slope between the rendered road surfaces at their landing nodes (ends with no road keep the landed height), lean with the mean landing cross slope, and railings/lane lines/dashes/piers/trusses stand on that face. Before, a level slab at the higher bank left 0.1–1.1 steps and no bridge connected at both ends. Every other system, curbs included, must still equal `plans`. Expressway ramp ends (2026-10-16) land on the rendered road surface (deck top = rendered terrain + 0.04 where the end lies on a ground road) instead of terrain.height + 0.3, which left a 0.24–0.26 step at all 22 ramp ends; the half-ramp is shifted and the shift fades out with the same ease. Ramp-zone segments (within 90 of an open end) are drawn as ≤ 10-unit collinear pieces so the eased profile is actually sampled: the 137–280 long single-segment spurs were one straight slab meeting the ring 0.6–1.1 below its deck at a ~30° merge; they now level out before the merge, and long spurs get piers by the same 34-unit mileage rule.",
     "plans": {
       "1/1": {
         "buildInfrastructure": "b5bdf6d04b578c3bad9356554879a104f543b24d94cd5fa65bc254346cad6353",
@@ -144,7 +144,8 @@
       },
       "7/2": {
         "buildInfrastructure": "7c252bf0f1617310d4330f10923e207bfea6276e27e72f316d3b7c0ecb696ee4",
-        "buildTrussBridges": "6a49debec47412aa8a223a783867ba81239b96f271d3387b24c111bb44b16900"
+        "buildTrussBridges": "6a49debec47412aa8a223a783867ba81239b96f271d3387b24c111bb44b16900",
+        "buildDistrictExpressways": "d642f09a748c149ffae11a975f3834d4bc9625c25c4db7157fb897c15b83a1b0"
       },
       "7/3": {
         "buildInfrastructure": "c6a2dbe6c19bd3b48a97d42f8743210cc5db392747d016a53eba46c7dadbb2f7",
@@ -152,15 +153,18 @@
       },
       "42/1": {
         "buildInfrastructure": "76a690658e2d4dd103377dd0792f1550137e5ac3784be95a0cde14c6e37deced",
-        "buildTrussBridges": "8d7fa5cf0bf683ee98ed95dc586235a46023029195ed52678ebc24962177f016"
+        "buildTrussBridges": "8d7fa5cf0bf683ee98ed95dc586235a46023029195ed52678ebc24962177f016",
+        "buildDistrictExpressways": "b8b97080275aad27317a5d0e8430b6ff18caa0a12ea9d5b5af3c068e03d60007"
       },
       "42/2": {
         "buildInfrastructure": "c2b574e025140fbc48815ea459a82357f37d7c3ab4fd78c29ad10d520b35a68c",
-        "buildTrussBridges": "f88292edefb31a61edfae0fe499988c64e10f7c5ab9bb2d787b7d399aab1ff2d"
+        "buildTrussBridges": "f88292edefb31a61edfae0fe499988c64e10f7c5ab9bb2d787b7d399aab1ff2d",
+        "buildDistrictExpressways": "9a7c5824bcc14cfdc2ce6fbe4258b58a2d21710643aa95da824edd41175087ba"
       },
       "42/3": {
         "buildInfrastructure": "9f805d3ff3d9eabc505b0846250fc8e68a897663f1ad72dc5fc552aff463ff80",
-        "buildTrussBridges": "b2c44745324344c60bf1b7f61aab1c63f62048c25fd920dcd1dc7dfd3eaffb88"
+        "buildTrussBridges": "b2c44745324344c60bf1b7f61aab1c63f62048c25fd920dcd1dc7dfd3eaffb88",
+        "buildDistrictExpressways": "71400cc233c655dc0a5849633a4f2a627efc7cb030d7d63a0bdbf6679c162a03"
       },
       "2026/1": {
         "buildInfrastructure": "6a6b7db1d409f2d933aaa1ead94510feeb47151e56138418c5e3aba3ed05cb82",
@@ -176,15 +180,18 @@
       },
       "65537/1": {
         "buildInfrastructure": "4ce43f4861f54403b20fa2f4adaa6e893eb9c2da6e02c29339fa2c28fec7c311",
-        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "buildDistrictExpressways": "1c94cba07d154b916eb4deb23c6aea3a7ee304c3713af5013f0e692248e6b2bc"
       },
       "65537/2": {
         "buildInfrastructure": "9d1ad0c068c542f1ab326c8e874c503747b5e5c908b849dd47f20b2a7eb69937",
-        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "buildDistrictExpressways": "1787a7f91c7d416c90029635820517dfef6d9ebfa1f51f3bc437c49715866b85"
       },
       "65537/3": {
         "buildInfrastructure": "eb085ba12592125c866f846f68c4523051f1db21c7504a368c24821d9864ab1d",
-        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "buildDistrictExpressways": "82d07ad692f08209f533fc3075adc0d6cc0f6db9fae3634609585fd65d816aeb"
       }
     }
   }

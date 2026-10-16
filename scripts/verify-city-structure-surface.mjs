@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { loadCity, cachedPlan } from "./city-kit/index.mjs";
 import { structureRenderDigests } from "./city-kit/structure-render-digest.mjs";
+import { makeRoutePilot } from "./city-kit/route-pilot.mjs";
 const kit = await loadCity({
   "pkg:three": ["* as THREE"],
   "engine/systems/roadSystem.ts": ["buildInfrastructure", "buildDistrictExpressways", "buildTrussBridges", "buildCulDeSacBulbs", "buildChannelizedJunctions"],
@@ -16,6 +17,7 @@ const kit = await loadCity({
   "game/driving/surfaceFootprint.ts": ["footprintSupport"],
   "game/driving/SurfaceDrivingWorld.ts": ["SurfaceDrivingEnvironment", "SurfaceWorldValidator", "polylineProgress"],
   "game/driving/DrivingKernel.ts": ["DrivingKernel"],
+  "game/driving/citySolids.ts": ["cityCollisionIndex"],
   "game/DrivingSimulation.ts": ["initialDrivingState"],
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/surface/citySurfacePort.ts": ["CitySurfacePort"],
@@ -116,7 +118,8 @@ const drive = (regions, x0, z, x1) => {
   assert.equal(c.landings.find((l) => l.end === "to").status, "no-ground");
 }
 {
-  // Overpass: a ground road runs under the span → the deck is its own layer, the road below is unaffected.
+  // Overpass: a ground road runs under the span → the deck is its own layer, the road below is unaffected;
+  // the deck joins its approaches only through the landing portals the region rules validate (v4).
   const N = { x: 0, z: -40 }, S = { x: 0, z: 40 };
   const { c, regions } = build(city([edge(W, A), span(), edge(B, E), edge(N, S)]));
   const deck = c.surface.patches.find((p) => p.kind === "bridge-deck");
@@ -125,7 +128,11 @@ const drive = (regions, x0, z, x1) => {
   assert.ok(c.surface.portals.every((p)=>p.validated&&p.fromPatch===deck.id&&p.clearance>4));
   assert.equal(regions.classify(0, 10, "ground").status, "drivable", "the road under the deck stays drivable");
   assert.equal(regions.classify(0, 0, deck.layerId).status, "drivable");
-  assert.notEqual(regions.classify(0, 0, deck.layerId).regionId, regions.classify(-40, 0, "ground").regionId, "no implicit cross-layer portal");
+  assert.ok(regions.report.portals.length > 0 && regions.report.portals.every((p) => p.status === "open" && p.fromPatch === deck.id), "portals only from the deck to its landing pieces");
+  assert.deepEqual(kit.landingConnectivity(c, regions).map((x) => x.connected), [true, true], "both landings connect through their portals");
+  assert.ok(drive(regions, -40, 0, 40).reached, "the kernel crosses the overpass");
+  const isolated = kit.buildSurfaceRegions({ ...c.surface, revision: "fixture", portals: [] }, kit.buildSurfaceIndex({ ...c.surface, revision: "fixture", portals: [] }));
+  assert.notEqual(isolated.classify(0, 0, deck.layerId).regionId, isolated.classify(-40, 0, "ground").regionId, "without portals there is no implicit cross-layer link");
 }
 {
   // Dangling far end and a multi-point bridge.
@@ -136,14 +143,19 @@ const drive = (regions, x0, z, x1) => {
   assert.ok(issues.some((i) => i.source.id === `bridge:${bent.id}` && i.reason === "unsupported"), "multi-point bridges are rejected, not drawn as decks");
 }
 {
-  // Expressway: own layer, actual tilted deck tops, ramp ends a real step above the road.
+  // Expressway: own layer, actual tilted deck tops, ramp ends landed on the rendered road surface.
   const points = Array.from({ length: 11 }, (_, i) => ({ x: -100 + i * 20, z: 60 }));
   const { c, regions } = build(city([edge({ x: -120, z: 60 }, { x: 120, z: 60 }, 12)], () => 2, { highways: [points] }));
   const decks = c.surface.patches.filter((p) => p.layerId === "expressway:0");
-  assert.equal(decks.length, 10);
+  assert.equal(decks.length, 20, "ramp-zone segments are drawn as ≤ 10-unit pieces sampling the eased profile");
   const mid = regions.classify(0, 60, "expressway:0"); assert.equal(mid.status, "drivable"); close(mid.y, 9.1, 1e-4, "mid deck top");
-  assert.ok(c.landings.filter((l) => l.structureId === "expressway:0").every((l) => l.status === "layered" && Math.abs(l.step - 0.26) < 0.02));
+  assert.ok(c.landings.filter((l) => l.structureId === "expressway:0").every((l) => l.status === "layered" && Math.abs(l.step) < 0.02), "ramp ends meet the rendered road (was a 0.26 step)");
   assert.equal(regions.classify(0, 60, "ground").status, "drivable", "the road under the expressway is its own layer");
+  // Cross-layer portals at both ramp ends: validated by the region rules, the kernel climbs to the deck.
+  assert.ok(regions.report.portals.length >= 2 && regions.report.portals.every((p) => p.status === "open"), JSON.stringify(regions.report.portals.map((p) => p.reason)));
+  assert.ok(kit.landingConnectivity(c, regions).filter((x) => x.landing.structureId === "expressway:0").every((x) => x.connected), "both ramp ends join the road's region");
+  const up = makeRoutePilot(kit, key)(regions, [{ x: -112, z: 60 }, ...points], { until: 12 + 110 });
+  assert.equal(up.result, "ok"); assert.ok(up.maxY > 9, `the kernel drives up the ramp to the deck (max y ${up.maxY})`);
   assert.equal(regions.classify(0, 65.2, "expressway:0").status, "blocked", "rails bound the deck at ±4.95");
 }
 {
@@ -174,7 +186,14 @@ const drive = (regions, x0, z, x1) => {
   assert.equal((await port.capture(source, aborted.signal)).status, "cancelled");
   const first = await port.capture(source);
   assert.equal(first.status, "ready"); assert.match(first.revision, new RegExp(`^surface-v${kit.CITY_SURFACE_GEOMETRY_VERSION}:sha256:[a-f0-9]{64}$`));
-  assert.ok(first.readWorld().surface.patches.some((p) => p.kind === "bridge-deck"));
+  const frozenWorld = first.readWorld();
+  assert.ok(frozenWorld.surface.patches.some((p) => p.kind === "bridge-deck"));
+  assert.ok(frozenWorld.obstacles.filter((o) => o.role === "bridge-deck").length === 1 &&
+    frozenWorld.obstacles.filter((o) => o.role === "bridge-railing").length === 2,
+    "the captured world carries the structure solids (deck slab + railings)");
+  const capturedCollision = kit.cityCollisionIndex(frozenWorld.obstacles, frozenWorld.sceneSolids ?? []);
+  assert.ok(capturedCollision.report.byRole["bridge-deck"] === 1 && capturedCollision.report.byRole["bridge-railing"] === 2,
+    "same captured structural facts compile into the collision index without an escaping port capability");
   assert.equal(await port.capture(source), first, "same rendered source reuses the published snapshot");
   const copy = first.read(); copy.patches[0].vertices[0] += 99;
   assert.notEqual(first.read().patches[0].vertices[0], copy.patches[0].vertices[0], "reads are defensive copies");
@@ -190,16 +209,16 @@ console.log("Structure surface: THREE-exact BOX/cylinder tops, level and sloped 
 if (process.argv.includes("--cities")) {
   const baselineFile = JSON.parse(readFileSync(new URL("../fixtures/city-driving/structure-render-baseline.json", import.meta.url), "utf8"));
   const baseline = baselineFile.plans; const correctedPlans = baselineFile.corrected.plans;
-  const totals = { bridges: 0, landings: 0, connected: 0, crossings: 0, crossable: 0 };
-  const reasons = {}; const failures = [];
+  const totals = { bridges: 0, landings: 0, connected: 0, crossings: 0, crossable: 0, ramps: 0, rampsConnected: 0, rampsUp: 0, rampsDown: 0 };
+  const reasons = {}; const failures = []; const rampFailures = [];
   for (const seed of [1, 7, 42, 2026, 65537]) for (const tier of [1, 2, 3]) {
     const plan = cachedPlan(kit.createCityPlan, seed, tier);
     const digests = await structureRenderDigests(kit, plan);
-    // Bridge decks and trusses changed by design (sloped decks); everything else — curbs included —
-    // must still equal the pre-descriptor renderer byte for byte.
+    // Bridge decks and trusses (sloped decks) and expressways (ramp ends landed on the road) changed
+    // by design; everything else — curbs included — must still equal the pre-descriptor renderer.
     const before = baseline[`${seed}/${tier}`]; const corrected = correctedPlans[`${seed}/${tier}`];
     for (const name of Object.keys(before)) {
-      const expected = name === "buildInfrastructure" || name === "buildTrussBridges" ? corrected[name] : before[name];
+      const expected = name === "buildInfrastructure" || name === "buildTrussBridges" ? corrected[name] : corrected[name] ?? before[name];
       assert.equal(digests[name], expected, `seed ${seed} tier ${tier}: ${name} render output changed`);
     }
     const { c, regions } = build(plan);
@@ -238,6 +257,25 @@ if (process.argv.includes("--cities")) {
       const full = run(from, ux, uz, -1.5, len + reach);
       if (full === "ok") totals.crossings++; else failures.push(`${seed}/${tier} ${id.slice(0, 28)} ${full}`);
     }
+    // Expressway ramps (cross-layer portals): road → ramp → elevated deck, and back down.
+    const drivePath = makeRoutePilot(kit, key);
+    for (const x of kit.landingConnectivity(c, regions).filter((x) => x.landing.structureId.startsWith("expressway:"))) {
+      const l = x.landing; const run = plan.highways[Number(l.structureId.split(":")[1])];
+      const upPath = [{ x: l.x + l.outX * 4, z: l.z + l.outZ * 4 }, ...(l.end === "from" ? run : [...run].reverse())];
+      totals.ramps++; if (x.connected) totals.rampsConnected++;
+      const up = drivePath(regions, upPath, { until: 4 + 110 });
+      assert.ok(!up.result.startsWith("invalid"), up.result);
+      if (up.maxY > 9) totals.rampsUp++; else rampFailures.push(`${seed}/${tier} ${l.structureId}/${l.end} up ${up.result}`);
+      const lens = [0]; for (let i = 1; i < upPath.length; i++) lens.push(lens[i - 1] + Math.hypot(upPath[i].x - upPath[i - 1].x, upPath[i].z - upPath[i - 1].z));
+      const k = Math.max(1, lens.findIndex((v) => v >= 100)); const t = (100 - lens[k - 1]) / (lens[k] - lens[k - 1]);
+      const top = { x: upPath[k - 1].x + (upPath[k].x - upPath[k - 1].x) * t, z: upPath[k - 1].z + (upPath[k].z - upPath[k - 1].z) * t };
+      const at = regions.classify(top.x, top.z, l.layerId);
+      const down = at.status === "drivable" ? drivePath(regions, [top, ...upPath.slice(0, k).reverse()], { regionId: at.regionId, y: at.y }) : { result: `start:${at.cause}`, s: 0, layers: [] };
+      assert.ok(!down.result.startsWith("invalid"), down.result);
+      // Down counts once the car is back on the road layer within the last 4 units (the pilot's
+      // off-ramp aim point can sit next to a curb).
+      if (down.s >= 96 && down.layers.includes("ground")) totals.rampsDown++; else rampFailures.push(`${seed}/${tier} ${l.structureId}/${l.end} down ${down.result}`);
+    }
     const conflicts = regions.report.conflicts.length;
     console.log(`Structure surface: seed ${seed}, tier ${tier}: render parity ok, ${JSON.stringify(c.counts)}, ${c.obstacles.length} obstacles, landings ${c.landings.map((l) => `${l.status}${l.step === null ? "" : `(${l.step.toFixed(2)})`}`).join(" ")}, ${regions.report.regions} regions, ${conflicts} conflicts.`);
   }
@@ -246,5 +284,9 @@ if (process.argv.includes("--cities")) {
   // crossed approach → approach on the axis. Lower numbers mean the deck/landing geometry regressed.
   assert.ok(totals.crossings >= 7, `approach-to-approach crossings regressed (${totals.crossings}/${totals.crossable}): ${failures.join("; ")}`);
   if (failures.length) console.log(`Structure surface: landing-zone failures (reported, not opened): ${failures.join("; ")}`);
-  console.log(`Structure surface: ${totals.bridges} bridges, ${totals.landings} landings — ${totals.connected} join the deck region ${JSON.stringify(reasons)}; every connected span driven end to end; ${totals.crossings}/${totals.crossable} crossed approach → approach tick-by-tick. Expressways stay on their own layers (no cross-layer portal). Remaining closed landings are reported with their reason.`);
+  // Floors measured 2026-10-16 (landed + densified ramps, v4 portals): all 14 ramp ends connect, 13
+  // climb to the deck (one pilot start sits on a footprint-blocked approach), all 14 descend to the road.
+  assert.ok(totals.rampsConnected >= 14 && totals.rampsUp >= 13 && totals.rampsDown >= 14, `expressway ramps regressed: ${JSON.stringify(totals)} ${rampFailures.join("; ")}`);
+  if (rampFailures.length) console.log(`Structure surface: ramp runs reported: ${rampFailures.join("; ")}`);
+  console.log(`Structure surface: ${totals.bridges} bridges, ${totals.landings} landings — ${totals.connected} join the deck region ${JSON.stringify(reasons)}; every connected span driven end to end; ${totals.crossings}/${totals.crossable} crossed approach → approach tick-by-tick. Expressway ramps through cross-layer portals: ${totals.rampsConnected}/${totals.ramps} connected, ${totals.rampsUp} climbed road → deck, ${totals.rampsDown} descended deck → road. Remaining closed landings are reported with their reason.`);
 }

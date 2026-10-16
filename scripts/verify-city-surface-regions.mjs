@@ -173,6 +173,46 @@ const boundaryIn = (regions, regionId, x0, z0, x1, z1) => { const r = regions.se
   assert.equal(r2.classify(6, 0, "ground").cause, "height-conflict");
 }
 
+// ── Cross-layer portals (v4): compiler candidates re-checked with the exact overlay rule ──
+{
+  const portalOf = (from, to, mismatch = 0.1) => ({ id: `portal:${from}:${to}`, fromPatch: from, toPatch: to,
+    fromBoundary: { loop: 0, firstSegment: 0, segmentCount: 1 }, toBoundary: { loop: 0, firstSegment: 0, segmentCount: 1 },
+    permittedDirection: "both", clearance: 2.2, maxHeightMismatch: mismatch, validated: false });
+  const build = (patches, portals) => { const snap = { ...snapshot(patches), portals }; const r = m.buildSurfaceRegions(snap, m.buildSurfaceIndex(snap)); assert.equal(r.status, "ready"); return r; };
+  // Road on the ground from x −10 to 40; a ramp layer from x 30 rising 0.05 per unit (overlaps 30–40).
+  const road = patch("road", "carriageway", grid(-10, -4, 40, 4, 25, 4));
+  const rampAt = (lift) => patch("ramp", "ramp", grid(30, -4, 70, 4, 20, 4, (x) => lift + (x - 30) * 0.05), "ramp:0");
+  const isolated = build([road, rampAt(0)], []);
+  assert.equal(isolated.regions.length, 2, "without a portal the layers never join (mutation check)");
+  const r = build([road, rampAt(0)], [portalOf("ramp", "road")]);
+  assert.deepEqual(r.report.portals.map((p) => [p.status, p.reason]), [["open", "ok"]]);
+  assert.equal(r.regions.length, 1); assert.deepEqual([...r.regions[0].layerIds].sort(), ["ground", "ramp:0"]);
+  const region = r.regions[0].id;
+  assert.equal(r.classify(20, 0, "ground").regionId, region); assert.equal(r.classify(60, 0, "ramp:0").regionId, region);
+  // The ramp's lower end at x = 30 is a seam (the road continues at its height): no boundary there.
+  // Its far end and the road's end under the ramp (0.5 below it) stay closed boundaries.
+  const at = (x0, x1, layerId) => r.boundaryOf(region).filter((seg) => seg.layerId === layerId && Math.min(seg.ax, seg.bx) >= x0 && Math.max(seg.ax, seg.bx) <= x1 && seg.ax === seg.bx);
+  assert.equal(at(29.9, 30.1, "ramp:0").length, 0, "the seam to the road is not a boundary");
+  assert.ok(at(69.9, 70.1, "ramp:0").length > 0, "the ramp's far end is closed");
+  const under = at(39.9, 40.1, "ground"); assert.ok(under.length > 0);
+  assert.ok(under.every((seg) => Math.abs(seg.ya) < 1e-6 && Math.abs(seg.yb) < 1e-6), "boundary segments carry their surface height");
+  // Layer choice: height continuity, upper surface within the seam tolerance, ambiguous without a height.
+  close(r.supportAt(35, 0, region, 0).y, 0); close(r.supportAt(35, 0, region, 0.25).y, 0.25);
+  assert.equal(r.supportAt(35, 0, region).cause, "ambiguous-layer", "a spawn over two surfaces must name its height");
+  close(r.supportAt(31, 0, region, 0).y, 0.05, 1e-6, "within the seam tolerance the car rides the upper surface");
+  close(r.supportAt(31, 0, region).y, 0.05, 1e-6);
+  // Rejections, each with its reason.
+  assert.deepEqual(build([road, rampAt(0.3)], [portalOf("ramp", "road")]).report.portals.map((p) => p.reason), ["no-contact"], "a ramp passing 0.3 above never touches");
+  assert.deepEqual(build([road, rampAt(-0.3)], [portalOf("ramp", "road")]).report.portals.map((p) => p.reason), ["height-conflict"], "ground poking through the ramp");
+  const road2 = patch("road2", "carriageway", grid(35, -4, 60, 4, 10, 4));
+  assert.deepEqual(build([road, road2], [portalOf("road2", "road")]).report.portals.map((p) => p.reason), ["same-layer"]);
+  const walk = patch("walk", "sidewalk", grid(30, -6, 40, -4, 4, 1));
+  assert.deepEqual(build([road, rampAt(0), walk], [portalOf("ramp", "walk")]).report.portals.map((p) => p.reason), ["not-member"]);
+  const far = patch("far", "ramp", grid(80, -4, 90, 4, 4, 4), "ramp:0");
+  assert.deepEqual(build([road, far], [portalOf("far", "road")]).report.portals.map((p) => p.reason), ["no-overlap"]);
+  assert.equal(build([road, rampAt(0.3)], [portalOf("ramp", "road")]).regions.length, 2, "a rejected portal joins nothing");
+}
+
 // ── Failure modes: mismatched revision, unresolved index, budgets ──
 {
   const road = patch("road", "carriageway", grid(-10, -3, 10, 3, 4, 2));
@@ -186,7 +226,7 @@ const boundaryIn = (regions, regionId, x0, z0, x1, z1) => { const r = regions.se
   const two = snapshot([road, patch("road2", "carriageway", grid(-3, -10, 3, 10, 2, 4))]);
   assert.equal(m.buildSurfaceRegions(two, m.buildSurfaceIndex(two), { ...P, maxOverlayTests: 1 }).reason, "overlay-budget");
 }
-console.log("Surface regions: exact index rasterisation, alias merge with exact overlay heights, conflict/step/seam boundaries, curb vs closed, islands and holes, unresolved patches fail closed, layer isolation, bridge-deck occlusion, budgets passed.");
+console.log("Surface regions: exact index rasterisation, alias merge with exact overlay heights, conflict/step/seam boundaries, curb vs closed, islands and holes, unresolved patches fail closed, layer isolation, bridge-deck occlusion, cross-layer portals (open/no-contact/height-conflict/same-layer/not-member/no-overlap, seams, layer choice), budgets passed.");
 
 if (process.argv.includes("--cities")) {
   const { cachedPlan } = await import("./city-kit/index.mjs");

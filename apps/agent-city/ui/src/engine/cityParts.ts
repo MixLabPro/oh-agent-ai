@@ -36,6 +36,7 @@ import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type Amb
 import { buildRoadSurface, type RoadSurfaceHost } from "./systems/roadSurfaceSystem";
 import { compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./surface/groundRoadCompiler";
 import type { CitySurfaceSource } from "./surface/citySurfacePort";
+import { collectSceneSolids } from "./surface/sceneSolids";
 import { buildInfrastructure, buildCulDeSacBulbs, buildChannelizedJunctions, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
@@ -262,7 +263,8 @@ export class CityParts {
     }
     this.group.add(staticCity.group);
     this.drivingRoots = staticCity.drivingRoots.slice();
-    this.staticSource = Object.freeze({ layout: staticCity.layout, ground: staticCity.groundRoadSurface });
+    // Rendered scene proxies are sampled at capture, alongside the precise frozen mesh layer.
+    this.staticSource = Object.freeze({ layout: staticCity.layout, ground: staticCity.groundRoadSurface, solids: () => collectSceneSolids(this.group) });
     this.water = staticCity.water;
     this.treeMesh = staticCity.treeMesh;
     this.carMesh = staticCity.carMesh;

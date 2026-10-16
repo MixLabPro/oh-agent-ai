@@ -11,8 +11,9 @@ import { checkStructureGeometry, type StructureCheckOptions, type StructureCheck
 import { buildSurfaceIndex, type SurfaceIndexBuild, type SurfacePointQuery, type SurfaceQueryResult } from "./SurfaceIndex";
 import { checkLandingSeams, type LandingSeamOptions, type LandingSeamReport } from "./landingSeams";
 import { assertRenderedSolidBudget, copyRenderedSolids, type RenderedSolid, type RenderedSolidSource } from "./renderedSolidTypes";
+import type { SolidInput } from "../../game/driving/CollisionIndex";
 
-export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface; rendered?: RenderedSolidSource }>;
+export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface; rendered?: RenderedSolidSource; solids?: () => readonly SolidInput[] }>;
 type StructureMetadata = Pick<CitySurfaceCompilation, "obstacles" | "landings" | "counts">;
 export type CityDrivingSnapshot = StructureMetadata & Readonly<{
   revision: string;
@@ -23,6 +24,9 @@ export type CityDrivingSnapshot = StructureMetadata & Readonly<{
   /** Exact visible geometry of the registered building/landmark/civic/context layer.
    * Does not include all street furniture, vegetation, traffic or the legal graph. */
   renderedSolids: readonly RenderedSolid[];
+  /** Whitelisted scene bounding proxies, sampled with the same world. These are
+   * conservative proxies, not the precise architectural render triangles above. */
+  sceneSolids: readonly SolidInput[];
 }>;
 export type ReadyCitySurfaceCapture = Readonly<{
   status: "ready";
@@ -53,9 +57,33 @@ function copyMetadata(input: StructureMetadata): StructureMetadata {
   });
 }
 
+function sceneSolidValues(solids: readonly SolidInput[]): unknown[] {
+  if (solids.length > 20000) throw new Error("scene-solids-budget");
+  const ids = new Set<string>(); let points = 0;
+  return [...solids].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map((s) => {
+    if (!s.id || ids.has(s.id) || s.id.length > 512 || !s.role || s.role.length > 512) throw new Error("invalid-scene-solid"); ids.add(s.id);
+    const vertices = s.kind === "box" ? [s.center, ...s.halfAxes] : s.ring;
+    points += vertices.length;
+    if (points > 200000) throw new Error("scene-solids-budget");
+    if (vertices.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.z) || ("y" in p && !Number.isFinite(p.y)))) throw new Error("invalid-scene-solid");
+    if (s.kind === "box") {
+      if (s.halfAxes.length !== 3) throw new Error("invalid-scene-solid");
+      return [s.id, s.role, s.kind, [s.center.x,s.center.y,s.center.z], s.halfAxes.map((p) => [p.x,p.y,p.z])];
+    }
+    if (s.ring.length < 3 || !Number.isFinite(s.yMin) || !Number.isFinite(s.yMax) || s.yMin > s.yMax) throw new Error("invalid-scene-solid");
+    return [s.id,s.role,s.kind,s.ring.map((p) => [p.x,p.z]),s.yMin,s.yMax];
+  });
+}
+function copySceneSolids(solids: readonly SolidInput[]): readonly SolidInput[] {
+  sceneSolidValues(solids);
+  return Object.freeze(solids.map((s): SolidInput => s.kind === "box"
+    ? Object.freeze({ ...s, center: Object.freeze({ ...s.center }), halfAxes: Object.freeze(s.halfAxes.map((p) => Object.freeze({ ...p }))) as unknown as typeof s.halfAxes })
+    : Object.freeze({ ...s, ring: Object.freeze(s.ring.map((p) => Object.freeze({ ...p }))) })));
+}
+
 /** Canonical structural payload; the surface revision already covers meshes and topology.
  * Sorting removes incidental caller order; malformed identities/numbers fail before hashing. */
-export function canonicalCityWorldBytes(surfaceRevision: string, metadata: StructureMetadata, renderedSolids?: readonly RenderedSolid[]): Uint8Array {
+export function canonicalCityWorldBytes(surfaceRevision: string, metadata: StructureMetadata, renderedSolids?: readonly RenderedSolid[], sceneSolids?: readonly SolidInput[]): Uint8Array {
   if (!surfaceRevision) throw new Error("invalid-world-surface-revision");
   const ids = new Set<string>();
   const obstacles = [...metadata.obstacles].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map((o) => {
@@ -92,7 +120,8 @@ export function canonicalCityWorldBytes(surfaceRevision: string, metadata: Struc
     return s;
   });
   const header = new TextEncoder().encode(JSON.stringify(["city-driving-world", 1, renderedSolids ? "structures-and-rendered-buildings" : "structures-only", surfaceRevision, obstacles, landings, counts,
-    ...(renderedSolids ? [rendered.map((s) => [s.id, s.role, s.positions.length, s.indices.length, s.transforms.length])] : [])]));
+    ...(renderedSolids ? [rendered.map((s) => [s.id, s.role, s.positions.length, s.indices.length, s.transforms.length])] : []),
+    ...(sceneSolids ? [["scene-proxies", sceneSolidValues(sceneSolids)]] : [])]));
   if (!renderedSolids) return header;
   // Binary payload avoids JSON expansion of millions of numeric values. A length-prefixed
   // UTF-8 header plus explicitly little-endian arrays is deterministic on every host.
@@ -128,8 +157,8 @@ export class CitySurfacePort {
 
   async capture(source: CitySurfaceSource | null, signal?: AbortSignal): Promise<CitySurfaceCapture> {
     if (!source) { this.invalidate(); return Object.freeze({ status: signal?.aborted ? "cancelled" : "unavailable" }); }
-    if (this.source?.layout !== source.layout || this.source?.ground !== source.ground || this.source?.rendered !== source.rendered) {
-      this.invalidate(); this.source = Object.freeze({ layout: source.layout, ground: source.ground, rendered: source.rendered });
+    if (this.source?.layout !== source.layout || this.source?.ground !== source.ground || this.source?.rendered !== source.rendered || this.source?.solids !== source.solids) {
+      this.invalidate(); this.source = Object.freeze({ layout: source.layout, ground: source.ground, rendered: source.rendered, solids: source.solids });
     }
     if (signal?.aborted) return Object.freeze({ status: "cancelled" });
     if (this.cached?.isCurrent()) return this.cached;
@@ -150,11 +179,18 @@ export class CitySurfacePort {
     // Hash/read payloads are owned; no compiler/source references escape through the handle.
     const metadata = copyMetadata(compilation);
     const renderedSolids = copyRenderedSolids(source.rendered?.solids ?? []);
-    const sourceCurrent = () => !source.rendered || source.rendered.isCurrent();
+    const sceneSolids = copySceneSolids(source.solids?.() ?? []);
+    const sceneIdentity = JSON.stringify(sceneSolidValues(sceneSolids));
+    let sourceValid = true;
+    const sourceCurrent = () => {
+      if (!sourceValid) return false;
+      try { return sourceValid = (!source.rendered || source.rendered.isCurrent()) && (!source.solids || JSON.stringify(sceneSolidValues(source.solids())) === sceneIdentity); }
+      catch { return sourceValid = false; }
+    };
     const publication = await this.store.publish(compilation.surface);
     if (generation !== this.generation || publication.status !== "published" || !sourceCurrent()) return Object.freeze({ status: "stale" });
     const revision = publication.revision;
-    const digest = await this.hash(canonicalCityWorldBytes(revision, metadata, source.rendered ? renderedSolids : undefined));
+    const digest = await this.hash(canonicalCityWorldBytes(revision, metadata, source.rendered ? renderedSolids : undefined, source.solids ? sceneSolids : undefined));
     if (generation !== this.generation || this.store.revision !== revision || !sourceCurrent()) return Object.freeze({ status: "stale" });
     if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("invalid-world-digest");
     const worldRevision = `city-world-v1:sha256:${digest}`;
@@ -163,7 +199,7 @@ export class CitySurfacePort {
     const readWorld = (): CityDrivingSnapshot | null => {
       const surface = read();
       return surface ? Object.freeze({ ...copyMetadata(metadata), surface, revision: worldRevision,
-        obstacleCoverage: source.rendered ? "structures-and-rendered-buildings" : "structures-only", renderedSolids: copyRenderedSolids(renderedSolids) }) : null;
+        obstacleCoverage: source.rendered ? "structures-and-rendered-buildings" : "structures-only", renderedSolids: copyRenderedSolids(renderedSolids), sceneSolids: copySceneSolids(sceneSolids) }) : null;
     };
     const checkStructures = (options: StructureCheckOptions): StructureCheckReport | null => {
       const snapshot = readWorld();

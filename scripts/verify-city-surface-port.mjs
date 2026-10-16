@@ -73,4 +73,19 @@ const racing = new CitySurfacePort((bytes) => ++phases === 1 ? hash(bytes) : new
 }));
 const pending = racing.capture(source); await worldStarted; racing.invalidate(); await releaseWorld();
 assert.equal((await pending).status, "stale");
+// Remote scene proxy integration must retain the local same-generation guarantees.
+let scene = [{ id: "scene:building:0", role: "building", kind: "box", center: { x: 0, y: 5, z: 0 },
+  halfAxes: [{ x: 1,y: 0,z: 0 }, { x: 0,y: 5,z: 0 }, { x: 0,y: 0,z: 1 }] }];
+const scenePort = new CitySurfacePort(hash), sceneSource = { ...source, solids: () => scene };
+const sceneCapture = await scenePort.capture(sceneSource); assert.equal(sceneCapture.status, "ready");
+assert.equal(sceneCapture.readWorld().sceneSolids.length, 1);
+assert.throws(() => { sceneCapture.readWorld().sceneSolids[0].center.y = 8; }, TypeError);
+const originalScene = scene; scene = structuredClone(scene); scene[0].center.y += 1;
+assert.equal(sceneCapture.isCurrent(), false, "displayed scene proxy changes invalidate the frozen world");
+scene = originalScene; assert.equal(sceneCapture.isCurrent(), false, "restoring scene geometry cannot revive an old handle");
+scenePort.invalidate(); const restoredScene = await scenePort.capture(sceneSource);
+assert.equal(restoredScene.worldRevision, sceneCapture.worldRevision, "unchanged scene geometry keeps content identity across generations");
+scenePort.invalidate(); scene = structuredClone(scene); scene[0].center.y += 1;
+const movedScene = await scenePort.capture(sceneSource);
+assert.notEqual(movedScene.worldRevision, restoredScene.worldRevision, "scene proxies participate in world content identity");
 console.log("Surface port: owned surface/structural metadata, world content identity, concurrent capture sharing, per-caller cancellation, source replacement and invalidation during either hash passed.");

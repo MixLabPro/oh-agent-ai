@@ -12,6 +12,8 @@ const m=await loadCity({
  'game/driving/surfaceFootprint.ts':['DEFAULT_FOOTPRINT_PARAMS'],
  'game/driving/vehicleFootprint.ts':['DRIVING_FOOTPRINT'],
  'game/driving/DrivingKernel.ts':['DrivingKernel'],
+ 'game/driving/audit/DrivingRouteRunner.ts':['DrivingRouteRunner'],
+ 'game/driving/audit/GateAuditObserver.ts':['GateAuditObserver'],
  'game/DrivingSimulation.ts':['initialDrivingState'],
 });
 const { grid,patch,regionsOf }=makeFixtures(m);
@@ -59,5 +61,21 @@ run();run(.05);
  const built=m.buildCollisionIndex({revision:'cross-slope',obstacles:[slab]});assert.equal(built.status,'ready');
  const b=m.createStructureCollisionBinding({surfaceRevision:regions.revision,worldRevision:'cross-slope',index:built.index,dimensions,centerHeight:.55,isCurrent:()=>true});
  const world=new m.SurfaceDrivingEnvironment(regions,m.DRIVING_FOOTPRINT,m.DEFAULT_FOOTPRINT_PARAMS,b);assert.ok(world.place(0,0,0,regions.regions[0].id),'positive roll raises the positive lateral side');
+}
+// A query budget failure must terminate as simulation uncertainty, never road blockage.
+{
+ const {regions}=regionsOf([patch('budget-road','carriageway',grid(-20,-4,20,4,20,4))]);const id=regions.regions[0].id;
+ const built=m.buildCollisionIndex({revision:'budget-world',obstacles:[box('ahead',1.8,0,0,.1,4,.1)]},{maxIterations:1});assert.equal(built.status,'ready');
+ const binding=m.createStructureCollisionBinding({surfaceRevision:regions.revision,worldRevision:'budget-world',index:built.index,dimensions,centerHeight:.55,isCurrent:()=>true});
+ const world=new m.SurfaceDrivingEnvironment(regions,m.DRIVING_FOOTPRINT,m.DEFAULT_FOOTPRINT_PARAMS,binding);
+ const start={...m.initialDrivingState(0,0,0,id),...world.place(0,0,0,id),speed:13};
+ const validator=new m.SurfaceWorldValidator(regions,s=>s.x,m.DRIVING_FOOTPRINT,m.DEFAULT_FOOTPRINT_PARAMS,binding);
+ const key={baseSnapshotHash:'budget-world',vehicleConfigHash:'fixture',kernelBuildId:'fixture',surfaceVersion:1,queryVersion:1,snapshotCompilerVersion:1,physicsVersion:1,collisionVersion:1,controllerVersion:1,plannerVersion:1,observerVersion:1,manifestHash:'fixture',releasePolicyVersion:1,releaseBoundaryHash:null};
+ const kernel=new m.DrivingKernel(world,key);const next=kernel.step(start,{forward:true,backward:false,left:false,right:false});
+ assert.match(next.motion.reason,/structure-collision:unresolved:budget/);assert.equal(validator.validate(start,next),'simulation-invalid');
+ const test={id:'budget-route',units:['edge'],start,corridor:{surfaceSequence:[id],portalSequence:[],waypoints:[{x:0,z:0},{x:10,z:0}]},policy:{cruiseSpeed:7,maxReverseSpeed:4},gates:[{id:'exit',x:10,y:0,z:0,forwardX:1,forwardZ:0,halfWidth:3,heightTolerance:.05,surfaceIds:[id]}],maxTicks:20,maxNoProgressTicks:10};
+ const run=new m.DrivingRouteRunner(key,test,kernel,{input:()=>({forward:true,backward:false,left:false,right:false})},new m.GateAuditObserver(test,validator));
+ const result=run.advance(20,key);assert.equal(result.verdict,'inconclusive');assert.equal(result.cause,'simulation-invalid');assert.equal(result.simulatedTicks,1);assert.deepEqual(result.coveredUnits,[]);
+ assert.equal(validator.validate(start,{state:start,motion:{blocked:true,reason:'structure-collision:unresolved:precision'}}),'simulation-invalid');
 }
 console.log('Structure world binding: spawn, same-kernel pier stop, guardrail, independent sweep validator, slope offset and stale/mismatch rejection passed.');

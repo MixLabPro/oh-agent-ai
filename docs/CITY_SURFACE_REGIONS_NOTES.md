@@ -48,8 +48,8 @@ A5之前：每城1–9个区域，0–3个片段被排除，0–10对冲突（�
 
 1. 不处理桥/高架（编译器尚未产出顶面），不处理渠化岛：编译器目前不产 `island` kind，岛语义只在合成夹具上验证过。
 2. ~~带子在急弯斜接处自折叠、坡地扇面与带子叠置高差到0.30~~：已在A5修复（编译器精确贴地+折点处理）。规则不变——将来编译器再出现这类片段，仍是整片判不可行驶并上报，不能靠放宽aliasTolerance掩盖。
-3. 无固体障碍：建筑、护栏、桥墩、路缘实体盒未纳入；CollisionIndex 仍待实现。
-4. 无portal：区域切换一律closed。环境层仍是整步拒绝，TOI和切线滑动属于Agent C。
+3. ~~无固体障碍~~：B2 起由 `CollisionIndex` 判（建筑、地标、护栏、桥墩、桁架、桥面板），作为可选参数接入整车与运动检查，见 [B2记录](CITY_PORTALS_AND_COLLISION_NOTES.md)。地面路缘仍由人行道边界的curb语义表达，不是固体。
+4. ~~无portal~~：B2 起编译器给出跨层 portal 候选，本模块复核后并区域（v4）；未通过的 portal 与不同区域之间仍一律closed。环境层仍是整步拒绝，TOI和切线滑动属于Agent C。
 5. 边界两侧偏移探测假设没有另一条线段在 `sideOffset` 内与之近平行。真实数据抽样未见违例，但这不是通用鲁棒布尔运算。
 6. Environment和Validator共享surface事实（spec §11.1允许）；编译器错误要靠A批次的渲染几何对照兜底。
 7. 构建是同步全量（每城约1–3秒），未接Worker和SurfaceStore生命周期，没有性能验收。
@@ -70,3 +70,17 @@ node scripts/verify-city-driving-surface.mjs --cities   # 十五城真实路段�
 ## A7修订（2026-10-16）
 
 规则版本 v3：同层的 `bridge-deck` 遮挡它所覆盖、且不高于它超过容差的地面片段——这些片段不提供支撑，也不构成冲突。高出桥面超过容差的地面判为 `height-conflict`。桥面端边与地面的接缝照旧检查 step。守卫新增两项：被遮挡的低处地面不算冲突，高出桥面 0.3 的地面算冲突（变异检查：关掉遮挡规则后测试失败）。
+
+## B2修订（2026-10-16）：跨层 portal
+
+规则版本 v4：
+- 编译器给的 portal 候选（结构片段 ↔ 被它压着的下层片段）按同层合并的精确叠置点复核：
+  - 下层高出结构 > 容差 → `height-conflict`；
+  - 最小叠置高差 > 容差 → `no-contact`；
+  - 另有 `same-layer`、`not-member`、`no-overlap` 三种拒绝原因；
+  - 通过（`open`）的对并入同一区域，区域带 `layerIds`。
+- 接缝不算边界：一侧在本层是无面或人行道，同区域另一层在容差内接得上。
+- 边界线段带 `layerId`/`ya`/`yb`。
+- 新增 `supportAt(x, z, regionId, nearY)`：按高度连续选层，上方容差内取上层，没给高度又压着两层时返回 `ambiguous-layer`。
+
+整车规则 v2：只检查车此处所在那层的边界线段。单层区域与 v1 逐字相同。证据与命令见 [B2记录](CITY_PORTALS_AND_COLLISION_NOTES.md)。
