@@ -4,6 +4,7 @@ import { loadCity } from "./city-kit/index.mjs";
 import { makeFixtures } from "./city-kit/surface-region-fixtures.mjs";
 const m = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
+  "engine/surface/renderedSolidObstacles.ts": ["renderedSolidsToObstacles"],
   "game/runtime/createCityCarSession.ts": ["createCityCarSession"],
   "game/runtime/GameRuntime.ts": ["GameRuntime"],
 });
@@ -37,9 +38,9 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   runtime.exit(); assert.equal(f.state.releases, 1); assert.equal(f.state.hook, null);
 }
 {
-  // 建筑 exact mesh 仍在 capture 里（未消费），但白名单代理在场：入场应成功并标注 coverage。
+  // 白名单场景代理没有对应的 renderedSolid 时仍参与碰撞并标注 coverage。
   const wallProxy = { id: "bld-1", role: "building", kind: "box", center: { x: 0, y: 2, z: 6 }, halfAxes: [{ x: 2, y: 0, z: 0 }, { x: 0, y: 2, z: 0 }, { x: 0, y: 0, z: 0.5 }] };
-  const f = hostFixture([{ id: "building-exact-mesh" }], [wallProxy]); const runtime = new m.GameRuntime();
+  const f = hostFixture([], [wallProxy]); const runtime = new m.GameRuntime();
   const result = await m.createCityCarSession(f.host, runtime, request);
   assert.equal(result.status, "ready", `building city must be drivable via proxies: ${result.reason}`);
   assert.equal(result.coverage, "structures-and-scene-proxies");
@@ -53,12 +54,13 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   runtime.exit();
 }
 {
-  // 无代理且 exact mesh 在场（旧场景：规划-only capture）→ 仍拒绝，不假装可碰撞。
-  const f = hostFixture([{ id: "building-exact-mesh" }]); const runtime = new m.GameRuntime();
+  // Malformed rendered solids fail closed and never start a frame hook.
+  const f = hostFixture([Object.freeze({ id: "malformed-mesh", role: "building", positions: undefined, indices: undefined, transforms: new Float64Array(16) })]); const runtime = new m.GameRuntime();
   const result = await m.createCityCarSession(f.host, runtime, request);
-  assert.equal(result.status, "ready", `exact-mesh-only city now enters with zero proxies too: ${result.reason}`);
-  assert.equal(result.coverage, "structures-and-scene-proxies");
-  runtime.exit();
+  assert.equal(result.status, "unavailable"); assert.equal(result.reason, "invalid-rendered-solid");
+  assert.equal(f.state.releases, 1, "entry refusal releases displayed geometry freeze");
+  assert.equal(f.state.hooks, 0, "architecture without collision never starts a frame hook");
+  assert.equal(runtime.snapshot.phase, "idle");
 }
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
@@ -72,4 +74,4 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   assert.equal(result.status, "ready"); abort.abort();
   assert.equal(runtime.snapshot.phase, "idle"); assert.equal(f.state.releases, 1);
 }
-console.log("City car bridge: structure fixture shares frozen world/kernel; architectural collision refusal, unsafe spawn and abort all release the lease");
+console.log("City car bridge: frozen structure/proxy collision, rendered-solid fail-closed validation, unsafe spawn and abort lease handling");
