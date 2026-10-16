@@ -3,6 +3,7 @@
  */
 import type { CityDrivingWorldCapture } from "../../engine/CityEngine";
 import { buildSurfaceIndex } from "../../engine/surface/SurfaceIndex";
+import { renderedSolidsToObstacles } from "../../engine/surface/renderedSolidObstacles";
 import { buildSurfaceRegions } from "../../engine/surface/surfaceRegions";
 import { initialDrivingState, DRIVING_PHYSICS_VERSION } from "../DrivingSimulation";
 import { DrivingKernel } from "../driving/DrivingKernel";
@@ -20,7 +21,7 @@ export type CityCarRequest = Readonly<{
   present(frame: CarPresentation): void;
 }>;
 export type CityCarEntry =
-  | Readonly<{ status: "ready"; worldRevision: string; coverage: "structures-only"; adapter: CarAdapter }>
+  | Readonly<{ status: "ready"; worldRevision: string; coverage: "structures-only" | "structures-and-buildings"; adapter: CarAdapter }>
   | Readonly<{ status: "unavailable"; reason: string }>;
 export async function createCityCarSession(host: CityCarHost, runtime: GameRuntime, request: CityCarRequest,
   signal?: AbortSignal): Promise<CityCarEntry> {
@@ -35,15 +36,20 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     if (signal?.aborted || !capture.isCurrent()) return unavailable("stale-or-cancelled");
     const snapshot = capture.readWorld();
     if (!snapshot || snapshot.revision !== capture.worldRevision || snapshot.surface.revision !== capture.revision) return unavailable("revision-mismatch");
-    // Exact architectural render geometry is captured, but this collision path
-    // currently supports only the structural boxes/prisms. No permissive fallback.
-    if (snapshot.renderedSolids.length > 0) return unavailable("unavailable-rendered-collision");
+    // Exact architectural render geometry joins collision as per-instance
+    // conservative world boxes (building render geometry IS instanced boxes, so
+    // the bound is exact there; other meshes keep their AABB — never smaller
+    // than drawn). Over-budget or malformed solids refuse the session: no
+    // permissive fallback that would let the car drive through buildings.
+    const rendered = renderedSolidsToObstacles(snapshot.renderedSolids);
+    if (rendered.status !== "ready") return unavailable(rendered.reason);
+    const coverage = rendered.obstacles.length > 0 ? "structures-and-buildings" : "structures-only";
     if (!request.collider.vehicleConfigHash) return unavailable("invalid-vehicle-config");
     const surfaceIndex = buildSurfaceIndex(snapshot.surface);
     if (surfaceIndex.status !== "ready") return unavailable(`surface-index:${surfaceIndex.reason}`);
     const regions = buildSurfaceRegions(snapshot.surface, surfaceIndex);
     if (regions.status !== "ready") return unavailable(`surface-regions:${regions.reason}`);
-    const collision = buildCollisionIndex({ revision: capture.worldRevision, obstacles: snapshot.obstacles });
+    const collision = buildCollisionIndex({ revision: capture.worldRevision, obstacles: [...snapshot.obstacles, ...rendered.obstacles] });
     if (collision.status !== "ready") return unavailable(`collision-index:${collision.reason}`);
     const binding = createStructureCollisionBinding({ surfaceRevision: capture.revision, worldRevision: capture.worldRevision,
       index: collision.index, dimensions: request.collider.dimensions, centerHeight: request.collider.centerHeight, isCurrent: capture.isCurrent });
@@ -64,7 +70,7 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     transferred = true;
     const entered = await runtime.enter({ revision: capture.worldRevision, isCurrent: capture.isCurrent,
       setFrameHook: capture.setFrameHook, release: () => { signal?.removeEventListener("abort", cancel); capture.release(); } }, adapter);
-    return entered ? Object.freeze({ status: "ready", worldRevision: capture.worldRevision, coverage: "structures-only", adapter }) : unavailable(runtime.snapshot.reason ?? "runtime-refused");
+    return entered ? Object.freeze({ status: "ready", worldRevision: capture.worldRevision, coverage, adapter }) : unavailable(runtime.snapshot.reason ?? "runtime-refused");
   } catch (error) {
     return unavailable(error instanceof Error ? error.message : "city-car-entry-failed");
   } finally {

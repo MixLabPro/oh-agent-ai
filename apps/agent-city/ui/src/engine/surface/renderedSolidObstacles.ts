@@ -1,0 +1,73 @@
+/** Per-instance conservative world boxes derived from exact rendered building solids.
+ * Rendered building geometry is instanced boxes in this city, so the per-instance
+ * transformed AABB equals the exact visual footprint; non-box meshes (spires, sails)
+ * keep their conservative AABB — never smaller than what is drawn.
+ * CPU-only; no three.js import. Fail-closed: over budget or degenerate transforms
+ * refuse the batch rather than silently dropping buildings. */
+import type { RenderedSolid } from "./renderedSolidTypes";
+import type { StructureObstacle } from "./compileSurface";
+
+export const RENDERED_OBSTACLE_LIMITS = Object.freeze({ obstacles: 60_000, solids: 20_000 });
+
+export type RenderedObstacleResult =
+  | Readonly<{ status: "ready"; obstacles: readonly StructureObstacle[]; instances: number; skippedDegenerate: number }>
+  | Readonly<{ status: "unavailable"; reason: "rendered-solids-budget" | "invalid-rendered-solid" }>;
+
+type P3 = Readonly<{ x: number; y: number; z: number }>;
+
+/** Column-major 4×4 application. */
+function apply(m: readonly number[] | Float64Array, offset: number, x: number, y: number, z: number): { x: number; y: number; z: number } {
+  const o = offset;
+  return {
+    x: m[o] * x + m[o + 4] * y + m[o + 8] * z + m[o + 12],
+    y: m[o + 1] * x + m[o + 5] * y + m[o + 9] * z + m[o + 13],
+    z: m[o + 2] * x + m[o + 6] * y + m[o + 10] * z + m[o + 14],
+  };
+}
+
+export function renderedSolidsToObstacles(solids: readonly RenderedSolid[], limits: Readonly<{ obstacles: number; solids: number }> = RENDERED_OBSTACLE_LIMITS): RenderedObstacleResult {
+  if (solids.length > limits.solids) return { status: "unavailable", reason: "rendered-solids-budget" };
+  const out: StructureObstacle[] = [];
+  let instances = 0;
+  let skippedDegenerate = 0;
+  for (const solid of solids) {
+    const { positions, indices, transforms } = solid;
+    if (!(positions instanceof Float32Array) || !(indices instanceof Uint32Array) || !(transforms instanceof Float64Array)
+      || (transforms.length & 15) !== 0 || transforms.length === 0) return { status: "unavailable", reason: "invalid-rendered-solid" };
+    if (!transforms.every(Number.isFinite)) return { status: "unavailable", reason: "invalid-rendered-solid" };
+    // Local AABB over referenced vertices only — unused buffer tails must not
+    // inflate the conservative bound.
+    let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+      for (let k = 0; k < 3; k += 1) {
+        const v = indices[i + k] * 3;
+        const x = positions[v], y = positions[v + 1], z = positions[v + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return { status: "unavailable", reason: "invalid-rendered-solid" };
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      }
+    }
+    if (!Number.isFinite(minX)) return { status: "unavailable", reason: "invalid-rendered-solid" };
+    const count = transforms.length / 16;
+    for (let instance = 0; instance < count; instance += 1) {
+      if (out.length >= limits.obstacles) return { status: "unavailable", reason: "rendered-solids-budget" };
+      const corners: P3[] = [];
+      let finite = true;
+      for (let cy = 0; cy <= 1; cy += 1) for (let cz = 0; cz <= 1; cz += 1) for (let cx = 0; cx <= 1; cx += 1) {
+        const p = apply(transforms, instance * 16, cx ? maxX : minX, cy ? maxY : minY, cz ? maxZ : minZ);
+        if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) { finite = false; break; }
+        corners.push(p);
+      }
+      if (!finite) { skippedDegenerate += 1; continue; }
+      let cMinY = corners[0].y, cMaxY = corners[0].y;
+      for (const corner of corners) { if (corner.y < cMinY) cMinY = corner.y; if (corner.y > cMaxY) cMaxY = corner.y; }
+      if (cMaxY - cMinY <= 1e-9) { skippedDegenerate += 1; continue; }
+      // StructureObstacle's role is an opaque reporting label for the collision
+      // index; rendered roles are namespaced to stay distinguishable in reports.
+      out.push({ id: `${solid.id}#${instance}`, role: `rendered-${solid.role}` as StructureObstacle["role"], shape: "box", corners } as StructureObstacle);
+      instances += 1;
+    }
+  }
+  return Object.freeze({ status: "ready", obstacles: Object.freeze(out), instances, skippedDegenerate });
+}

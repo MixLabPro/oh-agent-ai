@@ -31,9 +31,13 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   runtime.exit(); assert.equal(f.state.releases, 1); assert.equal(f.state.hook, null);
 }
 {
-  const f = hostFixture([{ id: "building-exact-mesh" }]); const runtime = new m.GameRuntime();
+  // 2026-10-16 起：真实渲染几何已按逐实例保守盒并入碰撞（见
+  // verify-city-car-rendered-collision.mjs）；本守卫的旧拒绝断言随之退役。
+  // 这里改测非几何意义上的非法 renderedSolids（缺 positions/indices 的
+  // 假对象）在转换层被 fail-closed 拒绝，不进入帧钩子。
+  const f = hostFixture([Object.freeze({ id: "malformed-mesh", role: "building", positions: undefined, indices: undefined, transforms: new Float64Array(16) })]); const runtime = new m.GameRuntime();
   const result = await m.createCityCarSession(f.host, runtime, request);
-  assert.equal(result.status, "unavailable"); assert.equal(result.reason, "unavailable-rendered-collision");
+  assert.equal(result.status, "unavailable"); assert.equal(result.reason, "invalid-rendered-solid");
   assert.equal(f.state.releases, 1, "entry refusal releases displayed geometry freeze");
   assert.equal(f.state.hooks, 0, "architecture without collision never starts a frame hook");
   assert.equal(runtime.snapshot.phase, "idle");
