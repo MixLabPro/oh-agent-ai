@@ -1,0 +1,365 @@
+/** Road passability audit (Agent B): every audited route returns passed, blocked WITH a witness, or
+ * inconclusive with its cause — always bound to the world revision it was computed on.
+ * Pure CPU; no THREE, DOM, host or renderer. The host hands in a frozen CityDrivingSnapshot.
+ *
+ * 为什么不能「跑不过就是路不通」：自动驾驶员撞路缘、转向不够、预算用完，都只说明这次没跑通。
+ * 本模块把两件事分开：
+ *   1. 静态证据（可认证的「挡住」）——
+ *      a. 拓扑：起点与出口不在同一个区域。区域是分类器的连通分量，验证器禁止换区域，所以这是证明。
+ *      b. 几何截面：沿合法走廊的直段取横截线；可行驶区间由区域边界线段精确切出，再扣掉精确结构固体
+ *         占住的点。车心落在截线上时，车身（含余量）在截线上的弦长不小于车宽 2·(半宽+侧余量)，且整条弦
+ *         必须在同一个无边界区间内——所有区间都短于这个值，任何合法位姿都过不去这条线。
+ *         走廊内从起点到出口的连续路径必然穿过每一条截线（截线跨满走廊、直段内部、不与别段相近）。
+ *         场景包围盒代理（sceneSolids）是保守外包，只用于动态试跑，永远不能当「挡住」的证据。
+ *   2. 动态试跑（可认证的「通过」）——同一个 DrivingKernel、按钮式 pilot，经 DrivingRouteRunner +
+ *      GateAuditObserver，每 tick 由独立验证器（整车覆盖 + 连续运动 + 固体 + 走廊）复核。
+ * 合并：通过只来自试跑通过且固体覆盖完整；挡住只来自证据；其余都是 inconclusive 并带原因。
+ * 有证据却跑通了，是模拟缺陷（simulation-invalid），不是通过。 */
+import type { CityDrivingSnapshot, ReadyCitySurfaceCapture } from "../../../engine/surface/citySurfacePort";
+import { buildSurfaceIndex } from "../../../engine/surface/SurfaceIndex";
+import { buildSurfaceRegions } from "../../../engine/surface/surfaceRegions";
+import type { RegionBoundarySegment, SurfaceRegionsBuild } from "../../../engine/surface/surfaceRegions";
+import { initialDrivingState, type DrivingInputState, type DrivingState } from "../../DrivingSimulation";
+import { boxPoly, buildCollisionIndex, type CollisionIndex, type SolidInput } from "../CollisionIndex";
+import { DrivingKernel, type KernelStep } from "../DrivingKernel";
+import { structureSolids } from "../citySolids";
+import { DEFAULT_FOOTPRINT_PARAMS, footprintSupport, type FootprintParams, type VehicleFootprint } from "../surfaceFootprint";
+import { polylineProgress, SurfaceDrivingEnvironment, SurfaceWorldValidator } from "../SurfaceDrivingWorld";
+import { DRIVING_FOOTPRINT } from "../vehicleFootprint";
+import { auditKeyId } from "./AuditIdentity";
+import { DrivingRouteRunner } from "./DrivingRouteRunner";
+import { GateAuditObserver } from "./GateAuditObserver";
+import type { AuditCause, AuditKey, AuditVerdict, AuditWorldValidator, DirectedGate, RoadAuditCase, RoadAuditCaseResult, RoutePilot, StaticUnitEvidence, StepValidation } from "./contracts";
+
+export const ROAD_PASSABILITY_AUDIT_VERSION = 1;
+
+type P = Readonly<{ x: number; z: number }>;
+type Ready = Extract<SurfaceRegionsBuild, { status: "ready" }>;
+
+/** One frozen world, the only thing an audit may read. */
+export type PassabilityWorld = Readonly<{
+  worldRevision: string; surfaceRevision: string; regions: Ready;
+  /** Exact solids only (structure descriptors): allowed as blocking evidence. */
+  exact: CollisionIndex;
+  /** Exact + conservative scene proxies: what the dynamic run drives against. */
+  dynamic: CollisionIndex;
+  /** "complete" when every rendered solid family is represented in `dynamic` (exactly or by a proxy). */
+  coverage: "complete" | "structures-only";
+  isCurrent: () => boolean;
+}>;
+/** Roles the region rules already bound exactly (or a hull would over-approximate): never cut evidence. */
+const NON_EVIDENCE_ROLES: ReadonlySet<string> = new Set(["island", "bridge-railing", "expressway-rail", "bridge-deck", "expressway-deck"]);
+
+/** `declareNoBuildings`: the caller asserts this world has no building/landmark layer at all (synthetic
+ * fixtures). A plan-only capture is NOT such a world — its buildings simply were not captured. */
+export function passabilityWorld(snapshot: CityDrivingSnapshot, regions: SurfaceRegionsBuild, isCurrent: () => boolean,
+  options: Readonly<{ declareNoBuildings?: boolean }> = {}):
+  Readonly<{ status: "ready"; world: PassabilityWorld }> | Readonly<{ status: "unresolved"; reason: string }> {
+  if (regions.status !== "ready") return Object.freeze({ status: "unresolved", reason: `regions:${regions.reason}` });
+  if (regions.revision !== snapshot.surface.revision) return Object.freeze({ status: "unresolved", reason: "surface-revision-mismatch" });
+  const structure = structureSolids(snapshot.obstacles);
+  const exactInputs = structure.filter((s) => !NON_EVIDENCE_ROLES.has(s.role));
+  let exact: CollisionIndex; let dynamic: CollisionIndex;
+  try {
+    exact = buildCollisionIndex(exactInputs);
+    dynamic = buildCollisionIndex([...structure, ...(snapshot.sceneSolids as readonly SolidInput[])]);
+  } catch (error) { return Object.freeze({ status: "unresolved", reason: error instanceof Error ? error.message : "collision-index" }); }
+  // Buildings are covered only by captured scene proxies (conservative supersets of the rendered meshes).
+  // Rendered buildings without proxies, or a capture with no scene at all, would be driven through unseen.
+  const coverage = snapshot.sceneSolids.length > 0 || (options.declareNoBuildings === true && snapshot.renderedSolids.length === 0) ? "complete" : "structures-only";
+  return Object.freeze({ status: "ready", world: Object.freeze({ worldRevision: snapshot.revision, surfaceRevision: snapshot.surface.revision, regions, exact, dynamic, coverage, isCurrent }) });
+}
+
+/** A directed route: a legal corridor (centreline + half width) from its first point to an exit gate at
+ * its last point. Units are the audit units it covers (normally one directed edge). */
+export type PassabilityRoute = Readonly<{
+  id: string; units: readonly string[];
+  path: readonly P[]; halfWidth: number;
+  startLayer?: string; exitLayer?: string;
+  cruiseSpeed?: number;
+}>;
+export type CutWitness = Readonly<{
+  kind: "cut"; station: number; a: P; b: P; layerId: string;
+  /** Widest boundary-free, solid-free interval on the cut, vs the width a car body needs. */
+  widest: number; required: number;
+  limits: readonly string[];
+}>;
+export type TopologyWitness = Readonly<{ kind: "topology"; startRegion: string; exitRegion: string }>;
+export type PassabilityWitness = CutWitness | TopologyWitness;
+export type PassabilityResult = Readonly<{
+  key: AuditKey; routeId: string; worldRevision: string; auditVersion: number;
+  verdict: AuditVerdict; cause: AuditCause;
+  /** Present iff verdict is "blocked" (or on a contradiction, for diagnosis). */
+  witness: PassabilityWitness | null;
+  detail: string;
+  run: RoadAuditCaseResult | null;
+  /** Release-policy inputs, one per unit, bound to the same key. */
+  evidence: readonly StaticUnitEvidence[];
+}>;
+export type PassabilityOptions = Readonly<{
+  footprint?: VehicleFootprint; params?: FootprintParams;
+  /** Distance between cut stations along the corridor. */
+  stationStep?: number;
+  /** Solid occupancy sampling along a cut (sound: only sampled points count as occupied). */
+  solidSample?: number;
+  maxCutSegments?: number;
+  /** Skip the dynamic run (static evidence only). */
+  staticOnly?: boolean;
+  kernelBuildId?: string;
+}>;
+
+const finiteP = (p: P) => Number.isFinite(p.x) && Number.isFinite(p.z);
+function segDist(a: P, b: P, c: P, d: P): number {
+  const pd = (p: P, s: P, t: P) => { const dx = t.x - s.x, dz = t.z - s.z, ll = dx * dx + dz * dz; const u = ll ? Math.max(0, Math.min(1, ((p.x - s.x) * dx + (p.z - s.z) * dz) / ll)) : 0; return Math.hypot(p.x - s.x - dx * u, p.z - s.z - dz * u); };
+  const o = (p: P, q: P, r: P) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
+  if (o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0) return 0;
+  return Math.min(pd(a, c, d), pd(b, c, d), pd(c, a, b), pd(d, a, b));
+}
+/** Parameter u ∈ [0,1] on the cut a→b where segment s crosses it (proper or touching), or null. */
+function crossParam(a: P, b: P, s: RegionBoundarySegment): number | null {
+  const rx = b.x - a.x, rz = b.z - a.z, qx = s.bx - s.ax, qz = s.bz - s.az;
+  const den = rx * qz - rz * qx; const wx = s.ax - a.x, wz = s.az - a.z;
+  if (Math.abs(den) < 1e-12 * Math.hypot(rx, rz) * Math.hypot(qx, qz)) return null; // parallel: probing the sides covers it
+  const u = (wx * qz - wz * qx) / den; const v = (wx * rz - wz * rx) / den;
+  return u >= -1e-9 && u <= 1 + 1e-9 && v >= -1e-9 && v <= 1 + 1e-9 ? Math.min(1, Math.max(0, u)) : null;
+}
+
+type Interval = { u0: number; u1: number; layerId: string; y0: number; y1: number };
+/** Exact drivable intervals of one cut, per layer of the region (classifier-consistent). */
+function cutIntervals(regions: Ready, regionId: string, a: P, b: P, maxSegments: number): Interval[] | "budget" {
+  const region = regions.regionById(regionId)!;
+  const box = regions.segmentsInBox(regionId, Math.min(a.x, b.x), Math.min(a.z, b.z), Math.max(a.x, b.x), Math.max(a.z, b.z), maxSegments);
+  if (box.status !== "ok") return "budget";
+  const out: Interval[] = [];
+  for (const layerId of region.layerIds) {
+    const us = [0, 1];
+    for (const s of box.segments) if (s.layerId === layerId) { const u = crossParam(a, b, s); if (u !== null) us.push(u); }
+    us.sort((x, y) => x - y);
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    for (let i = 1; i < us.length; i++) {
+      if ((us[i] - us[i - 1]) * len < 1e-6) continue;
+      const um = (us[i - 1] + us[i]) / 2;
+      const c = regions.classify(a.x + (b.x - a.x) * um, a.z + (b.z - a.z) * um, layerId);
+      if (c.status !== "drivable" || c.regionId !== regionId) continue;
+      const at = (u: number) => c.y - (c.normal.x * ((a.x + (b.x - a.x) * u) - (a.x + (b.x - a.x) * um)) + c.normal.z * ((a.z + (b.z - a.z) * u) - (a.z + (b.z - a.z) * um))) / c.normal.y;
+      out.push({ u0: us[i - 1], u1: us[i], layerId, y0: at(us[i - 1]), y1: at(us[i]) });
+    }
+  }
+  return out;
+}
+
+/** Static cut evidence over a route corridor. Returns a witness, "clear", or an unresolved reason. */
+export function corridorCutEvidence(world: PassabilityWorld, route: PassabilityRoute, regionId: string, options: PassabilityOptions = {}):
+  Readonly<{ status: "blocked"; witness: CutWitness }> | Readonly<{ status: "clear"; stations: number }> | Readonly<{ status: "unresolved"; reason: string }> {
+  const footprint = options.footprint ?? DRIVING_FOOTPRINT; const params = options.params ?? DEFAULT_FOOTPRINT_PARAMS;
+  const step = options.stationStep ?? 0.5; const sample = options.solidSample ?? 0.05;
+  const required = 2 * (footprint.halfWidth + params.lateralMargin);
+  const path = route.path; const w = route.halfWidth;
+  let along = 0; let stations = 0;
+  for (let i = 1; i < path.length; i++) {
+    const p = path[i - 1], q = path[i]; const len = Math.hypot(q.x - p.x, q.z - p.z);
+    if (len < 1e-9) continue;
+    const ux = (q.x - p.x) / len, uz = (q.z - p.z) / len, nx = -uz, nz = ux;
+    // Straight interior only (≥ w from both vertices), so the cut spans the tube and separates it.
+    for (let s = w; s <= len - w + 1e-9; s += step) {
+      const cx = p.x + ux * s, cz = p.z + uz * s;
+      const a = { x: cx - nx * w, z: cz - nz * w }, b = { x: cx + nx * w, z: cz + nz * w };
+      // Another part of the corridor near this cut would let a path bypass it.
+      let separated = true;
+      for (let j = 1; j < path.length && separated; j++) if (j !== i && segDist(a, b, path[j - 1], path[j]) <= w) separated = false;
+      if (!separated) continue;
+      stations++;
+      const intervals = cutIntervals(world.regions, regionId, a, b, options.maxCutSegments ?? 4096);
+      if (intervals === "budget") return Object.freeze({ status: "unresolved", reason: "cut-budget" });
+      // A free interval touching the corridor edge continues outside it: no claim from this cut.
+      // Free intervals on two layers: the footprint rules may exempt segments across layers — no claim.
+      if (new Set(intervals.map((x) => x.layerId)).size > 1) continue;
+      let widest = 0; const limits = new Set<string>();
+      let open = false;
+      for (const iv of intervals) {
+        if (iv.u0 <= 1e-9 || iv.u1 >= 1 - 1e-9) { open = true; break; }
+        // Subtract exact solids at body height (sampled: unsampled points count as free → sound).
+        const total = (iv.u1 - iv.u0) * 2 * w; const n = Math.max(1, Math.floor(total / sample));
+        let runStart = iv.u0; let free = 0;
+        for (let k = 1; k < n; k++) {
+          const u = iv.u0 + (iv.u1 - iv.u0) * (k / n);
+          const x = a.x + (b.x - a.x) * u, z = a.z + (b.z - a.z) * u, y = iv.y0 + (iv.y1 - iv.y0) * ((u - iv.u0) / (iv.u1 - iv.u0));
+          // Column the car body must occupy over a chord point (support residual 0.06 shaved off both ends).
+          const hit = world.exact.hit(boxPoly({ x, y: y + (0.16 + 1.19) / 2, z }, [{ x: 1e-4, y: 0, z: 0 }, { x: 0, y: (1.19 - 0.16) / 2, z: 0 }, { x: 0, y: 0, z: 1e-4 }]));
+          if (hit.status === "budget" || hit.status === "invalid-input") return Object.freeze({ status: "unresolved", reason: `solid-${hit.status}` });
+          if (hit.status === "hit") { free = Math.max(free, (u - runStart) * 2 * w); runStart = u; limits.add(hit.solid.id); }
+        }
+        free = Math.max(free, (iv.u1 - runStart) * 2 * w);
+        widest = Math.max(widest, free);
+      }
+      if (open || widest >= required) continue;
+      const segs = world.regions.segmentsInBox(regionId, Math.min(a.x, b.x), Math.min(a.z, b.z), Math.max(a.x, b.x), Math.max(a.z, b.z), options.maxCutSegments ?? 4096);
+      if (segs.status === "ok") for (const s of segs.segments) if (crossParam(a, b, s) !== null) limits.add(`${s.label}:${s.cause}`);
+      return Object.freeze({ status: "blocked", witness: Object.freeze({ kind: "cut", station: along + s, a: Object.freeze(a), b: Object.freeze(b),
+        layerId: intervals[0]?.layerId ?? world.regions.regionById(regionId)!.layerId, widest, required, limits: Object.freeze([...limits].sort()) }) });
+    }
+    along += len;
+  }
+  return Object.freeze({ status: "clear", stations });
+}
+
+/** Button-only pure-pursuit pilot along the corridor centreline, holding a cruise speed. */
+export class CorridorPilot implements RoutePilot {
+  private readonly lengths: number[];
+  private readonly progress: (s: Readonly<{ x: number; z: number }>) => number;
+  constructor(private readonly path: readonly P[], private readonly cruise: number, private readonly lookahead = 4) {
+    this.lengths = [0];
+    for (let i = 1; i < path.length; i++) this.lengths.push(this.lengths[i - 1] + Math.hypot(path[i].x - path[i - 1].x, path[i].z - path[i - 1].z));
+    this.progress = polylineProgress(path);
+  }
+  private at(s: number): P {
+    const L = this.lengths; let i = 1; while (i < this.path.length - 1 && L[i] < s) i++;
+    const a = this.path[i - 1], b = this.path[i]; const t = Math.max(0, Math.min(1, (s - L[i - 1]) / ((L[i] - L[i - 1]) || 1)));
+    return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
+  }
+  input(state: Readonly<DrivingState>): Readonly<DrivingInputState> {
+    const total = this.lengths[this.lengths.length - 1];
+    // Aim past the end so the exit gate is crossed along the final tangent.
+    const s = this.progress(state) + this.lookahead;
+    const end = this.path[this.path.length - 1], prev = this.path[this.path.length - 2];
+    let target = this.at(Math.min(total, s));
+    if (s > total) { const l = Math.hypot(end.x - prev.x, end.z - prev.z) || 1; target = { x: end.x + (end.x - prev.x) / l * (s - total), z: end.z + (end.z - prev.z) / l * (s - total) }; }
+    const want = Math.atan2(target.z - state.z, target.x - state.x);
+    const err = Math.atan2(Math.sin(want - state.heading), Math.cos(want - state.heading));
+    return Object.freeze({ forward: state.speed < this.cruise, backward: false, left: err < -0.02, right: err > 0.02 });
+  }
+}
+
+/** Corridor-bounded validator: the base validator plus "centre stays within halfWidth of the centreline". */
+export class CorridorValidator implements AuditWorldValidator {
+  private readonly progressOf: (s: Readonly<{ x: number; z: number }>) => number;
+  constructor(private readonly base: AuditWorldValidator, private readonly path: readonly P[], private readonly halfWidth: number) {
+    this.progressOf = polylineProgress(path);
+  }
+  private inside(s: Readonly<{ x: number; z: number }>): boolean {
+    let best = Infinity;
+    for (let i = 1; i < this.path.length; i++) best = Math.min(best, segDist(s, s, this.path[i - 1], this.path[i]));
+    return best <= this.halfWidth;
+  }
+  validateStart(state: Readonly<DrivingState>): StepValidation { return this.inside(state) ? this.base.validateStart(state) : "route-deviation"; }
+  validate(previous: Readonly<DrivingState>, next: KernelStep): StepValidation {
+    const v = this.base.validate(previous, next);
+    return v === "valid" && !this.inside(next.state) ? "route-deviation" : v;
+  }
+  progress(state: Readonly<DrivingState>): number { return this.base.progress(state); }
+}
+
+function evidenceFor(key: AuditKey, units: readonly string[], topology: AuditVerdict, geometry: AuditVerdict, witness: string | null): StaticUnitEvidence[] {
+  return units.map((unitId) => Object.freeze({ key, unitId, topology, geometry, witness }));
+}
+const witnessText = (w: PassabilityWitness) => w.kind === "topology" ? `topology:${w.startRegion}→${w.exitRegion}`
+  : `cut@${w.station.toFixed(2)}:${w.layerId}:widest=${w.widest.toFixed(3)}<${w.required.toFixed(3)}:${w.limits.join(",")}`;
+
+/** Audit one route against one frozen world. Never throws for world/route content; bad input is inconclusive. */
+export function auditRoute(world: PassabilityWorld, key: AuditKey, route: PassabilityRoute, options: PassabilityOptions = {}): PassabilityResult {
+  const footprint = options.footprint ?? DRIVING_FOOTPRINT; const params = options.params ?? DEFAULT_FOOTPRINT_PARAMS;
+  const finish = (verdict: AuditVerdict, cause: AuditCause, detail: string, witness: PassabilityWitness | null, run: RoadAuditCaseResult | null,
+    topology: AuditVerdict, geometry: AuditVerdict): PassabilityResult => {
+    // A world that changed under the audit invalidates every conclusion drawn from it.
+    if (!world.isCurrent()) { verdict = "inconclusive"; cause = "unconfirmed"; detail = "stale-world"; topology = geometry = "inconclusive"; }
+    const evidenceWitness = verdict === "blocked" && witness ? witnessText(witness) : null;
+    return Object.freeze({ key, routeId: route.id, worldRevision: world.worldRevision, auditVersion: ROAD_PASSABILITY_AUDIT_VERSION, verdict, cause,
+      witness, detail, run, evidence: Object.freeze(evidenceFor(key, route.units, topology, geometry, evidenceWitness)) });
+  };
+  try { auditKeyId(key); } catch { return finish("inconclusive", "unconfirmed", "invalid-audit-key", null, null, "inconclusive", "inconclusive"); }
+  if (key.baseSnapshotHash !== world.worldRevision) return finish("inconclusive", "unconfirmed", "key-world-mismatch", null, null, "inconclusive", "inconclusive");
+  if (!world.isCurrent()) return finish("inconclusive", "unconfirmed", "stale-world", null, null, "inconclusive", "inconclusive");
+  if (!route.id || !route.units.length || route.path.length < 2 || !route.path.every(finiteP) || !(route.halfWidth > 0)) return finish("inconclusive", "unconfirmed", "invalid-route", null, null, "inconclusive", "inconclusive");
+  const regions = world.regions;
+  const p0 = route.path[0], p1 = route.path[1], pn = route.path[route.path.length - 1], pm = route.path[route.path.length - 2];
+  const start = regions.classify(p0.x, p0.z, route.startLayer ?? "ground");
+  const exit = regions.classify(pn.x, pn.z, route.exitLayer ?? "ground");
+  if (start.status !== "drivable") return finish("inconclusive", "unconfirmed", `start:${start.cause}`, null, null, "inconclusive", "inconclusive");
+  if (exit.status !== "drivable") return finish("inconclusive", "unconfirmed", `exit:${exit.cause}`, null, null, "inconclusive", "inconclusive");
+  if (start.regionId !== exit.regionId) {
+    const witness: TopologyWitness = Object.freeze({ kind: "topology", startRegion: start.regionId, exitRegion: exit.regionId });
+    return finish("blocked", "topology-disconnected", "regions-differ", witness, null, "blocked", "inconclusive");
+  }
+  const regionId = start.regionId;
+  const cut = corridorCutEvidence(world, route, regionId, options);
+  if (cut.status === "unresolved") return finish("inconclusive", "budget-exhausted", cut.reason, null, null, "passed", "inconclusive");
+  const witness = cut.status === "blocked" ? cut.witness : null;
+  if (options.staticOnly) return witness ? finish("blocked", "geometry-blocked", "cut", witness, null, "passed", "blocked")
+    : finish("inconclusive", "unconfirmed", "static-only", null, null, "passed", "passed");
+
+  // ── Dynamic run on the same kernel ──
+  const heading = Math.atan2(p1.z - p0.z, p1.x - p0.x);
+  const env = new SurfaceDrivingEnvironment(regions, footprint, params, world.dynamic);
+  const placed = env.place(p0.x, p0.z, heading, regionId, start.y);
+  if (!placed) {
+    const why = footprintSupport(regions, { x: p0.x, z: p0.z, heading, y: start.y }, regionId, footprint, params, world.dynamic);
+    return witness ? finish("blocked", "geometry-blocked", `cut;start:${why.ok ? "ok" : why.reason}`, witness, null, "passed", "blocked")
+      : finish("inconclusive", "unconfirmed", `start-footprint:${why.ok ? "ok" : `${why.reason}:${why.detail}`}`, null, null, "passed", "passed");
+  }
+  const startState: DrivingState = { ...initialDrivingState(p0.x, p0.z, heading, regionId), ...placed };
+  const ex = pn.x - pm.x, ez = pn.z - pm.z, el = Math.hypot(ex, ez) || 1;
+  const gate: DirectedGate = { id: `${route.id}:exit`, x: pn.x, y: exit.y, z: pn.z, forwardX: ex / el, forwardZ: ez / el,
+    halfWidth: route.halfWidth + Math.hypot(footprint.halfLength, footprint.halfWidth), heightTolerance: 0.5, surfaceIds: [regionId] };
+  let length = 0; for (let i = 1; i < route.path.length; i++) length += Math.hypot(route.path[i].x - route.path[i - 1].x, route.path[i].z - route.path[i - 1].z);
+  const cruise = route.cruiseSpeed ?? 7;
+  const test: RoadAuditCase = { id: route.id, units: [...route.units], start: startState, gates: [gate],
+    corridor: { surfaceSequence: [regionId], portalSequence: [], waypoints: route.path.map((p) => ({ x: p.x, z: p.z })) },
+    policy: { cruiseSpeed: cruise, maxReverseSpeed: 0 }, maxTicks: Math.ceil(((length + 10) / cruise) * 60 * 2 + 600), maxNoProgressTicks: 240 };
+  let run: RoadAuditCaseResult | null = null;
+  try {
+    const kernel = new DrivingKernel(env, { baseSnapshotHash: key.baseSnapshotHash, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId,
+      physicsVersion: key.physicsVersion, collisionVersion: key.collisionVersion, queryVersion: key.queryVersion });
+    const validator = new CorridorValidator(new SurfaceWorldValidator(regions, polylineProgress(route.path), footprint, params, world.dynamic), route.path, route.halfWidth);
+    const runner = new DrivingRouteRunner(key, test, kernel, new CorridorPilot(route.path, cruise), new GateAuditObserver(test, validator));
+    for (let guard = 0; !runner.result && guard < 10000; guard++) { runner.advance(250, key); if (!world.isCurrent()) { runner.cancel(); break; } }
+    run = runner.result;
+  } catch (error) {
+    return finish("inconclusive", "simulation-invalid", `runner:${error instanceof Error ? error.message : "error"}`, witness, null, "passed", witness ? "blocked" : "passed");
+  }
+  if (!run) return finish("inconclusive", "budget-exhausted", "runner-guard", witness, null, "passed", witness ? "blocked" : "passed");
+  if (run.verdict === "passed") {
+    // Evidence says impossible, the kernel did it anyway: the simulation or the evidence is wrong.
+    if (witness) return finish("inconclusive", "simulation-invalid", "passed-against-witness", witness, run, "passed", "inconclusive");
+    if (world.coverage !== "complete") return finish("inconclusive", "unconfirmed", "solid-coverage-incomplete", null, run, "passed", "passed");
+    return finish("passed", "none", "run-passed", null, run, "passed", "passed");
+  }
+  if (witness) return finish("blocked", "geometry-blocked", `cut;run:${run.cause}`, witness, run, "passed", "blocked");
+  // A failed search or a failed pilot is never road evidence.
+  return finish("inconclusive", run.cause, `run:${run.cause}`, null, run, "passed", "passed");
+}
+
+/** Directed-edge routes from the layout's road edges (both directions), trimmed off the node fans.
+ * A starting set for real cities, not D's planner: turns, spawn access and structures are not planned here. */
+export function directedEdgeRoutes(edges: readonly Readonly<{ id: string; points: readonly P[]; width: number; bridge?: boolean; structure?: string }>[],
+  options: Readonly<{ trim?: number; minLength?: number; corridorMargin?: number }> = {}): PassabilityRoute[] {
+  const trim = options.trim ?? 6; const routes: PassabilityRoute[] = [];
+  for (const edge of [...edges].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
+    const pts = edge.points; if (pts.length < 2 || !pts.every(finiteP)) continue;
+    const L = [0]; for (let i = 1; i < pts.length; i++) L.push(L[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
+    const total = L[L.length - 1]; const t = Math.min(trim, total / 4);
+    if (total - 2 * t < (options.minLength ?? 8)) continue;
+    const at = (s: number): P => { let i = 1; while (i < pts.length - 1 && L[i] < s) i++; const u = (s - L[i - 1]) / ((L[i] - L[i - 1]) || 1); return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * u, z: pts[i - 1].z + (pts[i].z - pts[i - 1].z) * u }; };
+    const inner = pts.filter((_, i) => L[i] > t && L[i] < total - t);
+    const path = [at(t), ...inner, at(total - t)];
+    const halfWidth = edge.width / 2 + (options.corridorMargin ?? 0.5);
+    routes.push(Object.freeze({ id: `edge:${edge.id}:fwd`, units: Object.freeze([`edge:${edge.id}:fwd`]), path: Object.freeze(path), halfWidth }));
+    routes.push(Object.freeze({ id: `edge:${edge.id}:rev`, units: Object.freeze([`edge:${edge.id}:rev`]), path: Object.freeze([...path].reverse()), halfWidth }));
+  }
+  return routes;
+}
+
+/** Audit routes on a host capture (CitySurfacePort / CityEngine.captureDrivingWorld). The key is derived
+ * from the captured world revision by the caller's identity rules; results are bound to that revision
+ * and become inconclusive (stale-world) the moment the capture stops being current. */
+export function auditCapture(capture: ReadyCitySurfaceCapture, keyFor: (worldRevision: string) => AuditKey,
+  routes: readonly PassabilityRoute[], options: PassabilityOptions = {}):
+  Readonly<{ status: "ready"; worldRevision: string; results: readonly PassabilityResult[] }> | Readonly<{ status: "unresolved"; reason: string }> {
+  const snapshot = capture.readWorld();
+  if (!snapshot || snapshot.revision !== capture.worldRevision || snapshot.surface.revision !== capture.revision) return Object.freeze({ status: "unresolved", reason: "stale-or-mismatched-capture" });
+  const index = buildSurfaceIndex(snapshot.surface);
+  if (index.status !== "ready") return Object.freeze({ status: "unresolved", reason: `surface-index:${index.reason}` });
+  const built = passabilityWorld(snapshot, buildSurfaceRegions(snapshot.surface, index), capture.isCurrent);
+  if (built.status !== "ready") return built;
+  const key = keyFor(snapshot.revision);
+  return Object.freeze({ status: "ready", worldRevision: snapshot.revision, results: Object.freeze(routes.map((route) => auditRoute(built.world, key, route, options))) });
+}
