@@ -234,6 +234,8 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
 
 export function CityExperience({ ui, disabled, cinema, status, quality, onQuality, game, planRepair, windowDays, windowOptions, onWindowDays, labels, onLabels }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void; game: ReturnType<typeof useCityGame>; planRepair: PlanRepairUi; windowDays: number; windowOptions: readonly number[]; onWindowDays: (days: number) => void; labels: boolean; onLabels: (next: boolean) => void }) {
   const language = useCityLanguage();
+  // Presentation only: the landing host still enforces its own fixture/method boundary.
+  const landingPreview = embedded() && new URLSearchParams(location.search).get("presentation") === "landing";
   const gameActive = game.active;
   // 游戏接管时收起模态与侧栏（native dialog 在 top layer，会盖住游戏 HUD）。
   useEffect(() => {
@@ -243,7 +245,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   // 音频上下文预热：WKWebView 首次 new AudioContext() 可能同步阻塞主线程数秒，
   // 放在进场关键路径会把进入游戏冻结住。城市就绪后的空闲时机先建好（不发声）。
   useEffect(() => {
-    if (disabled || !ui.model) return;
+    if (disabled || !ui.model || landingPreview) return;
     const warm = () => prewarmAudioContext();
     if (typeof requestIdleCallback === "function") {
       const id = requestIdleCallback(warm, { timeout: 4000 });
@@ -251,7 +253,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     }
     const timer = setTimeout(warm, 1500);
     return () => clearTimeout(timer);
-  }, [disabled, ui.model]);
+  }, [disabled, ui.model, landingPreview]);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const summaryButton = useRef<HTMLButtonElement>(null);
@@ -428,18 +430,18 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     <dialog className="city-dialog" ref={settingsRef} onCancel={(event) => { event.preventDefault(); event.stopPropagation(); ui.setOptions(false); }} onClose={() => ui.setOptions(false)} aria-label="城市设置">
       <header className="city-dialog-header"><h2>城市设置</h2><button className="city-close" aria-label="关闭城市设置" onClick={() => ui.setOptions(false)}>×</button></header>
       <div className="city-dialog-body">
-      <form onSubmit={(e) => { e.preventDefault(); void ui.applySeed(Number(ui.seedDraft.trim())); }}>
+      {!landingPreview && <><form onSubmit={(e) => { e.preventDefault(); void ui.applySeed(Number(ui.seedDraft.trim())); }}>
         <label htmlFor="city-seed">岛屿种子</label><div className="city-seed-controls"><input id="city-seed" inputMode="numeric" value={ui.seedDraft} disabled={locked} onChange={(e) => ui.setSeedDraft(e.target.value)} />
         <button disabled={locked}>应用种子</button></div>
       </form>
       <button onClick={ui.reseed} disabled={locked}>{ui.confirmSeed ? "确认重新生成（4 秒内）" : "重新生成岛屿"}</button>
-      <p>只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。</p>
+      <p>只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。</p></>}
       <label htmlFor="city-backdrop">城市背景楼</label><select id="city-backdrop" value={ui.backdrop} disabled={locked} onChange={(e) => ui.setBackdrop(e.target.value as BackdropMode)}><option value="auto">自动（随会话数，不挤占城区）</option><option value="off">关闭（纯数据城市）</option><option value="full">繁华（铺满城区周边）</option></select>
       <p>背景楼只是城市氛围，不是会话，不可点击，不计入统计。</p>
       <label htmlFor="city-window">时间范围</label><select id="city-window" value={String(windowDays)} disabled={locked || gameActive} onChange={(e) => onWindowDays(Number(e.target.value))}>{windowOptions.map((days) => <option key={days} value={String(days)}>{`${days} 天`}</option>)}</select>
       <label className="city-check" htmlFor="city-labels"><input id="city-labels" type="checkbox" checked={labels} disabled={locked || gameActive} onChange={(e) => onLabels(e.target.checked)} />显示建筑标签</label>
       <label htmlFor="city-quality">画质</label><select id="city-quality" value={quality} onChange={(e) => onQuality(e.target.value)}><option value="auto">自动</option><option value="high">高画质</option><option value="eco">节能</option></select>
-      <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
+      {!landingPreview && <><label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
       <details className="city-settings-help"><summary>导出说明</summary><p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p></details>
       <div className="city-game-entry">
         <label style={{ fontSize: 12, color: "var(--city-muted)" }}>{gameText("游戏模式", language === "en" ? "en" : "zh-Hans")}</label>
@@ -453,7 +455,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         <p>{gameText("进入后用 W/S/A/D 与方向键飞行，Esc 暂停。", language === "en" ? "en" : "zh-Hans")}</p>
       </div>
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
-      {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}
+      {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}</>}
       <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.lockSelection(e.target.value); else ui.clearSelection(); ui.setOptions(false); }}>
         <option value="">请选择</option>{(ui.projection?.sessions ?? []).map((session) => <option key={session.id} value={session.id}>{session.harness} · {session.first_event_at} · {tokens(session.tokens.total)} tokens</option>)}
       </select>

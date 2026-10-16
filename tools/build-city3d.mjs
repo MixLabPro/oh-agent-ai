@@ -3,13 +3,16 @@
 //   node tools/build-city3d.mjs
 // 前提：apps/agent-city/ui 已存在（codex/app-layer-city 落地后）。
 // 产物 website/landing/city3d/ 为自托管静态文件（three 已打包、同源加载、
-// 无第三方请求）；缺失时落地页自动保持 canvas mock，不依赖本脚本成功。
+// 无第三方请求）；缺失时落地页保留产品截图并显示明确的重试说明。
 import { execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
-const src = join(root, "apps/agent-city/ui");
+// Allow a clean main snapshot as source while preserving local landing edits.
+const sourceArg = process.argv.find((arg) => arg.startsWith("--source-root="));
+const sourceRoot = sourceArg ? resolve(sourceArg.slice("--source-root=".length)) : root;
+const src = join(sourceRoot, "apps/agent-city/ui");
 const dist = join(src, "dist");
 const target = join(root, "website/landing/city3d");
 
@@ -17,8 +20,10 @@ if (!existsSync(join(src, "package.json"))) {
   console.error(`[city3d] ${src} 不存在——agent-city 插件应用尚未落地（codex/app-layer-city 合入后重跑）。`);
   process.exit(1);
 }
-console.log("[city3d] installing deps (apps/agent-city/ui)…");
-execSync("npm ci --no-audit --no-fund", { cwd: src, stdio: "inherit" });
+if (!process.argv.includes("--skip-install")) {
+  console.log("[city3d] installing deps (apps/agent-city/ui)…");
+  execSync("npm ci --no-audit --no-fund", { cwd: src, stdio: "inherit" });
+}
 console.log("[city3d] building…");
 execSync("npm run build", { cwd: src, stdio: "inherit" });
 if (!existsSync(dist)) {
@@ -34,4 +39,4 @@ const sizeOf = (dir) => readdirSync(dir, { withFileTypes: true }).reduce((total,
   return total + (entry.isDirectory() ? sizeOf(full) : statSync(full).size);
 }, 0);
 console.log(`[city3d] copied → website/landing/city3d (${(sizeOf(target) / 1024 / 1024).toFixed(2)} MB)`);
-console.log("[city3d] done. landing 将在滚入视口时懒加载并切换到 3D；删除该目录即回退 canvas mock。");
+console.log("[city3d] done. Oh Agent 桌面首屏自动运行 mock 城市；窄屏点击进入，缺失产物时保留预览和重试说明。");

@@ -30,7 +30,14 @@ export function CityApp() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<CityEngine | null>(null);
   const [projection, setProjection] = useState<CityProjectionV1 | null>(null);
-  const [windowDays, setWindowDays] = useState<WindowDays>(366); // 默认全年窗口：近 500 条会话先载入（coverage.truncated 如实披露）
+  const [windowDays, setWindowDays] = useState<WindowDays>(() => {
+    const params = new URLSearchParams(location.search);
+    const days = Number(params.get("windowDays"));
+    // The browser landing starts with its mock window, avoiding a second full
+    // scene build. The native default remains the latest 500 sessions/year.
+    return embedded() && params.get("presentation") === "landing" && windowOptions.includes(days as WindowDays)
+      ? days as WindowDays : 366;
+  });
   const [status, setStatus] = useState("正在载入 City 插槽数据…");
   const [sceneUnavailable, setSceneUnavailable] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);

@@ -1,154 +1,182 @@
-// 落地页 ↔ Agent City 插件的父侧宿主（apps/agent-city/ui 的 iframe 模式）。
-// 协议：postMessage 信道 av-plugin-rpc v1（@agent-vitals/app-sdk ui-host 的
-// 浏览器分支）——同源、instanceId 隔离；数据走 PluginRequestV1/ResponseV1，
-// 投影契约 CityProjectionV1（source:"fixture"，页面示例数据）。
-// 产物 city3d/ 由 tools/build-city3d.mjs 从 apps/agent-city/ui 构建灌入；
-// 产物缺失时保持 canvas mock，不报错——landing 在任何情况下不缺画面。
+// A bounded browser host for the production City plugin. Synthetic data only.
 (() => {
-  const INSTANCE = 'av-landing-city';
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
-  const stage = document.querySelector('.city-stage');
-  const canvas = document.getElementById('city-canvas');
-  if (!stage || !canvas || !window.parent === window) {
-    // 正常 standalone 打开时 window.parent === window：宿主逻辑无意义
-  }
-  const currentLocale = () => (document.documentElement.lang === 'zh-CN' ? 'zh-Hans' : 'en');
+  const box = document.querySelector('.city-window');
+  if (!box) return;
+  const stage = box.querySelector('.city-stage');
+  const launch = document.getElementById('city-launch');
+  const status = document.getElementById('city-status');
+  const range = document.getElementById('city-window-days');
+  const reset = document.getElementById('city-reset');
+  const settings = document.getElementById('city-settings');
+  const stop = document.getElementById('city-stop');
+  const locale = window.__avLandingLang;
+  const t = (key) => locale.t(key);
+  let frame = null;
+  let instance = '';
+  let timer = null;
+  let sequence = 0;
+  let initialWindowSent = false;
+  let receivedWindow = 0;
+  let visible = false;
+  let generation = 0;
+  let fixtureSeed = 74031;
+  let autoAttempted = false;
 
-  // ── 示例投影：确定性种子，五宿主、幂律 tokens、三个 landmark 候选 ──
-  function projection(windowDays, locale) {
+  function projection(days) {
+    // Fixed end date and PRNG keep reloads, views and generated cities reproducible.
+    const to = Date.parse('2026-10-15T23:59:59Z');
+    const from = to - days * 86400000;
     let seed = 20261002;
     const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
-    const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
-    const HARNESS = ['claude_code', 'codex', 'deepseek_harness', 'workbuddy', 'zcode'];
-    const now = Date.now();
-    const from = now - windowDays * 86400_000;
-    // 分布：多数小会话 + 少数 landmark 级（与应用内 tokensToHeight 的
-    // landmark 语义对齐——大数真的立得起来）
-    const sessions = [];
-    const landmarks = [18_600_000, 42_300_000, 8_900_000];
-    const count = windowDays <= 7 ? 26 : windowDays <= 30 ? 78 : windowDays <= 90 ? 160 : 380;
-    for (let i = 0; i < count; i += 1) {
-      const total = i < landmarks.length
-        ? landmarks[i]
-        : Math.floor(40_000 + Math.pow(rnd(), 3.2) * 6_000_000);
-      const input = Math.floor(total * (0.6 + rnd() * 0.25));
-      // 白天密、深夜疏：小时按双峰偏置
-      const hour = Math.min(23, Math.floor(9 + Math.abs(rnd() + rnd() - 1) * 9));
-      const day = Math.floor(rnd() * windowDays);
-      const start = from + day * 86400_000 + hour * 3600_000 + Math.floor(rnd() * 3600_000);
-      const span = 5 + Math.floor(rnd() * 90);
-      sessions.push({
-        id: `sample-${String(i + 1).padStart(3, '0')}`,
-        harness: pick(HARNESS),
-        first_event_at: new Date(start).toISOString(),
-        last_event_at: new Date(start + span * 60_000).toISOString(),
-        tokens: { input, output: total - input, total },
-        event_count: 18 + Math.floor(rnd() * 380),
-      });
-    }
-    return {
-      protocol: 'city:v1',
-      source: 'fixture',
-      data_revision: 1,
-      generated_at: new Date(now).toISOString(),
-      window: {
-        days: windowDays,
-        label: locale === 'zh-Hans' ? `最近 ${windowDays} 天` : `Last ${windowDays} days`,
-        from: new Date(from).toISOString(),
-        to: new Date(now).toISOString(),
-      },
-      sessions,
-      findings: [
-        { harness: 'codex', severity: 'warning', count: 2 },
-        { harness: 'claude_code', severity: 'info', count: 1 },
-      ],
-      coverage: { total: sessions.length, returned: sessions.length, truncated: false, unknown_time: 0, findings_state: 'partial' },
-      status: 'ready',
-    };
-  }
-
-  let frame = null;
-  let fixtureSeed = 74031;
-
-  function respond(message, requestId, result) {
-    frame?.contentWindow?.postMessage(
-      { channel: 'av-plugin-rpc', version: 1, instanceId: INSTANCE, type: 'response', requestId, result },
-      location.origin,
-    );
-  }
-
-  function onMessage(event) {
-    if (!frame || event.source !== frame.contentWindow || event.origin !== location.origin) return;
-    const message = event.data;
-    if (message?.channel !== 'av-plugin-rpc' || message.version !== 1 || message.instanceId !== INSTANCE) return;
-    if (message.type !== 'request') return;
-    const { requestId, command, args } = message;
-    if (command === 'plugin_request') {
-      const request = args?.request;
-      if (request?.method === 'data.read' && request.payload?.projection === 'city-settings'
-        && request.payload.version === 1 && ['read', 'write'].includes(request.payload.action)) {
-        const seed = request.payload.seed;
-        const valid = request.payload.action === 'read'
-          || (Number.isInteger(seed) && seed >= 1 && seed <= 4294967295);
-        if (valid && request.payload.action === 'write') fixtureSeed = seed;
-        respond(message, requestId, valid
-          ? { version: 1, requestId: request.requestId, ok: true, result: { seed: fixtureSeed }, error: null }
-          : { version: 1, requestId: request.requestId, ok: false, result: null, error: { code: 'invalid_seed', retryable: false } });
-        return;
-      }
-      const ok = request?.method === 'data.read'
-        && request?.payload?.projection === 'city'
-        && [7, 30, 90, 366].includes(request.payload.windowDays);
-      respond(message, requestId, ok
-        ? { version: 1, requestId: request.requestId, ok: true, result: projection(request.payload.windowDays, currentLocale()), error: null }
-        : { version: 1, requestId: request?.requestId ?? '', ok: false, result: null, error: { code: 'invalid_request', retryable: false } });
-      return;
-    }
-    if (command === 'plugin_message') {
-      // heartbeat / toolbar.update / command.result：礼貌 ACK，发布端超时静默
-      respond(message, requestId, { version: 1, requestId: '', ok: true, result: null, error: null });
-    }
+    const harnesses = [
+      { id: 'claude_code', display_name: 'Claude Code' }, { id: 'codex', display_name: 'Codex' },
+      { id: 'deepseek_harness', display_name: 'DeepSeek Harness' }, { id: 'workbuddy', display_name: 'WorkBuddy' },
+    ].map((h) => ({ ...h, capabilities: { session_statistics: { available: true }, findings: { available: false, reason: 'sample_only' } } }));
+    const all = Array.from({ length: 2000 }, (_, i) => {
+      const start = to - (i % 30) * 86400000 - Math.floor(rnd() * 72000000) - 7200000;
+      const end = start + (10 + Math.floor(rnd() * 75)) * 60000;
+      const total = Math.floor(50000 + Math.pow(rnd(), 2) * 4000000);
+      const input = Math.floor(total * .8);
+      return { id: `landing-sample-${i + 1}`, harness: harnesses[i % 4].id,
+        first_event_at: new Date(start).toISOString(), last_event_at: new Date(end).toISOString(),
+        tokens: { input, output: total - input, total }, event_count: 15 + Math.floor(rnd() * 200) };
+    });
+    const sessions = all.filter((s) => Date.parse(s.last_event_at) >= from);
+    return { protocol: 'city:v2', source: 'fixture', data_revision: 1, harnesses,
+      generated_at: new Date(to).toISOString(),
+      window: { days, label: locale.lang === 'zh' ? `样例 · ${days} 天` : `Sample · ${days} days`, from: new Date(from).toISOString(), to: new Date(to).toISOString() },
+      sessions, findings: [], status: 'ready',
+      coverage: { total: sessions.length, returned: sessions.length, truncated: false, unknown_time: 0, findings_state: 'unavailable' } };
   }
 
   function post(type, extra = {}) {
-    frame?.contentWindow?.postMessage(
-      { channel: 'av-plugin-rpc', version: 1, instanceId: INSTANCE, type, ...extra },
-      location.origin,
-    );
+    frame?.contentWindow?.postMessage({ channel: 'av-plugin-rpc', version: 1, instanceId: instance, type, ...extra }, location.origin);
+  }
+  function command(commandId, value) {
+    post('command', { command: { version: 1, instanceId: instance, requestId: `landing-command-${++sequence}`, commandId, ...(value === undefined ? {} : { value }) } });
+  }
+  function state(value, message) {
+    box.dataset.cityState = value;
+    if (message) status.textContent = message;
+    launch.disabled = value === 'loading';
+    launch.textContent = t(value === 'loading' ? 'city.loading' : value === 'error' ? 'city.retry' : 'city.launch.button');
+    range.disabled = reset.disabled = settings.disabled = value !== 'ready';
+    stop.disabled = !frame;
+  }
+  function cleanup() {
+    clearTimeout(timer);
+    frame?.remove();
+    frame = null;
+    generation++;
+    initialWindowSent = false;
+    receivedWindow = 0;
+  }
+  function fail(key = 'city.error') {
+    cleanup();
+    state('error', t(key));
+  }
+  function syncVisibility() {
+    if (!frame || box.dataset.cityState !== 'ready') return;
+    post(document.hidden || !visible ? 'suspend' : 'resume');
+  }
+  function respond(requestId, result) { post('response', { requestId, result }); }
+  function onMessage(event) {
+    const m = event.data;
+    if (!frame || event.source !== frame.contentWindow || event.origin !== location.origin ||
+      m?.channel !== 'av-plugin-rpc' || m.version !== 1 || m.instanceId !== instance || m.type !== 'request') return;
+    if (m.command === 'plugin_request') {
+      const r = m.args?.request;
+      if (r?.version !== 1 || r.instanceId !== instance || typeof r.requestId !== 'string') return;
+      let result = null;
+      if (r.method === 'data.read' && r.payload?.projection === 'city' && r.payload.version === 2 && [7, 30, 90, 366].includes(r.payload.windowDays)) {
+        receivedWindow = r.payload.windowDays;
+        // Settings inside the production view can change the same time window.
+        if (initialWindowSent && box.dataset.cityState === 'ready') {
+          range.value = String(receivedWindow);
+        }
+        result = projection(receivedWindow);
+      } else if (r.method === 'data.read' && r.payload?.projection === 'city-settings' && r.payload.version === 1) {
+        if (r.payload.action === 'read') result = { seed: fixtureSeed };
+        if (r.payload.action === 'write' && Number.isInteger(r.payload.seed) && r.payload.seed > 0 && r.payload.seed <= 4294967295) {
+          fixtureSeed = r.payload.seed;
+          result = { seed: fixtureSeed };
+        }
+      }
+      respond(m.requestId, { version: 1, requestId: r.requestId, ok: result !== null, result,
+        error: result ? null : { code: 'landing_method_unavailable', retryable: false } });
+    } else if (m.command === 'plugin_message') {
+      const message = m.args?.message;
+      if (message?.version !== 1 || message.instanceId !== instance) return;
+      respond(m.requestId, { version: 1, requestId: '', ok: true, result: null, error: null });
+      if (message.type === 'runtime.error') { fail(); return; }
+      if (message.type === 'toolbar.update' && Array.isArray(message.items)) {
+        const usable = message.items.some((item) => item.commandId === 'city.reset' && item.enabled);
+        if (!usable) {
+          // Rebuilding terrain temporarily disables reset. It is not a crash.
+          if (!initialWindowSent) fail();
+          else reset.disabled = true;
+          return;
+        }
+        if (!initialWindowSent) {
+          initialWindowSent = true;
+          command('city.quality', 'eco');
+          // The production app initially requests its own default (366 days).
+          // Apply the selected sample window only after its command listener is ready.
+          if (receivedWindow !== Number(range.value)) { command('city.window', range.value); return; }
+        }
+        if (receivedWindow === Number(range.value)) {
+          clearTimeout(timer);
+          state('ready');
+          syncVisibility();
+        }
+      }
+    } else post('response', { requestId: m.requestId, error: 'landing_command_unavailable' });
   }
 
   function mount() {
-    if (frame || reduced.matches) return;
-    fetch('city3d/index.html', { method: 'HEAD' }).then((res) => {
-      if (!res.ok) return; // 产物未灌入：保持 canvas mock
+    if (frame || box.dataset.cityState === 'loading') return;
+    autoAttempted = true;
+    state('loading', t('city.loading'));
+    const attempt = ++generation;
+    instance = `av-landing-city-${attempt}`;
+    timer = setTimeout(() => { if (generation === attempt) fail('city.timeout'); }, 20000);
+    fetch('city3d/index.html', { method: 'HEAD', credentials: 'omit' }).then((response) => {
+      if (generation !== attempt) return;
+      if (!response.ok) { fail(); return; }
       frame = document.createElement('iframe');
       frame.id = 'city-frame';
-      frame.title = document.getElementById('city')?.querySelector('figure')?.getAttribute('aria-label') || 'Agent City';
-      frame.loading = 'eager';
-      frame.src = `city3d/index.html?instanceId=${INSTANCE}&locale=${encodeURIComponent(currentLocale())}`;
-      frame.addEventListener('load', () => {
-        // 引擎自举（纹理/地形）需要一点时间；就绪后再切换，避免白屏闪
-        setTimeout(() => stage.classList.add('city-3d-ready'), 900);
-      }, { once: true });
-      stage.appendChild(frame);
-      window.addEventListener('message', onMessage);
-      // 语言切换同步给插件
-      new MutationObserver(() => post('locale', { locale: currentLocale() }))
-        .observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
-      // 不可见即挂起（省电；插件协议的 suspend/resume 语义）
-      const suspend = () => post('suspend');
-      const resume = () => post('resume');
-      document.addEventListener('visibilitychange', () => (document.hidden ? suspend() : resume()));
-      new IntersectionObserver((entries) => entries.forEach((e) => (e.isIntersecting ? resume() : suspend())), { threshold: 0.05 }).observe(frame);
-    }).catch(() => { /* 离线/产物缺失：canvas mock 兜底 */ });
+      frame.title = locale.lang === 'zh' ? 'Agent City 样例城市 · 模拟数据' : 'Agent City sample · synthetic data';
+      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+      frame.referrerPolicy = 'no-referrer';
+      frame.src = `city3d/index.html?instanceId=${encodeURIComponent(instance)}&locale=${locale.lang === 'zh' ? 'zh-Hans' : 'en'}&presentation=landing&windowDays=${range.value}`;
+      frame.addEventListener('error', () => { if (generation === attempt) fail(); }, { once: true });
+      stage.append(frame);
+      stop.disabled = false;
+    }).catch(() => { if (generation === attempt) fail(); });
   }
-
-  // 滚进视口才探测与加载（three 产物 ~几百 KB，不占首屏）
-  const trigger = () => { if (!frame) mount(); };
-  // 调试钩子：遮挡/无帧环境下 IO 可能不通知，验证与排障用
-  window.__avCityHost = { mount: trigger, post };
-  new IntersectionObserver((entries, observer) => {
-    if (entries.some((e) => e.isIntersecting)) { observer.disconnect(); trigger(); }
-  }, { threshold: 0.05 }).observe(stage);
-  reduced.addEventListener('change', () => { if (!reduced.matches) trigger(); });
+  launch.addEventListener('click', mount);
+  window.addEventListener('av:explore-city', mount);
+  window.addEventListener('message', onMessage);
+  reset.addEventListener('click', () => command('city.reset'));
+  settings.addEventListener('click', () => command('city.settings'));
+  stop.addEventListener('click', () => { cleanup(); state('idle', t('city.launch.body')); launch.focus({ preventScroll: true }); });
+  range.addEventListener('change', () => {
+    state('loading', t('city.updating'));
+    command('city.window', range.value);
+    clearTimeout(timer);
+    timer = setTimeout(() => fail('city.timeout'), 10000);
+  });
+  new IntersectionObserver(([entry]) => {
+    visible = entry.isIntersecting;
+    // Desktop gets the real City frontend in the hero. Narrow/reduced-motion
+    // views retain a deliberate entry action, and closing never auto-reopens it.
+    if (visible && !document.hidden && !autoAttempted && matchMedia('(min-width: 601px)').matches
+      && !matchMedia('(prefers-reduced-motion: reduce)').matches && !window.navigator?.connection?.saveData) {
+      autoAttempted = true;
+      mount();
+    }
+    syncVisibility();
+  }, { threshold: .05 }).observe(stage);
+  document.addEventListener('visibilitychange', syncVisibility);
+  window.addEventListener('pagehide', cleanup);
 })();
