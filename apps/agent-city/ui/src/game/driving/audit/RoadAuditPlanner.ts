@@ -371,11 +371,12 @@ export function executeAuditPlan(world: PassabilityWorld, plan: AuditPlan, keyFo
   const pilot = options.pilot ?? routePilotFactory();
   const results: PassabilityResult[] = [];
   for (let i = 0; i < plan.routes.length; i++) {
-    if (options.shouldStop?.()) break;
+    if (options.shouldStop?.()) {try{options.evidence?.invalidate();}catch{/* diagnostics only */}break;}
     if (options.only && !options.only(plan.routes[i])) continue;
     const r = auditRoute(world, key, plan.routes[i], { ...options, pilot }); results.push(r); options.onResult?.(r, i, plan.routes.length);
   }
   const manifest: AuditManifest = { key, units: plan.units, exclusions: plan.exclusions, cases: plan.routes.map((r) => plannedCase(world, r)) };
+  if(!world.isCurrent())try{options.evidence?.invalidate();}catch{/* diagnostics only */}
   const release = evaluateAuditRelease(manifest, results.flatMap((r) => r.evidence), results.flatMap((r) => r.run ? [r.run] : []));
   const byUnit = new Map<string, UnitStatus>();
   for (const x of plan.exclusions) byUnit.set(x.unitId, "excluded");

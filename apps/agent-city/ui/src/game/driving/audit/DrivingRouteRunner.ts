@@ -2,6 +2,7 @@ import { DrivingKernel } from "../DrivingKernel";
 import type { DrivingState } from "../../DrivingSimulation";
 import { auditKeyId, freezeAuditCase, validateManifest } from "./AuditIdentity";
 import type { AuditCause, AuditKey, AuditObserver, AuditRunState, RoadAuditCase, RoadAuditCaseResult, RoutePilot } from "./contracts";
+import type { AuditEvidenceCapture, AuditEvidenceSink } from "./AuditEvidenceStore";
 
 /** Resumable, renderer-free execution. advance(N) is deterministic work, not wall
  * time. Caller schedules small batches and checks cancellation/revision each time.
@@ -14,10 +15,11 @@ export class DrivingRouteRunner {
   private runState: AuditRunState = "queued";
   private terminal: RoadAuditCaseResult | null = null;
   private readonly identity: string;
+  private capture:AuditEvidenceCapture|null=null;
   readonly key: AuditKey;
   readonly test: RoadAuditCase;
   constructor(key: AuditKey, test: RoadAuditCase, private readonly kernel: DrivingKernel,
-    private readonly pilot: RoutePilot, private readonly observer: AuditObserver) {
+    private readonly pilot: RoutePilot, private readonly observer: AuditObserver, private readonly evidence?:AuditEvidenceSink) {
     for (const field of ["baseSnapshotHash", "vehicleConfigHash", "kernelBuildId", "physicsVersion", "collisionVersion", "queryVersion"] as const) {
       if (kernel.identity[field] !== key[field]) throw new Error("kernel-audit-identity-mismatch");
     }
@@ -27,6 +29,7 @@ export class DrivingRouteRunner {
     this.test = freezeAuditCase(test);
     if (!Number.isSafeInteger(test.maxTicks) || test.maxTicks < 1 || !Number.isSafeInteger(test.maxNoProgressTicks) || test.maxNoProgressTicks < 1 || test.maxNoProgressTicks > test.maxTicks || !test.units.length || !test.gates.length) throw new Error("invalid-runner-case");
     this.current = this.test.start;
+    try{this.capture=evidence?.begin(this.key,this.test)??null;}catch{/* diagnostics cannot change a verdict */}
   }
   get state(): Readonly<DrivingState> { return this.current; }
   get simulatedTicks(): number { return this.ticks; }
@@ -34,12 +37,14 @@ export class DrivingRouteRunner {
   get result(): RoadAuditCaseResult | null { return this.terminal; }
   cancel(): void {
     if (this.terminal) return;
+    try{this.evidence?.invalidate();}catch{/* diagnostics only */}
     this.finish("cancelled"); this.runState = "cancelled";
   }
   advance(maxTicks: number, currentKey: AuditKey): RoadAuditCaseResult | null {
     if (!Number.isSafeInteger(maxTicks) || maxTicks < 1 || maxTicks > 10000) throw new Error("invalid-audit-batch");
     // Even a completed result becomes stale if the snapshot/config changes.
     if (auditKeyId(currentKey) !== this.identity) {
+      try{this.evidence?.invalidate();}catch{/* diagnostics only */}
       this.finish("unconfirmed", true); this.runState = "stale"; return this.terminal;
     }
     if (this.terminal) return this.terminal;
@@ -64,6 +69,9 @@ export class DrivingRouteRunner {
       try { next = this.kernel.step(this.current, input); }
       catch { this.finish("simulation-invalid"); break; }
       this.ticks++;
+      try{this.capture?.record(this.ticks,input,this.current,next.state);}catch{
+        try{this.capture?.discard();}catch{/* diagnostics only */}this.capture=null;
+      }
       let observation;
       try { observation = this.observer.observe(this.current, next, this.ticks); }
       catch { this.finish("unconfirmed"); break; }
@@ -87,6 +95,8 @@ export class DrivingRouteRunner {
     this.terminal = Object.freeze({ key: this.key, caseId: this.test.id,
       verdict: cause === "none" ? "passed" : "inconclusive", cause,
       coveredUnits: Object.freeze(cause === "none" ? [...this.test.units] : []), simulatedTicks: this.ticks });
+    try{this.capture?.finish(this.terminal);}catch{try{this.capture?.discard();}catch{/* diagnostics only */}}
+    this.capture=null;
     this.runState = "complete";
   }
 }

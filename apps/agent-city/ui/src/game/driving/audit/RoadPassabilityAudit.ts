@@ -34,6 +34,7 @@ import { ContinuousWorldValidator } from "../ContinuousWorldValidator";
 import { createContinuousDrivingKernel } from "../createContinuousDrivingKernel";
 import { commitRecovery, findSafePose } from "../SafeRecovery";
 import { DrivingRouteRunner } from "./DrivingRouteRunner";
+import type { AuditEvidenceSink } from "./AuditEvidenceStore";
 import { GateAuditObserver } from "./GateAuditObserver";
 import type { AuditCause, AuditKey, AuditVerdict, AuditWorldValidator, DirectedGate, RoadAuditCase, RoadAuditCaseResult, RoutePilot, StaticUnitEvidence, StepValidation } from "./contracts";
 
@@ -113,6 +114,8 @@ export type PassabilityResult = Readonly<{
   evidence: readonly StaticUnitEvidence[];
 }>;
 export type PassabilityOptions = Readonly<{
+  /** Local automatic-run diagnostics only; never used as release evidence. */
+  evidence?:AuditEvidenceSink;
   footprint?: VehicleFootprint; params?: FootprintParams;
   /** Distance between cut stations along the corridor. */
   stationStep?: number;
@@ -383,7 +386,7 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
     policy: { cruiseSpeed: cruise, maxReverseSpeed: 0 }, maxTicks: Math.ceil(((length + 10) / cruise) * 60 * 2 + 600), maxNoProgressTicks: 240 };
   let run: RoadAuditCaseResult | null = null;
   try {
-    const runner = new DrivingRouteRunner(key, test, kernelFor(), options.pilot ? options.pilot(route.path, cruise) : new CorridorPilot(route.path, cruise), new GateAuditObserver(test, validatorFor()));
+    const runner = new DrivingRouteRunner(key, test, kernelFor(), options.pilot ? options.pilot(route.path, cruise) : new CorridorPilot(route.path, cruise), new GateAuditObserver(test, validatorFor()), options.evidence);
     for (let guard = 0; !runner.result && guard < 10000; guard++) { runner.advance(250, key); if (!world.isCurrent()) { runner.cancel(); break; } }
     run = runner.result;
   } catch (error) {
