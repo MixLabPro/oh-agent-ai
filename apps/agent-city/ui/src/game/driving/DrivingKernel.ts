@@ -1,11 +1,11 @@
 /** Single entry for manual driving and headless audit. This first implementation
  * wraps the existing arcade model; it does not certify the synthetic world as City.
  */
-import { DRIVING_DT, DRIVING_PARAMS, stepDriving, type DrivingEnvironment, type DrivingInputState, type DrivingState } from "../DrivingSimulation";
+import { DRIVING_DT, DRIVING_PARAMS, stepDriving, type DrivingEnvironment, type DrivingInputState, type DrivingState, type DrivingMoveResult } from "../DrivingSimulation";
 export { DRIVING_DT } from "../DrivingSimulation";
 export type KernelStep = Readonly<{
   state: Readonly<DrivingState>;
-  motion: Readonly<{ blocked: boolean; reason: string | null }>;
+  motion: Readonly<{ blocked: boolean; reason: string | null; trajectory?: DrivingMoveResult["trajectory"]; contacts?: DrivingMoveResult["contacts"]; contact?: boolean; queryStatus?: DrivingMoveResult["queryStatus"] }>;
 }>;
 export type KernelIdentity = Readonly<{
   baseSnapshotHash: string; vehicleConfigHash: string; kernelBuildId: string;
@@ -19,6 +19,7 @@ export class DrivingKernel {
   step(previous: Readonly<DrivingState>, input: Readonly<DrivingInputState>): KernelStep {
     if (!validDrivingState(previous)) throw new Error("invalid-driving-state");
     let blocked = false; let reason: string | null = null;
+    let details: Pick<DrivingMoveResult,"trajectory"|"contacts"|"contact"|"queryStatus"> = {};
     // Pass copies to the existing mutable adapter contract. Neither a pilot nor
     // an environment may mutate a live state held by the runner/runtime.
     const state = stepDriving({ ...previous }, {
@@ -26,6 +27,12 @@ export class DrivingKernel {
       left: input.left === true, right: input.right === true,
     }, { move: (before, desired) => {
       const result = this.world.move({ ...before }, { ...desired });
+      details={};
+      if(result.trajectory&&result.trajectory.length>2048)throw new Error("motion-trajectory-budget");
+      if(result.trajectory)details.trajectory=result.trajectory.map(p=>Object.freeze({...p}));
+      if(result.contacts)details.contacts=Object.freeze(result.contacts.map(c=>Object.freeze({...c,normal:Object.freeze({...c.normal})})));
+      if(result.contact!==undefined)details.contact=result.contact;
+      if(result.queryStatus!==undefined)details.queryStatus=result.queryStatus;
       blocked = result.blocked; reason = result.reason ?? null;
       return { ...result };
     } });
@@ -34,7 +41,11 @@ export class DrivingKernel {
     if (Math.hypot(state.x - previous.x, state.z - previous.z) > maxStep) {
       throw new Error("unexpected-position-jump");
     }
-    return Object.freeze({ state: Object.freeze(state), motion: Object.freeze({ blocked, reason }) });
+    if(details.trajectory) {
+      const distance=Math.abs(state.distance-previous.distance);
+      if(distance>maxStep||Math.hypot(state.x-previous.x,state.y-previous.y,state.z-previous.z)>maxStep)throw new Error("unexpected-surface-distance-jump");
+    }
+    return Object.freeze({ state: Object.freeze(state), motion: Object.freeze({ blocked, reason, ...details, ...(details.trajectory?{trajectory:Object.freeze(details.trajectory)}:{}) }) });
   }
 }
 export function validDrivingState(state: Readonly<DrivingState>): boolean {

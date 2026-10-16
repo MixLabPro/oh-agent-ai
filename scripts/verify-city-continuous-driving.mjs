@@ -1,0 +1,172 @@
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+import {loadCity} from "./city-kit/index.mjs";
+const k=await loadCity({
+  "game/driving/CollisionIndex.ts":["buildCollisionIndex"],
+  "game/driving/DrivingCollision.ts":["sweepBody"],
+  "game/driving/DrivingCollisionSolver.ts":["resolveDrivingCollision"],
+  "game/driving/ContinuousDrivingEnvironment.ts":["ContinuousDrivingEnvironment"],
+  "game/driving/ContinuousWorldValidator.ts":["ContinuousWorldValidator"],
+  "game/driving/createContinuousDrivingKernel.ts":["createContinuousDrivingKernel"],
+  "game/DrivingSimulation.ts":["stepDriving","initialDrivingState","DRIVING_DT"],
+  "game/driving/DrivingKernel.ts":["DrivingKernel"],
+  "game/runtime/FixedStepClock.ts":["FixedStepClock"],
+  "engine/surface/SurfaceIndex.ts":["buildSurfaceIndex"],
+  "engine/surface/surfaceRegions.ts":["buildSurfaceRegions"],
+  "game/driving/surfaceFootprint.ts":["footprintSupport"],
+});
+const box=(id,x,y,z,hx,hy,hz)=>({id,role:"test",kind:"box",center:{x,y,z},halfAxes:[{x:hx,y:0,z:0},{x:0,y:hy,z:0},{x:0,y:0,z:hz}]});
+const solids=(...items)=>k.buildCollisionIndex(items).solids();
+const pose=(x=0,z=0,heading=0)=>({x,y:1,z,heading,pitch:0,roll:0,surfaceId:"road"});
+const dims={halfLength:0.5,halfHeight:0.4,halfWidth:0.3};
+const close=(a,b,e=1e-6)=>assert.ok(Math.abs(a-b)<=e,`${a} != ${b}`);
+const wall=solids(box("thin",5,1,0,0.001,3,100));
+const fast=k.sweepBody(wall,pose(),pose(100),dims);
+assert.equal(fast.status,"contact",JSON.stringify(fast));close(fast.contact.time,(5-0.001-0.5-0.0001)/100,1e-10);close(fast.contact.normal.x,-1);
+const leave=k.sweepBody(wall,pose(4.4988),pose(0),dims);assert.equal(leave.status,"clear","reverse away from contact");
+const rotational=solids(box("rotation",0,1,1.2,0.15,2,0.15));
+const long={halfLength:2,halfHeight:0.3,halfWidth:0.15};
+const rotate=k.sweepBody(rotational,pose(),pose(0,0,Math.PI),long);
+assert.equal(rotate.status,"contact",JSON.stringify(rotate));
+assert.ok(rotate.contact.timeUpper-rotate.contact.time<=1e-7);assert.ok(rotate.contact.time>0&&rotate.contact.time<0.5);
+assert.equal(k.sweepBody(wall,pose(),pose(100),dims,{maxTests:1}).status,"unresolved");
+assert.equal(k.sweepBody(wall,pose(5),pose(6),dims).reason,"initial-overlap");
+const pitchWall=solids(box("pitch",0,2.2,0,0.15,0.001,0.15));
+const pitchHit=k.sweepBody(pitchWall,pose(),{...pose(),pitch:Math.PI},long);
+assert.equal(pitchHit.status,"contact",JSON.stringify(pitchHit));assert.ok(pitchHit.contact.timeUpper-pitchHit.contact.time<=1e-7);
+const orderA=solids(box("a",5,1,0,0.001,3,100),box("b",5,1,0,0.001,3,100));
+const orderB=solids(box("b",5,1,0,0.001,3,100),box("a",5,1,0,0.001,3,100));
+assert.deepEqual(k.sweepBody(orderA,pose(),pose(10),dims),k.sweepBody(orderB,pose(),pose(10),dims));
+const world={isCurrent:()=>true,constrain:(from,to)=>({ok:true,pose:to}),body:p=>p};
+const slide=k.resolveDrivingCollision(wall,world,pose(),pose(10,8),dims);
+assert.equal(slide.status,"moved",JSON.stringify(slide));assert.ok(slide.pose.x<4.499);close(slide.pose.z,8,1e-4);assert.ok(slide.contacts.length>0);
+assert.ok(slide.distance<=Math.hypot(10,8)+1e-6,"projection cannot add energy/path length");
+const corner=k.resolveDrivingCollision(solids(box("x",5,1,0,0.001,3,100),box("z",0,1,5,20,3,0.001)),world,pose(),pose(10,10),dims);
+assert.ok(corner.pose.x<4.499&&corner.pose.z<4.699);assert.ok(corner.contacts.length<=5);
+const headon=k.resolveDrivingCollision(wall,world,pose(),pose(10),dims);
+assert.equal(headon.speedFraction,0,"normal velocity is removed at first contact, not one tick later");
+const rotationResolved=k.resolveDrivingCollision(rotational,world,pose(),pose(0,0,Math.PI),long);
+assert.notEqual(rotationResolved.status,"unresolved",rotationResolved.reason);assert.ok(rotationResolved.pose.heading<Math.PI/2);
+let active=true;const invalidating={...world,constrain:(a,b)=>{active=false;return {ok:true,pose:b};},isCurrent:()=>active};
+assert.equal(k.resolveDrivingCollision(wall,invalidating,pose(),pose(10),dims).status,"unresolved");
+function surface(slope=0){
+  const vertices=new Float32Array([-20,-20*slope,-20,20,20*slope,-20,20,20*slope,20,-20,-20*slope,20]);
+  const ring=[{x:-20,z:-20},{x:20,z:-20},{x:20,z:20},{x:-20,z:20}];
+  const snapshot={revision:`surface:${slope}`,geometryVersion:5,patches:[{id:"road",kind:"carriageway",layerId:"ground",source:{kind:"road-edge",id:"road"},vertices,indices:new Uint32Array([0,2,1,0,3,2]),boundaryLoops:[{hole:false,vertices:ring,segments:ring.map(()=>"closed")}]}],portals:[],renderBatches:[],report:{candidateLength:200,geometricallyEligibleLength:0,issues:[]}};
+  return k.buildSurfaceRegions(snapshot,k.buildSurfaceIndex(snapshot));
+}
+assert.equal(k.sweepBody(wall,pose(),pose(10),dims,{maxSourceSolids:0}).reason,"invalid-input");
+assert.equal(k.sweepBody(wall,pose(),pose(10),dims,{maxAxes:1}).reason,"budget");
+assert.equal(k.sweepBody(wall,{...pose(),heading:1e16},{...pose(10),heading:1e16},dims).reason,"precision");
+const region=surface();assert.equal(region.status,"ready",JSON.stringify(region));const regionId=region.regions[0].id;
+const env=new k.ContinuousDrivingEnvironment(region,{surfaceRevision:region.revision,worldRevision:"world",solidRevision:"world",solids:wall,dimensions:dims,centerHeight:1,isCurrent:()=>true});
+assert.throws(()=>new k.ContinuousDrivingEnvironment(region,{surfaceRevision:region.revision,worldRevision:"world",solidRevision:"wrong",solids:wall,dimensions:dims,centerHeight:1,isCurrent:()=>true}),/invalid-continuous-world/);
+const placed=k.footprintSupport(region,{x:0,z:0,heading:0},regionId);assert.ok(placed.ok);
+const initial={...k.initialDrivingState(0,0,0,regionId),y:placed.y,pitch:placed.pitch,roll:placed.roll};
+const move=env.move(initial,{x:10,z:8,heading:0});
+// Explicit large-step fixture needs its own bounded prediction budget.
+assert.equal(move.queryStatus,"unresolved");
+const roomy=new k.ContinuousDrivingEnvironment(region,{surfaceRevision:region.revision,worldRevision:"world",solidRevision:"world",solids:wall,dimensions:dims,centerHeight:1,isCurrent:()=>true},undefined,undefined,{maxSupportSegments:256});
+const result=roomy.move(initial,{x:10,z:8,heading:0});assert.equal(result.queryStatus,"resolved");assert.ok(result.x<4.499&&result.z>7.99);
+assert.equal(roomy.validateTrajectory(initial,result,result.trajectory),true);
+const forged=result.trajectory.map(p=>({...p}));forged[forged.length-1].x=8;
+assert.equal(roomy.validateTrajectory(initial,{...result,x:8},forged),false);
+const forward={forward:true,backward:false,left:false,right:false},idle={forward:false,backward:false,left:false,right:false};
+const planeWorld=slope=>({move:(before,want)=>({...want,y:want.x*slope,pitch:Math.atan(slope),roll:0,surfaceId:"plane",blocked:false})});
+for(const slope of [-0.2,0.2]) {
+  let state={...k.initialDrivingState(),pitch:Math.atan(slope)};
+  const next=k.stepDriving(state,forward,planeWorld(slope));
+  close(next.distance,Math.hypot(next.x,next.y),1e-10);close(next.distance/k.DRIVING_DT,next.speed,1e-10);
+  state=k.stepDriving(state,idle,planeWorld(slope));assert.equal(state.speed,0,"passive slope parking hold");
+  state={...state,speed:1};for(let i=0;i<120;i++)state=k.stepDriving(state,{...forward,backward:true},planeWorld(slope));assert.equal(state.speed,0,"active slope brake");
+}
+function run(hz){const clock=new k.FixedStepClock(),world=planeWorld(0.15);let state={...k.initialDrivingState(),pitch:Math.atan(0.15)};for(let i=0;i<hz*5;i++)clock.advance(1/hz,false,()=>{state=k.stepDriving(state,forward,world);});return state;}
+assert.deepEqual(run(30),run(60));assert.deepEqual(run(60),run(120));
+
+
+// Actual C environment/kernel/independent validator share one immutable world.
+function integrated(hz,slope=0){
+  const r=surface(slope),id=r.regions[0].id;
+  const environment=new k.ContinuousDrivingEnvironment(r,{surfaceRevision:r.revision,worldRevision:"integrated",solidRevision:"integrated",solids:wall,dimensions:dims,centerHeight:1,isCurrent:()=>true});
+  const support=k.footprintSupport(r,{x:0,z:0,heading:0},id);assert.ok(support.ok);
+  let state={...k.initialDrivingState(0,0,0,id),y:support.y,pitch:support.pitch,roll:support.roll};
+  const kernel=k.createContinuousDrivingKernel(environment,{worldRevision:"integrated",vehicleConfigHash:"test-config",kernelBuildId:"test-C"});
+  assert.equal(kernel.identity.physicsVersion,2);assert.equal(kernel.identity.collisionVersion,2);assert.equal(kernel.identity.queryVersion,3);
+  const validator=new k.ContinuousWorldValidator(environment,s=>s.x);assert.equal(validator.validateStart(state),"valid");
+  const clock=new k.FixedStepClock();let contacts=0;
+  for(let frame=0;frame<hz*3;frame++)clock.advance(1/hz,false,()=>{
+    const next=kernel.step(state,forward);assert.equal(validator.validate(state,next),"valid",JSON.stringify(next.motion));
+    if(next.motion.contact)contacts++;state=next.state;
+  });
+  assert.ok(state.x<4.8);assert.ok(contacts>0);
+  // Back out after sustained contact, rather than freezing at t=0 forever.
+  const contactX=state.x;
+  for(let tick=0;tick<90;tick++) {const next=kernel.step(state,{...idle,backward:true});assert.equal(validator.validate(state,next),"valid");state=next.state;}
+  assert.ok(state.x<contactX-0.5,"reverse must escape the wall");
+  return state;
+}
+assert.deepEqual(integrated(30),integrated(60));assert.deepEqual(integrated(60),integrated(120));
+integrated(60,0.1);integrated(60,-0.1);
+// Stationary traces also verify support and collision; no one-element escape.
+assert.equal(roomy.validateTrajectory({...initial,y:2},{...initial,y:2},[{...initial,y:2}]),false);
+
+
+for(let index=1;index<=24;index++) {
+  const angle=index*0.17,n={x:Math.cos(angle),z:Math.sin(angle)},t={x:-n.z,z:n.x};
+  const obstacle={id:"oblique",role:"test",kind:"box",center:{x:5*n.x,y:1,z:5*n.z},halfAxes:[{x:0.001*n.x,y:0,z:0.001*n.z},{x:0,y:3,z:0},{x:100*t.x,y:0,z:100*t.z}]};
+  const hit=k.sweepBody(solids(obstacle),pose(),pose(10*n.x+3*t.x,10*n.z+3*t.z),dims);
+  assert.equal(hit.status,"contact");
+  const radius=0.5*Math.abs(n.x)+0.3*Math.abs(n.z);
+  close(hit.contact.time,(5-0.001-radius-0.0001)/10,1e-9);
+  close(hit.contact.normal.x,-n.x,1e-9);close(hit.contact.normal.z,-n.z,1e-9);
+  const moved=k.resolveDrivingCollision(solids(obstacle),world,pose(),pose(10*n.x+3*t.x,10*n.z+3*t.z),dims);
+  assert.notEqual(moved.status,"unresolved",moved.reason);
+  assert.ok(moved.pose.x*n.x+moved.pose.z*n.z<5-0.001-radius);
+}
+// Non-orthogonal double wall cannot gain distance or escape through the wedge.
+const wedge=solids(box("wall-x",5,1,0,0.001,3,100),{id:"angled",role:"test",kind:"box",center:{x:0,y:1,z:5},halfAxes:[{x:80,y:0,z:40},{x:0,y:3,z:0},{x:-0.0005,y:0,z:0.001}]});
+const wedged=k.resolveDrivingCollision(wedge,world,pose(),pose(10,10),dims);
+assert.notEqual(wedged.status,"unresolved",wedged.reason);assert.ok(wedged.distance<=Math.sqrt(200)+1e-6);
+assert.equal(k.sweepBody(wedge,wedged.pose,wedged.pose,dims).status,"clear");
+// Grade changes use measured support length, never exceed the tick travel budget.
+const changed=surface(0.2),changedId=changed.regions[0].id;
+const changedEnv=new k.ContinuousDrivingEnvironment(changed,{surfaceRevision:changed.revision,worldRevision:"slope",solidRevision:"slope",solids:[],dimensions:dims,centerHeight:1,isCurrent:()=>true});
+const s=k.footprintSupport(changed,{x:0,z:0,heading:0},changedId);
+const budgeted=changedEnv.move({...k.initialDrivingState(0,0,0,changedId),y:s.y,pitch:s.pitch,roll:s.roll},{x:1,z:0,heading:0,travelBudget:0.5});
+assert.ok(budgeted.travelledDistance<=0.5+1e-9);close(budgeted.travelledDistance,0.5,1e-8);
+console.log("C continuous driving: analytic TOI, bounded rotation, slides/corners, stale/budgets, independent trajectories, slope/brake/reverse and real-kernel frame parity passed.");
+if(process.argv.includes("--cities")) {
+  const {createCityPlan,compileCitySurface,cityCollisionIndex,cachedPlan}=await (async()=>{
+    const m=await loadCity({"engine/cityPlan.ts":["createCityPlan"],"engine/surface/compileSurface.ts":["compileCitySurface"],"game/driving/citySolids.ts":["cityCollisionIndex"]});
+    const kit=await import("./city-kit/index.mjs");return {...m,cachedPlan:kit.cachedPlan};
+  })();
+  let runs=0,ticks=0,contacts=0,uncertain=0;
+  for(const seed of [1,7,42,2026,65537])for(const tier of [1,2,3]) {
+    const layout=cachedPlan(createCityPlan,seed,tier),compilation=compileCitySurface(layout);
+    const surface={...compilation.surface,revision:`C:${seed}/${tier}`};
+    const regions=k.buildSurfaceRegions(surface,k.buildSurfaceIndex(surface));assert.equal(regions.status,"ready");
+    const solidIndex=cityCollisionIndex(compilation.obstacles);assert.equal(solidIndex.report.rejected,0);
+    let sceneRuns=0;
+    for(const edge of layout.roadEdges.filter(e=>!e.bridge&&e.structure!=="deck"&&e.points.length===2)) {
+      const [a,b]=edge.points,dx=b.x-a.x,dz=b.z-a.z,len=Math.hypot(dx,dz);if(len<35)continue;
+      const x=a.x+dx/len*12,z=a.z+dz/len*12,heading=Math.atan2(dz,dx),point=regions.classify(x,z,"ground");
+      if(point.status!=="drivable")continue;
+      const support=k.footprintSupport(regions,{x,z,heading},point.regionId);if(!support.ok)continue;
+      const environment=new k.ContinuousDrivingEnvironment(regions,{surfaceRevision:surface.revision,worldRevision:surface.revision,solidRevision:surface.revision,solids:solidIndex.solids(),dimensions:{halfLength:1.4,halfHeight:0.35,halfWidth:0.7},centerHeight:0.7,isCurrent:()=>true});
+      let state={...k.initialDrivingState(x,z,heading,point.regionId),y:support.y,pitch:support.pitch,roll:support.roll};
+      const validator=new k.ContinuousWorldValidator(environment,s=>s.distance);
+      if(validator.validateStart(state)!=="valid")continue;
+      const kernel=k.createContinuousDrivingKernel(environment,{worldRevision:surface.revision,vehicleConfigHash:"C-city-explicit-collider",kernelBuildId:"C-city-test"});
+      for(let tick=0;tick<60;tick++) {
+        const next=kernel.step(state,forward);
+        if(next.motion.queryStatus==="unresolved") {assert.equal(validator.validate(state,next),"simulation-invalid");uncertain++;break;}
+        assert.equal(validator.validate(state,next),"valid",`${seed}/${tier}: ${next.motion.reason}`);
+        ticks++;if(next.motion.contact)contacts++;state=next.state;
+      }
+      runs++;if(++sceneRuns===2)break;
+    }
+    console.log(`C city ${seed}/${tier}: ${sceneRuns} valid spawns, all committed pieces independently checked`);
+  }
+  assert.ok(runs>=15&&ticks>=runs*10,JSON.stringify({runs,ticks,contacts,uncertain}));
+  console.log(`C structural city matrix: ${runs} runs, ${ticks} verified ticks, ${contacts} contact ticks, ${uncertain} explicit uncertainties; no road release.`);
+}

@@ -1,14 +1,14 @@
 /** Fixed-step arcade bicycle model. No renderer, DOM, input listeners or persistence.
- * World units are deliberately not labelled metres or km/h. +heading points toward +Z.
+ * World units are deliberately not labelled metres or km/h. heading 0 points toward +X.
  */
 import { CAR_DIMENSIONS } from "./carDimensions";
 
-export const DRIVING_PHYSICS_VERSION = 1;
+export const DRIVING_PHYSICS_VERSION = 2;
 export const DRIVING_DT = 1 / 60;
 export const DRIVING_PARAMS = Object.freeze({
   wheelbase: CAR_DIMENSIONS.wheelbase, maxForward: 13, maxReverse: 4, acceleration: 5.5,
   reverseAcceleration: 3, braking: 12, coastDrag: 1.2, maxSteering: 0.48,
-  steeringResponse: 8, zeroSpeed: 0.08,
+  steeringResponse: 8, zeroSpeed: 0.08, slopeGravity: 6, staticHold: 2,
 });
 export type DrivingInputState = { forward: boolean; backward: boolean; left: boolean; right: boolean };
 export const EMPTY_DRIVING_INPUT: DrivingInputState = { forward: false, backward: false, left: false, right: false };
@@ -17,10 +17,19 @@ export type DrivingState = {
   steering: number; distance: number; braking: boolean; reversing: boolean;
   pitch: number; roll: number; surfaceId: string;
 };
-export type DrivingMotion = { x: number; z: number; heading: number };
+export type DrivingMotion = { x: number; z: number; heading: number; travelBudget?: number };
+export type DrivingTrajectoryPose = DrivingMotion & {y:number;pitch:number;roll:number;surfaceId:string};
+export type DrivingContact = Readonly<{obstacleId:string;worldRevision:string;time:number;timeUpper:number;
+  normal:Readonly<{x:number;y:number;z:number}>;kind:"translation"|"rotation"}>;
 export type DrivingMoveResult = DrivingMotion & {
   y: number; pitch: number; roll: number; surfaceId: string;
   blocked: boolean; reason?: string;
+  /** C adapter supplies measured support-path length and retained speed. Legacy
+   * worlds keep the endpoint 3D chord fallback. No audit trusts these by themselves. */
+  travelledDistance?: number; speedFraction?: number;
+  trajectory?: readonly Readonly<DrivingTrajectoryPose>[];
+  contacts?: readonly DrivingContact[];
+  contact?: boolean; queryStatus?: "resolved" | "unresolved";
 };
 export interface DrivingEnvironment {
   move(previous: DrivingState, desired: DrivingMotion): DrivingMoveResult;
@@ -43,21 +52,29 @@ export function stepDriving(previous: DrivingState, input: DrivingInputState, wo
     if (Math.abs(speed) <= p.zeroSpeed && Math.sign(speed) !== direction) speed = 0;
     speed += direction * (direction > 0 ? p.acceleration : p.reverseAcceleration) * DRIVING_DT;
   } else speed = approachZero(speed, p.coastDrag * DRIVING_DT);
+  const gravity = -p.slopeGravity * Math.sin(previous.pitch);
+  // Active brake holds at rest; passive parking hold only counters bounded grade.
+  const hold = braking || (!direction && Math.abs(previous.speed)<=p.zeroSpeed && Math.abs(gravity)<=p.staticHold);
+  if (!hold) speed += gravity * DRIVING_DT;
   speed = Math.max(-p.maxReverse, Math.min(p.maxForward, speed));
   const turn = Number(input.right) - Number(input.left);
   const target = turn * p.maxSteering / (1 + Math.abs(speed) * 0.07);
   const steering = previous.steering + (target - previous.steering) * (1 - Math.exp(-p.steeringResponse * DRIVING_DT));
-  const yaw = speed / p.wheelbase * Math.tan(steering) * DRIVING_DT;
+  const horizontalSpeed = speed * Math.cos(previous.pitch);
+  const yaw = horizontalSpeed / p.wheelbase * Math.tan(steering) * DRIVING_DT;
   const desired = {
-    x: previous.x + Math.cos(previous.heading + yaw / 2) * speed * DRIVING_DT,
-    z: previous.z + Math.sin(previous.heading + yaw / 2) * speed * DRIVING_DT,
-    heading: previous.heading + yaw,
+    x: previous.x + Math.cos(previous.heading + yaw / 2) * horizontalSpeed * DRIVING_DT,
+    z: previous.z + Math.sin(previous.heading + yaw / 2) * horizontalSpeed * DRIVING_DT,
+    heading: previous.heading + yaw, travelBudget: Math.abs(speed)*DRIVING_DT,
   };
   const result = world.move(previous, desired);
-  const travelled = Math.hypot(result.x - previous.x, result.z - previous.z) * Math.sign(speed);
+  const measured = result.travelledDistance ?? Math.hypot(result.x-previous.x,result.y-previous.y,result.z-previous.z);
+  const fraction = result.speedFraction ?? (result.blocked ? 0 : 1);
+  if(!Number.isFinite(measured)||measured<0||!Number.isFinite(fraction)||fraction<0||fraction>1)throw new Error("invalid-motion-metrics");
+  const travelled = measured * Math.sign(speed);
   return { ...previous, x: result.x, y: result.y, z: result.z,
-    heading: result.heading, steering, speed: result.blocked ? 0 : speed,
+    heading: result.heading, steering, speed: result.blocked ? 0 : speed * fraction,
     pitch: result.pitch, roll: result.roll, surfaceId: result.surfaceId,
-    distance: previous.distance + travelled, braking: braking || result.blocked,
-    reversing: !result.blocked && speed < -p.zeroSpeed };
+    distance: previous.distance + travelled, braking: braking || result.blocked || !!result.contact,
+    reversing: !result.blocked && speed * fraction < -p.zeroSpeed };
 }
