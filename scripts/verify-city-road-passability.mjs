@@ -166,14 +166,19 @@ if (process.argv.includes("--cities")) {
   const engine = process.env.PASSABILITY_ENGINE === "legacy" ? "legacy" : "continuous";
   const perScene = Number(process.env.PASSABILITY_EDGES ?? 12);
   const totals = { routes: 0, passed: 0, blocked: 0, inconclusive: 0 }; const causes = {}; const witnesses = [];
+  // PASSABILITY_SCENES="500/42,0/42" and PASSABILITY_ROUTES="edge:a:fwd,…" narrow the run (comparisons).
+  const sceneFilter = process.env.PASSABILITY_SCENES ? new Set(process.env.PASSABILITY_SCENES.split(",")) : null;
+  const routeFilter = process.env.PASSABILITY_ROUTES ? new Set(process.env.PASSABILITY_ROUTES.split(",")) : null;
+  const notPassed = [];
   for (const sessions of [0, 90, 500]) for (const seed of [1, 7, 42, 2026, 65537]) {
+    if (sceneFilter && !sceneFilter.has(`${sessions}/${seed}`)) continue;
     const { parts } = buildParts(kit, sessions, seed);
     const lease = parts.acquireDrivingWorldSource();
     try {
       const port = new kit.CitySurfacePort();
       const capture = await port.capture(lease.source); assert.equal(capture.status, "ready");
       const edges = lease.source.layout.roadEdges.filter((e) => e.points.length >= 2).sort((a, b) => a.id < b.id ? -1 : 1).slice(0, perScene);
-      const routes = kit.directedEdgeRoutes(edges);
+      const routes = kit.directedEdgeRoutes(edges).filter((r) => !routeFilter || routeFilter.has(r.id));
       const audited = kit.auditCapture(capture, engine === "legacy" ? legacyKeyFor : keyFor, routes, { engine });
       assert.equal(audited.status, "ready", audited.reason);
       const outcome = {};
@@ -185,6 +190,7 @@ if (process.argv.includes("--cities")) {
         totals.routes++; totals[r.verdict]++;
         const k = `${r.verdict}:${r.cause}`; outcome[k] = (outcome[k] ?? 0) + 1; causes[k] = (causes[k] ?? 0) + 1;
         if (r.witness) witnesses.push(`${sessions}/${seed} ${r.routeId} ${r.evidence[0].witness}`);
+        if (r.verdict !== "passed") notPassed.push(`${sessions}/${seed} ${r.routeId} ${r.verdict}:${r.cause} ${r.detail}`);
       }
       // The same results go stale the moment the frozen world is released.
       lease.release();
@@ -195,4 +201,5 @@ if (process.argv.includes("--cities")) {
   assert.ok(totals.passed > 0, "real roads pass the audit");
   console.log(`Road passability (${engine}): ${totals.routes} real directed routes → ${totals.passed} passed, ${totals.blocked} blocked (witnessed), ${totals.inconclusive} inconclusive ${JSON.stringify(causes)}.`);
   for (const w of witnesses.slice(0, 20)) console.log(`  witness ${w}`);
+  for (const n of notPassed) console.log(`  not passed ${n}`);
 }
