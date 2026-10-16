@@ -14,7 +14,7 @@ assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // Preserve the existing stages and register the new production causeway guard.
 // 63 + city-opt 的 5 个（villa-placement / model-envelope / site-registry / site-registry-scene / joint-site-road）+ 规划修复的 6 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller / -bulldozer / -remap）+ R2 的 verify-city-import-boundary。计数锁防的是悄悄增减，
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
-assert.equal(manifest.length, 86);
+assert.equal(manifest.length, 87);
 assert(selectStages("fast").some((stage) => stage.id === "verify-city-import-boundary"), "import boundary guard must run in fast mode");
 assert(selectStages("module", "planning").some((stage) => stage.id === "verify-city-import-boundary"));
 for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
@@ -59,7 +59,7 @@ for (const id of ["verify-city-world", "verify-city-access-capabilities", "verif
 for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
   .some((stage) => stage.id === "verify-city-radius"));
 assert(manifest.some((s) => s.id === "verify-city-road-report"));
-assert.equal(selectStages("module", "game").length, 13);
+assert.equal(selectStages("module", "game").length, 14);
 let calls = 0;
 const factory = (seed, tier, config, opts) => ({ seed, tier, config: { ...config }, opts, call: ++calls });
 const c = { margin: 1, version: 2 };

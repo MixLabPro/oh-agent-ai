@@ -506,5 +506,11 @@
     "file": "verify-city-driving-spawns.mjs",
     "env": {},
     "shared": false
+  },
+  {
+    "id": "verify-city-driving-entry",
+    "file": "verify-city-driving-entry.mjs",
+    "env": {},
+    "shared": false
   }
 ]
