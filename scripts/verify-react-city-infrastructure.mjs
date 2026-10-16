@@ -41,6 +41,7 @@ assert(harness.mesh.count > 12, "bridge includes edge lines and dashed center ma
 const distant = new SegmentIndex([[{ x: 150, z: 0 }, { x: 150, z: 10 }]]);
 assert(distant.closerThan({ x: 0, z: 0 }, 160), "large footprint queries search beyond adjacent cells");
 assert(!distant.closerThan({ x: 0, z: 0 }, 140), "large footprint guard remains distance-based");
+let corpusRuns = 0;
 for (const seed of [1927, 42, 1485618003, 987654]) {
   const plan = createCityPlan(seed, 2);
   for (const run of plan.highways) {
@@ -51,14 +52,27 @@ for (const seed of [1927, 42, 1485618003, 987654]) {
     }
   }
   assert.deepEqual(plan.highways, createCityPlan(seed, 2).highways, `seed ${seed}: deterministic exits`);
+  corpusRuns += plan.highways.length;
 }
+assert.ok(corpusRuns > 0, "seed corpus: at least one expressway run survives at tier 2");
 // 档位：每档 400 栋，最多 10 档 = 4000 栋（scaleTierFor 夹在 MAX_TIER = 10）。
+// 2026-10-16 起干线筛查收紧（plan-repair 残余收敛：跨水地面段按 water-span 拒绝，
+// 见 skeleton.ts screenTrunkRoute），环线出口不再有跨水地面宿主可接——环线是否成环
+// 变成地理依赖（seed 42 各档保留，1485618003/1927/987654 目前全无）。
+// 「每档保留跨水高架」因此从固定单 seed 改为语料级不变量；单 seed 全档必有的旧断言
+// 依赖的是已被移除的非法跨水地面路，不恢复。
+const tierSeeds = [1927, 42, 987654, 1485618003];
 for (const tier of [1, 5, 10]) {
-  const plan = createCityPlan(1485618003, tier);
-  for (const block of plan.blocks) for (const parcel of block.parcels) {
-    assert(clearsHighways(parcel, parcel.width, parcel.depth, plan.highways), `tier ${tier}: expressway footprint guard`);
+  let runs = 0; let crossings = 0;
+  for (const seed of tierSeeds) {
+    const plan = createCityPlan(seed, tier);
+    runs += plan.highways.length;
+    crossings += plan.highways.reduce((sum, run) => sum + run.filter((p) => plan.terrain.height(p.x, p.z) < 0).length, 0);
+    for (const block of plan.blocks) for (const parcel of block.parcels) {
+      assert(clearsHighways(parcel, parcel.width, parcel.depth, plan.highways), `tier ${tier}/seed ${seed}: expressway footprint guard`);
+    }
   }
-  // Every sampled ring point on the riverbank is retained, not split by the buildable setback.
-  assert(plan.highways.some((run) => run.some((p) => plan.terrain.height(p.x, p.z) < 0)), `tier ${tier}: elevated river crossing retained`);
+  assert.ok(runs > 0, `tier ${tier}: at least one expressway run survives in the seed corpus`);
+  assert.ok(crossings > 0, `tier ${tier}: elevated river crossing retained somewhere in the seed corpus`);
 }
 console.log("City infrastructure: real bridge deck/rails/piers and expressway clearance/crossings across tiers passed.");
