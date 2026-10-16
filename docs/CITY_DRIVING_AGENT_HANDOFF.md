@@ -111,6 +111,10 @@ architecture测试覆盖：同核逐tick终态、不同调度批一致、整车�
 
 ## 8. A3增量交付（2026-10-15）
 
+2026-10-16：结构与宿主后续实施进度见 [任务1/2实施记录](CITY_DRIVING_STRUCTURE_HOST_PROGRESS.md)。宿主capture现提供readWorld与checkStructures，worldRevision含结构实体；完整建筑/地标障碍及合法图尚未纳入，不能用作正式审计base hash。
+
+接缝后续：landings带实际端边与patchId；checkLandings对整个端边做精确有理数区间切分，返回覆盖/高度/坡变证据和连续宽度区间。候选区间不自动生成portal。实际CityEngine浏览器守卫已核对初始/修复后道路mesh与快照buffer一致，含缓存复用和hash期间换seed/销毁失效。
+
 `engine/surface/SurfaceIndex.ts` 提供有界XZ三角候选索引和显式layerId的点采样。构建会复制patch缓冲区，限制三角数、桶数、总索引项、单三角跨格数；查询在同一patch共边按稳定ID取样，跨patch重叠明确返回ambiguous，超候选预算返回budget。它不做整车footprint、portal穿越、固体碰撞或可行性认证，也未接入CityEngine/Store生命周期。
 
 后续B工作包可在此候选层上增加跨三角的连续运动验证、坡度/台阶阈值和全footprint覆盖；必须先完成普通路面union及岛/路缘语义，再允许任何点采样结果参与正式开放图。

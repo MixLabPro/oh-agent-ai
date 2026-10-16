@@ -419,6 +419,8 @@ A2增量：已实现单片段闭环/孔洞提取、边界故障/预算诊断、�
 
 A3增量：`engine/surface/SurfaceIndex.ts` 已提供复制快照、有界XZ三角索引和显式layerId点采样；跨patch重叠返回ambiguous，构建/查询超预算失败关闭。该索引只产出点级几何候选，不能代替全车覆盖、连续运动、portal、碰撞或正式通行审计，尚未连接CityEngine运行时。
 
+2026-10-16任务1/2增量：宿主端口现以generation租约读取surface与结构实体副本，worldRevision覆盖板体/桥墩/护栏等结构数据，并提供绑定该版本的坡度/异层板底净空诊断。完整建筑/地标障碍、合法图与跨层portal仍待闭合，见 [实施记录](CITY_DRIVING_STRUCTURE_HOST_PROGRESS.md)。
+
 A4/B1增量：同层alias合并（精确叠置顶点高差 ≤0.1）、唯一点分类器、按两侧分类切分的curb/closed/step区域边界、整车矩形覆盖（侧向余量0.2）与细分扫掠凸包连续运动验证已实现，并通过 `SurfaceDrivingEnvironment`/`SurfaceWorldValidator` 接入现有kernel/runner/observer。十五城直路同核试跑每个tick独立复核均合法。SurfaceIndex法线错误已修。仍无portal、固体障碍、桥/高架和渠化岛编译，不认证通行。见 [区域与整车覆盖记录](CITY_SURFACE_REGIONS_NOTES.md)。
 
 A5增量：普通路面改为精确贴地（不贴地处按渲染地形三角网保形裁剪，无T形接点），并修复折点自折叠与闭合环线接缝。十五城贴地偏差 ≤0.02，车行片段边界全部是流形；驾驶区域高差冲突与排除片段均为0。平地渲染几何与重构前逐字节一致，坡地变化有新基线和原因记录。见 [A5贴地记录](CITY_GROUND_SURFACE_TERRAIN_FIT_NOTES.md)。
