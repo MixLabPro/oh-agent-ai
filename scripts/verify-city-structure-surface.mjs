@@ -121,6 +121,8 @@ const drive = (regions, x0, z, x1) => {
   const { c, regions } = build(city([edge(W, A), span(), edge(B, E), edge(N, S)]));
   const deck = c.surface.patches.find((p) => p.kind === "bridge-deck");
   assert.ok(deck.layerId.startsWith("bridge:")); assert.ok(c.landings.every((l) => l.status === "layered"));
+  assert.equal(c.surface.portals.length,2,"both proven overpass landings produce explicit geometric portals");
+  assert.ok(c.surface.portals.every((p)=>p.validated&&p.fromPatch===deck.id&&p.clearance>4));
   assert.equal(regions.classify(0, 10, "ground").status, "drivable", "the road under the deck stays drivable");
   assert.equal(regions.classify(0, 0, deck.layerId).status, "drivable");
   assert.notEqual(regions.classify(0, 0, deck.layerId).regionId, regions.classify(-40, 0, "ground").regionId, "no implicit cross-layer portal");
@@ -171,8 +173,8 @@ const drive = (regions, x0, z, x1) => {
   const aborted = new AbortController(); aborted.abort();
   assert.equal((await port.capture(source, aborted.signal)).status, "cancelled");
   const first = await port.capture(source);
-  assert.equal(first.status, "ready"); assert.match(first.revision, /^surface-v2:sha256:[a-f0-9]{64}$/);
-  assert.ok(first.compilation.surface.patches.some((p) => p.kind === "bridge-deck"));
+  assert.equal(first.status, "ready"); assert.match(first.revision, new RegExp(`^surface-v${kit.CITY_SURFACE_GEOMETRY_VERSION}:sha256:[a-f0-9]{64}$`));
+  assert.ok(first.readWorld().surface.patches.some((p) => p.kind === "bridge-deck"));
   assert.equal(await port.capture(source), first, "same rendered source reuses the published snapshot");
   const copy = first.read(); copy.patches[0].vertices[0] += 99;
   assert.notEqual(first.read().patches[0].vertices[0], copy.patches[0].vertices[0], "reads are defensive copies");

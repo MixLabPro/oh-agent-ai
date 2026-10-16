@@ -72,6 +72,8 @@ A6 的发现：原来的桥面是一块平板，顶面取两岸**原始**地形�
 
 ## 未完成（移交）
 
+2026-10-16后续：实体板底、宿主所有权/worldRevision和独立坡度/净空检查已开始补齐，见 [任务1/2实施记录](CITY_DRIVING_STRUCTURE_HOST_PROGRESS.md)。新端口使用readWorld()/checkStructures()，不再暴露原始compilation。几何版本为3；下列A6/A7剩余项仍需逐项关闭。
+
 - 跨层portal（立交桥、高架匝道；高架匝道末端在渲染上本来就有约0.26的台阶）。
 - CollisionIndex 接入 `obstacles`；SafeRecovery；正式开放图与审计（B/C/D）。
 - 宿主端口已接CityEngine，但尚无运行时消费方（GameRuntime/CarAdapter属E）；编译在主线程同步执行，Worker是后续项。

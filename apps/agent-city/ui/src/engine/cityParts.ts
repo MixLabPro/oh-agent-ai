@@ -24,6 +24,7 @@ import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
 import { buildAirport, planAirport, roadSamples } from "./cityAirport";
 import { LANDMARK_BUILDERS } from "./render/landmarkBuilders";
+import { captureRenderedSolids, type RenderedSolidRoot, type RenderedSolidRole } from "./surface/renderedSolids";
 import type { LandmarkHost } from "./models/landmarkContext";
 import { buildGardens, buildCivics, buildFlags, buildPublicSites, updateCivics, writeCivic, type CivicSystemHost } from "./systems/civicSystem";
 import { applyDistrictLandmarkGrowth, buildDistrictLandmarks, buildLandmarks, type LandmarkSystemHost } from "./systems/landmarkSystem";
@@ -57,6 +58,7 @@ type StaticCity = {
   layout: CityLayout;
   /** The ground road compilation the rendered road mesh was built from (driving reads the same one). */
   groundRoadSurface: CompiledGroundRoadSurface;
+  drivingRoots: RenderedSolidRoot[];
   group: THREE.Group;
   disposables: Array<{ dispose: () => void }>;
   water: THREE.Mesh;
@@ -81,6 +83,13 @@ type StaticCity = {
 let staticCityCache: StaticCity | null = null;
 
 export class CityParts {
+  private drivingRoots: RenderedSolidRoot[] = [];
+  private drivingFreezeCount = 0;
+  private drivingFrozenSource: CitySurfaceSource | null = null;
+  private drivingDisposed = false;
+  private drivingDeferredCursor: [number, boolean, number] | null = null;
+  private drivingDeferredSnap: boolean | null = null;
+  private drivingDeferredReset = false;
   readonly group = new THREE.Group();
   readonly raycastTargets: THREE.Object3D[] = [];
   readonly water: THREE.Mesh;
@@ -194,11 +203,11 @@ export class CityParts {
         const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges), (x, z) => this.layout.terrain.height(x, z) < -0.6);
         if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null));
       }
-      this.buildCivics();
-      this.buildLandmarks();
+      this.registerDrivingRoots("civic", () => this.buildCivics());
+      this.registerDrivingRoots("landmark", () => this.buildLandmarks());
       this.buildTrussBridges();
-      this.buildDistrictLandmarks();
-      this.buildUrbanContext();
+      this.registerDrivingRoots("landmark", () => this.buildDistrictLandmarks());
+      this.registerDrivingRoots("context", () => this.buildUrbanContext());
       this.buildSeaMountains();
       this.buildBeachRibbon();
       const seaside = this.layout.seaside;
@@ -224,6 +233,7 @@ export class CityParts {
         seed: layout.seed,
         layout,
         groundRoadSurface: this.groundRoadSurface!,
+        drivingRoots: this.drivingRoots.slice(),
         group: this.group,
         disposables: staticBucket,
         water: this.water,
@@ -251,6 +261,7 @@ export class CityParts {
       (this.disposables as Array<{ dispose: () => void }>) = [];
     }
     this.group.add(staticCity.group);
+    this.drivingRoots = staticCity.drivingRoots.slice();
     this.staticSource = Object.freeze({ layout: staticCity.layout, ground: staticCity.groundRoadSurface });
     this.water = staticCity.water;
     this.treeMesh = staticCity.treeMesh;
@@ -398,12 +409,28 @@ export class CityParts {
     this.signStripeMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), 96);
 
     // ── 动态层：溢出楼群 / 信标 / 标签 / 选中环 / 建筑运行时 ────────────
-    this.buildMassing();
+    this.registerDrivingRoots("massing", () => this.buildMassing());
     this.buildAnomalyMarkers();
     this.hoverRing = this.makeGroundRing("#087f62");
     this.selectRing = this.makeGroundRing("#c96f4a");
-    this.buildRuntimes();
+    this.registerDrivingRoots("building", () => this.buildRuntimes());
     this.buildLabels();
+    for (const object of [...this.shaftMeshes, ...this.roofProfiles, this.podiumMesh, this.roofMesh,
+      this.decoTrimMesh, this.decoCornerMesh, this.cylinderMesh, this.antennaMesh, this.scaffoldMesh,
+      this.craneMastMesh, this.craneArmMesh, this.crownFinMesh, this.signPostMesh, this.signPanelMesh]) {
+      this.drivingRoots.push({ object, role: "building" });
+    }
+    // The hero light beam is a transparent lighting effect, not architectural geometry.
+    this.drivingRoots = this.drivingRoots.filter((root) => root.object !== this.heroParts?.beam);
+    for (const root of this.drivingRoots) root.object.traverse((object) => {
+      if (object instanceof THREE.Mesh && this.nightLights &&
+        [this.nightLights.neon, this.nightLights.pools, this.nightLights.strips].includes(object.material as THREE.MeshBasicMaterial)) object.userData.cityDrivingNonSolid = true;
+    });
+  }
+
+  private registerDrivingRoots(role: RenderedSolidRole, build: () => void): void {
+    const before = new Set(this.group.children); build();
+    for (const object of this.group.children) if (!before.has(object) && object.name !== "city-civic-glow") this.drivingRoots.push({ object, role });
   }
 
   private makeInstanced(geometry: THREE.BufferGeometry, material: THREE.Material, capacity: number): THREE.InstancedMesh {
@@ -512,6 +539,34 @@ export class CityParts {
   /** Layout + ground compilation the CURRENTLY drawn static city was built from (the static cache
    *  may reuse an earlier layout object): the driving surface must match what is on screen. */
   drivingSurfaceSource(): CitySurfaceSource | null { return this.staticSource; }
+
+  /** Explicit, reference-counted display freeze. Several readers may hold independent leases.
+   * Time changes queue until the last reader releases; rebuild/dispose still invalidate. */
+  acquireDrivingWorldSource(): { source: CitySurfaceSource; release: () => void } {
+    if (this.drivingDisposed || !this.staticSource) throw new Error("driving-world-unavailable");
+    this.drivingFreezeCount++;
+    try {
+      if (!this.drivingFrozenSource) {
+        const rendered = captureRenderedSolids(this.drivingRoots);
+        let valid = true;
+        this.drivingFrozenSource = Object.freeze({ ...this.staticSource, rendered: Object.freeze({
+          solids: rendered.solids, isCurrent: () => valid && (valid = !this.drivingDisposed && this.drivingFreezeCount > 0 && rendered.isCurrent()),
+        }) });
+      }
+    } catch (error) { this.drivingFreezeCount--; throw error; }
+    let active = true;
+    return { source: this.drivingFrozenSource, release: () => {
+      if (!active) return; active = false;
+      if (--this.drivingFreezeCount !== 0) return;
+      this.drivingFrozenSource = null;
+      if (this.drivingDisposed) return;
+      const cursor = this.drivingDeferredCursor, snap = this.drivingDeferredSnap, reset = this.drivingDeferredReset;
+      this.drivingDeferredCursor = null; this.drivingDeferredSnap = null; this.drivingDeferredReset = false;
+      if (cursor) this.applyCursor(...cursor);
+      if (snap !== null) this.snapToTargets(snap);
+      if (reset) this.resetAnimation();
+    } };
+  }
 
   /** 尽端回车圈（形态批 §5-3）：合法尽端（culDeSacEnds）的回车圆盘 + 路缘描边，
    *  纯渲染装饰、不改路网拓扑；见 systems/roadSystem.ts。 */
@@ -701,6 +756,7 @@ export class CityParts {
 
   /** pace>0 时按回放节奏夹住升起时长（见 builtFractionAt）；live 或未回放时传 0。 */
   applyCursor(cursor: number, live: boolean, paceMsPerSec = 0): void {
+    if (this.drivingFreezeCount) { this.drivingDeferredCursor = [cursor, live, paceMsPerSec]; return; }
     this.cursor = cursor;
     this.live = live;
     (this.layout.civics ?? []).forEach((civic, index) => { this.civicTarget[index] = live || cursor >= civic.unlockAt ? 1 : 0; });
@@ -729,6 +785,7 @@ export class CityParts {
    *  all=true：连还在「长入」的楼也立即对齐——回放起点 / 拖时间轴是时间跳变，城市应当直接是那一刻的样子，
    *  而不是先让整座城从当前高度慢慢缩下去（回放看起来就不是从第一栋楼开始）。 */
   snapToTargets(all = false): void {
+    if (this.drivingFreezeCount) { this.drivingDeferredSnap = all || this.drivingDeferredSnap === true; return; }
     this.contextProgress.set(this.contextTarget);
     this.writeContext();
     for (const runtime of this.runtimes) {
@@ -851,6 +908,7 @@ export class CityParts {
 
   /** 每帧增量更新。返回是否有矩阵写入（供引擎决定是否强制重绘）。 */
   update(dt: number, elapsed: number): boolean {
+    if (this.drivingFreezeCount) return false;
     this.waterUniforms.uTime.value = elapsed;
     if (this.flagTime) this.flagTime.value = elapsed;
     this.updateCivics(dt);
@@ -1014,6 +1072,7 @@ export class CityParts {
   /** 把所有随帧累加的动画状态放回起点，楼与配套直接落到目标进度（不再有生长插值）。
    *  胶片导出开拍前调用：同一份数据 + seed，任何时候导出都从同一个状态开始。 */
   resetAnimation(): void {
+    if (this.drivingFreezeCount) { this.drivingDeferredReset = true; return; }
     this.contextProgress.set(this.contextTarget);
     this.writeContext();
     for (const car of this.cars) car.distance = originOf(car, car.distance);
@@ -1045,6 +1104,7 @@ export class CityParts {
   }
 
   dispose(): void {
+    this.drivingDisposed = true;
     // 只拆动态层：静态城（地形/基建/车船云）留在模块级缓存，同一 seed 的下一次
     // 重建直接复用；换 seed 时由构造函数统一释放旧缓存。
     this.group.removeFromParent();

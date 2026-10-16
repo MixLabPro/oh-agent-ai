@@ -1,45 +1,193 @@
-/** Host-side capture of the driving surface for the CURRENT rendered city (spec §11.6 read-only
- * snapshot port). No THREE/DOM: CityEngine supplies the exact layout + ground compilation its
- * static geometry was built from, this compiles the aggregate once, publishes it into a
- * SurfaceStore (local SHA-256 content identity) and hands out revision-checked reads.
- *
- * 只给当前官方 City 实例的审计/驾驶模块用；不是插件 IPC，不出 MCP/导出，不落盘。
- * 编译是按需的（不在每次布局变化时花 CPU），在主线程同步执行（十五城 0.1–0.7 秒，Worker 是后续项）。
- * 布局一变 / 换种子 / 卸载就 invalidate：在途的 capture 返回 stale，旧 revision 读不到新几何。 */
+/** Host-local snapshots of the CURRENT rendered static city. No IPC, uploads or disk I/O.
+ * Surface geometry and structural obstacles are captured together. A handle is a lease on
+ * one host generation: even identical content after rebuild cannot revive an old handle. */
 import type { CityLayout } from "../cityLayout";
 import { compileCitySurface, type CitySurfaceCompilation } from "./compileSurface";
 import type { CompiledGroundRoadSurface } from "./groundRoadCompiler";
 import { SurfaceStore, type SurfaceHasher } from "./SurfaceStore";
+import { sha256SurfaceBytes } from "./surfaceDigest";
 import type { CompiledCitySurface } from "./types";
+import { checkStructureGeometry, type StructureCheckOptions, type StructureCheckReport } from "./structureChecks";
+import { buildSurfaceIndex, type SurfaceIndexBuild, type SurfacePointQuery, type SurfaceQueryResult } from "./SurfaceIndex";
+import { checkLandingSeams, type LandingSeamOptions, type LandingSeamReport } from "./landingSeams";
+import { assertRenderedSolidBudget, copyRenderedSolids, type RenderedSolid, type RenderedSolidSource } from "./renderedSolidTypes";
 
-export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface }>;
-export type CitySurfaceCapture =
-  | Readonly<{ status: "ready"; revision: string; compilation: CitySurfaceCompilation;
-      /** Defensive copy, or null once the city changed since this capture. */
-      read: () => CompiledCitySurface | null }>
-  | Readonly<{ status: "stale" | "cancelled" | "unavailable" }>;
+export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface; rendered?: RenderedSolidSource }>;
+type StructureMetadata = Pick<CitySurfaceCompilation, "obstacles" | "landings" | "counts">;
+export type CityDrivingSnapshot = StructureMetadata & Readonly<{
+  revision: string;
+  surface: CompiledCitySurface;
+  /** Coverage is explicit: this identity must not be used as the complete AuditKey base hash
+   * until building/landmark obstacles and the frozen legal graph are included. */
+  obstacleCoverage: "structures-only" | "structures-and-rendered-buildings";
+  /** Exact visible geometry of the registered building/landmark/civic/context layer.
+   * Does not include all street furniture, vegetation, traffic or the legal graph. */
+  renderedSolids: readonly RenderedSolid[];
+}>;
+export type ReadyCitySurfaceCapture = Readonly<{
+  status: "ready";
+  revision: string;
+  worldRevision: string;
+  isCurrent: () => boolean;
+  /** Defensive copies; both reads fail once the host generation changes. */
+  read: () => CompiledCitySurface | null;
+  readWorld: () => CityDrivingSnapshot | null;
+  checkStructures: (options: StructureCheckOptions) => StructureCheckReport | null;
+  checkLandings: (options: LandingSeamOptions) => LandingSeamReport | null;
+  querySurface: (request: SurfacePointQuery) => CitySurfaceQuery;
+}>;
+export type CitySurfaceQuery =
+  | Readonly<{ status: "current"; worldRevision: string; result: SurfaceQueryResult }>
+  | Readonly<{ status: "unresolved"; worldRevision: string; reason: Extract<SurfaceIndexBuild, { status: "unresolved" }>["reason"] }>
+  | Readonly<{ status: "stale" }>;
+export type CitySurfaceCapture = ReadyCitySurfaceCapture | Readonly<{ status: "stale" | "cancelled" | "unavailable" }>;
+
+function copyMetadata(input: StructureMetadata): StructureMetadata {
+  return Object.freeze({
+    obstacles: Object.freeze(input.obstacles.map((obstacle) => obstacle.shape === "box"
+      ? Object.freeze({ ...obstacle, corners: Object.freeze(obstacle.corners.map((p) => Object.freeze({ ...p }))) })
+      : Object.freeze({ ...obstacle, ring: Object.freeze(obstacle.ring.map((p) => Object.freeze({ ...p }))) }))),
+    landings: Object.freeze(input.landings.map((landing) => Object.freeze({ ...landing,
+      seam: Object.freeze({ a: Object.freeze({ ...landing.seam.a }), b: Object.freeze({ ...landing.seam.b }) }) }))),
+    counts: Object.freeze({ ...input.counts }),
+  });
+}
+
+/** Canonical structural payload; the surface revision already covers meshes and topology.
+ * Sorting removes incidental caller order; malformed identities/numbers fail before hashing. */
+export function canonicalCityWorldBytes(surfaceRevision: string, metadata: StructureMetadata, renderedSolids?: readonly RenderedSolid[]): Uint8Array {
+  if (!surfaceRevision) throw new Error("invalid-world-surface-revision");
+  const ids = new Set<string>();
+  const obstacles = [...metadata.obstacles].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map((o) => {
+    if (!o.id || ids.has(o.id)) throw new Error("invalid-world-obstacle-id");
+    ids.add(o.id);
+    const points = o.shape === "box" ? o.corners : o.ring;
+    if ((o.shape === "box" && points.length !== 8) || points.length < 3 ||
+      points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.z) || ("y" in p && !Number.isFinite(p.y)))) throw new Error("invalid-world-obstacle");
+    if (o.shape === "prism" && (!Number.isFinite(o.yMin) || !Number.isFinite(o.yMax) || o.yMin > o.yMax)) throw new Error("invalid-world-obstacle");
+    return o.shape === "box" ? [o.id, o.role, o.shape, o.surfacePatchId ?? null, o.corners.map((p) => [p.x, p.y, p.z])]
+      : [o.id, o.role, o.shape, o.ring.map((p) => [p.x, p.z]), o.yMin, o.yMax];
+  });
+  const landingIds = new Set<string>();
+  const landings = [...metadata.landings].sort((a, b) => a.structureId < b.structureId ? -1 : a.structureId > b.structureId ? 1 : a.end < b.end ? -1 : a.end > b.end ? 1 : 0).map((l) => {
+    const id = JSON.stringify([l.structureId, l.end]);
+    if (!l.structureId || !l.layerId || !l.patchId || !l.seam || ![l.seam.a.x,l.seam.a.y,l.seam.a.z,l.seam.b.x,l.seam.b.y,l.seam.b.z].every(Number.isFinite) || landingIds.has(id) || ![l.x, l.z, l.outX, l.outZ, l.deckY].every(Number.isFinite) ||
+      (l.groundY !== null && !Number.isFinite(l.groundY)) || (l.step !== null && !Number.isFinite(l.step))) throw new Error("invalid-world-landing");
+    landingIds.add(id);
+    return [l.structureId, l.end, l.layerId, l.patchId, [l.seam.a.x,l.seam.a.y,l.seam.a.z], [l.seam.b.x,l.seam.b.y,l.seam.b.z], l.x, l.z, l.outX, l.outZ, l.deckY, l.groundY, l.step, l.status];
+  });
+  const counts = [metadata.counts.bridges, metadata.counts.expresswaySegments, metadata.counts.flares, metadata.counts.islands, metadata.counts.culDeSacs];
+  if (!counts.every((n) => Number.isSafeInteger(n) && n >= 0)) throw new Error("invalid-world-counts");
+  const renderedIds = new Set<string>();
+  assertRenderedSolidBudget(renderedSolids ?? []);
+  let renderedBytes = 0;
+  const rendered = [...(renderedSolids ?? [])].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map((s) => {
+    if (!s.id || s.id.length > 512 || renderedIds.has(s.id) || !["building", "landmark", "civic", "context", "massing"].includes(s.role) ||
+      s.positions.length % 3 || s.indices.length % 3 || s.transforms.length % 16 ||
+      !s.positions.every(Number.isFinite) || !s.transforms.every(Number.isFinite) ||
+      !s.indices.every((i) => Number.isSafeInteger(i) && i >= 0 && i < s.positions.length / 3)) throw new Error("invalid-world-rendered-solid");
+    for (let at = 0; at < s.transforms.length; at += 16) if (s.transforms[at+3] !== 0 || s.transforms[at+7] !== 0 || s.transforms[at+11] !== 0 || s.transforms[at+15] !== 1) throw new Error("invalid-world-rendered-solid-transform");
+    renderedIds.add(s.id);
+    renderedBytes += s.positions.byteLength + s.indices.byteLength + s.transforms.byteLength;
+    return s;
+  });
+  const header = new TextEncoder().encode(JSON.stringify(["city-driving-world", 1, renderedSolids ? "structures-and-rendered-buildings" : "structures-only", surfaceRevision, obstacles, landings, counts,
+    ...(renderedSolids ? [rendered.map((s) => [s.id, s.role, s.positions.length, s.indices.length, s.transforms.length])] : [])]));
+  if (!renderedSolids) return header;
+  // Binary payload avoids JSON expansion of millions of numeric values. A length-prefixed
+  // UTF-8 header plus explicitly little-endian arrays is deterministic on every host.
+  const bytes = new Uint8Array(4 + header.length + renderedBytes), view = new DataView(bytes.buffer);
+  view.setUint32(0, header.length, true); bytes.set(header, 4); let at = 4 + header.length;
+  for (const s of rendered) {
+    for (const n of s.positions) { view.setFloat32(at, n, true); at += 4; }
+    for (const n of s.indices) { view.setUint32(at, n, true); at += 4; }
+    for (const n of s.transforms) { view.setFloat64(at, n, true); at += 8; }
+  }
+  return bytes;
+}
 
 export class CitySurfacePort {
   private readonly store: SurfaceStore;
   private generation = 0;
-  private cached: { source: CitySurfaceSource; capture: Extract<CitySurfaceCapture, { status: "ready" }> } | null = null;
-  constructor(hash?: SurfaceHasher) { this.store = new SurfaceStore(hash); }
+  private source: CitySurfaceSource | null = null;
+  private cached: ReadyCitySurfaceCapture | null = null;
+  private pending: { generation: number; promise: Promise<CitySurfaceCapture> } | null = null;
+  private releaseIndex: (() => void) | null = null;
+  constructor(private readonly hash: SurfaceHasher = sha256SurfaceBytes) { this.store = new SurfaceStore(hash); }
 
-  /** The rendered city changed (layout, seed, teardown): every earlier capture becomes unreadable. */
-  invalidate(): void { this.generation++; this.cached = null; this.store.clear(); }
+  invalidate(): void {
+    this.generation++; this.source = null; this.cached = null; this.pending = null;
+    this.releaseIndex?.(); this.releaseIndex = null; this.store.clear();
+  }
+
+  /** Release the final display freeze without allowing an old lease to evict a newer world. */
+  releaseFrozenSource(source: CitySurfaceSource): void {
+    if (source.rendered && this.source?.layout === source.layout && this.source.ground === source.ground &&
+      this.source.rendered === source.rendered && !source.rendered.isCurrent()) this.invalidate();
+  }
 
   async capture(source: CitySurfaceSource | null, signal?: AbortSignal): Promise<CitySurfaceCapture> {
-    if (!source) return Object.freeze({ status: "unavailable" });
+    if (!source) { this.invalidate(); return Object.freeze({ status: signal?.aborted ? "cancelled" : "unavailable" }); }
+    if (this.source?.layout !== source.layout || this.source?.ground !== source.ground || this.source?.rendered !== source.rendered) {
+      this.invalidate(); this.source = Object.freeze({ layout: source.layout, ground: source.ground, rendered: source.rendered });
+    }
     if (signal?.aborted) return Object.freeze({ status: "cancelled" });
-    if (this.cached && this.cached.source.layout === source.layout && this.cached.source.ground === source.ground && this.store.read(this.cached.capture.revision)) return this.cached.capture;
-    const generation = this.generation;
+    if (this.cached?.isCurrent()) return this.cached;
+    if (!this.pending) {
+      const generation = this.generation;
+      const promise = this.prepare(source, generation);
+      this.pending = { generation, promise };
+      // Both success and failure release only THIS pending generation.
+      const clear = () => { if (this.pending?.promise === promise) this.pending = null; };
+      void promise.then(clear, clear);
+    }
+    const result = await this.pending.promise;
+    return signal?.aborted ? Object.freeze({ status: "cancelled" }) : result;
+  }
+
+  private async prepare(source: CitySurfaceSource, generation: number): Promise<CitySurfaceCapture> {
     const compilation = compileCitySurface(source.layout, { ground: source.ground });
+    // Hash/read payloads are owned; no compiler/source references escape through the handle.
+    const metadata = copyMetadata(compilation);
+    const renderedSolids = copyRenderedSolids(source.rendered?.solids ?? []);
+    const sourceCurrent = () => !source.rendered || source.rendered.isCurrent();
     const publication = await this.store.publish(compilation.surface);
-    if (signal?.aborted) return Object.freeze({ status: "cancelled" });
-    if (generation !== this.generation || publication.status !== "published") return Object.freeze({ status: "stale" });
+    if (generation !== this.generation || publication.status !== "published" || !sourceCurrent()) return Object.freeze({ status: "stale" });
     const revision = publication.revision;
-    const capture = Object.freeze({ status: "ready" as const, revision, compilation, read: () => (generation === this.generation ? this.store.read(revision) : null) });
-    this.cached = { source, capture };
+    const digest = await this.hash(canonicalCityWorldBytes(revision, metadata, source.rendered ? renderedSolids : undefined));
+    if (generation !== this.generation || this.store.revision !== revision || !sourceCurrent()) return Object.freeze({ status: "stale" });
+    if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("invalid-world-digest");
+    const worldRevision = `city-world-v1:sha256:${digest}`;
+    const isCurrent = () => generation === this.generation && this.store.revision === revision && sourceCurrent();
+    const read = () => isCurrent() ? this.store.read(revision) : null;
+    const readWorld = (): CityDrivingSnapshot | null => {
+      const surface = read();
+      return surface ? Object.freeze({ ...copyMetadata(metadata), surface, revision: worldRevision,
+        obstacleCoverage: source.rendered ? "structures-and-rendered-buildings" : "structures-only", renderedSolids: copyRenderedSolids(renderedSolids) }) : null;
+    };
+    const checkStructures = (options: StructureCheckOptions): StructureCheckReport | null => {
+      const snapshot = readWorld();
+      return snapshot ? checkStructureGeometry(snapshot, options) : null;
+    };
+    const checkLandings = (options: LandingSeamOptions): LandingSeamReport | null => {
+      const snapshot = readWorld();
+      return snapshot ? checkLandingSeams(snapshot, options) : null;
+    };
+    let index: SurfaceIndexBuild | null = null;
+    this.releaseIndex = () => { index = null; };
+    const querySurface = (request: SurfacePointQuery): CitySurfaceQuery => {
+      if (!isCurrent()) return Object.freeze({ status: "stale" });
+      if (!index) {
+        const snapshot = read();
+        if (!snapshot) return Object.freeze({ status: "stale" });
+        index = buildSurfaceIndex(snapshot);
+      }
+      return index.status === "ready"
+        ? Object.freeze({ status: "current", worldRevision, result: index.query(request) })
+        : Object.freeze({ status: "unresolved", worldRevision, reason: index.reason });
+    };
+    const capture: ReadyCitySurfaceCapture = Object.freeze({ status: "ready", revision, worldRevision, isCurrent, read, readWorld, checkStructures, checkLandings, querySurface });
+    this.cached = capture;
     return capture;
   }
 }

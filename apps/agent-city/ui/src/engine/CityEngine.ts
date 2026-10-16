@@ -40,7 +40,7 @@ import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 import { buildingFrame, isSelectionGesture } from "./cityCameraInteraction";
 import type { ReturnCameraView } from "../game/types";
-import { CitySurfacePort, type CitySurfaceCapture } from "./surface/citySurfacePort";
+import { CitySurfacePort, type CitySurfaceCapture, type ReadyCitySurfaceCapture } from "./surface/citySurfacePort";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -48,6 +48,9 @@ const CINEMATIC_HOUR_TO = 19.6;
 
 export type EngineQualityMode = "auto" | "high" | "eco";
 export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean; geometries: number; textures: number };
+export type CityDrivingWorldCapture = Exclude<CitySurfaceCapture, ReadyCitySurfaceCapture> | (ReadyCitySurfaceCapture & Readonly<{
+  release: () => void; setFrameHook: (hook: ((dt: number) => void) | null) => void;
+}>);
 export type PhotoView = { position: number[]; target: number[]; fov: number; elapsed: number; cursorMs: number | null };
 /** 相机所有权（游戏模式 §4）：同一帧只允许一个所有者推进相机。 */
 export type CameraOwner = "orbit" | "cinematic" | "game";
@@ -100,6 +103,8 @@ export class CityEngine {
   private layout: CityLayout | null = null;
   /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
   private readonly surfacePort = new CitySurfacePort();
+  private readonly drivingWorldPort = new CitySurfacePort();
+  private drivingWorldFrame: { token: symbol; run: (dt: number) => void } | null = null;
   /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
   private baseLayout: CityLayout | null = null;
   private repairHook: RepairHook | null = null;
@@ -574,6 +579,7 @@ export class CityEngine {
   /** 相机所有权切换（§4）。game 接管要求航拍未在进行（互斥由调用方先拒，这里兜底返回 false）；
    *  orbit 归还时恢复 controls；cinematic 所有权由 startCinematic/stopCinematic 自管。 */
   setCameraOwner(owner: CameraOwner): boolean {
+    if (owner === "game" && this.drivingWorldFrame) return false;
     if (owner === this.cameraOwner) return true;
     if (owner === "game") {
       if (this.cinematic) return false;
@@ -592,6 +598,7 @@ export class CityEngine {
 
   /** 游戏每帧回调：owner === "game" 时在 updateScene 中调用（dt 秒），不启动第二个绘制循环。 */
   setGameFrameHook(fn: ((dt: number) => void) | null): void {
+    if (fn && this.drivingWorldFrame) throw new Error("driving-frame-already-owned");
     this.gameFrame = fn;
   }
 
@@ -642,6 +649,7 @@ export class CityEngine {
     const first = this.seed === null;
     this.seed = seed;
     this.surfacePort.invalidate();
+    this.drivingWorldPort.invalidate();
     this.layout = null;
     this.baseLayout = null;
     this.planResult = null;
@@ -658,6 +666,7 @@ export class CityEngine {
     // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
     const previousDisplays = this.parts ? this.parts.displaySnapshot() : null;
     this.surfacePort.invalidate();
+    this.drivingWorldPort.invalidate();
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
@@ -1370,7 +1379,7 @@ export class CityEngine {
   /** 开拍：镜头接管相机与时间游标；用户点/拖画布即中止。
    *  游戏持有相机期间拒绝开拍（§5 互斥；正常入口在进入游戏前已被禁用，此处兜底）。 */
   startCinematic(cut: CinematicCut = "full"): CinematicPlan | null {
-    if (this.cameraOwner === "game") return null;
+    if (this.cameraOwner === "game" || this.drivingWorldFrame) return null;
     if (!this.layout || !this.model || !this.parts) return null;
     this.releaseOrbitLock();
     const plan = planCinematic(this.layout, this.model, this.parts.anchors(), { cut });
@@ -1769,6 +1778,8 @@ export class CityEngine {
   }
 
   private updateScene(dt: number): void {
+    // A frozen driving consumer uses the existing host frame, never a second rAF.
+    this.drivingWorldFrame?.run(dt);
     this.updateDaylight();
     this.aurora?.update(dt);
     this.ambient?.update(dt, this.elapsed);
@@ -1885,15 +1896,55 @@ export class CityEngine {
     this.lowFpsWindows = this.highFpsWindows = 0;
   }
 
-  /** Capture the drivable surface of the city as currently drawn (lazy compile + local SHA-256
-   *  revision). Stale once the layout/seed changes; the caller must re-capture, never reuse. */
+  /** Capture current rendered roads + structural solids, with lazy revision-bound queries.
+   *  Model/patch/seed rebuild and teardown invalidate old handles, including cached indices.
+   *  Building/landmark solids are not yet in this structural snapshot (coverage is explicit). */
   captureDrivingSurface(signal?: AbortSignal): Promise<CitySurfaceCapture> {
     return this.surfacePort.capture(this.parts?.drivingSurfaceSource() ?? null, signal);
+  }
+
+  /** Explicit display-freeze lease. The caller MUST release it, including on refused entry.
+   * Captures actual building/landmark meshes at current displayed height, not final model height.
+   * Independent readers share the freeze; releasing one cannot unfreeze another reader. */
+  async captureDrivingWorld(signal?: AbortSignal): Promise<CityDrivingWorldCapture> {
+    const parts = this.parts;
+    if (!parts || this.disposed) return Object.freeze({ status: "unavailable" });
+    if (signal?.aborted) return Object.freeze({ status: "cancelled" });
+    let lease: ReturnType<CityParts["acquireDrivingWorldSource"]>;
+    try { lease = parts.acquireDrivingWorldSource(); }
+    catch { return Object.freeze({ status: "unavailable" }); }
+    let active = true; const token = Symbol("driving-world-frame");
+    const release = () => {
+      if (!active) return; active = false;
+      if (this.drivingWorldFrame?.token === token) this.drivingWorldFrame = null;
+      lease.release();
+      this.drivingWorldPort.releaseFrozenSource(lease.source);
+    };
+    try {
+      const capture = await this.drivingWorldPort.capture(lease.source, signal);
+      if (capture.status !== "ready") { release(); return capture; }
+      const current = () => active && this.parts === parts && capture.isCurrent();
+      const setFrameHook = (hook: ((dt: number) => void) | null) => {
+        if (!hook) { if (this.drivingWorldFrame?.token === token) this.drivingWorldFrame = null; return; }
+        if (!current()) throw new Error("stale-driving-world");
+        if (this.cinematic || this.gameFrame || this.cameraOwner !== "orbit" || (this.drivingWorldFrame && this.drivingWorldFrame.token !== token)) throw new Error("driving-frame-already-owned");
+        this.drivingWorldFrame = { token, run: (dt) => { if (!current()) { this.drivingWorldFrame = null; hook(dt); return; } hook(dt); } };
+      };
+      return Object.freeze({ ...capture, isCurrent: current, release, setFrameHook,
+        read: () => current() ? capture.read() : null,
+        readWorld: () => current() ? capture.readWorld() : null,
+        querySurface: (request: Parameters<ReadyCitySurfaceCapture["querySurface"]>[0]) => current() ? capture.querySurface(request) : Object.freeze({ status: "stale" as const }),
+        checkStructures: (options: Parameters<ReadyCitySurfaceCapture["checkStructures"]>[0]) => current() ? capture.checkStructures(options) : null,
+        checkLandings: (options: Parameters<ReadyCitySurfaceCapture["checkLandings"]>[0]) => current() ? capture.checkLandings(options) : null,
+      });
+    } catch { release(); return Object.freeze({ status: "unavailable" }); }
   }
 
   dispose(): void {
     this.disposed = true;
     this.surfacePort.invalidate();
+    this.drivingWorldPort.invalidate();
+    this.drivingWorldFrame = null;
     this.stopLoop();
     this.gameFrame = null;
     this.cameraOwner = "orbit";
