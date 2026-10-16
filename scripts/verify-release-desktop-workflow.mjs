@@ -6,6 +6,9 @@ import path from "node:path";
 const repo = path.resolve(import.meta.dirname, "..");
 const workflow = readFileSync(path.join(repo, ".github/workflows/release-desktop.yml"), "utf8");
 const checks = [
+  ["native platform package workflow", "uses: ./.github/workflows/desktop-platforms.yml"],
+  ["all platforms gate publication", "needs: [build, platform_packages]"],
+  ["platform installer download", "pattern: desktop-*-x86_64"],
   ["tag trigger", 'tags: ["app-v*"]'],
   ["manual release tag input", "release_tag:"],
   ["Intel runner matrix", "runner: macos-13"],
@@ -22,7 +25,7 @@ const checks = [
   ["publish artifact path", "find dist -type d -path \"*-${arch}/agent-vitals.app\""],
   ["strict signature check", "--require-developer-id"],
   ["notarization validation", "xcrun stapler validate"],
-  ["artifact checksums", "shasum -a 256 *.zip *.dmg > SHA256SUMS"],
+  ["artifact checksums", "shasum -a 256 *.zip *.dmg *.exe *.deb *.AppImage > SHA256SUMS"],
   ["existing tag only", "gh release create \"$RELEASE_TAG\" --verify-tag"],
   ["publish ref matches tag", "ref: ${{ inputs.release_tag || github.ref }}"],
   ["pinned Node runtime", "node-version: 20"],

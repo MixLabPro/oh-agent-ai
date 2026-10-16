@@ -197,7 +197,10 @@ jobs:
         with:
           node-version: "20"
       - name: 检查桌面发布 workflow 门禁
-        run: node scripts/verify-release-desktop-workflow.mjs
+        run: |
+          node scripts/verify-release-desktop-workflow.mjs
+          node scripts/verify-desktop-platforms.mjs
+          node scripts/test-run-npm.mjs
 
   city_guards:
     name: City 专项守卫

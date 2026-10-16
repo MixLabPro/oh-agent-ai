@@ -280,7 +280,15 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
     let bounds_only = bounds_only.unwrap_or(false);
     if bounds_only && (restart || instance_id.is_none()) { return Err("plugin_instance_mismatch".into()); }
     let definition = definitions().iter().find(|plugin| plugin.id == plugin_id).ok_or("plugin_unknown")?;
-    let locale = if locale.as_deref() == Some("en") { "en" } else { "zh-Hans" };
+    // Unspecified locale follows the system language; unsupported systems fall back to English.
+    let locale = match locale.as_deref() {
+        Some("zh-Hans") => "zh-Hans",
+        Some("en") => "en",
+        _ => match crate::system_ui_language() {
+            crate::NativeUiLanguage::Chinese => "zh-Hans",
+            crate::NativeUiLanguage::English => "en",
+        },
+    };
     let _operation = state.1.lock().unwrap();
     start_watchdog(&app, &state);
     if !app.asset_resolver().iter().any(|(key, _)| key.trim_start_matches('/') == definition.entry) {

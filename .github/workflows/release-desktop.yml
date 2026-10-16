@@ -1,4 +1,4 @@
-name: Release macOS desktop app
+name: Release desktop apps
 
 on:
   push:
@@ -18,6 +18,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  platform_packages:
+    uses: ./.github/workflows/desktop-platforms.yml
+    with:
+      ref: ${{ inputs.release_tag || github.ref }}
+
   build:
     name: build and notarize macOS app
     strategy:
@@ -150,8 +155,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: publish macOS app release
-    needs: build
+    name: publish desktop release
+    needs: [build, platform_packages]
     runs-on: macos-latest
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
@@ -165,6 +170,12 @@ jobs:
           pattern: agent-vitals-macos-${{ inputs.release_tag || github.ref_name }}-*
           path: dist
           merge-multiple: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*-x86_64
+          path: platform-dist
+          merge-multiple: true
 
       - name: Re-verify downloaded app
         shell: bash
@@ -203,6 +214,11 @@ jobs:
               "release/agent-vitals-${RELEASE_TAG}-${arch}.app.zip"
             cp "$dmg" "release/agent-vitals-${RELEASE_TAG}-${arch}.dmg"
           done
-          (cd release && shasum -a 256 *.zip *.dmg > SHA256SUMS)
+          for extension in exe deb AppImage; do
+            file="$(find platform-dist -type f -name "*.$extension" -print -quit)"
+            [ -n "$file" ] || { echo "missing $extension installer" >&2; exit 1; }
+            cp "$file" release/
+          done
+          (cd release && shasum -a 256 *.zip *.dmg *.exe *.deb *.AppImage > SHA256SUMS)
           gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
           gh release upload "$RELEASE_TAG" release/*

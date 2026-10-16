@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runNpm } from "./run-npm.mjs";
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -10,7 +11,7 @@ const authoritySource = readFileSync(path.join(repo, "crates/agent-vitals-data/s
 const expectedSchema = authoritySource.match(/pub const SCHEMA_VERSION: i64 = (\d+);/)?.[1];
 if (!expectedSchema) throw new Error("Cannot read authority schema version from source");
 
-execFileSync("npm", ["--prefix", "apps/desktop/ui-dev", "run", "build:react"], {
+runNpm(["--prefix", "apps/desktop/ui-dev", "run", "build:react"], {
   cwd: repo,
   stdio: "inherit",
 });
