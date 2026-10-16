@@ -90,7 +90,7 @@ for (const [name, layout] of groundSurfaceFixtures()) {
   const compiled = compileGroundRoadSurface(layout);
   // Flat fixtures must still equal the pre-refactor renderer byte for byte; the two that the
   // terrain-conforming fix deliberately changed are pinned in baseline.corrected with the reason.
-  const expected = baseline.corrected.fixtures[name] ?? baseline.fixtures[name];
+  const expected = baseline.terrainResolution?.fixtures?.[name] ?? baseline.corrected.fixtures[name] ?? baseline.fixtures[name];
   assert.equal(groundGeometryDigest(compiled.layers), expected, `${name}: render geometry changed (${name in baseline.corrected.fixtures ? "corrected" : "pre-refactor"} baseline)`);
   fitAndTopology(name, compiled, layout);
   inspect(compiled);
@@ -108,7 +108,7 @@ if (process.argv.includes("--cities")) {
   for (const seed of [1, 7, 42, 2026, 65537]) for (const tier of [1, 2, 3]) {
     const plan = cachedPlan(createCityPlan, seed, tier);
     const compiled = compileGroundRoadSurface(plan);
-    assert.equal(groundGeometryDigest(compiled.layers), baseline.corrected.generatedPlans[`${seed}/${tier}`], `seed ${seed}, tier ${tier}: corrected buffer baseline`);
+    assert.equal(groundGeometryDigest(compiled.layers), baseline.terrainResolution?.generatedPlans[`${seed}/${tier}`] ?? baseline.corrected.generatedPlans[`${seed}/${tier}`], `seed ${seed}, tier ${tier}: versioned terrain/road buffer baseline`);
     inspect(compiled);
     const fit = fitAndTopology(`seed ${seed} tier ${tier}`, compiled, plan, 2);
     assert.equal(fit.sidewalkUnresolved, 0, `seed ${seed} tier ${tier}: ${fit.sidewalkUnresolved} sidewalk pieces without manifold boundary`);

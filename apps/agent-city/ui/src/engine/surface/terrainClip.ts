@@ -1,7 +1,7 @@
 /** Exact conforming split of road polygons against the rendered terrain triangulation.
  * Pure CPU: no THREE, host or layout runtime.
  *
- * 渲染地形是 extent/192 网格上的分段线性面（每格对角线连 (ix, iz+1)–(ix+1, iz)，即 gx+gz=整数）。
+ * 渲染地形是 extent/TERRAIN_SEGMENTS 网格上的分段线性面（每格对角线连 (ix, iz+1)–(ix+1, iz)，即 gx+gz=整数）。
  * 路面若要处处贴地，三角形就必须落在单个地形三角形里——按容差逐级加密在陡坡上会把顶点堆到 25 万
  * 仍贴不住（2026-10 实测），所以不贴地的路面四边形/扇区直接按地形三角形裁成凸片：偏差为 0，
  * 顶点数与跨过的地形三角形数成正比。

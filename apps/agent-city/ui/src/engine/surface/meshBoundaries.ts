@@ -65,10 +65,20 @@ export function extractMeshBoundaries(positions: Float32Array, indices: Uint32Ar
   const segments = rings.flatMap((ring, loop) => ring.map((a, k) => ({ a, b: ring[(k + 1) % ring.length], loop, k, length: ring.length })));
   const cross = (a: typeof points[number], b: typeof points[number], c: typeof points[number]) => (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
   const on = (a: typeof points[number], b: typeof points[number], c: typeof points[number]) => cross(a, b, c) === 0 && c.x >= Math.min(a.x, b.x) && c.x <= Math.max(a.x, b.x) && c.z >= Math.min(a.z, b.z) && c.z <= Math.max(a.z, b.z);
+  // Sweep the longest projected axis. Counting every pair before even checking
+  // its bounds exhausted the budget on long, perfectly manifold coastal strips.
+  // Retain the same candidate budget: every active-axis pair spends one test,
+  // including adjacent edges and pairs later rejected on the other axis.
+  let minX=Infinity,maxX=-Infinity,minZ=Infinity,maxZ=-Infinity;
+  for(const s of segments){const p=points[s.a];minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minZ=Math.min(minZ,p.z);maxZ=Math.max(maxZ,p.z);}
+  const axis: "x"|"z"=maxX-minX>=maxZ-minZ?"x":"z";
+  const ordered=segments.map(s=>({...s,min:Math.min(points[s.a][axis],points[s.b][axis]),max:Math.max(points[s.a][axis],points[s.b][axis])}))
+    .sort((s,t)=>s.min-t.min||s.max-t.max||s.loop-t.loop||s.k-t.k);
   let tests = 0;
-  for (let i = 0; i < segments.length; i++) for (let j = i + 1; j < segments.length; j++) {
+  for (let i = 0; i < ordered.length; i++) for (let j = i + 1; j < ordered.length; j++) {
+    if(ordered[j].min>ordered[i].max)break;
     if (++tests > budget.maxIntersectionTests) return unresolved("budget");
-    const s = segments[i]; const t = segments[j];
+    const s = ordered[i]; const t = ordered[j];
     if (s.loop === t.loop && (Math.abs(s.k - t.k) === 1 || Math.abs(s.k - t.k) === s.length - 1)) continue;
     const a = points[s.a]; const b = points[s.b]; const c = points[t.a]; const d = points[t.b];
     if (Math.max(a.x, b.x) < Math.min(c.x, d.x) || Math.max(c.x, d.x) < Math.min(a.x, b.x) || Math.max(a.z, b.z) < Math.min(c.z, d.z) || Math.max(c.z, d.z) < Math.min(a.z, b.z)) continue;

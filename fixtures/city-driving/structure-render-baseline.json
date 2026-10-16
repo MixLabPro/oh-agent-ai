@@ -405,5 +405,69 @@
         "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       }
     }
+  },
+  "terrainResolution": {
+    "geometryVersion": 8,
+    "segments": 384,
+    "reason": "Actual terrain resolution increases from 192 to 384 segments; original analytic height field and road topology unchanged. Road compiler and terrain-dependent structures use the same refined rendered triangulation. Historical baselines retained; flat fixture hashes, curbs and cul-de-sac geometry unchanged.",
+    "plans": {
+      "1/1": {
+        "buildInfrastructure": "247bda97489e42e00133df6013f8e2a53d29e02bb6a2920b89d21fbf8ea21b0f",
+        "buildTrussBridges": "1ddde4d1b425bd16fc11b77ea3a1252e5b5ccaac7462ba8d198d93fe8b6c263a"
+      },
+      "1/2": {
+        "buildInfrastructure": "bd11d090dd5682526a79edc00226937f4349a28de5ff3b74d7338a2f2b4c3d59",
+        "buildTrussBridges": "cbbf2663cc5202abe97c1e0e332d52abc896972d05223b3050d1dd39d0dcbf59"
+      },
+      "1/3": {
+        "buildInfrastructure": "0893f2059f2b5305e2bbeddebb0e1dcabdcdd0af82ac0d9646249ee96b74e82b",
+        "buildTrussBridges": "ab82e63f24c036a81a3fb178189bf7baf5eb4b8bc87d63d222371b5563c5228b"
+      },
+      "7/1": {
+        "buildInfrastructure": "960501a162983af23923ef98ec6fffe82dffc04e7405840856ff5150b601454e",
+        "buildTrussBridges": "170181698bf7894a62f9ecaa4ecb37387de0a57d767959dd3fdacb9b9011e82a"
+      },
+      "7/2": {
+        "buildInfrastructure": "575eeba6a22ee2d58ffc5f966d4c6adb0fb159227e959c46d4f28fb821752432",
+        "buildTrussBridges": "131712407c33731e468aaea18a31f1ca3a0645e24200fb651271fa03eea605d3"
+      },
+      "7/3": {
+        "buildInfrastructure": "05d8909a1f14b05edd3fb74405c9e1e1d32c96dcf3bc04f7e5d96f13644fca1a",
+        "buildTrussBridges": "72dc9b29268c53226302330579db9695b0e6447f39e48c536bd852c8f1f17e50"
+      },
+      "42/1": {
+        "buildInfrastructure": "b3760f77ce96e623aceb61bd601dcf9e9decabe84b599a753fff846de8783660",
+        "buildTrussBridges": "c8b51089e5f697cfcf8578f128f54cd45aacb5315214a9047ae4bcb9c484705b"
+      },
+      "42/2": {
+        "buildInfrastructure": "aa2cdcb02feda82b07cbb097f607f7aa2deb62387a6a49a557b69b76be1e9d38",
+        "buildTrussBridges": "4f5f817104dfb5d9a82403e5635ca39da63b9c12512bebd2b00f79875476142f"
+      },
+      "42/3": {
+        "buildInfrastructure": "22ef59a5b2af7e8c8a8f39c02b7ff1ebf40bf2e48d1f2dc21d7357d42363bcb9",
+        "buildTrussBridges": "51ead24d4cce1549081f8918f7bcf6ff3eddac9ccbe4ebed9472397bf5c01401"
+      },
+      "2026/1": {
+        "buildInfrastructure": "103352b3d4ec63915065ba66f7adf2da20f0966bf4320e3006623ee12f4f828a",
+        "buildTrussBridges": "61278887514e0e037d2fbc18f46abcc4f81fba54059914cc4f055dd357cce431"
+      },
+      "2026/2": {
+        "buildInfrastructure": "4e623a2d9f5936ee5eda12e385e48795fd442af4b1158ea6d81a43bd6705e301",
+        "buildTrussBridges": "f6d68995b18b0b9be88a59f65f971b1f4a15733db6388c5630327b655f55c36f"
+      },
+      "2026/3": {
+        "buildInfrastructure": "b414218c99872744bb5000c17ebe1f46bfb5701dbae049f3c0c1ba1b8e9f1f41",
+        "buildTrussBridges": "93b3771362b844d878f3e099f70b09dfa1ca74485ead1e5fe2b77d932a6fde37"
+      },
+      "65537/1": {
+        "buildInfrastructure": "c11fc15559272878f7f69933007788a1f3855427fc99bb3cb1b02d0c2f3372b5"
+      },
+      "65537/2": {
+        "buildInfrastructure": "407871723c7f507e06a23ec3cc5a8fcd97f1caa4b920c1879bb6f9d88034fd10"
+      },
+      "65537/3": {
+        "buildInfrastructure": "e1c3b3e04cba07414036fef1b8e83952c84234ab075d52261e3e5c9f97660171"
+      }
+    }
   }
 }

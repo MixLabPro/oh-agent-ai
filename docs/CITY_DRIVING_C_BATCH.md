@@ -47,3 +47,5 @@ contacts 为每tick归一化时间区间、法线、固体id和worldRevision，�
 `createCityCarSession` 进入前深检，碰撞绑定、CarAdapter、GameRuntime 和 CityEngine 帧钩子使用快检。审计仍可用原有深检与节流方式；这里没有修改 B 的审计调用。`captureDrivingSurface()` 只返回道路与结构编译事实，scene proxies 由冻结世界捕获负责，避免时间轴增长使道路快照失效。
 
 宿主浏览器守卫覆盖326个网格/1317个实例、1000次快检低于250ms、冻结引用计数、延后时间轴、读取时发现原始矩阵篡改、几何dispose、取消和重建。车辆会话守卫同时确认60 tick内深检次数不增加。此结果仅为合成宿主测试，不代表原生bundle帧率验收。
+
+2026-10-16 几何版本 8 复测：实际地形 192→384，保持原始高度场和 0.06 轮面约束。`--contact-cities` 的 500/42 两向与 500/65537 三边六向现均 passed（8/8），包括先前两向 pilot-failed；没有 simulation-invalid。`--cities` 的 30 次结构试跑/1800 独立复核 tick 通过。这是指定路线和有限用例的证据，仍不自动开放道路，也不替代新版本的 D1 全量审计或原生性能验收。

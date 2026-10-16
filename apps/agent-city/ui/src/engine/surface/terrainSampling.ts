@@ -2,7 +2,7 @@
 import type { CityLayout } from "../cityLayout";
 
 /** 地形网格分段数（PlaneGeometry extent×extent，segments²格）。路面网格（roadSurfaceSystem）按同一份三角剖分取高度。 */
-export const TERRAIN_SEGMENTS = 192;
+export const TERRAIN_SEGMENTS = 384;
 
 /** 地形网格顶点高度表（按 terrain 对象缓存）：路面网格建网要查几十万次高度，逐次算噪声场是秒级开销。 */
 const vertexHeightCache = new WeakMap<object, { extent: number; heights: Float64Array }>();
@@ -16,7 +16,7 @@ function terrainVertexHeights(layout: Pick<CityLayout, "extent" | "terrain">): F
   return heights;
 }
 /** 渲染出来的地形表面高度：不是 terrain.height 的真值，而是 PlaneGeometry 三角形上的线性插值——
- *  贴在地面上的网格（路面）若按真值取高，在格内凸处会钻进地形里（格宽 extent/192 ≈ 8.3）。
+ *  贴在地面上的网格（路面）若按真值取高，在格内凸处会钻进地形里（格宽 extent/TERRAIN_SEGMENTS）。
  *  三角剖分与 PlaneGeometry 一致：每格 (a,b,d)/(b,c,d)，对角线连 (ix, iy+1)–(ix+1, iy)；rotateX(−π/2) 后行号沿 +z 增长。 */
 export function terrainSurfaceHeight(layout: Pick<CityLayout, "extent" | "terrain">, x: number, z: number): number {
   const cell = layout.extent / TERRAIN_SEGMENTS;

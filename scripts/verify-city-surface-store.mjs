@@ -34,6 +34,22 @@ assert.equal(extractMeshBoundaries(positions,indices,{maxTriangles:10,maxBoundar
 // Two upward disconnected triangles overlap in XZ; they must not become two legal loops.
 const overlap = new Float32Array([0,0,0, 3,0,0, 0,0,3, 1,0,-1, 4,0,2, 1,0,2]);
 assert.equal(extractMeshBoundaries(overlap,new Uint32Array([0,2,1,3,5,4])).reason,"intersection");
+// A long conforming strip has >700k disjoint boundary pairs. The default 200k
+// budget must apply to sweep candidates, without increasing the budget or
+// treating budget exhaustion as a manifold mesh. Exercise both sweep axes.
+for(const swap of [false,true]) {
+  const p=[],idx=[],count=600;
+  for(let i=0;i<=count;i++)for(const x of [0,2])p.push(swap?i:x,0,swap?x:i);
+  for(let i=0;i<count;i++) {
+    const a=i*2,b=a+1,c=a+2,d=a+3;
+    idx.push(...(swap?[a,b,c,b,d,c]:[a,c,b,b,c,d]));
+  }
+  const v=new Float32Array(p),tri=new Uint32Array(idx),boundary=extractMeshBoundaries(v,tri);
+  assert.equal(boundary.status,"complete");assert.equal(boundary.loops.length,1);
+  assert.equal(boundary.loops[0].vertices.length,2*(count+1));
+  assert.equal(extractMeshBoundaries(new Float32Array([...p,1000000,0,1000000]),tri).status,"complete","unused vertices cannot skew the boundary sweep axis");
+  assert.equal(extractMeshBoundaries(v,tri,{maxTriangles:100000,maxBoundaryEdges:4000,maxIntersectionTests:10}).reason,"budget");
+}
 let snapshot;
 for (const [name,layout] of groundSurfaceFixtures()) {
   const compiled=compileGroundRoadSurface(layout);const digest=groundGeometryDigest(compiled.layers);
