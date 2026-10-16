@@ -3,322 +3,106 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Audit your AI tools' session logs offline. Find where they got stuck and what it cost — nothing leaves your Mac. Agent Vitals for macOS.">
-  <link rel="alternate" hreflang="en" href="https://mixlabpro.github.io/agent-vitals/">
+  <meta name="theme-color" content="#0a1111">
+  <title>Oh Agent — Your agents work. Your world grows.</title>
+  <meta name="description" content="Meet Oh Agent. Explore your desktop agents’ history as a living city, replay activity, and understand usage. Private, on-device analysis for Mac.">
+  <link rel="canonical" href="https://mixlabpro.github.io/agent-vitals/">
+  <link rel="alternate" hreflang="en" href="https://mixlabpro.github.io/agent-vitals/?lang=en">
   <link rel="alternate" hreflang="zh" href="https://mixlabpro.github.io/agent-vitals/?lang=zh">
-  <meta name="theme-color" content="#0a0f12">
-  <meta property="og:image" content="assets/app-icon.png">
-  <meta property="og:title" content="Is your AI actually working — or just burning money? — Agent Vitals">
-  <meta property="og:description" content="Audit your AI tools' session logs offline. Find where they got stuck and what it cost — nothing leaves your Mac.">
-  <title>Agent Vitals — a checkup for your AI tools</title>
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://mixlabpro.github.io/agent-vitals/">
+  <meta property="og:title" content="Oh Agent — Your agents work. Your world grows.">
+  <meta property="og:description" content="Meet the world behind your agent history. Explore activity, understand usage, and keep your sessions on your Mac.">
+  <meta property="og:image" content="https://mixlabpro.github.io/agent-vitals/assets/oh-agent-preview.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Oh Agent — Your agents work. Your world grows.">
+  <meta name="twitter:description" content="Meet the world behind your agent history. Explore activity, understand usage, and keep your sessions on your Mac.">
+  <meta name="twitter:image" content="https://mixlabpro.github.io/agent-vitals/assets/oh-agent-preview.jpg">
   <link rel="icon" href="assets/app-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20261002a">
-  <script src="i18n.js?v=20261002a" defer></script>
-  <script src="app.js?v=20261001c" defer></script>
-  <script src="ascii-scenes.js?v=20261002b" defer></script>
-  <script src="city-mock.js?v=20261002b" defer></script>
-  <script src="city-host.js?v=20261002a" defer></script>
+  <link rel="stylesheet" href="styles.css?v=20261016-oh-agent">
+  <script src="i18n.js?v=20261016-oh-agent" defer></script>
+  <script src="app.js?v=20261016-oh-agent" defer></script>
+  <script src="city-host.js?v=20261016-oh-agent" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main" data-i18n="skip">Skip to content</a>
-
-  <header class="site-header">
-    <div class="shell nav">
-      <a class="brand" href="#" aria-label="Agent Vitals home">
-        <img src="assets/app-icon.png" width="32" height="32" alt="">
-        <span class="brand-name">Agent Vitals<small data-i18n="brand.tag">Agent Monitoring</small></span>
-      </a>
-      <nav aria-label="Main navigation">
-        <a href="#demo" data-i18n="nav.demo">Demo</a>
-        <a href="#city" data-i18n="nav.city">Agent City</a>
-        <a href="#how" data-i18n="nav.how">How it works</a>
-        <a href="#privacy" data-i18n="nav.privacy">Local privacy</a>
-        <a href="#faq" data-i18n="nav.faq">FAQ</a>
-        <a href="#" data-lang-switch="zh" lang="zh" title="中文">中文</a>
-      </nav>
-      <a class="button button-ghost button-sm" href="#download" data-i18n="nav.download">Get for macOS</a>
-    </div>
-  </header>
-
+  <header class="site-header"><div class="shell nav">
+    <a class="brand" href="#" aria-label="Oh Agent home" data-i18n-aria="brand.home"><img src="assets/app-icon.png" width="30" height="30" alt=""><span>Oh Agent<small data-i18n="brand.tag">Your agents, visualized</small></span></a>
+    <nav aria-label="Main navigation" data-i18n-aria="nav.aria"><a href="#city" data-i18n="nav.city">Agent City</a><a href="#insights" data-i18n="nav.insights">Insights</a><a href="#privacy" data-i18n="nav.privacy">Privacy</a><a href="#faq">FAQ</a></nav>
+    <div class="nav-end"><a class="language" href="?lang=zh" data-lang-switch="zh" lang="zh">中文</a><a class="button small" href="#download" data-i18n="nav.download">Mac app</a></div>
+  </div></header>
   <main id="main">
-    <!-- Hero：一句话定位 + 品牌形象（啄木鸟沿会话日志逐行检查） -->
-    <section class="hero" aria-labelledby="hero-title">
-      <div class="shell hero-grid">
-        <div class="hero-copy">
-          <p class="kicker"><span class="dot"></span><span data-i18n="kicker">A checkup for your AI tools · macOS beta</span></p>
-          <h1 id="hero-title"><span data-i18n="hero.l1">Is your AI actually working,</span><br><em data-i18n="hero.l2">or just burning money?</em></h1>
-          <p class="lede" data-i18n="hero.lede">Audit your AI tools' session logs offline. Find where they got stuck and what it cost — nothing leaves your Mac.</p>
-          <div class="actions">
-            <a class="button button-primary" href="#download">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg><span data-i18n="cta.download">Get the macOS beta</span>
-            </a>
-            <a class="button button-ghost" href="#demo" data-i18n="cta.demo">See the demo</a>
-          </div>
-          <ul class="assurances">
-            <li data-i18n="assure.1">Sessions analyzed on-device only</li>
-            <li data-i18n="assure.2">MIT open source</li>
-            <li data-i18n="assure.3">No API key required</li>
-          </ul>
-        </div>
-
-        <figure class="scope" aria-label="Concept animation: a woodpecker inspects a session log line by line, flagging failed calls. Sample data." data-i18n-aria="scope.aria">
-          <div class="scope-bar">
-            <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="mono">session.trace</span>
-            <button id="motion-toggle" class="motion-toggle" type="button" aria-pressed="false" data-i18n="motion.pause">Pause motion</button>
-          </div>
-          <pre class="ascii" data-ascii="woodpecker" aria-hidden="true"></pre>
-          <figcaption class="scope-foot">
-            <span><span data-i18n="scope.scanned">Scanned</span> <b class="mono" data-count="scanned">0012</b> <span data-i18n="scope.lines">lines</span></span>
-            <span class="warn"><span data-i18n="scope.flagged">flagged failures</span> <b class="mono" data-count="flagged">04</b></span>
-            <span class="muted" data-i18n="scope.sample">Sample data</span>
-          </figcaption>
-        </figure>
+    <section class="hero shell" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="status-dot"></span><span data-i18n="hero.kicker">A LITTLE WONDER IN YOUR AGENT HISTORY.</span></p>
+        <h1 id="hero-title"><span data-i18n="hero.line1">Your agents work.</span><br><em data-i18n="hero.line2">Your world grows.</em></h1>
+        <p class="lede" data-i18n="hero.lede">Turn your desktop agents’ history into a living city. Explore the sessions, replay the activity, and understand the usage behind it. Your work stays on your Mac.</p>
+        <div class="actions"><a class="button primary" href="#city" data-start-city data-i18n="cta.explore">Explore the demo city ↗</a><a class="text-link" href="#download" data-i18n="cta.release">Meet the Mac app →</a></div>
+        <ul class="assurances"><li data-i18n="trust.local">On-device analysis</li><li data-i18n="trust.key">No API key required</li><li data-i18n="trust.license">MIT licensed</li></ul>
       </div>
-
-      <div class="shell harnesses">
-        <p data-i18n="harnesses.lede">Reads the local records you already have — no workflow change</p>
-        <ul>
-          <li><span class="harness-mark" aria-hidden="true">✳</span>Claude Code</li>
-          <li><span class="harness-mark" aria-hidden="true">⌘</span>Codex</li>
-          <li>DeepSeek Harness</li>
-          <li>WorkBuddy</li>
-        </ul>
-        <p class="fine" data-i18n="harnesses.fine">Coverage depends on source and version; not every tool provides complete cost and trace evidence.</p>
-      </div>
-    </section>
-
-    <!-- 产品演示 -->
-    <section class="section demo" id="demo" aria-labelledby="demo-title">
-      <div class="shell">
-        <header class="section-head">
-          <p class="eyebrow" data-i18n="demo.eyebrow">Demo</p>
-          <h2 id="demo-title" data-i18n="demo.title">See usage at a glance, <br>reach evidence in one step.</h2>
-          <p data-i18n="demo.sub">Interactive concept demo — all numbers are simulated, not real screenshots.</p>
-        </header>
-
-        <div class="app-window">
-          <div class="app-toolbar">
-            <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="window-name">Agent Vitals</span>
-            <span class="window-local"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span data-i18n="demo.local">On-device only</span>
-          </div>
-          <div class="app-body">
-            <aside class="app-sidebar" aria-label="Demo pages">
-              <div class="workspace"><img src="assets/app-icon.png" width="24" height="24" alt=""><span data-i18n="demo.workspace">My workspace</span></div>
-              <div class="app-nav selected" data-i18n="demo.nav.overview">Overview</div>
-              <div class="app-nav" data-i18n="demo.nav.usage">Usage</div>
-              <div class="app-nav" data-i18n="demo.nav.sessions">Sessions</div>
-              <div class="app-nav" data-i18n="demo.nav.sources">Sources</div>
-              <div class="sidebar-foot"><span class="dot"></span><span data-i18n="demo.foot">Local data · synced</span></div>
-            </aside>
-            <div class="app-content">
-              <div class="app-heading">
-                <div><p class="eyebrow" data-i18n="demo.head.eyebrow">Local agent work records</p><h3 data-i18n="demo.head.title">Who worked, what it cost, where it got stuck</h3></div>
-                <div class="segmented" role="group" aria-label="Demo time range">
-                  <button type="button" data-period="week" aria-pressed="false" data-i18n="demo.week">This week</button>
-                  <button type="button" data-period="month" aria-pressed="true" data-i18n="demo.month">This month</button>
-                </div>
-              </div>
-              <div class="stats" aria-live="polite">
-                <div><span data-i18n="demo.tokens">Tokens observed</span><strong id="demo-tokens">127.4<small>M</small></strong><em id="demo-sessions">42 sessions · 2 tools</em></div>
-                <div><span data-i18n="demo.cost">Estimated cost</span><strong id="demo-cost"><small>$</small>5.40</strong><em data-i18n="demo.cost.note">An estimate, not a bill</em></div>
-                <div><span data-i18n="demo.cache">Cache hit rate</span><strong id="demo-cache">96.8<small>%</small></strong><em data-i18n="demo.cache.note">Cache reads / input tokens</em></div>
-              </div>
-              <div class="chart-head">
-                <h4 data-i18n="demo.trend">Usage trend</h4>
-                <div class="legend"><span class="l-claude">Claude Code</span><span class="l-codex">Codex</span><span class="l-flag" data-i18n="demo.legend.flag">consecutive failures</span></div>
-              </div>
-              <div class="chart" role="img" aria-label="Sample usage trend">
-                <div class="chart-grid" aria-hidden="true"><span>16M</span><span>8M</span><span>0</span></div>
-                <div id="chart-bars" class="chart-bars"></div>
-              </div>
-              <div class="chart-axis"><span id="axis-start">09.01</span><span id="axis-middle">09.15</span><span id="axis-end">09.28</span></div>
-              <div class="insight">
-                <span class="insight-mark" aria-hidden="true">!</span>
-                <div><strong data-i18n="demo.insight.title">Start with the sessions that keep failing</strong><p id="demo-session-note" data-i18n="demo.insight.note">Sample session used 18.6M tokens; the same call failed 3 times in a row.</p></div>
-                <button type="button" class="button button-ghost button-sm" id="inspect-session" data-i18n="demo.inspect">View trace →</button>
-              </div>
-            </div>
+    <section class="hero-city" id="city" aria-labelledby="city-title">
+      <header class="city-intro"><h2 id="city-title" data-i18n="city.title">Your agent history, brought to life.</h2><p data-i18n="city.body">Explore this demo city. Imagine your own history here.</p></header>
+      <div class="city-window" data-city-state="idle">
+        <div class="city-toolbar">
+          <div class="window-title"><span class="status-dot"></span> Agent City <span class="sample-badge" data-i18n="city.sample">Mock sessions · interactive city</span></div>
+          <div class="city-actions">
+            <label class="sr-only" for="city-window-days" data-i18n="city.range">Sample time range</label>
+            <select id="city-window-days" disabled>
+              <option value="7" data-i18n="city.week">7 days</option><option value="30" selected data-i18n="city.month">30 days</option>
+              <option value="90" data-i18n="city.quarter">90 days</option><option value="366" data-i18n="city.year">366 days</option>
+            </select>
+            <button id="city-settings" disabled data-i18n="city.settings">City settings</button><button id="city-reset" disabled data-i18n="city.reset">Reset view</button><button id="city-stop" disabled data-i18n="city.stop">Close demo</button>
           </div>
         </div>
+        <div class="city-stage">
+          <img class="city-poster" src="assets/city-preview-live.jpg" width="708" height="490" alt="Preview of the Agent City application using demonstration data" data-i18n-alt="city.poster" loading="lazy">
+          <div class="city-launch"><span class="launch-symbol" aria-hidden="true">↗</span><h3 data-i18n="city.launch.title">Take a look around.</h3><p id="city-status" role="status" data-i18n="city.launch.body">Walk through a city made from mock sessions. Select a building or replay a day. Your own records stay untouched.</p><button class="button primary" id="city-launch" data-i18n="city.launch.button">Explore the city</button><a class="text-link" href="#how" data-i18n="city.static">See how the city works →</a></div>
+        </div>
+        <div class="city-foot"><span data-i18n="city.hint">Try selecting a data building. Use the timeline to replay activity.</span><span data-i18n="city.local">The Mac app builds a city from your local history.</span></div>
       </div>
+      <noscript><p class="notice">The interactive sample needs JavaScript. Product previews and explanations below are available without it.</p></noscript>
+    </section>
+      <div class="source-strip"><span data-i18n="sources.lead">Built around the records you already have</span><div><span>✳ Claude Code</span><span>⌘ Codex</span><span>DeepSeek Harness</span><span>WorkBuddy</span></div><small data-i18n="sources.note">Support and available fields vary by source and version. macOS desktop app.</small></div>
     </section>
 
-    <!-- Agent City：吸引用户的可视化钩子（应用内真实功能，动画为概念示意） -->
-    <section class="section city" id="city" aria-labelledby="city-title">
-      <div class="shell">
-        <header class="section-head">
-          <p class="eyebrow" data-i18n="city.eyebrow">Agent City</p>
-          <h2 id="city-title" data-i18n="city.title">A month of agent work, one skyline.</h2>
-          <p data-i18n="city.sub">Every session becomes a building — height is workload, lit windows are activity. Your busiest weeks stand tallest. All from your local records, rendered on-device.</p>
-        </header>
-        <div class="city-grid">
-          <figure class="scope city-scope" aria-label="Concept mock: a miniature city at dusk — building colors by host, lit windows as activity, a crane for work in progress, weather passing through. Sample data." data-i18n-aria="city.scope.aria">
-            <div class="scope-bar">
-              <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span class="mono">agent.city · miami</span>
-            </div>
-            <div class="city-stage">
-              <canvas id="city-canvas" role="img" aria-hidden="true"></canvas>
-            </div>
-            <figcaption class="scope-foot">
-              <span><span data-i18n="city.scope.buildings">sessions as buildings</span> <b class="mono" data-count="city-buildings">0000</b></span>
-              <span class="warn"><span data-i18n="city.scope.lit">windows lit</span> <b class="mono" data-count="city-lit">000</b></span>
-              <span class="muted" data-i18n="scope.sample">Sample data</span>
-            </figcaption>
-          </figure>
-          <ul class="city-points">
-            <li><h3 data-i18n="city.f1">Time playback</h3><p data-i18n="city.f1b">Scrub a whole day in seconds — watch the city wake, rush, and wind down.</p></li>
-            <li><h3 data-i18n="city.f2">Weather &amp; cinematic mode</h3><p data-i18n="city.f2b">Sun, rain, and cinematic cuts — over a skyline that is unmistakably yours.</p></li>
-            <li><h3 data-i18n="city.f3">Photo &amp; film export</h3><p data-i18n="city.f3b">Export a 2560×1440 postcard of your work week — or the whole film.</p></li>
-          </ul>
-        </div>
-        <p class="fine city-fine" data-i18n="city.fine">Concept mock rendered in one canvas — no assets, no network. In the app, your real sessions render in 3D, fully on-device.</p>
-      </div>
+
+    <section class="section shell mapping" id="how" aria-labelledby="how-title">
+      <header class="section-heading"><div><p class="eyebrow" data-i18n="how.kicker">01 / EVERY BUILDING HAS A BACKSTORY</p><h2 id="how-title" data-i18n="how.title">Every building<br>has a backstory.</h2></div><p data-i18n="how.body">Every session leaves a trace. Oh Agent gives you a place to explore where it came from, how much it used, and when it happened.</p></header>
+      <div class="mapping-grid"><figure class="building-view"><img src="assets/city-building-live.jpg" width="708" height="628" alt="Selected demonstration building with session source, tokens, time and event details" data-i18n-alt="how.image" loading="lazy"><figcaption data-i18n="how.caption">Actual product view · demonstration workspace</figcaption></figure><ol class="mapping-list">
+        <li><span class="map-number">01</span><div><h3 data-i18n="how.session">A session becomes a building.</h3><p data-i18n="how.session.body">Select a data building to see its source, recorded activity, and token usage.</p></div></li>
+        <li><span class="map-number">02</span><div><h3 data-i18n="how.scale">Your sources shape the skyline.</h3><p data-i18n="how.scale.body">Agent tools form districts. Token volume shapes building height. Decorative buildings are separate from your sessions.</p></div></li>
+        <li><span class="map-number">03</span><div><h3 data-i18n="how.time">Your history has a rhythm.</h3><p data-i18n="how.time.body">Replay activity within the loaded time range and explore how the view changes over time.</p></div></li>
+      </ol></div><p class="footnote" data-i18n="how.note">Building height represents token scale, not productivity. Construction and growth are visual metaphors, not task completion. The app shows how much of your history is loaded.</p>
     </section>
 
-    <!-- 工作方式 -->
-    <section class="section how" id="how" aria-labelledby="how-title">
-      <div class="shell">
-        <header class="section-head">
-          <p class="eyebrow" data-i18n="how.eyebrow">From delivered results to a checkable process</p>
-          <h2 id="how-title" data-i18n="how.title">Logs tell you what happened.<br>Agent Vitals tells you where to look.</h2>
-          <p data-i18n="how.sub">Research, docs, spreadsheets, code — all can go to an agent. But the process, cost, and failures should not stay in a black box.</p>
-        </header>
-        <ol class="steps">
-          <li class="step">
-            <span class="step-no mono" data-i18n="how.1.no">01 · Record</span>
-            <div class="vis vis-sources" aria-hidden="true">
-              <span class="src">Claude Code</span><span class="src">Codex</span><span class="src">WorkBuddy</span>
-              <span class="arrow">→</span>
-              <span class="ledger"><b data-i18n="how.1.ledger">Work record</b><span data-i18n="how.1.ledger.sub">sessions · events · traces</span></span>
-            </div>
-            <h3 data-i18n="how.1.title">Turn every run into a work record.</h3>
-            <p data-i18n="how.1.body">Browse events and traces your agents left, by date, source, and session. Fields a source never recorded are marked unavailable — never invented.</p>
-          </li>
-          <li class="step">
-            <span class="step-no mono" data-i18n="how.2.no">02 · Cost</span>
-            <div class="vis vis-basis" aria-hidden="true">
-              <div><span data-i18n="how.2.metered">Pay-per-use estimate</span><b id="basis-metered">$5.40</b><em class="tag" data-i18n="how.2.tag.est">estimate</em></div>
-              <div><span data-i18n="how.2.sub">Subscription</span><b id="basis-sub">$20.00</b><em class="tag" data-i18n="how.2.tag.fixed">fixed</em></div>
-              <div><span data-i18n="how.2.unpriced">Unpriced usage</span><b class="unknown" data-i18n="how.2.unknown">Unknown</b><em class="tag tag-warn" data-i18n="how.2.tag.warn">not counted as 0</em></div>
-            </div>
-            <h3 data-i18n="how.2.title">Know what it cost — and how solid the number is.</h3>
-            <p data-i18n="how.2.body">Subscription, metered estimate, and evidenced spend sit in separate columns and are never summed. Missing price or attribution stays“unknown”— guesses never pose as bills.</p>
-          </li>
-          <li class="step">
-            <span class="step-no mono" data-i18n="how.3.no">03 · Check</span>
-            <div class="vis vis-flags" aria-hidden="true">
-              <div><span data-i18n="how.3.fail">Consecutive failures</span><i style="--w:84%"></i><b>3×</b></div>
-              <div><span data-i18n="how.3.infl">Input inflation</span><i style="--w:52%"></i><b>4.2×</b></div>
-              <div><span data-i18n="how.3.miss">Cache misses</span><i style="--w:22%"></i><b>18%</b></div>
-            </div>
-            <h3 data-i18n="how.3.title">Look at failures, repeats, and outlier sessions first.</h3>
-            <p data-i18n="how.3.body">It points out ranges worth checking, then walks you back to the session trace to verify evidence. Clues, not verdicts — it never judges whether the work was right.</p>
-          </li>
-        </ol>
+    <section class="section insights-section" id="insights" aria-labelledby="insights-title"><div class="shell">
+      <header class="section-heading"><div><p class="eyebrow" data-i18n="insights.kicker">02 / FOLLOW YOUR CURIOSITY</p><h2 id="insights-title" data-i18n="insights.title">A little curiosity.<br>A clearer picture.</h2></div><p data-i18n="insights.body">Follow your curiosity beyond the skyline. The Mac app offers usage, cost basis, and session evidence when you want a closer look.</p></header>
+      <div class="insight-grid">
+        <article class="insight-card"><span class="card-index" data-i18n="insights.usage.label">01 / USAGE</span><h3 data-i18n="insights.usage">See where activity adds up.</h3><p data-i18n="insights.usage.body">Review token usage by source and time, then look into the sessions behind a busy day.</p><div class="mini-chart" role="img" aria-label="Illustrative token trend using sample data" data-i18n-aria="insights.chart"><i style="--bar:24%"></i><i style="--bar:43%"></i><i style="--bar:32%"></i><i style="--bar:68%"></i><i style="--bar:54%"></i><i style="--bar:90%"></i><i style="--bar:72%"></i><i style="--bar:48%"></i><i style="--bar:83%"></i><i style="--bar:62%"></i><i style="--bar:96%"></i><i style="--bar:71%"></i></div><small class="illustration-note" data-i18n="insights.example">Illustration · sample data</small></article>
+        <article class="insight-card"><span class="card-index" data-i18n="insights.cost.label">02 / COST BASIS</span><h3 data-i18n="insights.cost">Know what a number means.</h3><p data-i18n="insights.cost.body">Keep subscription fees, usage-based estimates, and evidenced spend distinct. Unknown prices stay unknown.</p><dl class="cost-example"><div><dt data-i18n="cost.subscription">Subscription / month</dt><dd>$20.00</dd></div><div><dt data-i18n="cost.estimate">API-equivalent estimate</dt><dd>$14.60</dd></div><div><dt data-i18n="cost.actual">Actual API bill</dt><dd data-i18n="cost.unknown">Unknown</dd></div></dl><small class="illustration-note" data-i18n="cost.note">Sample amounts. An estimate, not a bill or money saved. Separate analysis view; cost is not shown in City.</small></article>
+        <article class="insight-card"><span class="card-index" data-i18n="insights.session.label">03 / SESSION EVIDENCE</span><h3 data-i18n="insights.session">Find a session worth a look.</h3><p data-i18n="insights.session.body">Explore available traces and supported signals such as consecutive tool failures. Review the evidence in context.</p><div class="mini-trace" aria-hidden="true"><span>09:41:08 <b>timeout</b></span><span>09:41:16 <b>timeout</b></span><span>09:41:32 <b>timeout</b></span></div><small class="illustration-note" data-i18n="insights.trace.note">Illustrative sequence. A retry is a clue to inspect, not proof of wasted work.</small></article>
       </div>
-    </section>
+    </div></section>
 
-    <!-- 隐私 -->
-    <section class="section privacy" id="privacy" aria-labelledby="privacy-title">
-      <div class="shell privacy-panel">
-        <div class="privacy-copy">
-          <p class="eyebrow" data-i18n="privacy.eyebrow">Your computer is the data boundary</p>
-          <h2 id="privacy-title" data-i18n="privacy.title">See your agents clearly,<br>without surrendering sessions.</h2>
-          <p data-i18n="privacy.body">Session logs never need to leave for a third-party cloud. Agent Vitals reads and analyzes supported local records directly on your Mac; code, prompts, and work context stay where they are.</p>
-          <a class="text-link" href="https://github.com/MixLabPro/agent-vitals" target="_blank" rel="noopener noreferrer" data-i18n="privacy.link">Read the source on GitHub ↗</a>
-        </div>
-        <div class="privacy-side">
-          <div class="flow" aria-label="Data flow: local session logs, analyzed on-device, become your work ledger — entirely on your Mac" data-i18n-aria="privacy.flow.aria">
-            <span class="flow-label mono">YOUR MAC</span>
-            <div class="flow-row">
-              <span><span data-i18n="privacy.flow.1">Session logs</span><small data-i18n="privacy.flow.1s">stay in the source</small></span>
-              <b aria-hidden="true">→</b>
-              <span><span data-i18n="privacy.flow.2">Local analysis</span><small data-i18n="privacy.flow.2s">usage · cost · traces</small></span>
-              <b aria-hidden="true">→</b>
-              <span><span data-i18n="privacy.flow.3">Work ledger</span><small data-i18n="privacy.flow.3s">you review and verify</small></span>
-            </div>
-          </div>
-          <ul class="proofs">
-            <li><h3 data-i18n="privacy.p1">Sessions analyzed entirely on-device</h3><p data-i18n="privacy.p1b">Session logs, code, prompts, or usage records are never uploaded.</p></li>
-            <li><h3 data-i18n="privacy.p2">MIT open source, inspectable</h3><p data-i18n="privacy.p2b">What is read and how it is computed — all in the code.</p></li>
-            <li><h3 data-i18n="privacy.p3">Unknowns are stated, not hidden</h3><p data-i18n="privacy.p3b">Unknown ≠ zero; estimates never pose as real bills.</p></li>
-          </ul>
-          <p class="fine" data-i18n="privacy.fine">Session analysis needs no network. Public price-catalog updates and version checks may use the network but carry no session data.</p>
-        </div>
-      </div>
-    </section>
+    <section class="section shell privacy-section" id="privacy" aria-labelledby="privacy-title"><div class="privacy-copy"><p class="eyebrow" data-i18n="privacy.kicker">03 / A PERSONAL WORLD</p><h2 id="privacy-title" data-i18n="privacy.title">Your work is personal.<br><em>Your world stays local.</em></h2><p data-i18n="privacy.body">Your sessions hold your work, ideas, and context. Oh Agent analyzes supported records on your Mac. Session data is never uploaded for analysis.</p><div class="license"><span class="license-mark">MIT</span><span data-i18n="privacy.license">MIT licensed code.<br>Local analysis you can inspect.</span></div></div><div class="privacy-diagram"><div class="boundary-label"><span class="status-dot"></span><span data-i18n="privacy.boundary">INSIDE YOUR MAC</span><span aria-hidden="true">⌘</span></div><ol>
+      <li><span class="flow-icon" aria-hidden="true">≡</span><div><strong data-i18n="privacy.records">Local session records</strong><small data-i18n="privacy.records.body">From supported agent tools</small></div></li>
+      <li><span class="flow-icon" aria-hidden="true">⌁</span><div><strong data-i18n="privacy.analysis">On-device analysis</strong><small data-i18n="privacy.analysis.body">Activity, usage, and available evidence</small></div></li>
+      <li><span class="flow-icon" aria-hidden="true">▥</span><div><strong data-i18n="privacy.world">Your city and insights</strong><small data-i18n="privacy.world.body">Explored on your own machine</small></div></li>
+    </ol><p data-i18n="privacy.network">Public price updates, release checks, and explicitly chosen official downloads may use the network. Those requests carry no session data.</p></div></section>
 
-    <!-- FAQ：先回答安装与隐私，再讲金额与能力边界 -->
-    <section class="section faq" id="faq" aria-labelledby="faq-title">
-      <div class="shell faq-grid">
-        <header class="section-head">
-          <p class="eyebrow" data-i18n="faq.eyebrow">Before you download</p>
-          <h2 id="faq-title" data-i18n="faq.title">Straight answers.</h2>
-          <p data-i18n="faq.sub">Less guessing, more certainty.</p>
-        </header>
-        <div class="faq-list">
-          <details><summary data-i18n="faq.1.q">Do I need an API key or to upload logs?</summary><p data-i18n="faq.1.a">No API key, no uploads. The desktop app reads usage records your supported tools already keep locally; if the system restricts access you may need to grant read permission.</p></details>
-          <details><summary data-i18n="faq.2.q">Which computers and agents are supported?</summary><p data-i18n="faq.2.a">A macOS beta is available. Runtime sessions and usage focus on Claude Code, Codex, DeepSeek Harness, and WorkBuddy; statistics, cost, and trace coverage differs by harness, version, and field. OpenClaw and Hermes currently get install- and skill-level checks only — not the same runtime coverage.</p></details>
-          <details><summary data-i18n="faq.3.q">What if the first launch shows no data?</summary><p data-i18n="faq.3.a">Confirm your supported agents have local usage records, then check data-source status and read permissions in the app. No logs, no permission, and not-yet-synced are different states — none is ever filled with made-up data.</p></details>
-          <details><summary data-i18n="faq.4.q">Is the displayed amount what I actually pay?</summary><p data-i18n="faq.4.a">Not necessarily. Pay-per-use estimates come from available usage and pricing and are not charges. Subscription, estimate, and evidenced known spend are separate; missing price, route, or bill data stays unknown.</p></details>
-          <details><summary data-i18n="faq.5.q">Will it actually save me money?</summary><p data-i18n="faq.5.a">Agent Vitals shows you usage and cost, and pinpoints high-spend or repeatedly failing sessions so you can act. Whether that saves money depends on your billing and what you change. On a fixed subscription, fewer tokens don't always mean a smaller bill; we promise no automatic savings or fixed ratios.</p></details>
-          <details><summary data-i18n="faq.6.q">Can it tell whether the agent did the job right?</summary><p data-i18n="faq.6.a">No. It records the usage, events, failures, and trace evidence your sources leave, and helps you find sessions worth checking. It never treats“low spend”as“correct output”, and it does not accept deliverables for you.</p></details>
-          <details><summary data-i18n="faq.7.q">Is it open source?</summary><p data-i18n="faq.7.a">Yes, MIT licensed. Browse the code, license, and releases on GitHub, and file issues. Numbers on this page are demo data — not user statistics or savings claims.</p></details>
-        </div>
-      </div>
-    </section>
+    <section class="section shell faq-section" id="faq" aria-labelledby="faq-title"><div><p class="eyebrow" data-i18n="faq.kicker">BEFORE YOU STEP INSIDE</p><h2 id="faq-title" data-i18n="faq.title">A few things<br>to know.</h2></div><div class="faq-list">
+      <details><summary data-i18n="faq.1.q">Is the sample city using my data?</summary><p data-i18n="faq.1.a">No. This website uses synthetic sample sessions. It never reads your local agent records. Your own city is generated by the installed macOS app using supported local records.</p></details>
+      <details><summary data-i18n="faq.2.q">Which agents and computers are supported?</summary><p data-i18n="faq.2.a">The desktop app targets macOS on Apple Silicon. Sources include Claude Code, Codex, DeepSeek Harness, and WorkBuddy; available statistics, traces, and cost evidence vary by source and version. Intel, Windows, and Linux desktop support is not currently claimed. Check the release notes before installing.</p></details>
+      <details><summary data-i18n="faq.3.q">What does a building represent?</summary><p data-i18n="faq.3.a">Data buildings represent loaded sessions. Their height reflects token volume, and sources form districts. Decorative buildings provide scenery. Building growth is a visual metaphor and does not measure task completion or output quality.</p></details>
+      <details><summary data-i18n="faq.4.q">Will I see my complete history?</summary><p data-i18n="faq.4.a">The current City view loads up to 500 recent sessions within the selected time range and reports its coverage. Available history depends on the records your agent tools retain. Missing records are not replaced with invented activity.</p></details>
+      <details><summary data-i18n="faq.5.q">What if I have no data yet?</summary><p data-i18n="faq.5.a">Use a supported agent first so it creates local records. In the desktop app, check source status, permissions, and synchronization. No records, denied access, and read failures require different follow-up steps; the website sample remains available to explore.</p></details>
+      <details><summary data-i18n="faq.6.q">Are costs actual charges or savings?</summary><p data-i18n="faq.6.a">Usage-based amounts can be estimates, not charges. Subscription fees and evidenced spend are shown with their own basis; currencies are not directly added together. Comparing a subscription with an API-equivalent estimate does not prove money saved. City itself does not currently project cost data.</p></details>
+      <details><summary data-i18n="faq.7.q">Do I need an API key or an account?</summary><p data-i18n="faq.7.a">No API key or cloud account is required for local analysis. The app reads records your supported tools already leave on the Mac; macOS may require permission to read those locations.</p></details>
+      <details><summary data-i18n="faq.8.q">Where can I download it and inspect the code?</summary><p data-i18n="faq.8.a">The project code is MIT licensed. The configured public repository and release URLs are not currently accessible anonymously. Public download and source links will appear here after they are verified. This preview does not offer an available download.</p></details>
+    </div></section>
 
-    <!-- 下载：收据是整页比喻的落点 -->
-    <section class="section download" id="download" aria-labelledby="download-title">
-      <div class="shell download-grid">
-        <div class="download-copy">
-          <p class="eyebrow" data-i18n="dl.eyebrow">Every agent run leaves a receipt</p>
-          <h2 id="download-title" data-i18n="dl.title">Your agent has logs.<br>Now give it vitals.</h2>
-          <ol class="first-run">
-            <li><b>1</b><span data-i18n="dl.1">Install the app</span></li>
-            <li><b>2</b><span data-i18n="dl.2">Check local data sources</span></li>
-            <li><b>3</b><span data-i18n="dl.3">Read your first usage and session report</span></li>
-          </ol>
-          <a class="button button-primary button-lg" href="https://github.com/MixLabPro/agent-vitals/releases?q=app-v&amp;expanded=true" target="_blank" rel="noopener noreferrer">
-            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg><span data-i18n="dl.cta">Download the macOS beta ↗</span>
-          </a>
-          <p class="fine" data-i18n="dl.fine">Requires local records from a supported agent. The package is Developer ID–signed; the beta is un-notarized — right-click → Open on first launch. System requirements and install notes are on the GitHub release page.</p>
-        </div>
-        <figure class="receipt" aria-label="Concept animation: an agent work receipt printing line by line. Sample data." data-i18n-aria="dl.receipt.aria">
-          <pre class="ascii" data-ascii="receipt" aria-hidden="true"></pre>
-        </figure>
-      </div>
-    </section>
+    <section class="section download-section" id="download" aria-labelledby="download-title"><div class="shell download-inner"><p class="eyebrow" data-i18n="download.kicker">A WORLD THAT STARTS WITH YOU</p><h2 id="download-title" data-i18n="download.title">Meet your agents.<br><em>All over again.</em></h2><p data-i18n="download.body">There’s a world in the work you’ve already done. Oh Agent helps you explore it, one session at a time.</p><ol class="install-steps"><li><span>01</span><span data-i18n="download.step1">Install on your Mac</span></li><li><span>02</span><span data-i18n="download.step2">Read supported local records</span></li><li><span>03</span><span data-i18n="download.step3">Explore your own city</span></li></ol><div class="release-status" role="status"><span class="status-dot amber"></span><strong data-i18n="download.status">Public download is being prepared.</strong><p data-i18n="download.note">Release and source links will be enabled after public access and installation details are verified. No download is available from this preview.</p></div><a class="button primary" href="#city" data-start-city data-i18n="download.explore">Take a walk through the demo ↗</a><p class="footnote" data-i18n="download.requirements">macOS · Apple Silicon target · Requires records from a supported agent. Final system requirements and installation notes will accompany the release.</p></div></section>
   </main>
-
-  <footer class="site-footer">
-    <div class="shell footer-row">
-      <a class="brand" href="#" aria-label="Agent Vitals home"><img src="assets/app-icon.png" width="26" height="26" alt=""><span class="brand-name">Agent Vitals<small data-i18n="brand.tag">Agent Monitoring</small></span></a>
-      <span class="muted" data-i18n="footer.tag">Offline single-machine analysis · sessions never leave your Mac</span>
-      <div class="footer-links">
-        <a href="https://github.com/MixLabPro/agent-vitals/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License ↗</a>
-        <a href="https://github.com/MixLabPro/agent-vitals/issues" target="_blank" rel="noopener noreferrer" data-i18n="footer.feedback">Feedback ↗</a>
-        <span class="muted">© 2026 Mixlab</span>
-      </div>
-    </div>
-  </footer>
-
-  <dialog id="session-dialog" aria-labelledby="dialog-title">
-    <div class="dialog-top"><p class="eyebrow" data-i18n="dialog.sample">Interactive demo · sample data</p><button class="close-button" type="button" aria-label="Close sample" data-i18n-aria-label="dialog.close">×</button></div>
-    <h2 id="dialog-title" data-i18n="dialog.title">Why is this session worth checking?</h2>
-    <p class="dialog-lede" data-i18n="dialog.lede">Fictional research task: the same tool call fails three times in a row, then recovers. Click a node to check the record; retries are not automatically waste.</p>
-    <div class="event-trace" role="group" aria-label="Sample session event trace" data-i18n-aria="dialog.trace"></div>
-    <div class="trace-evidence" aria-live="polite"></div>
-    <div class="breakdown">
-      <div><span data-i18n="dialog.cache">Cache reads</span><strong>16.8M</strong><i style="--w:90%"></i></div>
-      <div><span data-i18n="dialog.input">Uncached input</span><strong>1.2M</strong><i style="--w:7%"></i></div>
-      <div><span data-i18n="dialog.output">Output</span><strong>0.6M</strong><i style="--w:3%"></i></div>
-    </div>
-    <div class="dialog-note"><strong data-i18n="dialog.note.title">High consumption doesn't always mean a high bill.</strong><p data-i18n="dialog.note.body">Caching and billing shape the amount. Read the composition and pricing basis first; this demo never computes“amounts saved”.</p></div>
-    <button class="button button-primary dialog-done" type="button" data-i18n="dialog.done">Got it</button>
-  </dialog>
+  <footer class="shell footer"><a class="brand" href="#"><img src="assets/app-icon.png" width="26" height="26" alt=""><span>Oh Agent<small data-i18n="brand.tag">Your agents, visualized</small></span></a><p data-i18n="footer.tag">Your agents. Your stories. Your world.</p><span>© 2026 Mixlab</span></footer>
 </body>
 </html>

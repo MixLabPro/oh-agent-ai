@@ -1,45 +1,56 @@
-# Agent Vitals 智能体监测 landing page
+# Oh Agent · City-first landing
 
-Standalone Chinese marketing page. No build step, external fonts, third-party scripts, cookies, analytics, or network API calls. External links only navigate on user action.
+Brand and copy updated to **Oh Agent** on 2026-10-16. Implemented against [the redesign spec](../../docs/LANDING_CITY_FIRST_REDESIGN_SPEC.md). English is the static default; `?lang=zh` selects Chinese. Language preference stays in localStorage. No analytics, accounts, uploaded sessions, external fonts or third-party scripts.
 
-Preview from this directory:
+## Preview
+
+From this directory:
 
 ```sh
 python3 -m http.server 5180 --bind 127.0.0.1
 ```
 
-Open http://127.0.0.1:5180/. The directory can also be deployed as a static site.
+Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. The page is a static site; the interactive City requires HTTP serving. Opening `index.html` as a local file still offers product images and text, but cannot start the embedded application.
 
-## Content and interactions
+## Page and data
 
-- Brand: **Agent Vitals 智能体监测**. Privacy promise: Sessions are analyzed offline on the user's Mac and are never uploaded to a cloud service. Public pricing-catalog and release checks may use the network but carry no Session data.
-- Positioning: 你把工作交给 Agent，谁来检查 Agent？The category metaphor is a local “Agent work receipt”: usage, cost basis, failures, and session traces that supported harnesses already leave on the machine. The page does not claim output-quality judgment, universal runtime coverage, measured savings, or automatic optimization.
-- The product window and session dialog are explicitly labeled illustrative mock data, not screenshots of a released UI. Period buttons switch sample totals and charts; the session button opens a dismissible native dialog. FAQs use native details elements.
-- Download CTA opens the project's desktop release listing. It does not claim a particular architecture, signature, release artifact, or system requirement; those must be verified against the published package before direct download links are added.
-- Product icon copied from `apps/desktop/src-tauri/icons/128x128.png`.
-- System fonts. Dark graphite base; mint means local/normal, amber means failure/estimate/needs checking — the two accents never swap roles. Mobile responsive, reduced-motion support, motion toggle in the hero window.
-- Character scenes (`ascii-scenes.js`): text-grid art, no image assets shipped. Hero: the woodpecker climbs a trunk made of a scrolling session log and pecks failed calls, which turn amber (the static frame keeps the story readable when motion is off). Download: a work receipt prints line by line. Font size is fitted to the measured glyph width; narrow screens drop the log's target column. Animation runs only while on screen and the tab is visible.
-- The woodpecker is converted from `tools/woodpecker-source.png` by `node tools/ascii-from-image.mjs [--cols 34] [--dry-run]`, which rewrites the `<generated:woodpecker>` block in `ascii-scenes.js`. Cells are classified by the flat palette in the script (crest, head, eye stripe, eye, beak, wing, chest, tail); edge cells get `/ \ ( ) _ '` from the fill direction. A replacement image needs flat colors, no gradients, a uniform background, the bird facing right with its beak touching a trunk at the right edge; if its colors differ, update `PALETTE`. `tools/` is a build aid and does not need to be deployed.
+Hero with the production City frontend → data mapping → usage/cost/session illustrations → local privacy → FAQ → release status.
 
-## Distribution decision (2026-09-30)
+- The hero embeds the frontend built from `apps/agent-city/ui`. New fallback/building images and the share preview are captured from this frontend running mock sessions; no personal records are involved. Provenance is in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
+- The visible desktop/tablet hero (over 600 CSS px) starts the real City frontend automatically, unless reduced motion or data saving is requested. Narrow phone views retain explicit entry. `city-host.js` serves deterministic synthetic `city:v2` projections through the production SDK's instance-scoped, same-origin message transport. Default 30 days contains 2000 mock sessions; 7 days contains 469. The frontend render cap is 4000, so this dataset does not trigger overflow aggregation; this does not change the native data projection's 500-session cap. No local authority, harness logs, generic IPC or SQL access is available.
+- First usable toolbar publication confirms renderer readiness. A failed startup, unavailable renderer, missing build or 20-second startup timeout leaves the product preview and an explicit retry. Clicking Close removes the iframe. Hidden/offscreen views receive suspend messages.
+- City settings enable keyboard session selection. The sample can show its bounded session fields; host full-session navigation is disabled for fixtures. The production component's `presentation=landing` mode hides game, export and seed controls, and avoids audio warmup. Synthetic seed state stays in memory. No native package install, raw-log access or file-save command is offered by this host.
+- Amount cards are clearly labeled illustrations. Amounts stay in USD in both locales; language switching is not currency conversion. API-equivalent estimates, subscriptions and actual charges remain distinct. City currently does not project cost.
+- Reduced-motion/narrow-view visitors can opt into City. Desktop uses one live City instance in the hero. Hidden/offscreen suspension and Close are available; no sound starts automatically.
 
-Beta distribution: Developer ID–signed (Team EUKB6WHY6Z) without notarization.
-Notarization is a one-command follow-up once `xcrun notarytool store-credentials`
-is run with the Apple ID app-specific password:
-`xcrun notarytool submit <dmg> --wait && xcrun stapler staple <dmg>`.
+## Build the optional City
 
-## Before publishing
+```sh
+node ../../tools/build-city3d.mjs
+```
 
-Verify the public desktop release, installation instructions, and supported harness versions. If a production screenshot replaces the illustrative window, use redacted or dedicated demo data. No product event collection is authorized by this page.
+When dependencies are already installed:
 
-## Agent City 3D 钩子（city3d/）
+```sh
+node ../../tools/build-city3d.mjs --skip-install
+```
 
-`#city` 段默认渲染零依赖的 canvas mock（`city-mock.js`）；当 `city3d/index.html`
-存在时，`city-host.js` 在滚入视口后懒加载同源 iframe（apps/agent-city/ui 的
-插件构建产物），经 `av-plugin-rpc` v1 postMessage 信道以 `PluginRequestV1`
-拉取 `CityProjectionV1`（本页返回确定性示例数据，`source:"fixture"`），
-并透传 locale/suspend/resume。产物缺失、WebGL 不可用或
-prefers-reduced-motion 时自动保持 canvas mock，不报错。
+The builder replaces the generated `city3d/` directory from the current production City source. Commit the rebuilt index and referenced assets together. Preserve generated third-party notices. Desktop requests the City bundle when the hero is visible; narrow/reduced-motion views request it on explicit entry. Passing the initial window to the frontend avoids building the scene twice.
 
-产物构建（需 codex/app-layer-city 合入后）：
-`node tools/build-city3d.mjs`（npm ci + vite build → 拷贝 dist 到本目录）。
+## Verify
+
+```sh
+node tools/verify-landing.mjs
+```
+
+Checks cover actual translation keys, local assets, anchor targets, truthful sample/cost labels, script syntax, and a simulated host exercising the v2 contract, deterministic windows, origin/method rejection, readiness, timeout, stale responses, retry and teardown. This command is a local implementation check, **not** permission to publish and not a substitute for browser interaction or public-download verification.
+
+The former `--allow-missing-shots` workflow belongs to the previous diagnostics-first design. Current evidence and pending work are tracked in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
+
+Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository root. The current share image is `assets/oh-agent-preview.jpg`; the deployment URL remains to be verified before launch. Oh Agent is the public-facing landing name; repository paths and native application identifiers retain project compatibility.
+
+## Public release
+
+On 2026-10-16 the configured public GitHub repository and releases API both returned 404 anonymously. The page therefore shows an explicit release-preparation state and does not link visitors to an unavailable download or source page. Before launch, verify repository visibility, downloadable assets, actual architecture/system requirements, signing and notarization; then update both locales and the verifier's release-state assertion. Nothing was published as part of this refactor.
+
+Canonical and social metadata retain the existing configured GitHub Pages address. That deployment address must be verified or replaced before publication; it is not a claim that the preview is already live there.

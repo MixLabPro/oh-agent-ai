@@ -1,5 +1,7 @@
 # 真截图资产位（LANDING 发布门）
 
+> 2026-10-16：下列清单属于旧版诊断优先 landing 的历史计划。City 优先改版已使用现有演示工作区截图；当前素材、验收与待补证据以 [RELEASE_REVIEW.md](../../RELEASE_REVIEW.md) 为准。当前 `verify-landing.mjs` 验证本地实现，不将旧五图清单当作新页面或公开发布已验收的证明。
+
 本目录存放从真机 app 捕获的发布门截图。**终端自动化捕获被 macOS Screen Recording
 权限拦截**（`screencapture: could not create image from display`），需手动捕获：
 

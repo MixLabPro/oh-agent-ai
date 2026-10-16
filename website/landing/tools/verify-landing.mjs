@@ -1,103 +1,158 @@
 #!/usr/bin/env node
-// verify-landing.mjs — LANDING 发布门的可执行化（2026-09-30）。
-// 零网络审计 + 真截图发布门 + 诚实文案在场检查。发布门当前为红（截图未捕获），
-// 用户按 assets/shots/README.md 捕获后自动转绿。
-//
-// 用法：node tools/verify-landing.mjs [--allow-missing-shots]
-//   --allow-missing-shots 仅供开发预览：跳过截图门（结果行会标注 GATE-OPEN）。
+// City-first landing contract and browser-host regressions; no network or dependencies.
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import vm from 'node:vm';
 
-import assert from "node:assert/strict";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import path from "node:path";
-import vm from "node:vm";
-import { fileURLToPath } from "node:url";
-
-const landing = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const allowMissingShots = process.argv.includes("--allow-missing-shots");
-
-// ── 1. 零网络审计：页面不得加载任何第三方脚本/字体/追踪 ──
-const html = readFileSync(path.join(landing, "index.html"), "utf8");
-const jsFiles = readdirSync(path.join(landing)).filter((f) => f.endsWith(".js")).map((f) => readFileSync(path.join(landing, f), "utf8"));
-const css = readFileSync(path.join(landing, "styles.css"), "utf8");
-const all = [html, css, ...jsFiles].join("\n");
-
-const externalScripts = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/g)].map((m) => m[1]).filter((src) => /^https?:\/\//.test(src));
-assert.deepEqual(externalScripts, [], `不得加载第三方脚本（found: ${externalScripts.join(", ")}）`);
-const externalLinks = [...html.matchAll(/<(?:link|img)[^>]+(?:href|src)=["']([^"']+)["']/g)]
-  .filter(([full]) => !/rel=["'][^"']*alternate/.test(full))
-  .map((m) => m[1]).filter((src) => /^https?:\/\//.test(src));
-assert.deepEqual(externalLinks, [], `静态资源不得外链（found: ${externalLinks.join(", ")}）`);
-assert.ok(!/@import\s+url\(/.test(css), "CSS 不得 @import 外链");
-assert.ok(!/fetch\(|XMLHttpRequest|sendBeacon|new Image\(\)\.src\s*=/.test(all), "不得有网络请求/信标代码");
-// 外链 <a href="https://..."> 仅允许 GitHub 仓库域（跳转型链接，非加载）。
-const anchorHrefs = [...html.matchAll(/<a[^>]+href=["'](https?:\/\/[^"']+)["']/g)].map((m) => m[1]);
-for (const href of anchorHrefs) {
-  assert.ok(/^https:\/\/github\.com\/MixLabPro\/agent-vitals/.test(href), `外链仅允许本仓库 GitHub 域：${href}`);
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const read = (name) => readFileSync(path.join(root, name), 'utf8');
+const html = read('index.html');
+const css = read('styles.css');
+const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1].split('?')[0]);
+for (const name of scripts) {
+  assert.ok(!/^https?:/.test(name), 'Scripts must be same-origin');
+  new vm.Script(read(name), { filename: name });
+  assert.doesNotMatch(read(name), /sendBeacon|XMLHttpRequest|document\.cookie|https?:\/\//);
 }
-console.log("零网络审计: OK（无第三方脚本/字体/追踪，外链仅 GitHub）");
-
-// ── 2. 诚实文案在场 ──
-assert.ok(/交互示意|示例数据|模拟数据|Sample data|simulated/.test(html), "演示区必须标注示意/模拟数据（双语词表）");
-assert.ok(/估算金额，非实际账单|不能直接视为扣款|estimate, not a bill|not charges/.test(html), "金额必须带估算口径标注（双语词表）");
-assert.ok(html.includes("右键 → 打开") || html.includes("right-click → Open"), "未公证测试版的右键打开指引必须在场（双语词表）");
-assert.ok(/本地|本机|不上传|on-device|never leave your Mac|never uploaded/.test(html), "本地处理主张必须在场（双语词表）");
-console.log("诚实文案: OK（示意标注 / 估算口径 / 右键打开指引 / 本地主张）");
-
-// ── 2b. 演示脚本行为守卫 ──
-// 回归：b1621514 把 app.js 误删成 2 行，静态检查全绿而页面的周期切换/图表/弹窗/动效开关全坏。
-// 不引入 jsdom（零依赖）：语法可解析 + 必需交互接线在场 + 脚本引用的每个选择器在页面里都存在。
-const appJs = readFileSync(path.join(landing, "app.js"), "utf8");
-new vm.Script(appJs, { filename: "app.js" }); // 语法错误直接抛出
-for (const needle of ["renderPeriod", "showModal", "motion-paused", "#chart-bars", "data-period", "selectEvent"]) {
-  assert.ok(appJs.includes(needle), `app.js 缺少演示交互接线：${needle}（是否被误删？）`);
+for (const [, source] of html.matchAll(/<(?:img|script)[^>]+src="([^"]+)"/g)) {
+  assert.ok(!/^https?:/.test(source), 'No external asset requests');
+  assert.ok(existsSync(path.join(root, source.split('?')[0])), `Missing asset: ${source}`);
 }
-assert.ok(appJs.split("\n").length >= 60, "app.js 行数异常偏少，疑似被截断");
-for (const [, id] of appJs.matchAll(/querySelector\('#([\w-]+)'\)/g)) {
-  assert.ok(html.includes(`id="${id}"`), `app.js 引用了页面里不存在的 #${id}`);
+assert.doesNotMatch(css, /@import|https?:\/\//);
+assert.match(css, /prefers-reduced-motion/);
+assert.match(html, /Mock sessions · interactive city/);
+assert.match(html, /<span>Oh Agent<small/);
+assert.doesNotMatch(html, /Agent Vitals/);
+assert.doesNotMatch(read('i18n.js'), /Agent Vitals/);
+assert.match(html, /An estimate, not a bill/);
+assert.match(html, /Public download is being prepared/);
+assert.ok(html.indexOf('id="city"') < html.indexOf('id="insights"'));
+assert.ok(!html.includes('data-ascii'), 'No obsolete primary animation dependency');
+assert.ok(!/<a[^>]+href="https?:/.test(html), 'Unverified public links must not be enabled');
+for (const [, anchor] of html.matchAll(/href="#([\w-]+)"/g)) assert.ok(html.includes(`id="${anchor}"`), `Missing anchor ${anchor}`);
+assert.doesNotMatch(html, /health score|framework-agnostic|burning money|saves you/i);
+
+// Execute localization against all actual translation-bearing elements.
+function translated(lang) {
+  const nodes = [];
+  for (const m of html.matchAll(/<([a-z0-9-]+)\b([^>]*\bdata-i18n(?:-aria|-alt)?="[^"]+"[^>]*)>/g)) {
+    const attrs = Object.fromEntries([...m[2].matchAll(/([\w-]+)="([^"]*)"/g)].map((v) => [v[1], v[2]]));
+    const tail = html.slice(m.index + m[0].length);
+    nodes.push({ innerHTML: tail.slice(0, tail.indexOf(`</${m[1]}>`)), getAttribute: (key) => attrs[key], setAttribute: (key, value) => { attrs[key] = value; }, attrs });
+  }
+  const document = { documentElement: { dataset: {} }, querySelector: () => null,
+    querySelectorAll: (selector) => nodes.filter((node) => node.attrs[selector.slice(1, -1)] !== undefined) };
+  const context = { document, location: { search: `?lang=${lang}`, pathname: '/', hash: '' },
+    localStorage: { getItem: () => null, setItem() {} }, URLSearchParams, window: {} };
+  vm.runInNewContext(read('i18n.js'), context);
+  for (const key of [...html.matchAll(/data-i18n(?:-aria|-alt)?="([^"]+)"/g)].map((m) => m[1])) {
+    const value = context.window.__avLandingLang.t(key);
+    assert.notEqual(value, key, `Untranslated key: ${key}`);
+    if (lang === 'zh') assert.match(value, /[\u3400-\u9fff]/, `Missing Chinese translation: ${key}`);
+  }
+  return context.window.__avLandingLang;
 }
-// 英文页：可见文本之外的 aria 属性也不得残留中文（屏幕阅读器会读出来）。
-// data-i18n-aria 的默认值由 i18n.js 覆盖，同样要求英文。
-const cjk = /[㐀-鿿]/;
-const aria = [...html.matchAll(/aria-label="([^"]*)"/g)].map((m) => m[1]).filter((v) => cjk.test(v));
-assert.deepEqual(aria, [], `英文页 aria-label 不得含中文：${aria.join(" | ")}`);
-// 英文默认面：可见文本、英文词表、CSS 生成内容都不得残留中文（唯一例外：语言切换入口「中文」）。
-const visible = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<!--[\s\S]*?-->/g, "").replace(/<a[^>]*data-lang-switch[^>]*>[\s\S]*?<\/a>/g, "");
-const visibleCjk = [...visible.matchAll(/>([^<>]*[㐀-鿿「」][^<>]*)</g)].map((m) => m[1].trim());
-assert.deepEqual(visibleCjk, [], `英文页可见文本含中文：${visibleCjk.join(" | ")}`);
-const i18nSrc = readFileSync(path.join(landing, "i18n.js"), "utf8");
-const enDict = i18nSrc.slice(i18nSrc.indexOf("en: {"), i18nSrc.indexOf("zh: {"));
-const enCjk = [...enDict.matchAll(/"([^"]*[㐀-鿿「」][^"]*)"/g)].map((m) => m[1].slice(0, 40));
-assert.deepEqual(enCjk, [], `英文词表含中文/全角引号：${enCjk.join(" | ")}`);
-const cssBase = css.split("\n").filter((l) => !/data-av-lang="zh"/.test(l)).join("\n");
-assert.ok(!/content:\s*"[^"]*[㐀-鿿]/.test(cssBase), "默认（英文）CSS 生成内容不得含中文；中文版请用 html[data-av-lang=\"zh\"] 覆盖");
-console.log("演示脚本: OK（可解析 / 交互接线在场 / 选择器均存在 / aria 与英文可见文本无中文残留）");
+translated('en');
+translated('zh');
+console.log('Content, assets, anchors, bilingual copy, privacy and cost basis: PASS');
 
-// ── 2c. 禁用词（LANDING_VALUE_FIRST_SPEC §0.6.5）：我们不产出/不支持的承诺 ──
-const i18nText = readFileSync(path.join(landing, "i18n.js"), "utf8");
-const banned = [/health score/i, /\bwasted\b|waste detected|estimated waste/i, /real-?time/i, /\bintervene\b/i, /auto-?fix/i, /\bburned\b/i, /saves? you/i, /framework-agnostic/i, /LangGraph|CrewAI|AutoGen/i, /cargo install/i, /agent-vitals (audit|inspect)/i];
-for (const re of banned) assert.ok(!re.test(html) && !re.test(i18nText), `页面含禁用承诺词：${re}`);
-console.log("禁用词: OK（无评分/浪费/实时/干预/框架无关/不存在的命令）");
-
-// ── 3. 真截图发布门 ──
-const shotsDir = path.join(landing, "assets", "shots");
-const required = ["hero-diagnostics.png", "b1-repeated-failure.png", "b2-usage-to-session.png", "b3-billing-scope.png", "tray.png"];
-const present = existsSync(shotsDir) ? readdirSync(shotsDir) : [];
-const missing = required.filter((name) => !present.includes(name));
-if (missing.length > 0 && !allowMissingShots) {
-  console.error(`真截图发布门: 未通过 — 缺 ${missing.length} 张：${missing.join(", ")}`);
-  console.error("捕获方式见 assets/shots/README.md（托盘打开工作台后 Cmd+Shift+4）");
-  process.exit(1);
+function host({ desktop = false, reduced = false } = {}) {
+  class Element {
+    constructor() { this.dataset = {}; this.listeners = {}; this.disabled = true; this.value = '30'; this.sent = []; this.contentWindow = { postMessage: (m) => this.sent.push(m) }; }
+    addEventListener(type, listener) { this.listeners[type] = listener; }
+    setAttribute() {}
+    append(element) { this.child = element; }
+    remove() { this.removed = true; }
+    focus() { this.focused = true; }
+  }
+  const elements = Object.fromEntries(['.city-window', '.city-stage', 'city-launch', 'city-status', 'city-window-days', 'city-reset', 'city-settings', 'city-stop'].map((id) => [id, new Element()]));
+  elements['.city-window'].querySelector = () => elements['.city-stage'];
+  const events = {};
+  const timers = new Map();
+  let timeId = 0;
+  let requested = 0;
+  let created;
+  let resolveFetch;
+  const fetchResult = new Promise((resolve) => { resolveFetch = resolve; });
+  const window = { __avLandingLang: { lang: 'en', t: (key) => key }, addEventListener: (name, handler) => { events[name] = handler; } };
+  const document = { hidden: false, querySelector: (key) => elements[key], getElementById: (key) => elements[key],
+    createElement: () => (created = new Element()), addEventListener: (name, handler) => { events[name] = handler; } };
+  const context = { document, window, location: { origin: 'http://localhost' },
+    matchMedia: (query) => ({ matches: query.includes('min-width') ? desktop : reduced }),
+    fetch: (url, opts) => { requested++; assert.equal(url, 'city3d/index.html'); assert.equal(opts.credentials, 'omit'); return fetchResult; },
+    setTimeout: (f) => { timers.set(++timeId, f); return timeId; }, clearTimeout: (id) => timers.delete(id),
+    IntersectionObserver: class { constructor(fn) { fn([{ isIntersecting: true }]); } observe() {} } };
+  vm.runInNewContext(read('city-host.js'), context);
+  const send = (command, args, origin = 'http://localhost') => {
+    const instanceId = new URL(created.src, 'http://localhost').searchParams.get('instanceId');
+    events.message({ source: created.contentWindow, origin, data: { channel: 'av-plugin-rpc', type: 'request', version: 1, instanceId, requestId: 'rpc-test', command, args } });
+  };
+  const readProjection = (days) => {
+    const instanceId = new URL(created.src, 'http://localhost').searchParams.get('instanceId');
+    send('plugin_request', { request: { version: 1, instanceId, requestId: 'dto', method: 'data.read', payload: { projection: 'city', version: 2, windowDays: days } } });
+    return created.sent.at(-1).result.result;
+  };
+  const toolbar = (enabled) => {
+    const instanceId = new URL(created.src, 'http://localhost').searchParams.get('instanceId');
+    send('plugin_message', { message: { version: 1, instanceId, type: 'toolbar.update', items: [{ commandId: 'city.reset', enabled }] } });
+  };
+  return { elements, events, timers, send, readProjection, toolbar, resolveFetch,
+    requested: () => requested, frame: () => created, start: () => events['av:explore-city']() };
 }
-// 双语（2026-10-01 i18n）：默认英文 + zh 可切。
-assert.equal(html.match(/<html lang="en">/)?.[0], '<html lang="en">', "默认语言必须英文");
-assert.ok(html.includes('hreflang="zh"') && html.includes('hreflang="en"'), "hreflang 双语声明在场");
-assert.ok(html.includes('data-lang-switch="zh"'), "默认面上必须给中文切换入口");
-assert.ok(html.includes('data-i18n='), "i18n 替换键已挂载");
-const i18nSource = readFileSync(path.join(landing, "i18n.js"), "utf8");
-assert.ok(!/fetch\(|XMLHttpRequest|sendBeacon/.test(i18nSource), "i18n 脚本零网络");
-assert.ok(!/document\.cookie/.test(i18nSource), "语言偏好不得用 Cookie（localStorage 本地）");
-console.log(missing.length === 0
-  ? "真截图发布门: OK（5 张真机截图齐备）"
-  : `真截图发布门: GATE-OPEN（--allow-missing-shots 开发模式，缺 ${missing.length} 张）`);
-
-console.log("verify-landing: PASS");
+const h = host();
+assert.equal(h.requested(), 0, 'Narrow view must not load 3D before user intent');
+h.start(); h.start();
+assert.equal(h.requested(), 1, 'Concurrent activation must coalesce');
+h.resolveFetch({ ok: true });
+await Promise.resolve(); await Promise.resolve();
+assert.equal(h.elements['.city-window'].dataset.cityState, 'loading', 'Iframe load is not readiness');
+const seven = h.readProjection(7);
+assert.equal(seven.protocol, 'city:v2');
+assert.equal(seven.source, 'fixture');
+assert.equal(seven.harnesses.length, 4);
+assert.deepEqual(JSON.parse(JSON.stringify(seven)), JSON.parse(JSON.stringify(h.readProjection(7))), 'Fixture must be deterministic');
+const thirty = h.readProjection(30);
+assert.equal(thirty.sessions.length, 2000, 'The default mock city must receive all 2000 sessions');
+assert.equal(thirty.coverage.returned, 2000);
+assert.equal(thirty.coverage.truncated, false);
+assert.equal(seven.sessions.length, 469, 'The week remains a filtered subset of the same 2000-session dataset');
+assert.ok(seven.sessions.length > 0 && thirty.sessions.length > seven.sessions.length);
+assert.ok(seven.sessions.every((session) => Date.parse(session.last_event_at) >= Date.parse(seven.window.from)));
+const count = h.frame().sent.length;
+h.send('plugin_request', {}, 'https://other.example');
+assert.equal(h.frame().sent.length, count, 'Foreign origins must not receive data');
+const instanceId = new URL(h.frame().src, 'http://localhost').searchParams.get('instanceId');
+h.send('plugin_request', { request: { version: 1, instanceId, requestId: 'denied', method: 'ui.open-session', payload: { handle: 'private' } } });
+assert.equal(h.frame().sent.at(-1).result.ok, false, 'No host-session or generic IPC access');
+h.elements['city-window-days'].value = '7';
+h.readProjection(7); h.toolbar(true);
+assert.equal(h.elements['.city-window'].dataset.cityState, 'ready');
+assert.equal(h.timers.size, 0, 'Successful readiness clears the startup timeout');
+h.toolbar(false);
+assert.equal(h.elements['.city-window'].dataset.cityState, 'ready', 'A temporary terrain rebuild is not a fatal error');
+h.readProjection(90); h.toolbar(true);
+assert.equal(h.elements['city-window-days'].value, '90', 'Settings and outer range selector stay in sync');
+h.elements['city-stop'].listeners.click();
+assert.equal(h.elements['.city-window'].dataset.cityState, 'idle');
+assert.ok(h.frame().removed, 'Closing must release the iframe and WebGL resources');
+const timed = host(); timed.start(); [...timed.timers.values()][0](); timed.resolveFetch({ ok: true });
+await Promise.resolve(); await Promise.resolve();
+assert.equal(timed.elements['.city-window'].dataset.cityState, 'error');
+assert.equal(timed.frame(), undefined, 'Late HEAD response must not create a timed-out frame');
+timed.start(); await Promise.resolve(); await Promise.resolve();
+assert.ok(timed.frame(), 'Retry creates a fresh instance');
+const missing = host(); missing.start(); missing.resolveFetch({ ok: false });
+await Promise.resolve(); await Promise.resolve();
+assert.equal(missing.elements['.city-window'].dataset.cityState, 'error', 'Missing build must show fallback');
+const unsupported = host(); unsupported.start(); unsupported.resolveFetch({ ok: true });
+await Promise.resolve(); await Promise.resolve();
+unsupported.toolbar(false);
+assert.equal(unsupported.elements['.city-window'].dataset.cityState, 'error', 'Unavailable renderer readiness must show fallback');
+const desktop = host({ desktop: true });
+assert.equal(desktop.requested(), 1, 'Desktop hero starts the production City frontend automatically');
+const reduced = host({ desktop: true, reduced: true });
+assert.equal(reduced.requested(), 0, 'Reduced motion retains explicit entry');
+console.log(`City host: PASS (v2 fixture ${seven.sessions.length}/${thirty.sessions.length} sessions, origin/method checks, explicit readiness, teardown, timeout, stale response, retry, missing build)`);
+console.log('verify-landing: PASS (local implementation checks; public release remains pending)');
