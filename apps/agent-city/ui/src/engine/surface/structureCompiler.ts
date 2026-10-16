@@ -3,7 +3,7 @@
  *
  * 桥面、高架、桁架、渠化口、尽端回车圈原来各自在 roadSystem 里边算边往 THREE 实例矩阵里写，
  * 驾驶要么另算一份（第二份几何，迟早与渲染分叉），要么凭 highways 折线补造路面（spec §3 明令禁止）。
- * 现在几何只在这里算一次：渲染按描述符原样组矩阵（实例矩阵逐字节不变，有守卫），驾驶取同一描述符
+ * 现在几何只在这里算一次：渲染按描述符原样组矩阵（有版本化渲染基线守卫），驾驶取同一描述符
  * 的 BOX 顶面——按实例的缩放、Euler 旋转（XYZ / YZX / YXZ，与 THREE.Euler 同公式）和平移变换，
  * 不按 deckHeights + 厚度猜曲面。护栏、桥墩、桁架是静态障碍，不是可行驶面。 */
 import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
@@ -87,14 +87,32 @@ export function bridgeDeckProfile(layout: BridgeLayoutInput, from: Vec2, to: Vec
   const lean = (p: Vec2) => half > 0 ? (road({ x: p.x + nx * half, z: p.z + nz * half }) - road({ x: p.x - nx * half, z: p.z - nz * half })) / width : 0;
   const leans = [fromLands ? lean(from) : null, toLands ? lean(to) : null].filter((v): v is number => v !== null);
   const crossSlope = leans.length ? leans.reduce((n, v) => n + v, 0) / leans.length : 0;
-  return Object.freeze({ ya, yb, length, pitch, crossSlope, fromLands, toLands, slant: Math.hypot(length, yb - ya), at: (t: number) => ya + (yb - ya) * t });
+  const leanFrom = fromLands ? lean(from) : crossSlope, leanTo = toLands ? lean(to) : crossSlope;
+  return Object.freeze({ ya, yb, length, pitch, crossSlope, leanFrom, leanTo, fromLands, toLands, slant: Math.hypot(length, yb - ya), at: (t: number) => ya + (yb - ya) * t });
 }
 /** Edge bridge (straight span): deck slab, railings, lane lines, dashes, piers — the parts
  * buildInfrastructure draws, in its order, all standing on the slab's actual top face. */
 export function bridgeDeckParts(edge: RoadEdge, layout: BridgeLayoutInput): BoxPart[] {
+  const [a,b]=edge.points,profile=bridgeDeckProfile(layout,a,b,edge.width);
+  const change=Math.abs(profile.leanTo-profile.leanFrom)*edge.width;
+  if(change<=0.08)return bridgeDeckSectionParts(edge,layout,profile);
+  // A rigid slab cannot meet opposite bank leans. Short overlapping slabs
+  // distribute the roll change; the worst lateral seam step is bounded by 0.02.
+  const count=Math.min(256,Math.max(2,Math.ceil(profile.length/8),Math.ceil(change/0.04)));
+  const parts:BoxPart[]=[];
+  for(let i=0;i<count;i++){
+    const t0=i/count,t1=(i+1)/count,point=(t:number)=>({x:a.x+(b.x-a.x)*t,z:a.z+(b.z-a.z)*t});
+    const ya=profile.at(t0),yb=profile.at(t1),length=profile.length/count;
+    const crossSlope=profile.leanFrom+(profile.leanTo-profile.leanFrom)*(t0+t1)/2;
+    parts.push(...bridgeDeckSectionParts({...edge,points:[point(t0),point(t1)]},layout,
+      {...profile,ya,yb,length,crossSlope,slant:Math.hypot(length,yb-ya),at:(t:number)=>ya+(yb-ya)*t}).filter(p=>p.role!=="bridge-pier"));
+  }
+  parts.push(...bridgeDeckSectionParts(edge,layout,profile).filter(p=>p.role==="bridge-pier"));
+  return parts;
+}
+function bridgeDeckSectionParts(edge: RoadEdge, layout: BridgeLayoutInput, profile: ReturnType<typeof bridgeDeckProfile>): BoxPart[] {
   const parts: BoxPart[] = [];
   const [a, b] = edge.points;
-  const profile = bridgeDeckProfile(layout, a, b, edge.width);
   const { length, pitch } = profile;
   const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
   // Roll about the span axis (local x, applied first in YZX) so +lateral (local +z) rises by crossSlope.
@@ -174,6 +192,67 @@ export function expresswayRun(layout: ExpresswayLayout, run: ReadonlyArray<{ x: 
 }
 
 export type ExpresswayPiece = BoxPart & Readonly<{ highway: number; segment: number }>;
+/** A portal bent leaves the full ground-road corridor between its columns. Support stations
+ * may move along the same deck to avoid crossing roads; the cap stays above vehicle clearance.
+ * These are real boxes shared by rendering and collision, never collision-only exclusions. */
+function expresswaySupport(layout: ExpresswayLayout, points: Vec2[], heights: number[], station: number): BoxPart[] {
+  type Corridor = { a: Vec2; b: Vec2; half: number; ya?: number; yb?: number };
+  // Include junction shoulders and other expressway ramps: a column clear of the ground
+  // centreline can otherwise emerge through a neighbouring, lower ramp.
+  const roads: Corridor[] = renderRoadEdges(layout.roadEdges ?? []).filter(e => !e.bridge && e.structure !== "deck")
+    .flatMap(e => e.points.slice(1).map((b, i) => ({ a: e.points[i], b, half: e.width / 2 + 1.5 })));
+  for (const run of (layout as Partial<Pick<CityLayout,"highways">>).highways ?? []) {
+    const other = expresswayRun(layout, run);
+    other.points.slice(1).forEach((b,i) => roads.push({a:other.points[i],b,half:EXPRESSWAY_DECK_WIDTH/2,
+      ya:other.heights[i]+EXPRESSWAY_DECK_THICKNESS,yb:other.heights[i+1]+EXPRESSWAY_DECK_THICKNESS}));
+  }
+  const lengths = [0];
+  for (let i = 1; i < points.length; i++) lengths.push(lengths[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].z - points[i - 1].z));
+  const distance = (x: number, z: number, a: Vec2, b: Vec2) => {
+    const dx = b.x - a.x, dz = b.z - a.z, ll = dx * dx + dz * dz;
+    const t = ll > 0 ? Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / ll)) : 0;
+    return { gap: Math.hypot(x - a.x - t * dx, z - a.z - t * dz), x: a.x + t * dx, z: a.z + t * dz, t };
+  };
+  let fallback: BoxPart[] = [];
+  for (const offset of [4.65, 6.65, 8.65, 10.65, 12.65]) for (const shift of [0, -4, 4, -8, 8, -12, 12, -16, 16, -24, 24, -34, 34]) {
+    const at = station + shift;
+    if (at < 0 || at > lengths[lengths.length - 1]) continue;
+    let i = 1; while (i < lengths.length - 1 && lengths[i] < at) i++;
+    if (!points[i] || lengths[i] - lengths[i - 1] < 6) continue;
+    const a = points[i - 1], b = points[i], length = lengths[i] - lengths[i - 1], t = (at - lengths[i - 1]) / length;
+    const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+    const nx = -(b.z - a.z) / length, nz = (b.x - a.x) / length, yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+    // Match the underside of the tilted slab at this station, including its lateral edge.
+    const top = heights[i - 1] + (heights[i] - heights[i - 1]) * t + 0.05;
+    const capHeight = 0.65, width = 1.1, depth = 1.8;
+    const columns = [-offset, offset].map(side => {
+      const cx = x + nx * side, cz = z + nz * side, ground = Math.max(-3, layout.terrain.height(cx, cz));
+      return part(cx, ground, cz, depth, top - capHeight - ground, width, "#a9aaa0", "expressway-pier", yaw, 0, "YZX");
+    });
+    if (columns.some(c => c.sy < 0.85)) continue;
+    const cap = part(x, top - capHeight, z, depth, capHeight, 2 * offset + width, "#a9aaa0", "expressway-pier", yaw, 0, "YZX");
+    const support = [...columns, cap];
+    if (!fallback.length) fallback = support;
+    const radius = Math.hypot(depth, width) / 2 + 0.3;
+    const roadTop = (r: Corridor, q: ReturnType<typeof distance>) => r.ya === undefined
+      ? (Number.isFinite(layout.extent) ? terrainSurfaceHeight(layout as BridgeLayoutInput,q.x,q.z) : layout.terrain.height(q.x,q.z))+ROAD_LIFT
+      : r.ya+(r.yb!-r.ya)*q.t;
+    if (columns.some(c => roads.some(r => {
+      const q=distance(c.x,c.z,r.a,r.b), y=roadTop(r,q);
+      return q.gap<=r.half+radius && c.y<y+1.5 && c.y+c.sy>y-0.05;
+    }))) continue;
+    // Conservative cap bounding circle: if it can cover a road, preserve 1.5 units headroom.
+    const capRadius = Math.hypot(depth, cap.sz) / 2;
+    if (roads.some(r => {
+      const q = distance(x, z, r.a, r.b);
+      const y=roadTop(r,q);
+      return q.gap <= r.half + capRadius && cap.y < y + 1.5 && top > y - 0.05;
+    })) continue;
+    return support;
+  }
+  // Keep a physical support if no road-free station exists; audits must still expose it.
+  return fallback;
+}
 /** District expressways: piers, then per segment deck + lane lines + rails (buildDistrictExpressways order).
  * Segments shorter than 6 are not drawn — and therefore not driveable. */
 export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"> & Partial<Pick<CityLayout, "extent" | "roadEdges">>): ExpresswayPiece[] {
@@ -194,10 +273,7 @@ export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"
         // 墩顶止于桥面底面（咬合 0.05）。BOX 以底面为原点：y 是墩底而不是中心。
         const pierTop = heights[index] + 0.05;
         if (pierTop - groundY < 1.5) continue; // 匝道落地段不需要桥墩
-        const neighbor = points[Math.min(index + 1, points.length - 1)];
-        const prev = points[Math.max(index - 1, 0)];
-        const pierYaw = -Math.atan2(neighbor.z - prev.z, neighbor.x - prev.x);
-        push(part(point.x, groundY, point.z, 1.8, pierTop - groundY, 8.4, "#a9aaa0", "expressway-pier", pierYaw, 0, "YZX"), -1);
+        for (const support of expresswaySupport(layout, points, heights, accumulated)) push(support, -1);
       }
     }
     for (let index = 1; index < points.length; index += 1) {

@@ -24,7 +24,7 @@ import type { SurfaceRegionsBuild } from "./surfaceRegions";
 import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch, SurfacePortal } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 5;
+export const CITY_SURFACE_GEOMETRY_VERSION = 6;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
 const LANDING_ZONE = 3;
 
@@ -155,8 +155,8 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     if (edge.points.length !== 2) { issues.push({ source, reason: "unsupported", detail: "invalid-mesh" }); continue; }
     bridges++;
     const parts = bridgeDeckParts(edge, layout);
-    const deck = parts.find((p) => p.role === "bridge-deck")!;
-    const top = boxTopFace(deck, bridgeDrivableHalf(edge));
+    const decks = parts.filter((p) => p.role === "bridge-deck");
+    const tops = decks.map(p => boxTopFace(p, bridgeDrivableHalf(edge)));
     const [a, b] = edge.points; const len = Math.hypot(b.x - a.x, b.z - a.z); const ux = (b.x - a.x) / len; const uz = (b.z - a.z) / len;
     // Any ground carriageway under the span that does not belong to the two landing nodes → own layer
     // (the bridgehead junction fans legitimately reach 1.5–2.3 into the span; they are the landing).
@@ -169,9 +169,10 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       overpass = groundPatchesAt(a.x + ux * s - uz * w, a.z + uz * s + ux * w).some((id) => !landingPatch(id) && s > LANDING_ZONE && s < len - LANDING_ZONE);
     }
     const layerId = overpass ? `bridge:${edge.id}` : "ground";
-    const deckPatch = add(`bridge:${edge.id}`, "bridge-deck", layerId, source, quad(top));
+    const deckPatches = tops.map((top,i) => add(decks.length===1?`bridge:${edge.id}`:`bridge:${edge.id}:${String(i).padStart(3,"0")}`, "bridge-deck", layerId, source, quad(top)));
     // Overpass: portal candidates to the landing nodes' ground pieces under each end zone.
-    if (overpass && deckPatch) for (const [s0, s1, seam] of [[-0.5, LANDING_ZONE, a], [len - LANDING_ZONE, len + 0.5, b]] as const) {
+    if (overpass) for (const [s0, s1, seam, deckPatch] of [[-0.5, LANDING_ZONE, a,deckPatches[0]], [len - LANDING_ZONE, len + 0.5, b,deckPatches[deckPatches.length-1]]] as const) {
+      if(!deckPatch)continue;
       const ids = new Set<string>();
       for (let s = s0; s <= s1 + 1e-9; s += 0.5) for (let w = -half; w <= half + 1e-9; w += Math.max(0.5, half / 4)) {
         for (const id of groundPatchesAt(a.x + ux * s - uz * w, a.z + uz * s + ux * w)) if (landingPatch(id)) ids.add(id);
@@ -180,9 +181,10 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     }
     // The slab is a solid too: lower-layer traffic must see the real underside,
     // not just the support top and railings. Link it to its own supporting patch.
-    obstacles.push(Object.freeze({ id: `${source.id}:slab`, role: "bridge-deck", shape: "box", corners: Object.freeze(boxCorners(deck)), surfacePatchId: `bridge:${edge.id}` }));
+    decks.forEach((deck,i)=>obstacles.push(Object.freeze({ id: decks.length===1?`${source.id}:slab`:`${source.id}:slab:${i}`, role: "bridge-deck", shape: "box", corners: Object.freeze(boxCorners(deck)), surfacePatchId: deckPatches[i]?.id })));
     for (const p of parts) if (p.role === "bridge-railing" || p.role === "bridge-pier") obstacles.push(Object.freeze({ id: `${source.id}:${p.role}:${obstacles.length}`, role: p.role, shape: "box", corners: Object.freeze(boxCorners(p)) }));
     for (const [end, p, out] of [["from", a, -1], ["to", b, 1]] as const) {
+      const section=end==="from"?0:tops.length-1,top=tops[section];
       // The seam is the deck's end edge, 0.25 past the node: compare the ground just outside it with
       // the deck top extrapolated along its pitch to the same point.
       const slope = (top[1].y - top[0].y) / Math.hypot(top[1].x - top[0].x, top[1].z - top[0].z);
@@ -192,7 +194,7 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       const step = g === null ? null : deckY - g;
       const status = overpass ? "layered" : g === null ? "no-ground" : Math.abs(step!) <= tolerance ? "aligned" : "step";
       const seam = seamOf(top, end);
-      landings.push(Object.freeze({ structureId: source.id, end, layerId, patchId: `bridge:${edge.id}`, seam, x: p.x, z: p.z, outX: ux * out, outZ: uz * out, deckY, groundY: g, step, status }));
+      landings.push(Object.freeze({ structureId: source.id, end, layerId, patchId: deckPatches[section]?.id??`bridge:${edge.id}`, seam, x: p.x, z: p.z, outX: ux * out, outZ: uz * out, deckY, groundY: g, step, status }));
     }
   }
   for (const bar of trussBars(layout)) {

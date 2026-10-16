@@ -104,11 +104,11 @@ const drive = (regions, x0, z, x1) => {
   const run = drive(regions, -40, 0, 40); assert.ok(run.reached, `climbs across the sloped bridge (${JSON.stringify(run)})`);
 }
 {
-  // Opposite cross slopes at the two landings: a box cannot twist, the mean lean is level and both
-  // road edges stand 0.15 above the deck edge → the landings stay closed (reported, not forced).
+  // Opposite cross slopes require multiple roll-transition slabs, shared with the renderer.
   const { c, regions } = build(city([edge(W, A), span(), edge(B, E)], (x, z) => 2 + (x < 0 ? 0.06 : -0.06) * z));
-  assert.ok(kit.landingConnectivity(c, regions).some((x) => !x.connected), "a twisted landing is not opened");
-  assert.equal(drive(regions, -40, 0, 40).reached, false);
+  assert.ok(c.surface.patches.filter(p=>p.kind==="bridge-deck").length>1,"opposite bank leans split the deck");
+  assert.ok(kit.landingConnectivity(c, regions).every((x) => x.connected), "both bank leans meet the segmented deck");
+  assert.equal(drive(regions, -40, 0, 40).reached, true);
 }
 {
   // Dangling span over open water: the end with no road keeps the landed height (no dip into the sea).
@@ -204,7 +204,7 @@ const drive = (regions, x0, z, x1) => {
   const racing = port.capture({ layout, ground: kit.compileGroundRoadSurface(layout) }); port.invalidate();
   assert.equal((await racing).status, "stale", "a capture overtaken by a city change is stale");
 }
-console.log("Structure surface: THREE-exact BOX/cylinder tops, level and sloped bridges crossed by the kernel, twisted landing closed, dangling deck stays level, overpass layering, dangling/multi-point bridges, expressway layer and rails, channelised island, cul-de-sac turnaround, host snapshot port passed.");
+console.log("Structure surface: THREE-exact BOX/cylinder tops, level/sloped/roll-transition bridges crossed by the kernel, dangling deck stays level, overpass layering, dangling/multi-point bridges, expressway layer and rails, channelised island, cul-de-sac turnaround, host snapshot port passed.");
 
 if (process.argv.includes("--cities")) {
   const baselineFile = JSON.parse(readFileSync(new URL("../fixtures/city-driving/structure-render-baseline.json", import.meta.url), "utf8"));
@@ -218,7 +218,7 @@ if (process.argv.includes("--cities")) {
     // by design; everything else — curbs included — must still equal the pre-descriptor renderer.
     const before = baseline[`${seed}/${tier}`]; const corrected = correctedPlans[`${seed}/${tier}`];
     for (const name of Object.keys(before)) {
-      const expected = name === "buildInfrastructure" || name === "buildTrussBridges" ? corrected[name] : corrected[name] ?? before[name];
+      const expected = baselineFile.portalPiers?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.rollTransition?.plans?.[`${seed}/${tier}`]?.[name] ?? (name === "buildInfrastructure" || name === "buildTrussBridges" ? corrected[name] : corrected[name] ?? before[name]);
       assert.equal(digests[name], expected, `seed ${seed} tier ${tier}: ${name} render output changed`);
     }
     const { c, regions } = build(plan);

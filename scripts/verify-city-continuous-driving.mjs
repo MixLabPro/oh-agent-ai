@@ -200,7 +200,7 @@ if(process.argv.includes("--contact-cities")) {
       const capture=await new kit.CitySurfacePort().capture(lease.source);assert.equal(capture.status,"ready");
       const routes=kit.directedEdgeRoutes(layout.roadEdges.filter(e=>e.id.startsWith(prefix)));assert.equal(routes.length,seed===42?2:6,`500/${seed}: contact regression edges missing`);
       const audited=kit.auditCapture(capture,revision=>({baseSnapshotHash:revision,...kit.continuousAuditKeyFields(),kernelBuildId:"C-contact-regression-v3",
-        surfaceVersion:5,snapshotCompilerVersion:1,controllerVersion:1,plannerVersion:1,observerVersion:2,manifestHash:"C-contact-regressions-v3",releasePolicyVersion:1,releaseBoundaryHash:null}),routes);
+        surfaceVersion:capture.readWorld().surface.geometryVersion,snapshotCompilerVersion:1,controllerVersion:1,plannerVersion:1,observerVersion:2,manifestHash:"C-contact-regressions-v3",releasePolicyVersion:1,releaseBoundaryHash:null}),routes);
       assert.equal(audited.status,"ready");
       for(const result of audited.results){
         assert.ok(result.run,`${result.routeId}: regression must exercise a dynamic run`);

@@ -81,9 +81,22 @@ A6 的发现：原来的桥面是一块平板，顶面取两岸**原始**地形�
 - 含修复补丁（planPatch）的显示布局已加入宿主版本失效与道路修改矩阵，具体命令/覆盖见任务1/2实施记录；原生 bundle 性能与内存仍未测。
 - 已存在的守卫失败（与本轮无关，在744f926上就失败）：`verify-city-culdesac-bulbs`（380会话布局 `culDeSacEnds` 为空）、`verify-city-scene-baseline`（场景图摘要不一致）。
 
+## 2026-10-16：反向横坡桥面与门式高架支撑（geometryVersion 6）
+
+上述 A7 的单块 BOX 限制已有后续修复：两岸横坡差较大时，桥面、护栏与标线共用短分段 BOX，逐段过渡横坡。seed 7/tier 1 的唯一东西连接桥，两端均连通；使用校准整车碰撞体和独立连续复核器，双向共 572 tick 通过。没有放宽轮面扭曲、碰撞或桥头高度容差，其他桥头故障仍需各自核验。
+
+高架的墙式桥墩改为两根独立立柱与顶部横梁，渲染和碰撞使用同一组真实盒体。优先沿桥面移动支撑位置避开横穿道路，再扩大两柱间距；检查地面车道、路口肩部和相邻较低匝道，横梁保留 1.5 高净空。若有界搜索仍找不到空位，保留实体支撑供审计报告，不能靠省略碰撞放行。
+
+`verify-city-expressway-piers.mjs --cities` 检查五种子 × 三等级全部 15 个布局、753 个桥墩盒体，没有发现桥墩占用可行驶路面；这是采样诊断，不能代替逐路开放审计。另用实际连续碰撞查询验证 8/12 宽的平行、垂直、斜向道路整车穿越，同时确认立柱仍阻止初始重叠。渲染基线保留旧记录，新增 `rollTransition` 和 `portalPiers` 记录有意的几何变化；路缘等其他渲染组保持原摘要。
+
+`--scenes` 进一步按 CityParts 的真实 Miami 配置构建 0/90/500 会话 × 五种子的 15 个渲染场景：633 个桥墩盒体，路面占用诊断为零。完整结构回归的 28 座桥、14 个匝道连接通过相应检查；仍有一条直线引道路线碰路缘、一条匝道起点 footprint 失败，守卫如实报告，不作正式开放证据。
+
 ## 命令
 
 ```sh
+node scripts/verify-city-bridge-roll-transition.mjs       # seed 7/1 双向整车连续复核
+node scripts/verify-city-expressway-piers.mjs --cities    # 门式桥墩净空及十五城路面占用诊断
+node scripts/verify-city-expressway-piers.mjs --scenes    # 真实 Miami 渲染场景的桥墩占路诊断
 node scripts/verify-city-structure-surface.mjs            # 合成 + THREE对照 + 宿主端口
 node scripts/verify-city-structure-surface.mjs --cities   # 十五城渲染字节对照、桥头连通、同核过桥
 node scripts/verify-city-surface-sessions.mjs             # 0/90/500会话 × 5种子显示布局

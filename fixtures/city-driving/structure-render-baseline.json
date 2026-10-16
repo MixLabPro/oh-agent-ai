@@ -194,5 +194,165 @@
         "buildDistrictExpressways": "82d07ad692f08209f533fc3075adc0d6cc0f6db9fae3634609585fd65d816aeb"
       }
     }
+  },
+  "rollTransition": {
+    "geometryVersion": 6,
+    "reason": "Opposite bank cross slopes use short overlapping roll-transition slabs; original and A7 baselines retained. All other structure groups including curbs are unchanged.",
+    "plans": {
+      "1/1": {
+        "buildInfrastructure": "0f59cf15424b7fcb57c41ea25dd7b84260ae8e19ebb17f888704362cb60b05e5",
+        "bridges": [
+          {
+            "id": "107.81:-81.11/62.09:-93.36",
+            "slabs": 6
+          }
+        ]
+      },
+      "1/2": {
+        "buildInfrastructure": "a7632ed75c6f736e41f63238df7eec40faaccb17046fcfa1f300dc4e919be831",
+        "bridges": [
+          {
+            "id": "141.71:-374.69/185.84:-363.08",
+            "slabs": 16
+          }
+        ]
+      },
+      "1/3": {
+        "buildInfrastructure": "f1dd7b8cbd160bf823795f2ba7468365fe2779ab99325e5e2afe7ba594e62032",
+        "bridges": [
+          {
+            "id": "43.66:279.78/98.64:286.24",
+            "slabs": 7
+          }
+        ]
+      },
+      "7/1": {
+        "buildInfrastructure": "9fe57db97633bf23d708789972d2351e066866a7161e18100461c0656326b730",
+        "bridges": [
+          {
+            "id": "45.15:138.07/97.37:131.2",
+            "slabs": 10
+          }
+        ]
+      },
+      "7/2": {
+        "buildInfrastructure": "69c1f48238fb5e90e3ee794a41fd3ed0a54bf9493da7ff203821d681c8007a21",
+        "bridges": [
+          {
+            "id": "104.34:125.4/44.79:118.08",
+            "slabs": 8
+          }
+        ]
+      },
+      "42/1": {
+        "buildInfrastructure": "bb128e52d5e24e365da953a0ac065fd822a9de41b912f3b0ea419188a4b46434",
+        "bridges": [
+          {
+            "id": "140.61:110.73/95.15:117.02",
+            "slabs": 6
+          }
+        ]
+      },
+      "42/2": {
+        "buildInfrastructure": "9a308ca3689773a69742a666b583982d98e2f1190675d1df25e639aa8494ef4b",
+        "bridges": [
+          {
+            "id": "145.25:-689.12/186.19:-660.49",
+            "slabs": 20
+          },
+          {
+            "id": "-319.94:707.54/-328.75:712.17",
+            "slabs": 19
+          }
+        ]
+      },
+      "42/3": {
+        "buildInfrastructure": "94dc8c5bf16cc727454b86189c38ed32b99278ffe448dd1847c38e9d926417b1",
+        "bridges": [
+          {
+            "id": "129.59:197.87/170.68:205.67",
+            "slabs": 7
+          }
+        ]
+      },
+      "2026/1": {
+        "buildInfrastructure": "f130ba904da2d47b3adef2e6d34e1e515c8342c8d0cdda41bb670721f9898755",
+        "bridges": [
+          {
+            "id": "-38.51:312.72/-93.12:311.33",
+            "slabs": 7
+          }
+        ]
+      },
+      "2026/2": {
+        "buildInfrastructure": "d3b9fd7e692e49bff88ee48b7c2d724ef9b18fb1b295837f90c9cb0c52db58f1",
+        "bridges": [
+          {
+            "id": "-26.8:257.01/-79.73:249.95",
+            "slabs": 7
+          }
+        ]
+      },
+      "2026/3": {
+        "buildInfrastructure": "d9818081f43389b43191b29f610308195e17049321a5f994c8a04d17578d7b36",
+        "bridges": [
+          {
+            "id": "-39.25:298.54/-91.63:282.98",
+            "slabs": 12
+          }
+        ]
+      }
+    }
+  },
+  "portalPiers": {
+    "geometryVersion": 6,
+    "reason": "Replace wall supports with two road-clearing columns and an overhead cap. Only buildDistrictExpressways changes; other groups and earlier baselines are preserved.",
+    "plans": {
+      "1/1": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "1/2": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "1/3": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "7/1": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "7/2": {
+        "buildDistrictExpressways": "38d6908db4201d3592736eaeff2ac1375091b6ca9352f9b8200e7467d5f5e427"
+      },
+      "7/3": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "42/1": {
+        "buildDistrictExpressways": "88b3199362ad3dcae22419f7084aed23c0c05c2612e705e2cf883d44b7ed9d4a"
+      },
+      "42/2": {
+        "buildDistrictExpressways": "2c2de511ab532f8e8b3f61899d978f5f93d9b05ed77c86820db5222f45eefc69"
+      },
+      "42/3": {
+        "buildDistrictExpressways": "7f8544ab4b2e792428ce59eb2d369aaf493ddb3c73c1d74e44b93341c639bfd6"
+      },
+      "2026/1": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "2026/2": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "2026/3": {
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "65537/1": {
+        "buildDistrictExpressways": "39d4cabf24481446b80f7117b3124a7907450c4f57f9f3d9865760861cecd355"
+      },
+      "65537/2": {
+        "buildDistrictExpressways": "0da54fbd68a815113631b1e9e9834f0804392247b705b4c5532dcd7271c4ce61"
+      },
+      "65537/3": {
+        "buildDistrictExpressways": "e05dc217aba818a1768defee7e28b0019e72e3ecdc8d65858c533d2fdf6a32f9"
+      }
+    }
   }
 }
