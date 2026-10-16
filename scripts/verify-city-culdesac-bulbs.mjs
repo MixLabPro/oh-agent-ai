@@ -2,11 +2,18 @@
 // 尽端回车圈守卫（路网形态批 §5-3，docs/CITY_PLANNER_V2_FINDINGS.md §5）：合法尽端
 // （EndpointRole cul-de-sac）有语义、几何上却路戛然而止——渲染层用回车圆盘补形。
 // 本守卫用固定合成数据 → layoutCity → new CityParts，断言场景与规划产物一致：
-//   (a) layout.culDeSacEnds 非空（迈阿密配置下必有：滨海大道计划断点属骨架路，生长剪枝不删）；
+//   (a) 两档合起来 layout.culDeSacEnds 非空（装饰输入没整体丢失）；单档允许为空，但只能是「最终路网里
+//       本来就没有合法尽端」——见 (e)。曾写「迈阿密配置下每档必有：滨海大道计划断点」，是错的：两档
+//       23 个滨海样本全有效、从无大道断点，回车点全是 cul-de-sac(coast)（路在近水处终止），随岛形而定。
+//       68cd5be1（用地间距改按精确占地）后 380 档岛重解成另一形状（R 495→482、边 535→449），
+//       原 (-91.21, 470.33) 的近水尽端节点不复存在，规划层 classifyEndpoints 就不再产出回车点——
+//       不是 cityLayout 的 liveDegree 过滤误删（plan.culDeSacEnds 本身已为空）。1600 档仍有 2 个。
 //   (b) 每个回车点恰好对应一个 bulb 圆盘实例与一个路缘描边实例（数量一致、位置一致、一一对应）；
 //   (c) 圆盘半径落在 6–9（与路宽协调），y 跟随地形中心取样（max(0, height)+0.02），描边在盘面上方（防 z-fighting）；
 //   (d) layout.culDeSacEnds 的每个点在最终路网（生长剪枝后）里仍是度 1 非桥路端——
-//       计划层分类 + 布局层过滤两道口径不得漂移。
+//       计划层分类 + 布局层过滤两道口径不得漂移；
+//   (e) 对最终路网（layout）重跑 diagnoseNetwork，其 cul-de-sac 端点集合 == layout.culDeSacEnds——
+//       「规划没产出」与「被过滤误删」由此可分：误删时最终路网里仍有合法尽端、场景却没画回车圈。
 //   node scripts/verify-city-culdesac-bulbs.mjs
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
@@ -16,12 +23,13 @@ installCanvasShim();
 globalThis.window ??= globalThis;
 globalThis.devicePixelRatio ??= 1;
 
-const { THREE, buildCityModel, layoutCity, CityParts, MIAMI_COASTAL } = await loadCity({
+const { THREE, buildCityModel, layoutCity, CityParts, MIAMI_COASTAL, diagnoseNetwork } = await loadCity({
   "pkg:three": ["* as THREE"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/cityParts.ts": ["CityParts"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
+  "engine/planner/intent.ts": ["diagnoseNetwork"],
 });
 
 const HARNESSES = ["codex", "claude-code", "dsh", "harness:zcode"];
@@ -65,11 +73,16 @@ function instances(parts, name) {
 }
 
 const summary = [];
+let totalEnds = 0;
 for (const count of [380, 1600]) {
   const model = buildCityModel({ rows: rows(count), findings: [], windowStartMs: GENERATED_AT - 30 * 86_400_000, windowEndMs: GENERATED_AT, windowLabel: "30d", totalSessions: count, truncated: false, generatedAt: GENERATED_AT });
   const layout = layoutCity(model, null, undefined, MIAMI_COASTAL);
   const ends = layout.culDeSacEnds ?? [];
-  assert.ok(ends.length > 0, `${count} sessions: layout.culDeSacEnds is empty — cul-de-sac decoration lost its input`);
+  totalEnds += ends.length;
+  // (e) 最终路网的合法尽端 == 回车点：两边都按坐标键比，顺序无关。
+  const key = (p) => `${p.x}:${p.z}`;
+  const legal = (diagnoseNetwork(layout)?.endpoints ?? []).filter((end) => end.role.kind === "cul-de-sac").map((end) => key(end.at)).sort();
+  assert.deepEqual([...ends.map(key)].sort(), legal, `${count} sessions: layout.culDeSacEnds [${ends.map(key).join(", ")}] != cul-de-sac endpoints of the final network [${legal.join(", ")}] — a legal dead end was dropped (or a stale one kept)`);
   // (d) 布局层口径：每个回车点在生长剪枝后的路网里仍是度 1 非桥路端。
   const degree = new Map();
   for (const edge of layout.roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) degree.set(id, (degree.get(id) ?? 0) + 1);
@@ -77,7 +90,7 @@ for (const count of [380, 1600]) {
   const parts = new CityParts(model, layout, null);
   const discs = instances(parts, "city-culdesac-bulb-disc");
   const rims = instances(parts, "city-culdesac-bulb-rim");
-  assert.ok(discs.length > 0 && rims.length > 0, `${count} sessions: bulb batches missing from the scene`);
+  if (ends.length > 0) assert.ok(discs.length > 0 && rims.length > 0, `${count} sessions: bulb batches missing from the scene`);
   // (b) 数量一致 + 位置一一对应（双向：无多余实例、无落单端点）。
   assert.equal(discs.length, ends.length, `${count} sessions: disc instances ${discs.length} != culDeSacEnds ${ends.length}`);
   assert.equal(rims.length, ends.length, `${count} sessions: rim instances ${rims.length} != culDeSacEnds ${ends.length}`);
@@ -99,4 +112,6 @@ for (const count of [380, 1600]) {
   summary.push(`${count} sessions → ${ends.length} bulbs`);
   parts.dispose?.();
 }
-console.log(`City cul-de-sac bulbs: ${summary.join(", ")} — every culDeSacEnd has exactly one terrain-following disc + rim instance, radii 6–9, all still degree-1 road ends.`);
+// (a) 两档合起来必须有回车点：全空说明装饰输入整体丢了（或固定数据不再覆盖这条路径，该换档）。
+assert.ok(totalEnds > 0, "layout.culDeSacEnds is empty for every fixture — cul-de-sac decoration lost its input");
+console.log(`City cul-de-sac bulbs: ${summary.join(", ")} — every culDeSacEnd has exactly one terrain-following disc + rim instance, radii 6–9, all still degree-1 road ends, and they equal the final network's cul-de-sac endpoints.`);

@@ -82,3 +82,7 @@
 - 场景基线 `golden/city-scene-baseline.json`：基线在 `worktree-city-opt`（411606a1）上**本来就是红的**（landmarks / beach / expressways
   等约 190 个分区漂移，与本改动无关）。本次只把 `city-infrastructure-decorative`（路缘所在的家具批）四个场景的分区哈希
   改成新值并重算 `all`，其余漂移原样保留给对应的改动去认领；改前后逐分区对比，除该分区外两边完全一致。
+  2026-10-16 逐提交归因后整份重冻（Linux 导出 = CI 环境）：漂移来自 `8b571016`（干线筛查使环线高架找不到双端出口，
+  两档 `highways` 全空 → 区界高架消失）等 R0 已审生成器提交、本文件的路口/路面渲染、`68cd5be1`（精确占地间距，
+  380 档岛重解、近水尽端消失）、`c7d9a28f`/`a86a4f89`（占地与联合落位修复）；R1–R5 合并 `23c74064` 前后为零差异。
+  另有 `city-roof-profile-*`/`city-shafts-*`/`unnamed:Mesh` 在 Linux 上自基线创建提交 `8e84ce8d` 起就与作者机器不同（Node 20/22 一致）。
