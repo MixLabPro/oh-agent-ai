@@ -39,9 +39,11 @@ export type PlannerParams = Readonly<{
   spawnMargin: number;
   /** Corner fillet radius of turn/spawn centrelines (clamped by the legs), and its sampling step. */
   filletRadius: number; filletStep: number;
+  /** Directed edges: context through degree-2 continuations before entering / after leaving the edge. */
+  edgeContextBack: number; edgeContextAhead: number;
 }>;
 export const DEFAULT_PLANNER_PARAMS: PlannerParams = Object.freeze({ edgeTrim: 6, minEdgeRun: 8, edgeMargin: 0.5,
-  turnReach: 15, minTurnLeg: 5, turnMargin: 1.0, groundReach: 10, deckReach: 12, structureMargin: 0.5, spawnMargin: 1.0, filletRadius: 5, filletStep: 1 });
+  turnReach: 15, minTurnLeg: 5, turnMargin: 1.0, groundReach: 10, deckReach: 12, structureMargin: 0.5, spawnMargin: 1.0, filletRadius: 5, filletStep: 1, edgeContextBack: 8, edgeContextAhead: 6 });
 
 export type PlannedRoute = PassabilityRoute & Readonly<{ kind: AuditUnitKind; /** Road units: the member edges. */ edgeIds?: readonly string[] }>;
 export type AuditPlan = Readonly<{
@@ -117,17 +119,24 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
   const degree = (n: string) => incident.get(n)?.length ?? 0;
   const chains = roadChains(edges, incident);
 
-  // ── directed-edge: each road (chain between junctions) in both directions ──
-  for (const chain of chains) {
-    const L = lengthsOf(chain.points); const total = L[L.length - 1];
-    // Trim only at junction/dead ends (fans live there); a closed loop has no fan.
-    const t = chain.loop ? 0 : Math.min(params.edgeTrim, total / 4);
-    for (const dir of ["fwd", "rev"] as const) {
-      const id = `road:${chain.id}:${dir}`;
-      if (total - 2 * t < params.minEdgeRun) { exclude(id, "directed-edge", `road-too-short:${total.toFixed(2)}`); continue; }
-      const path = slice(chain.points, t, total - t);
-      route(id, "directed-edge", dir === "fwd" ? path : [...path].reverse(), chain.width / 2 + params.edgeMargin, { edgeIds: chain.edgeIds } as Partial<PassabilityRoute>);
-    }
+  // ── directed-edge: every graph edge in both directions, with context ──
+  // A unit is one edge traversed fully in one direction. Its case extends through degree-2 continuations
+  // (8 back, 6 ahead) so a short segment is runnable, and trims at junctions/dead ends (their fans).
+  // Coarser road-chain units were tried: one local defect failed a 600-long chain and was reported far away.
+  void chains;
+  for (const e of edges) for (const dir of ["fwd", "rev"] as const) {
+    const id = `edge:${e.id}:${dir}`;
+    const [entry, exit] = dir === "fwd" ? [e.from, e.to] : [e.to, e.from];
+    const own = dir === "fwd" ? [...e.points] : [...e.points].reverse();
+    const ownLen = lengthsOf(own).at(-1)!;
+    const before = degree(entry) === 2 ? context(incident, entry, e, params.edgeContextBack) : null;
+    const after = degree(exit) === 2 ? context(incident, exit, e, params.edgeContextAhead) : null;
+    const trimIn = before ? 0 : Math.min(params.edgeTrim, ownLen / 4), trimOut = after ? 0 : Math.min(params.edgeTrim, ownLen / 4);
+    const core = slice(own, trimIn, ownLen - trimOut);
+    const path = [...(before ? [...before].reverse().slice(0, -1) : []), ...core, ...(after ? after.slice(1) : [])];
+    const runLen = lengthsOf(dedupe(path)).at(-1)!;
+    if (ownLen - trimIn - trimOut < 1 || runLen < params.minEdgeRun) { exclude(id, "directed-edge", `edge-too-short:${ownLen.toFixed(2)}`); continue; }
+    route(id, "directed-edge", fillet(dedupe(path), params.filletRadius, params.filletStep), e.width / 2 + params.edgeMargin, { edgeIds: [e.id] } as Partial<PassabilityRoute>);
   }
 
   // ── turn: every incoming → outgoing pair at a junction (degree ≥ 3), no U-turns ──
@@ -244,6 +253,14 @@ function roadChains(edges: readonly PlannerEdge[], incident: Incident): Chain[] 
     chains.push({ id: [...w.ids].sort()[0], edgeIds: w.ids, points: dedupe(w.pts), width: w.width, loop: w.end === e.from });
   }
   return chains.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+/** Up to `reach` along the road continuing from `node` away from `edge` (one degree-2 step at a time),
+ * starting AT the node. */
+function context(incident: Incident, node: string, edge: PlannerEdge, reach: number): P[] {
+  const next = incident.get(node)!.find((x) => x.edge.id !== edge.id);
+  if (!next) return [];
+  const leg = legPoints(next, node, incident, false);
+  return slice(leg, 0, Math.min(reach, lengthsOf(leg).at(-1)!));
 }
 /** A turn leg along the whole road through degree-2 continuations; incoming ends at `node`, outgoing starts there. */
 function legPoints(first: { edge: PlannerEdge; atStart: boolean }, node: string, incident: Incident, incoming: boolean): P[] {

@@ -45,14 +45,16 @@ const plan = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: edges, la
   assert.notEqual(moved.manifestHash, plan.manifestHash, "geometry changes the manifest identity");
   // A spur too short to audit (off the junction) stays in the denominator as a visible exclusion.
   const stubbed = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: [...edges, edge("stub", "C", "X", C, { x: 6, z: 6 })], landings: [] });
-  const ex = stubbed.exclusions.filter((x) => x.unitId.startsWith("road:stub:"));
-  assert.equal(ex.length, 2); assert.match(ex[0].reason, /^road-too-short:/);
-  assert.ok(stubbed.units.some((u) => u.id === "road:stub:fwd"), "excluded units remain in the manifest");
-  // A road split into two segments through a degree-2 node is ONE road unit per direction, with no turns there.
+  const ex = stubbed.exclusions.filter((x) => x.unitId.startsWith("edge:stub:"));
+  assert.equal(ex.length, 2); assert.match(ex[0].reason, /^edge-too-short:/);
+  assert.ok(stubbed.units.some((u) => u.id === "edge:stub:fwd"), "excluded units remain in the manifest");
+  // A road split into two segments through a degree-2 node: one unit per segment and direction, each case
+  // running on through the continuation (no trim there), and no turns at the degree-2 node.
   const split = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: [...edges.filter((e) => e.id !== "e"), edge("e1", "C", "M", C, { x: 20, z: 0 }), edge("e2", "M", "E", { x: 20, z: 0 }, E)], landings: [] });
-  assert.equal(split.counts["directed-edge"].units, 8, "chains, not segments");
+  assert.equal(split.counts["directed-edge"].units, 10);
   assert.ok(!split.units.some((u) => u.id.startsWith("turn:M:")), "a degree-2 node is a continuation, not a junction");
-  assert.deepEqual(split.routes.find((r) => r.id === "road:e1:fwd").edgeIds, ["e1", "e2"], "the road unit names its member edges");
+  const e1 = split.routes.find((r) => r.id === "edge:e1:fwd");
+  assert.deepEqual(e1.edgeIds, ["e1"]); assert.deepEqual([e1.path[0].x, e1.path.at(-1).x], [5, 26], "trimmed at the junction (min(6, len/4) = 5), extended 6 into e2");
   // Landings: dangling ends excluded, others get onto/off cases with their layers.
   const landing = (end, status, layerId) => ({ structureId: "bridge:b", end, layerId, x: 0, z: 0, patchId: "deck", seam: { a: { x: 0, y: 0, z: -2.5 }, b: { x: 0, y: 0, z: 2.5 } }, outX: -1, outZ: 0, deckY: 0, groundY: 0, step: 0, status });
   const structured = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: edges, landings: [landing("from", "aligned", "ground"), landing("to", "no-ground", "ground")] });
@@ -86,11 +88,11 @@ const plan = m.planRoadAudit({ worldRevision: "world-plus", roadEdges: edges, la
   // with a witness; turns (legs ≤ 15) are untouched; the far spawn route is never counted as a pass.
   const report = m.executeAuditPlan(worldOf([box("pier", "expressway-pier", 19, 21, 0, 6, -3.2, 3.2)]), plan, keyFor);
   const v = (id) => report.results.find((r) => r.routeId === id);
-  assert.equal(v("road:e:fwd").verdict, "blocked"); assert.equal(v("road:e:rev").verdict, "blocked");
-  assert.ok(v("road:e:fwd").witness.limits.includes("structure:pier"));
-  for (const id of ["road:n:fwd", "road:w:rev", "road:s:fwd"]) assert.equal(v(id).verdict, "passed", id);
+  assert.equal(v("edge:e:fwd").verdict, "blocked"); assert.equal(v("edge:e:rev").verdict, "blocked");
+  assert.ok(v("edge:e:fwd").witness.limits.includes("structure:pier"));
+  for (const id of ["edge:n:fwd", "edge:w:rev", "edge:s:fwd"]) assert.equal(v(id).verdict, "passed", id);
   assert.equal(report.coverage["directed-edge"].blocked, 2);
-  assert.equal(report.release.units.find((u) => u.unitId === "road:e:fwd").status, "blocked", "the release policy carries the witness");
+  assert.equal(report.release.units.find((u) => u.unitId === "edge:e:fwd").status, "blocked", "the release policy carries the witness");
 }
 console.log("Audit planner: frozen deterministic manifest (directions, non-U turns, structure onto/off, spawn → farthest node), visible exclusions, one case per unit, release-policy execution with per-kind coverage, fault injection localised passed.");
 
