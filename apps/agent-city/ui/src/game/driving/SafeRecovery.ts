@@ -36,6 +36,9 @@ export type RecoveryOptions = Readonly<{
   /** Also try the reversed heading (turned around) after all forward-ish headings fail at a ring. */
   allowReverse?: boolean;
   maxCandidates?: number;
+  /** Extra clearance around the body beyond the footprint margins: a recovered pose merely touch-free
+   * (gap ~0) puts the next steering input straight into a grazing contact. */
+  clearance?: number;
   footprint?: VehicleFootprint; params?: FootprintParams;
 }>;
 export type RecoveryResult =
@@ -44,7 +47,7 @@ export type RecoveryResult =
   | Readonly<{ status: "unrecoverable"; worldRevision: string; version: number;
       reason: "no-safe-pose-within-bound" | "budget" | "stale-world" | "invalid-input" | "unknown-region"; candidatesTested: number }>;
 
-const DEFAULTS = Object.freeze({ maxDistance: 6, distanceStep: 0.25, maxHeadingChange: Math.PI / 4, headingStep: Math.PI / 24, allowReverse: true, maxCandidates: 20000 });
+const DEFAULTS = Object.freeze({ maxDistance: 6, distanceStep: 0.25, maxHeadingChange: Math.PI / 4, headingStep: Math.PI / 24, allowReverse: true, maxCandidates: 20000, clearance: 0.1 });
 
 /** Deterministic bounded search for the nearest legal pose. */
 export function findSafePose(world: RecoveryWorld, request: RecoveryRequest, options: RecoveryOptions = {}): RecoveryResult {
@@ -54,12 +57,14 @@ export function findSafePose(world: RecoveryWorld, request: RecoveryRequest, opt
   const fail = (reason: Extract<RecoveryResult, { status: "unrecoverable" }>["reason"]): RecoveryResult =>
     Object.freeze({ status: "unrecoverable", worldRevision: world.worldRevision, version: SAFE_RECOVERY_VERSION, reason, candidatesTested: tested });
   if (![request.x, request.z, request.heading].every(Number.isFinite) || (request.y !== undefined && !Number.isFinite(request.y)) ||
-    ![o.maxDistance, o.distanceStep, o.maxHeadingChange, o.headingStep].every((n) => Number.isFinite(n) && n >= 0) || !(o.distanceStep > 0) || !(o.headingStep > 0) ||
+    ![o.maxDistance, o.distanceStep, o.maxHeadingChange, o.headingStep, o.clearance].every((n) => Number.isFinite(n) && n >= 0) || !(o.distanceStep > 0) || !(o.headingStep > 0) ||
     !Number.isSafeInteger(o.maxCandidates) || o.maxCandidates < 1) return fail("invalid-input");
   if (!world.isCurrent()) return fail("stale-world");
   if (world.regions.status !== "ready") return fail("invalid-input");
   if (!world.regions.regionById(request.regionId)) return fail("unknown-region");
   const validator = new SurfaceWorldValidator(world.regions, () => 0, footprint, params, world.collision);
+  // The clearance check inflates the body; the returned pose's support is fitted with the normal params.
+  const clear = Object.freeze({ ...params, lateralMargin: params.lateralMargin + o.clearance, longitudinalMargin: params.longitudinalMargin + o.clearance });
   const headings: number[] = [0];
   for (let k = 1; k * o.headingStep <= o.maxHeadingChange + 1e-12; k++) headings.push(k * o.headingStep, -k * o.headingStep);
   if (o.allowReverse) headings.push(Math.PI);
@@ -67,6 +72,7 @@ export function findSafePose(world: RecoveryWorld, request: RecoveryRequest, opt
   const tryPose = (x: number, z: number, dHeading: number): RecoveryResult | null => {
     if (++tested > o.maxCandidates) throw new BudgetStop();
     const heading = wrap(request.heading + dHeading);
+    if (o.clearance > 0 && !footprintSupport(world.regions, { x, z, heading, y: request.y }, request.regionId, footprint, clear, world.collision).ok) return null;
     const support = footprintSupport(world.regions, { x, z, heading, y: request.y }, request.regionId, footprint, params, world.collision);
     if (!support.ok) return null;
     const state: DrivingState = { ...initialDrivingState(x, z, heading, request.regionId), y: support.y, pitch: support.pitch, roll: support.roll };

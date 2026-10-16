@@ -9,15 +9,18 @@ const m = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
   "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
   "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
-  "game/driving/audit/RoadPassabilityAudit.ts": ["passabilityWorld", "auditRoute", "corridorCutEvidence", "directedEdgeRoutes", "ROAD_PASSABILITY_AUDIT_VERSION"],
+  "game/driving/audit/RoadPassabilityAudit.ts": ["passabilityWorld", "auditRoute", "corridorCutEvidence", "directedEdgeRoutes", "ROAD_PASSABILITY_AUDIT_VERSION", "continuousAuditKeyFields", "CorridorValidator"],
+  "game/driving/audit/GateAuditObserver.ts": ["GateAuditObserver"],
   "game/driving/audit/AuditReleasePolicy.ts": ["evaluateAuditRelease"],
   "game/driving/vehicleFootprint.ts": ["DRIVING_FOOTPRINT"],
   "game/driving/surfaceFootprint.ts": ["DEFAULT_FOOTPRINT_PARAMS"],
 });
 const { grid, patch } = makeFixtures(m);
 const REQUIRED = 2 * (m.DRIVING_FOOTPRINT.halfWidth + m.DEFAULT_FOOTPRINT_PARAMS.lateralMargin);
-const keyFor = (revision) => ({ baseSnapshotHash: revision, vehicleConfigHash: "car-v1", kernelBuildId: "fixture-build-v1", surfaceVersion: 3, queryVersion: 4,
-  snapshotCompilerVersion: 1, physicsVersion: 1, collisionVersion: 1, controllerVersion: 1, plannerVersion: 1, observerVersion: 1, manifestHash: "passability-fixture", releasePolicyVersion: 1, releaseBoundaryHash: null });
+const legacyKeyFor = (revision) => ({ baseSnapshotHash: revision, vehicleConfigHash: "car-v1", kernelBuildId: "fixture-build-v1", surfaceVersion: 3, queryVersion: 4,
+  snapshotCompilerVersion: 1, physicsVersion: 1, collisionVersion: 1, controllerVersion: 1, plannerVersion: 1, observerVersion: 2, manifestHash: "passability-fixture", releasePolicyVersion: 1, releaseBoundaryHash: null });
+// The continuous (C) engine's calibrated identity: physics/collision/query versions + a vehicle config naming collider and solver.
+const keyFor = (revision) => ({ ...legacyKeyFor(revision), ...m.continuousAuditKeyFields(), kernelBuildId: "fixture-continuous-v1" });
 const box = (id, role, x0, x1, y0, y1, z0, z1) => ({ id, role, shape: "box",
   corners: [x0, x1].flatMap((x) => [y0, y1].flatMap((y) => [z0, z1].map((z) => ({ x, y, z })))) });
 const worldOf = (patches, { obstacles = [], sceneSolids = [], renderedSolids = [], revision = "world-fixture", current = () => true, noBuildings = true } = {}) => {
@@ -112,18 +115,52 @@ const audit = (world, r = route, options) => m.auditRoute(world, keyFor(world.wo
   assert.equal(mismatch.verdict, "inconclusive"); assert.equal(mismatch.detail, "key-world-mismatch");
   assert.equal(audit(fresh, { ...route, path: [{ x: -40, z: 0 }] }).detail, "invalid-route");
 }
+// ── Continuous engine (B4): calibrated key, recovered starts, legacy comparison ──
+{
+  const world = worldOf([road(), ...walks]);
+  const legacyKey = m.auditRoute(world, legacyKeyFor(world.worldRevision), route);
+  assert.equal(legacyKey.detail, "key-engine-mismatch", "a legacy key never certifies a continuous run");
+  const legacy = m.auditRoute(world, legacyKeyFor(world.worldRevision), route, { engine: "legacy" });
+  assert.equal(legacy.verdict, "passed", "the legacy whole-step engine stays available for comparison");
+  // A short barrier across the centreline at the route start: SafeRecovery moves the start (forward,
+  // the nearest legal pose), the new case passes.
+  const parked = { id: "scene:van", role: "city-shafts", kind: "box", center: { x: -40, y: 1, z: 0 }, halfAxes: [{ x: 0.3, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1.2 }] };
+  const r = audit(worldOf([road(), ...walks], { sceneSolids: [parked] }));
+  assert.equal(r.verdict, "passed", JSON.stringify(r.detail)); assert.match(r.detail, /recovered-start:/);
+  assert.equal(r.run.caseId, "east:recovered", "a recovered start is a separate case");
+}
+{
+  // Gates follow the performed trajectory: the chord (9,0)→(11,0) would cross inside, the real slid path
+  // crosses 2.5 off-centre and deviates.
+  const gate = { id: "g", x: 10, y: 0, z: 0, forwardX: 1, forwardZ: 0, halfWidth: 3, heightTolerance: 0.5, surfaceIds: ["r"] };
+  const test = { id: "t", units: ["u"], start: { x: 0, y: 0, z: 0, heading: 0, speed: 0, steering: 0, distance: 0, braking: false, reversing: false, pitch: 0, roll: 0, surfaceId: "r" },
+    gates: [gate], corridor: { surfaceSequence: ["r"], portalSequence: [], waypoints: [{ x: 0, z: 0 }, { x: 20, z: 0 }] }, policy: { cruiseSpeed: 7, maxReverseSpeed: 0 }, maxTicks: 10, maxNoProgressTicks: 10 };
+  const ok = { validateStart: () => "valid", validate: () => "valid", progress: (s) => s.x };
+  const pose = (x, z) => ({ x, y: 0, z, heading: 0, pitch: 0, roll: 0, surfaceId: "r" });
+  const prev = { ...test.start, x: 6 }; const next = { ...test.start, x: 14 };
+  const chord = new m.GateAuditObserver(test, ok).observe(prev, { state: next, motion: { blocked: false, reason: null } });
+  assert.equal(chord.status, "complete", "without a trajectory the chord is the motion (compatibility)");
+  const slid = new m.GateAuditObserver(test, ok).observe(prev, { state: next, motion: { blocked: false, reason: null, trajectory: [pose(6, 0), pose(14, 5), pose(14, 0)] } });
+  assert.equal(slid.status, "route-deviation", "the trajectory, not its chord, decides the gate");
+  // Corridor checks every trajectory piece.
+  const corridor = new m.CorridorValidator(ok, [{ x: 0, z: 0 }, { x: 20, z: 0 }], 3);
+  assert.equal(corridor.validate(prev, { state: next, motion: { blocked: false, reason: null, trajectory: [pose(6, 0), pose(10, 4), pose(14, 0)] } }), "route-deviation");
+  assert.equal(corridor.validate(prev, { state: next, motion: { blocked: false, reason: null, trajectory: [pose(6, 0), pose(10, 1), pose(14, 0)] } }), "valid");
+}
+
 // ── Route builder: both directions, trimmed off the node fans ──
 {
   const routes = m.directedEdgeRoutes([{ id: "e1", points: [{ x: 0, z: 0 }, { x: 50, z: 0 }], width: 6 }, { id: "tiny", points: [{ x: 0, z: 0 }, { x: 10, z: 0 }], width: 6 }]);
   assert.deepEqual(routes.map((r) => r.id), ["edge:e1:fwd", "edge:e1:rev"]);
   assert.deepEqual(routes[0].path, [{ x: 6, z: 0 }, { x: 44, z: 0 }]); assert.deepEqual(routes[1].path, [{ x: 44, z: 0 }, { x: 6, z: 0 }]);
 }
-console.log("Road passability: passed from a validated run (bound to world revision, release-policy evidence), blocked only with witnesses (exact pier cut, neck narrower than the body, disconnected regions), inconclusive for pilot failure, proxy-only obstacles, incomplete solid coverage, stale world and key mismatch passed.");
+console.log("Road passability (continuous engine): passed from a validated run (bound to world revision, release-policy evidence), blocked only with witnesses (exact pier cut, neck narrower than the body, disconnected regions), inconclusive for pilot failure, proxy-only obstacles, incomplete solid coverage, stale world and key mismatch; calibrated continuous key, SafeRecovery start as a new case, legacy comparison, trajectory-judged gates and corridor passed.");
 
 // ── Real rendered cities: CityParts scene → frozen display lease → CitySurfacePort → audit ──
 if (process.argv.includes("--cities")) {
   const { sceneKit, buildParts } = await import("./city-kit/scene-parts.mjs");
   const kit = await sceneKit({ "engine/surface/citySurfacePort.ts": ["CitySurfacePort"], "game/driving/audit/RoadPassabilityAudit.ts": ["auditCapture", "directedEdgeRoutes"] });
+  const engine = process.env.PASSABILITY_ENGINE === "legacy" ? "legacy" : "continuous";
   const perScene = Number(process.env.PASSABILITY_EDGES ?? 12);
   const totals = { routes: 0, passed: 0, blocked: 0, inconclusive: 0 }; const causes = {}; const witnesses = [];
   for (const sessions of [0, 90, 500]) for (const seed of [1, 7, 42, 2026, 65537]) {
@@ -134,7 +171,7 @@ if (process.argv.includes("--cities")) {
       const capture = await port.capture(lease.source); assert.equal(capture.status, "ready");
       const edges = lease.source.layout.roadEdges.filter((e) => e.points.length >= 2).sort((a, b) => a.id < b.id ? -1 : 1).slice(0, perScene);
       const routes = kit.directedEdgeRoutes(edges);
-      const audited = kit.auditCapture(capture, keyFor, routes);
+      const audited = kit.auditCapture(capture, engine === "legacy" ? legacyKeyFor : keyFor, routes, { engine });
       assert.equal(audited.status, "ready", audited.reason);
       const outcome = {};
       for (const r of audited.results) {
@@ -153,6 +190,6 @@ if (process.argv.includes("--cities")) {
     } finally { lease.release(); }
   }
   assert.ok(totals.passed > 0, "real roads pass the audit");
-  console.log(`Road passability: ${totals.routes} real directed routes → ${totals.passed} passed, ${totals.blocked} blocked (witnessed), ${totals.inconclusive} inconclusive ${JSON.stringify(causes)}.`);
+  console.log(`Road passability (${engine}): ${totals.routes} real directed routes → ${totals.passed} passed, ${totals.blocked} blocked (witnessed), ${totals.inconclusive} inconclusive ${JSON.stringify(causes)}.`);
   for (const w of witnesses.slice(0, 20)) console.log(`  witness ${w}`);
 }

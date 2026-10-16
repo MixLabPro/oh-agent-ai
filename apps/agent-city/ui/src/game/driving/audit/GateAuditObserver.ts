@@ -21,25 +21,34 @@ export class GateAuditObserver implements AuditObserver {
     const progress = this.world.progress(next.state);
     if (!Number.isFinite(progress)) return { status: "simulation-invalid", progress: 0, plannedStop: false };
     if (validation !== "valid") return { status: validation, progress, plannedStop: false };
-    while (this.nextGate < this.test.gates.length) {
-      const gate = this.test.gates[this.nextGate];
-      const extent = (heading: number) => DRIVING_FOOTPRINT.halfLength * Math.abs(Math.cos(heading) * gate.forwardX + Math.sin(heading) * gate.forwardZ) +
-        DRIVING_FOOTPRINT.halfWidth * Math.abs(-Math.sin(heading) * gate.forwardX + Math.cos(heading) * gate.forwardZ);
-      const plane = (state: Readonly<DrivingState>) => (state.x - gate.x) * gate.forwardX + (state.z - gate.z) * gate.forwardZ - extent(state.heading);
-      const before = plane(previous); const after = plane(next.state);
-      if (!(before <= 0 && after > 0)) break;
-      const t = -before / (after - before);
-      const heading = previous.heading + (next.state.heading - previous.heading) * t;
-      const x = previous.x + (next.state.x - previous.x) * t;
-      const z = previous.z + (next.state.z - previous.z) * t;
-      const lateral = Math.abs(-(x - gate.x) * gate.forwardZ + (z - gate.z) * gate.forwardX);
-      const halfWidth = DRIVING_FOOTPRINT.halfLength * Math.abs(-Math.cos(heading) * gate.forwardZ + Math.sin(heading) * gate.forwardX) +
-        DRIVING_FOOTPRINT.halfWidth * Math.abs(Math.sin(heading) * gate.forwardZ + Math.cos(heading) * gate.forwardX);
-      const y = previous.y + (next.state.y - previous.y) * t;
-      if (lateral + halfWidth > gate.halfWidth || Math.abs(y - gate.y) > gate.heightTolerance || !gate.surfaceIds.includes(next.state.surfaceId)) {
-        return { status: "route-deviation", progress, plannedStop: false };
+    // Gates are crossed along the motion actually performed. A continuous (C) step reports its piecewise
+    // trajectory (tangent slides make it a polyline); judging its end-to-end chord would accept a gate the
+    // car never crossed, or miss one it crossed and slid back from. Without a trajectory the step is the
+    // single segment previous → next, exactly as before (compatibility for whole-step environments).
+    const path = next.motion.trajectory && next.motion.trajectory.length >= 1
+      ? [previous, ...next.motion.trajectory.slice(1)] : [previous, next.state];
+    for (let k = 1; k < path.length; k++) {
+      const a = path[k - 1]; const b = path[k];
+      while (this.nextGate < this.test.gates.length) {
+        const gate = this.test.gates[this.nextGate];
+        const extent = (heading: number) => DRIVING_FOOTPRINT.halfLength * Math.abs(Math.cos(heading) * gate.forwardX + Math.sin(heading) * gate.forwardZ) +
+          DRIVING_FOOTPRINT.halfWidth * Math.abs(-Math.sin(heading) * gate.forwardX + Math.cos(heading) * gate.forwardZ);
+        const plane = (state: Readonly<{ x: number; z: number; heading: number }>) => (state.x - gate.x) * gate.forwardX + (state.z - gate.z) * gate.forwardZ - extent(state.heading);
+        const before = plane(a); const after = plane(b);
+        if (!(before <= 0 && after > 0)) break;
+        const t = -before / (after - before);
+        const heading = a.heading + (b.heading - a.heading) * t;
+        const x = a.x + (b.x - a.x) * t;
+        const z = a.z + (b.z - a.z) * t;
+        const lateral = Math.abs(-(x - gate.x) * gate.forwardZ + (z - gate.z) * gate.forwardX);
+        const halfWidth = DRIVING_FOOTPRINT.halfLength * Math.abs(-Math.cos(heading) * gate.forwardZ + Math.sin(heading) * gate.forwardX) +
+          DRIVING_FOOTPRINT.halfWidth * Math.abs(Math.sin(heading) * gate.forwardZ + Math.cos(heading) * gate.forwardX);
+        const y = a.y + (b.y - a.y) * t;
+        if (lateral + halfWidth > gate.halfWidth || Math.abs(y - gate.y) > gate.heightTolerance || !gate.surfaceIds.includes(b.surfaceId)) {
+          return { status: "route-deviation", progress, plannedStop: false };
+        }
+        this.nextGate++;
       }
-      this.nextGate++;
     }
     return { status: this.nextGate === this.test.gates.length ? "complete" : "continue", progress, plannedStop: false };
   }

@@ -27,6 +27,12 @@ import { DEFAULT_FOOTPRINT_PARAMS, footprintSupport, type FootprintParams, type 
 import { polylineProgress, SurfaceDrivingEnvironment, SurfaceWorldValidator } from "../SurfaceDrivingWorld";
 import { DRIVING_FOOTPRINT } from "../vehicleFootprint";
 import { auditKeyId } from "./AuditIdentity";
+import { DRIVING_PHYSICS_VERSION } from "../../DrivingSimulation";
+import { DEFAULT_SWEEP_LIMITS, DRIVING_COLLISION_VERSION } from "../DrivingCollision";
+import { CONTINUOUS_DRIVING_QUERY_VERSION, CONTINUOUS_MOTION_DEFAULTS, ContinuousDrivingEnvironment } from "../ContinuousDrivingEnvironment";
+import { ContinuousWorldValidator } from "../ContinuousWorldValidator";
+import { createContinuousDrivingKernel } from "../createContinuousDrivingKernel";
+import { commitRecovery, findSafePose } from "../SafeRecovery";
 import { DrivingRouteRunner } from "./DrivingRouteRunner";
 import { GateAuditObserver } from "./GateAuditObserver";
 import type { AuditCause, AuditKey, AuditVerdict, AuditWorldValidator, DirectedGate, RoadAuditCase, RoadAuditCaseResult, RoutePilot, StaticUnitEvidence, StepValidation } from "./contracts";
@@ -105,8 +111,31 @@ export type PassabilityOptions = Readonly<{
   maxCutSegments?: number;
   /** Skip the dynamic run (static evidence only). */
   staticOnly?: boolean;
-  kernelBuildId?: string;
+  /** Dynamic engine: C's continuous kernel (default) or the legacy whole-step-rejection environment. */
+  engine?: "continuous" | "legacy";
+  collider?: AuditCollider;
 }>;
+/** Calibrated collision box for the continuous engine (not the wheel footprint): the footprint plus the
+ * product SPEC clearance (lateral 0.2, longitudinal 0.1), body from 0.1 above the support to 1.25. */
+export type AuditCollider = Readonly<{ dimensions: Readonly<{ halfLength: number; halfWidth: number; halfHeight: number }>; centerHeight: number }>;
+export const CONTINUOUS_AUDIT_COLLIDER: AuditCollider = Object.freeze({
+  dimensions: Object.freeze({ halfLength: DRIVING_FOOTPRINT.halfLength + DEFAULT_FOOTPRINT_PARAMS.longitudinalMargin,
+    halfWidth: DRIVING_FOOTPRINT.halfWidth + DEFAULT_FOOTPRINT_PARAMS.lateralMargin, halfHeight: (1.25 - 0.1) / 2 }),
+  centerHeight: 0.1 + (1.25 - 0.1) / 2 });
+/** Key fields the continuous engine is calibrated to. vehicleConfigHash names the vehicle, collider,
+ * dynamics and solver parameters it covers — a key from the legacy engine never matches. */
+export function continuousAuditKeyFields(collider: AuditCollider = CONTINUOUS_AUDIT_COLLIDER) {
+  const d = collider.dimensions;
+  return Object.freeze({ physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: DRIVING_COLLISION_VERSION, queryVersion: CONTINUOUS_DRIVING_QUERY_VERSION,
+    vehicleConfigHash: JSON.stringify(["car-v1", "collider", d.halfLength, d.halfWidth, d.halfHeight, collider.centerHeight,
+      "sweep", DEFAULT_SWEEP_LIMITS.skin, DEFAULT_SWEEP_LIMITS.timeTolerance, DEFAULT_SWEEP_LIMITS.maxTests,
+      "motion", CONTINUOUS_MOTION_DEFAULTS.maxSlides, CONTINUOUS_MOTION_DEFAULTS.maxSupportSegments, CONTINUOUS_MOTION_DEFAULTS.supportStep,
+      "footprint", DEFAULT_FOOTPRINT_PARAMS.lateralMargin, DEFAULT_FOOTPRINT_PARAMS.longitudinalMargin, DEFAULT_FOOTPRINT_PARAMS.maxSlope]) });
+}
+function support0(regions: Ready, p: P, heading: number, regionId: string, y: number, footprint: VehicleFootprint, params: FootprintParams): DrivingState | null {
+  const s = footprintSupport(regions, { x: p.x, z: p.z, heading, y }, regionId, footprint, params);
+  return s.ok ? { ...initialDrivingState(p.x, p.z, heading, regionId), y: s.y, pitch: s.pitch, roll: s.roll } : null;
+}
 
 const finiteP = (p: P) => Number.isFinite(p.x) && Number.isFinite(p.z);
 function segDist(a: P, b: P, c: P, d: P): number {
@@ -244,7 +273,10 @@ export class CorridorValidator implements AuditWorldValidator {
   validateStart(state: Readonly<DrivingState>): StepValidation { return this.inside(state) ? this.base.validateStart(state) : "route-deviation"; }
   validate(previous: Readonly<DrivingState>, next: KernelStep): StepValidation {
     const v = this.base.validate(previous, next);
-    return v === "valid" && !this.inside(next.state) ? "route-deviation" : v;
+    if (v !== "valid") return v;
+    // Every piece of a slid (piecewise) motion must stay in the corridor, not only its end.
+    const path = next.motion.trajectory ?? [next.state];
+    return path.every((p) => this.inside(p)) && this.inside(next.state) ? "valid" : "route-deviation";
   }
   progress(state: Readonly<DrivingState>): number { return this.base.progress(state); }
 }
@@ -287,45 +319,74 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
   if (options.staticOnly) return witness ? finish("blocked", "geometry-blocked", "cut", witness, null, "passed", "blocked")
     : finish("inconclusive", "unconfirmed", "static-only", null, null, "passed", "passed");
 
-  // ── Dynamic run on the same kernel ──
-  const heading = Math.atan2(p1.z - p0.z, p1.x - p0.x);
-  const env = new SurfaceDrivingEnvironment(regions, footprint, params, world.dynamic);
-  const placed = env.place(p0.x, p0.z, heading, regionId, start.y);
-  if (!placed) {
-    const why = footprintSupport(regions, { x: p0.x, z: p0.z, heading, y: start.y }, regionId, footprint, params, world.dynamic);
-    return witness ? finish("blocked", "geometry-blocked", `cut;start:${why.ok ? "ok" : why.reason}`, witness, null, "passed", "blocked")
-      : finish("inconclusive", "unconfirmed", `start-footprint:${why.ok ? "ok" : `${why.reason}:${why.detail}`}`, null, null, "passed", "passed");
+  // ── Dynamic run on the same kernel (C continuous by default; legacy whole-step kept for comparison) ──
+  const engine = options.engine ?? "continuous";
+  if (engine === "continuous") {
+    const expect = continuousAuditKeyFields(options.collider);
+    if (key.physicsVersion !== expect.physicsVersion || key.collisionVersion !== expect.collisionVersion || key.queryVersion !== expect.queryVersion || key.vehicleConfigHash !== expect.vehicleConfigHash) {
+      return finish("inconclusive", "unconfirmed", "key-engine-mismatch", witness, null, "passed", witness ? "blocked" : "passed");
+    }
+    // C requires the solid index to be complete: a dropped solid is an unseen obstacle.
+    if (world.dynamic.report.rejected > 0) return finish("inconclusive", "unconfirmed", `solids-rejected:${world.dynamic.report.rejected}`, witness, null, "passed", witness ? "blocked" : "passed");
   }
-  const startState: DrivingState = { ...initialDrivingState(p0.x, p0.z, heading, regionId), ...placed };
+  const heading = Math.atan2(p1.z - p0.z, p1.x - p0.x);
+  const collider = options.collider ?? CONTINUOUS_AUDIT_COLLIDER;
+  let validatorFor: () => AuditWorldValidator; let kernelFor: () => DrivingKernel;
+  let startState: DrivingState | null = null; let recovered = "";
+  const base = support0(regions, p0, heading, regionId, start.y, footprint, params);
+  if (engine === "continuous") {
+    let env: ContinuousDrivingEnvironment;
+    try {
+      env = new ContinuousDrivingEnvironment(regions, { surfaceRevision: regions.revision, worldRevision: world.worldRevision, solidRevision: world.worldRevision,
+        solids: world.dynamic.solids(), dimensions: collider.dimensions, centerHeight: collider.centerHeight, isCurrent: world.isCurrent }, footprint, params);
+    } catch (error) { return finish("inconclusive", "unconfirmed", `continuous-world:${error instanceof Error ? error.message : "error"}`, witness, null, "passed", witness ? "blocked" : "passed"); }
+    validatorFor = () => new CorridorValidator(new ContinuousWorldValidator(env, polylineProgress(route.path)), route.path, route.halfWidth);
+    kernelFor = () => createContinuousDrivingKernel(env, { worldRevision: world.worldRevision, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId });
+  } else {
+    const env = new SurfaceDrivingEnvironment(regions, footprint, params, world.dynamic);
+    validatorFor = () => new CorridorValidator(new SurfaceWorldValidator(regions, polylineProgress(route.path), footprint, params, world.dynamic), route.path, route.halfWidth);
+    kernelFor = () => new DrivingKernel(env, { baseSnapshotHash: key.baseSnapshotHash, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId,
+      physicsVersion: key.physicsVersion, collisionVersion: key.collisionVersion, queryVersion: key.queryVersion });
+  }
+  if (base && validatorFor().validateStart(base) === "valid") startState = base;
+  else {
+    // Start overlapping a solid / off its support: SafeRecovery, then a NEW case from the recovered pose.
+    const recovery = findSafePose({ worldRevision: world.worldRevision, regions, collision: world.dynamic, isCurrent: world.isCurrent },
+      { x: p0.x, z: p0.z, heading, regionId, y: start.y }, { maxDistance: Math.min(3, route.halfWidth), allowReverse: false, footprint, params });
+    const state = commitRecovery(recovery, { worldRevision: world.worldRevision, regions, collision: world.dynamic, isCurrent: world.isCurrent });
+    if (state && validatorFor().validateStart(state) === "valid") { startState = { ...state }; recovered = `;recovered-start:${(recovery as { displacement: number }).displacement.toFixed(2)}`; }
+    else {
+      const why = recovery.status === "unrecoverable" ? recovery.reason : "recovered-pose-rejected";
+      return witness ? finish("blocked", "geometry-blocked", `cut;start:${why}`, witness, null, "passed", "blocked")
+        : finish("inconclusive", "unconfirmed", `start-unrecoverable:${why}`, null, null, "passed", "passed");
+    }
+  }
   const ex = pn.x - pm.x, ez = pn.z - pm.z, el = Math.hypot(ex, ez) || 1;
   const gate: DirectedGate = { id: `${route.id}:exit`, x: pn.x, y: exit.y, z: pn.z, forwardX: ex / el, forwardZ: ez / el,
     halfWidth: route.halfWidth + Math.hypot(footprint.halfLength, footprint.halfWidth), heightTolerance: 0.5, surfaceIds: [regionId] };
   let length = 0; for (let i = 1; i < route.path.length; i++) length += Math.hypot(route.path[i].x - route.path[i - 1].x, route.path[i].z - route.path[i - 1].z);
   const cruise = route.cruiseSpeed ?? 7;
-  const test: RoadAuditCase = { id: route.id, units: [...route.units], start: startState, gates: [gate],
+  const test: RoadAuditCase = { id: recovered ? `${route.id}:recovered` : route.id, units: [...route.units], start: startState, gates: [gate],
     corridor: { surfaceSequence: [regionId], portalSequence: [], waypoints: route.path.map((p) => ({ x: p.x, z: p.z })) },
     policy: { cruiseSpeed: cruise, maxReverseSpeed: 0 }, maxTicks: Math.ceil(((length + 10) / cruise) * 60 * 2 + 600), maxNoProgressTicks: 240 };
   let run: RoadAuditCaseResult | null = null;
   try {
-    const kernel = new DrivingKernel(env, { baseSnapshotHash: key.baseSnapshotHash, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId,
-      physicsVersion: key.physicsVersion, collisionVersion: key.collisionVersion, queryVersion: key.queryVersion });
-    const validator = new CorridorValidator(new SurfaceWorldValidator(regions, polylineProgress(route.path), footprint, params, world.dynamic), route.path, route.halfWidth);
-    const runner = new DrivingRouteRunner(key, test, kernel, new CorridorPilot(route.path, cruise), new GateAuditObserver(test, validator));
+    const runner = new DrivingRouteRunner(key, test, kernelFor(), new CorridorPilot(route.path, cruise), new GateAuditObserver(test, validatorFor()));
     for (let guard = 0; !runner.result && guard < 10000; guard++) { runner.advance(250, key); if (!world.isCurrent()) { runner.cancel(); break; } }
     run = runner.result;
   } catch (error) {
-    return finish("inconclusive", "simulation-invalid", `runner:${error instanceof Error ? error.message : "error"}`, witness, null, "passed", witness ? "blocked" : "passed");
+    return finish("inconclusive", "simulation-invalid", `runner:${error instanceof Error ? error.message : "error"}${recovered}`, witness, null, "passed", witness ? "blocked" : "passed");
   }
   if (!run) return finish("inconclusive", "budget-exhausted", "runner-guard", witness, null, "passed", witness ? "blocked" : "passed");
   if (run.verdict === "passed") {
     // Evidence says impossible, the kernel did it anyway: the simulation or the evidence is wrong.
     if (witness) return finish("inconclusive", "simulation-invalid", "passed-against-witness", witness, run, "passed", "inconclusive");
     if (world.coverage !== "complete") return finish("inconclusive", "unconfirmed", "solid-coverage-incomplete", null, run, "passed", "passed");
-    return finish("passed", "none", "run-passed", null, run, "passed", "passed");
+    return finish("passed", "none", `run-passed${recovered}`, null, run, "passed", "passed");
   }
-  if (witness) return finish("blocked", "geometry-blocked", `cut;run:${run.cause}`, witness, run, "passed", "blocked");
-  // A failed search or a failed pilot is never road evidence.
-  return finish("inconclusive", run.cause, `run:${run.cause}`, null, run, "passed", "passed");
+  if (witness) return finish("blocked", "geometry-blocked", `cut;run:${run.cause}${recovered}`, witness, run, "passed", "blocked");
+  // A failed search, a failed pilot or a contact is never road evidence.
+  return finish("inconclusive", run.cause, `run:${run.cause}${recovered}`, null, run, "passed", "passed");
 }
 
 /** Directed-edge routes from the layout's road edges (both directions), trimmed off the node fans.
