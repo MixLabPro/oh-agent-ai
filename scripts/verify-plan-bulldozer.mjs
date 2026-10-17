@@ -436,9 +436,10 @@ const slotOf = (layout, id) => layout.districts.flatMap((d) => [...d.slots]).fin
   //   这条河地面桥就能过（下面另测），高架照样可以跨。
   let crossing = null;
   const isWater = (p) => !layout.terrain.buildable(p.x, p.z);
+  // 半跨度取多档：窄河 160 就够，开湾的海湾宽 300–450，要 240–400 的跨度才有两端都在陆地的直线。
   for (let i = 0; i < slots.length && !crossing; i += 5) {
-    for (let k = 0; k < 8 && !crossing; k += 1) {
-      const ang = (k * Math.PI) / 8; const c = slots[i]; const half = 160;
+    for (let k = 0; k < 32 && !crossing; k += 1) {
+      const ang = ((k % 8) * Math.PI) / 8; const c = slots[i]; const half = [160, 240, 320, 400][Math.floor(k / 8)];
       const a = { x: c.x - Math.cos(ang) * half, z: c.z - Math.sin(ang) * half }; const b = { x: c.x + Math.cos(ang) * half, z: c.z + Math.sin(ang) * half };
       const samples = Array.from({ length: 33 }, (_, t) => ({ x: a.x + (b.x - a.x) * t / 32, z: a.z + (b.z - a.z) * t / 32 }));
       if (isWater(a) || isWater(b) || !samples.some(isWater)) continue;

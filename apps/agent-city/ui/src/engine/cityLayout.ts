@@ -4,14 +4,15 @@ import { hashSeed, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
 import { clearsHighways, polygonDistance } from "./roadGeometry";
 import { scaleTierFor } from "./scaleTier";
-import { seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
+import { oceanDriveSplitZ, oceanDriveWall, seasideHotelLots, seasideStripContains, type CoastalConfig, type OceanDriveBuilding } from "./citySeaside";
 import { preserveDemandPaths, preserveDisplayJunctions, retainBridgeLandings } from "./planner/retention";
 import { diagnoseNetwork } from "./planner/intent";
 import type { ParcelFrontageProof } from "./planner/roadBlocks";
 import { validateParcelFrontage } from "./planner/parcelFrontage";
 import { lotClearsRoads } from "./planner/lotRoadClearance";
 import { measureLayoutCapacity } from "./planner/layoutCapacity";
-import { closestPolylineSegment } from "./planner/footprint";
+import { closestPolylineSegment, polylineDistance } from "./planner/footprint";
+import { isletEstate } from "./cityIsletEstate";
 import { findBlockLotCandidate, LAYOUT_PLACEMENT_WORK_CONFIG } from "./planner/blockLotCandidates";
 import { inspectBlockPlacement, type BlockPlacementInput, type BlockPlacementResult } from "./planner/blockPlacement";
 import { compileGroundRoadSurface } from "./surface/groundRoadCompiler";
@@ -19,7 +20,9 @@ import { civicMinimumSize, civicEnvelopeSize, GARDEN_MINIMUM_SIZE, DISTRICT_LAND
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
-export type Parcel = Vec2 & { id: string; blockId: string; yaw: number; zone: Zone; width: number; depth: number; frontage?: ParcelFrontageProof };
+export type Parcel = Vec2 & { id: string; blockId: string; yaw: number; zone: Zone; width: number; depth: number; frontage?: ParcelFrontageProof;
+  /** 高楼并入的相邻地块 id（slot 的 width 已是两块之和、x/z 在两块中点）；刷新时据此重建，保证塔楼宽度稳定。 */
+  mergedWith?: string };
 export type BlockSurfaceExclusion = { kind: "road-corridor" | "highway-corridor"; id: string; points: Vec2[]; width: number }
   | { kind: "site-circle"; id: string; x: number; z: number; radius: number };
 export type CityBlock = {
@@ -97,6 +100,10 @@ export type CityLayout = {
   /** 尽端回车点（形态批 §5-3，加性）：计划层 classifyEndpoints 判为 cul-de-sac 的合法尽端，
    *  生长剪枝（G1）删掉所在支路后已不存在于最终路网的点被剔除——回车圈只画在真实路尽头。 */
   culDeSacEnds?: Vec2[];
+  /** 路口环岛（planner/junctionRings.ts）：中心岛由 roadSystem.buildJunctionIslands 画。 */
+  junctionRings?: Array<{ x: number; z: number; radius: number; width: number; kind: "major" | "minor" }>;
+  /** 高架立交匝道（planner/highwayRamps.ts）：桥面端 → 地面端，由 roadSystem.buildHighwayRamps 画。 */
+  highwayRamps?: Array<{ points: Vec2[]; width: number; side: 1 | -1 }>;
   districtLandmarks?: DistrictLandmark[];
   terrain: TerrainField; extent: number; coast: Vec2[]; river: Vec2[]; publicSites: PublicSite[];
   parkTrees: Array<Vec2 & { y: number; seed: number }>;
@@ -119,6 +126,8 @@ export type CityLayout = {
   coastalConfig: CoastalConfig | null;
   /** 低数据量也保留城市轮廓；这些环境楼明确不代表会话。 */
   contextBuildings: ContextBuilding[];
+  /** Ocean Drive Art Deco 街墙（开湾时东岛南段酒店线；背景楼，不占会话、不进统计）。 */
+  oceanDrive?: OceanDriveBuilding[];
   gardens: GardenSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
@@ -179,7 +188,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
         coastal.wetSandWidth, coastal.drySandWidth, coastal.promenadeOffset, coastal.boulevardOffset,
         coastal.hotelOffset, coastal.bandOuter, coastal.maxCoastalSlope,
         coastal.maxCoastalHeight, coastal.riverMargin, coastal.siteMargin,
-        coastal.minValidRatio,
+        coastal.minValidRatio, coastal.bayHalfWidth, coastal.bayShift,
       ].join(",")}`
     : "none";
   const planKey = `${seed}:${tier}:${coastalKey}`;
@@ -200,13 +209,79 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const lotClearOfRoads = (lot: { x: number; z: number; yaw: number; width: number; depth: number }) => {
     return lotClearsRoads(lot, plan.roadEdges);
   };
-  const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).filter(lotClearOfRoads).map((lot) => ({
+  // 开湾时南段（Ocean Beach / Washington Beach）的酒店线让给 Art Deco 街墙（oceanDrive，背景楼），会话酒店只留北段。
+  const oceanDriveSplit = (coastal?.bayHalfWidth ?? 0) > 0 ? oceanDriveSplitZ(plan.seaside) : -Infinity;
+  const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).filter(lotClearOfRoads).filter((lot) => lot.z >= oceanDriveSplit).map((lot) => ({
     id: lot.id, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
     parcels: [{ id: `${lot.id}/0`, blockId: lot.id, x: lot.x, z: lot.z, yaw: lot.yaw, zone: "waterfront" as Zone, width: lot.width, depth: lot.depth }],
   }));
-  const blocks = [...plan.blocks, ...hotelBlocks];
+  // Ocean Drive 街墙地块（用户定：会话楼优先占用、空位再补背景 Art Deco 酒店）：沿南段酒店线连续排，
+  // 海滨地块（facadeFor：海滨 + 楼高 ≤ 36 → Art Deco 立面；C-1：楼高 > 26 让到内陆），属于东岛城区的扇区。
+  // 压路（含横街）、压公共用地/地标的位置不排，读作街墙在路口处断开。
+  const oceanLots = coastal && oceanDriveSplit > -Infinity ? oceanDriveWall(plan.seaside, coastal, seed, (lot) => {
+    if (!lotClearsRoads(lot, plan.roadEdges)) return false;
+    const h = plan.terrain.height(lot.x, lot.z);
+    if (h < 0.5 || h > 6) return false;
+    const half = Math.hypot(lot.width, lot.depth) / 2;
+    return [...plan.publicSites, ...plan.landmarks].every((site) => !site.radius || Math.hypot(site.x - lot.x, site.z - lot.z) > half + site.radius + 1);
+  }) : [];
+  const oceanBlocks: CityBlock[] = oceanLots.map((lot) => ({
+    id: `oceandrive:${lot.id}`, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
+    parcels: [{ id: `${lot.id}/0`, blockId: `oceandrive:${lot.id}`, x: lot.x, z: lot.z, yaw: lot.yaw, zone: "waterfront" as Zone, width: lot.width, depth: lot.depth }],
+  }));
+  const blocks = [...plan.blocks, ...hotelBlocks, ...oceanBlocks];
   const parcels = blocks.flatMap((block) => block.parcels);
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
+  // 高楼并入相邻空地块（用户：「session building 太细了」的第二步）：楼高 ≥ TALL 的会话楼把同街区、同一排、紧挨着的
+  // 一块空地块并进来，面宽 7.2 → 14.4（高宽比 5–8:1 → 约 3:1）。海滨酒店 / Ocean Drive 地块本来就宽，不并。
+  const TALL = 26;
+  const parcelsByBlock = new Map<string, Parcel[]>();
+  for (const parcel of parcels) { const list = parcelsByBlock.get(parcel.blockId); if (list) list.push(parcel); else parcelsByBlock.set(parcel.blockId, [parcel]); }
+  // 并集取精确外包：沿街方向两块的最外侧边缘之间。曾取「宽 = 两块面宽之和、中心 = 两块中点」——相邻判定允许间距 ±1.2，
+  // 间距偏小时矩形两头各多伸出 ~0.6，碰到街区自己的边界路（verify-react-city-layout 实测）。
+  const mergeParcels = (a: Parcel, b: Parcel): Parcel => {
+    const tx = Math.cos(a.yaw); const tz = -Math.sin(a.yaw);
+    const along = (b.x - a.x) * tx + (b.z - a.z) * tz;
+    const lo = Math.min(-a.width / 2, along - b.width / 2); const hi = Math.max(a.width / 2, along + b.width / 2);
+    const mid = (lo + hi) / 2;
+    return { ...a, x: a.x + tx * mid, z: a.z + tz * mid, width: hi - lo, mergedWith: b.id };
+  };
+  const nearbyRoads = (x: number, z: number, reach: number) => plan.roadEdges.filter((edge) => edge.points.some((pt, i) => {
+    if (i === 0) return false;
+    const a = edge.points[i - 1];
+    return Math.min(a.x, pt.x) - reach < x && Math.max(a.x, pt.x) + reach > x && Math.min(a.z, pt.z) - reach < z && Math.max(a.z, pt.z) + reach > z;
+  }));
+  const mergedClearsRoads = (m: Parcel): boolean => {
+    const ax = Math.sin(m.yaw); const az = Math.cos(m.yaw); const bx = az; const bz = -ax;
+    for (const edge of nearbyRoads(m.x, m.z, Math.hypot(m.width, m.depth) / 2 + 10)) for (let i = 1; i < edge.points.length; i += 1) {
+      const a = edge.points[i - 1]; const b = edge.points[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
+      for (let d = 0; d <= len; d += 1) {
+        const t = len ? d / len : 0;
+        const dx = a.x + (b.x - a.x) * t - m.x; const dz = a.z + (b.z - a.z) * t - m.z;
+        if (Math.abs(dx * bx + dz * bz) < m.width / 2 + edge.width / 2 + 0.5 && Math.abs(dx * ax + dz * az) < m.depth / 2 + edge.width / 2 + 0.5) return false;
+      }
+    }
+    return true;
+  };
+  const adjacentFree = (p: Parcel, isFree: (q: Parcel) => boolean): Parcel | null => {
+    if (p.blockId.startsWith("hotel:") || p.blockId.startsWith("oceandrive:") || p.width > 9) return null;
+    const tx = Math.cos(p.yaw); const tz = -Math.sin(p.yaw);
+    let best: Parcel | null = null; let bestAlong = Infinity;
+    for (const q of parcelsByBlock.get(p.blockId) ?? []) {
+      if (q.id === p.id || !isFree(q)) continue;
+      const dx = q.x - p.x; const dz = q.z - p.z;
+      const along = dx * tx + dz * tz; const across = dx * Math.sin(p.yaw) + dz * Math.cos(p.yaw);
+      const yawGap = Math.abs((((q.yaw - p.yaw + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI);
+      if (Math.abs(across) > 0.8 || yawGap > 0.05 || Math.abs(Math.abs(along) - (p.width + q.width) / 2) > 1.2) continue;
+      // 空地块不保证不压路（规划后期的修补/接入路可能穿过还没人住的地块；守卫只查有楼的地块）：并之前按合并后的
+      // 真实朝向矩形查一遍。判据与 verify-react-city-layout 的并地块断言同一口径——两个轴向都留「半个路幅 + 0.5」，
+      // 比 lotClearsRoads 严：街区折角处斜着走的边界路，lotClearsRoads 放行、这条判据拒绝（守卫实测 4 例）。
+      if (!mergedClearsRoads(mergeParcels(p, q))) continue;
+      const gap = Math.abs(along);
+      if (gap < bestAlong - 1e-6 || (Math.abs(gap - bestAlong) <= 1e-6 && best !== null && q.id < best.id)) { bestAlong = gap; best = q; }
+    }
+    return best;
+  };
   const assigned = new Map<string, Parcel>();
   const used = new Set<string>();
   // 规划修复的移楼钉子（CITY_PLAN_MANUAL_REPAIR_SPEC §5/§12.4）：先于「刷新不搬家」落位。
@@ -230,7 +305,8 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const CELL = 40;
     const grid = new Map<string, Parcel[]>();
     for (const parcel of parcels) { const key = `${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`; const list = grid.get(key); if (list) list.push(parcel); else grid.set(key, [parcel]); }
-    const ordered = [...model.buildings].filter((building) => old.has(building.id) && !assigned.has(building.id)).sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    const ordered = [...model.buildings].filter((building) => old.has(building.id) && !assigned.has(building.id)).sort((a, b) => Number(!!old.get(b.id)?.mergedWith) - Number(!!old.get(a.id)?.mergedWith) || a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    // 并过的高楼先落位（它还要在近旁再要一块空地块，晚了邻地块已被别的楼拿走）；其余仍按开工先后。
     for (const building of ordered) {
       const from = old.get(building.id)!;
       const tx = from.x * ratio; const tz = from.z * ratio;
@@ -246,7 +322,12 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
           }
         }
       }
-      if (best && bestD <= 120) { assigned.set(building.id, best); used.add(best.id); }
+      if (best && bestD <= 120) {
+        // 跨档重排：旧 slot 是并过的高楼，就在新位置的近旁再并一块空地块（楼别因为岛放大就瘦回单宽）。
+        const partner = from.mergedWith ? adjacentFree(best, (q) => !used.has(q.id)) : null;
+        assigned.set(building.id, partner ? mergeParcels(best, partner) : best);
+        used.add(best.id); if (partner) used.add(partner.id);
+      }
     }
   }
   if (previous?.seed === seed && previous.scaleTier === tier) {
@@ -254,7 +335,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     for (const building of model.buildings) {
       const parcel = old.get(building.id);
       if (parcel && parcelIndex.has(parcel.id) && !used.has(parcel.id) && !assigned.has(building.id)) {
-        assigned.set(building.id, parcelIndex.get(parcel.id)!); used.add(parcel.id);
+        const base = parcelIndex.get(parcel.id)!;
+        const partner = parcel.mergedWith ? parcelIndex.get(parcel.mergedWith) : undefined;
+        if (partner && !used.has(partner.id)) { assigned.set(building.id, mergeParcels(base, partner)); used.add(base.id); used.add(partner.id); }
+        else { assigned.set(building.id, base); used.add(parcel.id); }
       }
     }
   }
@@ -283,16 +367,44 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     .sort((a, b) => angleFrom(a) - angleFrom(b) || a.id.localeCompare(b.id));
   const totalLots = usableBlocks.reduce((sum, block) => sum + block.parcels.length, 0);
   const wedgeOf = new Map<string, string>(); // blockId → districtId
-  {
+  /** 按方位扇形把 blocks 切给 order 里的城区，份额 = weight 占比（最后一个城区拿余量）。 */
+  const assignWedges = (pool: CityBlock[], order: Array<{ id: string; weight: number }>) => {
+    const lots = pool.reduce((sum, block) => sum + block.parcels.length, 0);
+    const total = order.reduce((sum, item) => sum + item.weight, 0) || 1;
     let index = 0; let accumulated = 0; let quota = 0;
-    for (const district of ranked) {
-      quota += (sessionsOf.get(district.id)! / totalSessions) * totalLots;
-      while (index < usableBlocks.length && (accumulated < quota || district === ranked[ranked.length - 1])) {
-        wedgeOf.set(usableBlocks[index].id, district.id);
-        accumulated += usableBlocks[index].parcels.length;
+    for (const item of order) {
+      quota += (item.weight / total) * lots;
+      while (index < pool.length && (accumulated < quota || item === order[order.length - 1])) {
+        wedgeOf.set(pool[index].id, item.id);
+        accumulated += pool[index].parcels.length;
         index += 1;
       }
     }
+  };
+  // 开湾（Vice City 式）：东岛整岛归一个执行环境（用户：「东岛应该是单独一个执行环境的区」）。曾以核心为圆心切扇形，
+  // 核心在西岛，扇形跨过海湾把东岛切成几块分给不同执行环境。选会话占比与东岛地块占比最接近的城区（排名第一的留在
+  // 大陆核心）；它在东岛放不下的部分按差额在西岛再分一片，其余城区照旧按扇形分西岛。
+  const riverXAt = (z: number) => {
+    let best = plan.river[0]; for (const p of plan.river) if (Math.abs(p.z - z) < Math.abs(best.z - z)) best = p;
+    return best.x;
+  };
+  const bayMode = (coastal?.bayHalfWidth ?? 0) > 0 && plan.river.length > 0 && ranked.length > 1;
+  const eastBlocks = bayMode ? usableBlocks.filter((block) => block.x > riverXAt(block.z)) : [];
+  const eastLots = eastBlocks.reduce((sum, block) => sum + block.parcels.length, 0);
+  let eastDistrictId: string | null = null;
+  if (bayMode && eastLots > 0) {
+    const eastShare = eastLots / Math.max(1, totalLots);
+    const eastDistrict = ranked.slice(1).reduce((best, district) =>
+      Math.abs(sessionsOf.get(district.id)! / totalSessions - eastShare) < Math.abs(sessionsOf.get(best.id)! / totalSessions - eastShare) ? district : best);
+    eastDistrictId = eastDistrict.id;
+    for (const block of eastBlocks) wedgeOf.set(block.id, eastDistrict.id);
+    const eastSet = new Set(eastBlocks.map((block) => block.id));
+    const deficit = Math.max(0, sessionsOf.get(eastDistrict.id)! - eastLots * (totalSessions / Math.max(1, totalLots)));
+    assignWedges(usableBlocks.filter((block) => !eastSet.has(block.id)),
+      ranked.map((district) => ({ id: district.id, weight: district === eastDistrict ? deficit : sessionsOf.get(district.id)! }))
+        .filter((item) => item.weight > 0));
+  } else {
+    assignWedges(usableBlocks, ranked.map((district) => ({ id: district.id, weight: sessionsOf.get(district.id)! })));
   }
   const blocksOf = (districtId: string) => usableBlocks.filter((block) => wedgeOf.get(block.id) === districtId);
   /** 小区中心：本片街区按离核心距离由近到远，取 30% 处——靠内但不压在核心点上（核心是市政广场）。 */
@@ -301,6 +413,14 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const own = blocksOf(district.id).sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
     const pick = own[Math.min(own.length - 1, Math.floor(own.length * 0.3))];
     anchorOf.set(district.id, pick ? { x: pick.x, z: pick.z } : core);
+    // 东岛城区从 Ocean Beach 往北长（用户定）：锚点 = 离 Ocean Drive 街墙中点最近的本区街区（花园与生长起点都在这里）。
+    // 曾按「离核心 30% 处」——东岛靠海湾、靠市中心的北段先建满，南段海滩一片空地（2000 会话截图）。
+    if (district.id === eastDistrictId && oceanLots.length) {
+      const mid = [...oceanLots].sort((a, b) => a.z - b.z)[Math.floor(oceanLots.length / 2)];
+      const inland = own.filter((block) => !block.id.startsWith("oceandrive:") && !block.id.startsWith("hotel:"))
+        .sort((a, b) => Math.hypot(a.x - mid.x, a.z - mid.z) - Math.hypot(b.x - mid.x, b.z - mid.z))[0];
+      if (inland) anchorOf.set(district.id, { x: inland.x, z: inland.z });
+    }
   }
 
   // 小区中心花园：先于会话落楼，在本小区内离中心最近的空街区整块预留（只看规划与会话数，确定性不变）。
@@ -429,19 +549,35 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     const inside = [...blocksOf(district.id), ...(buildings.length >= 20 ? hotelBlocks.filter((b) => nearestDistrict(b) === district.id) : [])].flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
     const overflow: typeof buildings = [];
     let cursor = 0;
+    let placedCount = 0;
+    /** 落位；高楼在本区空地块有富余时顺带并入相邻空地块（富余 = 剩余空地块 − 1 仍 ≥ 剩余会话 × 1.15，
+     *  留给后面的会话与将来的并入，近满载的城市不并，免得把会话挤成 massing 方块）。 */
+    const commit = (building: typeof buildings[number], parcel: Parcel) => {
+      let slot = parcel;
+      used.add(parcel.id);
+      if (building.height >= TALL) {
+        const partner = adjacentFree(parcel, (q) => !used.has(q.id));
+        if (partner) {
+          let free = 0;
+          for (let k = cursor; k < inside.length; k += 1) if (!used.has(inside[k].id)) free += 1;
+          if (free - 1 >= (buildings.length - placedCount - 1) * 1.15) { slot = mergeParcels(parcel, partner); used.add(partner.id); }
+        }
+      }
+      assigned.set(building.id, slot);
+      placedCount += 1;
+    };
     for (const building of buildings) {
       while (cursor < inside.length && used.has(inside[cursor].id)) cursor += 1;
       let parcel: Parcel | undefined = inside[cursor];
       // C-1 近岸高度梯度：楼高 > 26 的会话楼不占海滨地块，让给低层（迈阿密剖面：低层临水、塔楼退后）。楼高仍由 token 决定，只换位置。
       if (parcel && building.height > 26 && parcel.zone === "waterfront") {
         const inland = inside.find((p, k) => k > cursor && !used.has(p.id) && p.zone !== "waterfront");
-        if (inland) { used.add(inland.id); assigned.set(building.id, inland); continue; }
+        if (inland) { commit(building, inland); continue; }
       }
       if (parcel) cursor += 1;
       else parcel = parcels.filter((candidate) => !used.has(candidate.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id))[0];
       if (!parcel) { overflow.push(building); continue; }
-      assigned.set(building.id, parcel);
-      used.add(parcel.id);
+      commit(building, parcel);
     }
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
@@ -455,7 +591,9 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   if (coastal?.profile === "miami-coastal" && backdrop !== "off") {
     const full = backdrop === "full";
     const reserved = new Set([...used, ...civics.map((civic) => civic.parcelId)]);
-    const coreRadius = plan.islandRadius;
+    // 开湾时岛形定向南北、长半轴 ≈ 1.25R，核心又贴着西岸：0.94R 的圈罩不住南北两端，「繁华」档背景楼只剩一半
+    // （verify-react-city-layout 低会话量实测 75 < 140）。放宽到 1.4R；仍要求可建、坡度、避高架与海滨带。
+    const coreRadius = plan.islandRadius * ((coastal?.bayHalfWidth ?? 0) > 0 ? 1.4 / 0.94 : 1);
     const sessionSlots = [...assigned.values()];
     const candidates = plan.blocks
       .flatMap((block) => block.parcels)
@@ -525,6 +663,9 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       if (selected.length >= target) break;
     }
   }
+  // 会话没占用的街墙地块补背景 Art Deco 酒店（2–6 层）：街墙始终连续，会话越多真实数据占比越高。
+  const civicParcels = new Set(civics.map((civic) => civic.parcelId));
+  const oceanDrive = oceanLots.filter((lot) => !used.has(`${lot.id}/0`) && !civicParcels.has(`${lot.id}/0`) && !civicParcels.has(`oceandrive:${lot.id}`));
   {
     // 数据窗口缺省（测试夹具/旧调用方）时退回会话起始时刻的范围，绝不产出 NaN。
     const starts = model.buildings.map((building) => building.startedAt).filter(Number.isFinite);
@@ -591,7 +732,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
     sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
     aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
-  return { ...plan, ...grown, culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings, oceanDrive };
 }
 
 /**
@@ -626,6 +767,18 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
   // Retain the exact accepted frontage host and its proved route, not a new
   // nearest-road approximation after display pruning.
   const serviceSelection = new Set(selection);
+  // 市政广场周边的路口属于公共骨架。长边中点可能在服务圆之外，不能因此把广场入口裁成两岔。
+  const civicSites = plan.publicSites.filter((site) => site.kind === "civic");
+  const civicNodes = new Set(plan.roadNodes.filter((node) => civicSites.some((site) =>
+    Math.hypot(node.x - site.x, node.z - site.z) <= site.radius + 20)).map((node) => node.id));
+  for (const edge of plan.roadEdges) if (!edge.bridge && (civicNodes.has(edge.from) || civicNodes.has(edge.to))) serviceSelection.add(edge.id);
+  // 高架和匝道的落地点同样是固定服务入口。附近为避让走廊、没有建筑时，8 宽宿主也不能随活动剪枝消失。
+  const highwayLandings = [
+    ...(plan.highwayRamps ?? []).map((ramp) => ramp.points[ramp.points.length - 1]),
+    ...plan.highways.filter((run) => run.length > 1 && Math.hypot(run[0].x - run[run.length - 1].x, run[0].z - run[run.length - 1].z) > 0.01)
+      .flatMap((run) => [run[0], run[run.length - 1]]),
+  ];
+  for (const edge of plan.roadEdges) if (!edge.bridge && highwayLandings.some((point) => polylineDistance([edge.points], point) <= 0.02)) serviceSelection.add(edge.id);
   const edgeById = new Map(plan.roadEdges.map((edge) => [edge.id, edge]));
   const unresolvedParcelFrontage: string[] = [];
   const unsupportedAuxiliaryFrontage = auxiliaryParcels.filter(parcel => used.has(parcel.id)).map(parcel => parcel.id).sort();
@@ -840,6 +993,29 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     out.push({ id, kind, districtId: owner, parcelId: parcel.id, ...oriented, y: plan.terrain.height(oriented.x, oriented.z), unlockAt });
     recordLayoutPlacement(placementReport, id, "civic", true, "accepted renderer rectangle", samples, attempted);
   });
+  return out;
+}
+
+/** 豪宅岛（Vice City 的 Starfish Island 母题）：湾心小岛的场地层（环路/支路/棕榈）+ 一圈海湾豪宅 + 北侧大宅，
+ *  位置全由 cityIsletEstate.isletEstate 算（渲染场地层用同一个函数，棕榈天然避开住宅）。布局期装饰：规划层只认得
+ *  贴岛北缘穿过的那段堤道，不进规划基线、不占地块、不接路。离任何桥 < 20 的住宅不放（兜底：堤道被别的桥取代时）。 */
+function isletVillas(plan: { islets?: Array<Vec2 & { radius: number; kind?: string; side?: 1 | -1 }>; bridges: BridgeLayout[] }): Landmark[] {
+  const out: Landmark[] = [];
+  for (const [index, islet] of (plan.islets ?? []).entries()) {
+    const id = `landmark:islet-grounds:${index}`;
+    // Leaf Links：3 号堤道从岛南部穿过（geography 把中心放在堤道以北 0.2R）；Prawn：引道从岛心往东。只画场地层。
+    if (islet.kind === "leaf-links") { out.push({ id, kind: "islet-grounds", variant: "golf", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius, roadZ: 0.2 * islet.radius }); continue; }
+    // Prawn 的场地按「引道朝局部 +x」布置；贴西岸（side −1、短桥接大陆）时整组转 180°。
+    if (islet.kind === "prawn") { out.push({ id, kind: "islet-grounds", variant: "studio", x: islet.x, z: islet.z, yaw: (islet.side ?? 1) < 0 ? Math.PI : 0, radius: 0, reach: islet.radius }); continue; }
+    out.push({ id, kind: "islet-grounds", x: islet.x, z: islet.z, yaw: 0, radius: 0, reach: islet.radius });
+    const estate = isletEstate(islet.radius, Math.floor(hashSeed(id) * 0x7fffffff));
+    estate.houses.forEach((house, k) => {
+      const at = { x: islet.x + house.x, z: islet.z + house.z };
+      if (!plan.bridges.every((b) => polylineDistance([[b.from, b.to]], at) > 20 + 13 * house.scale)) return;
+      out.push({ id: `landmark:islet-mansion:${index}:${k}`, kind: "islet-mansion", x: at.x, z: at.z, yaw: house.yaw, radius: 0,
+        reach: house.reach, scale: house.scale });
+    });
+  }
   return out;
 }
 

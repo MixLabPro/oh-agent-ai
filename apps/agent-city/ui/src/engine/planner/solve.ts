@@ -728,7 +728,7 @@ function planView(ctx: RepairContext) {
   return {
     roadEdges: [...ctx.network.edges.values()], roadNodes: [...ctx.network.nodes.values()],
     publicSites: ctx.publicSites, landmarks: ctx.landmarks, blocks: ctx.blocks,
-    terrain: ctx.geo.terrain, seaside: ctx.seaside, coast: ctx.coast, river: ctx.geo.river,
+    terrain: ctx.geo.terrain, seaside: ctx.seaside, coast: ctx.coast, river: ctx.geo.river, waterEdges: ctx.geo.waterEdges,
     core: ctx.core, coastRoads: ctx.coastalRunCount === undefined ? ctx.coastRoadRuns : ctx.coastRoadRuns.slice(0, ctx.coastalRunCount), riverRoadRuns: ctx.riverRoadRuns,
     primaryAnchorNodeId: ctx.primaryAnchorNodeId,
     siteObligations: ctx.siteObligations,

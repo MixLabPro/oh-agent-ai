@@ -24,6 +24,7 @@ function plannedEndWorld(ctx: RepairContext) {
     coastRoadRunEnds: ctx.coastRoadRunEnds,
     coast: ctx.coast,
     river: ctx.geo.river,
+    waterEdges: ctx.geo.waterEdges,
   };
 }
 import type { RepairContext } from "./context";

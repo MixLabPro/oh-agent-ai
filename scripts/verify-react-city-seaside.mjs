@@ -13,7 +13,13 @@ const { createCityPlan: rawPlan, layoutCity, polygonDistance, MIAMI_COASTAL, sea
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL", "seasideStripContains", "promenadeSegments", "boulevardSegments", "seasideHotelCount", "encodeDistance", "decodeDistance", "distanceQuantizationError"],
 });
-const createCityPlan = (seed, tier, config) => cachedPlan(rawPlan, seed, tier, config);
+const createCityPlan = (seed, tier, config) => {
+  const trace = tier === 10 || process.env.CITY_VERIFY_PROGRESS === "1", began = performance.now();
+  if (trace) console.error(`City seaside: start ${seed}/t${tier} profile=${config?.profile ?? "default"}`);
+  const plan = cachedPlan(rawPlan, seed, tier, config);
+  if (trace) console.error(`City seaside: done ${seed}/t${tier} ${Math.round(performance.now() - began)}ms`);
+  return plan;
+};
 
 const normalizeAngle = (a) => { let r = a % (Math.PI * 2); if (r < 0) r += Math.PI * 2; return r; };
 const angleDelta = (a, b) => { const d = Math.abs(normalizeAngle(a) - normalizeAngle(b)); return Math.min(d, Math.PI * 2 - d); };
@@ -103,13 +109,19 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
       // 取「真正成路的」大道段的起点：第一个合法样本可能是只有 1 个点的孤立段，孤立段不成路、没有车流回路（设计如此）。
       const routeSegment = boulevards.find((segment) => segment.length >= 2);
       assert.ok(routeSegment, `seed ${seed}: 至少一段 ≥2 点的大道`);
-      const routeSample = { boulevard: routeSegment[0] };
+      // 段首的 1–2 个点可能是端部短桩，被网络清理（端点吃水/断头清理）删掉而不在路网上（seed 97/10 档：前 2 点离最近的边 26.9，
+      // 其余 109 点都在路上）；契约是「大道进入真实路网并继承主干道路幅」，所以取第一个确实落在路网上的点做代表。
+      const onNetwork = (point) => plan.roadEdges.some((edge) => edge.points.some((p) => Math.hypot(p.x - point.x, p.z - point.z) < 0.01));
+      const routeSample = { boulevard: routeSegment.find(onNetwork) ?? routeSegment[0] };
       assert.ok(plan.roadEdges.some((edge) => edge.width === 12 && edge.points.some((point) => Math.hypot(point.x - routeSample.boulevard.x, point.z - routeSample.boulevard.z) < 0.01)),
         `seed ${seed}: 规划的大道应进入真实车行路网并继承主干道路幅`);
       const coastalTraffic = plan.carPaths.find((path) => path.some((point) => Math.hypot(point.x - routeSample.boulevard.x, point.z - routeSample.boulevard.z) < 0.01));
       assert.ok(coastalTraffic, `seed ${seed}: 至少一条机动车回路应经过滨海大道`);
       assert.deepEqual(coastalTraffic[0], coastalTraffic.at(-1), `seed ${seed}: 滨海车流回路必须闭合，不可在端点瞬移`);
-      const roadPairs = new Set(plan.roadEdges.map((edge) => edge.points.map((point) => `${point.x}:${point.z}`).sort().join("/")));
+      // 车路径按折线逐段走：地面走廊重绘（relineEdges/relineSplits）会产出多点边，所以按「相邻点对」建集合，
+      // 而不是把整条边所有点拼成一个键（那样多点边上的每一步都会被误判成离路）。
+      const roadPairs = new Set(plan.roadEdges.flatMap((edge) => edge.points.slice(1).map((point, i) =>
+        [edge.points[i], point].map((p) => `${p.x}:${p.z}`).sort().join("/"))));
       for (let i = 1; i < coastalTraffic.length; i += 1) {
         assert.ok(roadPairs.has([coastalTraffic[i - 1], coastalTraffic[i]].map((point) => `${point.x}:${point.z}`).sort().join("/")),
           `seed ${seed}: 滨海车流只能沿已渲染道路移动 (${JSON.stringify([coastalTraffic[i - 1], coastalTraffic[i]])})`);

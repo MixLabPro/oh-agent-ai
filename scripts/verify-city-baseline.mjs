@@ -29,11 +29,21 @@ const hash = (value) => crypto.createHash("sha1").update(JSON.stringify(norm(val
 
 /** 分区哈希：出现差异时能指出是路网、用地、地块还是车流变了。 */
 function sections(plan) {
+  for (const ramp of plan.highwayRamps ?? []) {
+    const end = ramp.points.at(-1);
+    const touches = plan.roadEdges.some(edge => !edge.bridge && edge.structure !== "deck" && edge.points.slice(1).some((b, i) => {
+      const a = edge.points[i], dx = b.x - a.x, dz = b.z - a.z;
+      const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+      return Math.hypot(end.x - a.x - t * dx, end.z - a.z - t * dz) < 0.02;
+    }));
+    assert.ok(touches, "every accepted ramp must still touch a real ground host after solve and finalization");
+  }
   return {
     roads: hash({ nodes: plan.roadNodes, edges: plan.roadEdges }),
     sites: hash({ publicSites: plan.publicSites, landmarks: plan.landmarks }),
     blocks: hash(plan.blocks.map((b) => ({ id: b.id, zone: b.zone, polygon: b.polygon, parcels: b.parcels.map((p) => [p.id, p.x, p.z, p.yaw, p.width, p.depth]) }))),
     skeleton: hash({ core: plan.core, coast: plan.coast, highways: plan.highways, bridges: plan.bridges, river: plan.river, islandRadius: plan.islandRadius }),
+    infrastructure: hash({ junctionRings: plan.junctionRings, highwayRamps: plan.highwayRamps }),
     traffic: hash(plan.carPaths),
     seaside: hash(plan.seaside ?? null),
   };
@@ -66,11 +76,11 @@ if (process.argv.includes("--update")) {
 
 assert(fs.existsSync(goldenPath), "golden/city-plan-baseline.json missing — run with --update once and review");
 const golden = JSON.parse(fs.readFileSync(goldenPath, "utf8"));
-assert.equal(CITY_GENERATOR_VERSION, goldenVersion(golden),
-  `CITY_GENERATOR_VERSION is ${CITY_GENERATOR_VERSION} but the baseline was written by version ${goldenVersion(golden)}: 递增版本与重建基线必须在同一提交。`);
 const changed = islandKeys.filter((k) => golden[k]?.all !== current[k].all);
 if (changed.length) {
   const lines = changed.map((k) => `${k}: ${Object.keys(current[k]).filter((s) => s !== "all" && golden[k]?.[s] !== current[k][s]).join(", ") || "(new island)"}`);
   assert.fail(`plan changed on ${changed.length}/${islandKeys.length} islands (differing sections below). 重构应保持哈希不变；有意改规划请先 --diff 审阅再 --update：\n  ${lines.join("\n  ")}`);
 }
-console.log(`City baseline: ${islandKeys.length} island plans match golden/city-plan-baseline.json (roads, sites, blocks, skeleton, traffic, seaside; generator version ${CITY_GENERATOR_VERSION}).`);
+assert.equal(CITY_GENERATOR_VERSION, goldenVersion(golden),
+  `CITY_GENERATOR_VERSION is ${CITY_GENERATOR_VERSION} but the baseline was written by version ${goldenVersion(golden)}: 递增版本与重建基线必须在同一提交。`);
+console.log(`City baseline: ${islandKeys.length} island plans match golden/city-plan-baseline.json (roads, sites, blocks, skeleton, infrastructure, traffic, seaside; generator version ${CITY_GENERATOR_VERSION}).`);

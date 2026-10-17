@@ -3,6 +3,7 @@
  * 纯搬移自 CityParts（CITY_ENGINE_SPLIT_SPEC §4-6）：函数体逐字不变，`this.` -> `host.`。
  */
 
+import { m, METER_MODEL_SCALE, REAL } from "../worldScale";
 import * as THREE from "three";
 import { hashSeed } from "../../cityModel";
 import type { CityLayout, Vec2 } from "../cityLayout";
@@ -216,8 +217,9 @@ export function buildBeachFurniture(host: SeasideHost): void {
   buildBeachLife(host, courts, spots, wet);
   if (!spots.length) return;
   const colors = ["#ff5fa8", "#00c2d1", "#ffb03a", "#ffffff", "#7a5cff", "#ff6b4a"];
-  const poleGeometry = new THREE.CylinderGeometry(0.07, 0.07, 2.4, 5).translate(0, 1.2, 0);
-  const canopyGeometry = new THREE.ConeGeometry(1.6, 0.7, 8).translate(0, 2.55, 0);
+  // 伞、躺椅、人、沙排场、救生塔、码头小艇都按真实米建模，经 worldScale 换算（1 单位 = 2 m）。
+  const poleGeometry = new THREE.CylinderGeometry(m(0.04), m(0.04), m(REAL.umbrella.height), 5).translate(0, m(REAL.umbrella.height) / 2, 0);
+  const canopyGeometry = new THREE.ConeGeometry(m(REAL.umbrella.diameter / 2), m(0.5), 8).translate(0, m(REAL.umbrella.height) + m(0.1), 0);
   const box = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
   const poleMaterial = new THREE.MeshLambertMaterial({ color: "#f2ede2" });
   const canopyMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
@@ -235,9 +237,9 @@ export function buildBeachFurniture(host: SeasideHost): void {
     canopies.setColorAt(i, host.color.set(colors[Math.floor(spot.seed * 997) % colors.length]));
     // 两张躺椅并排、朝海（局部 z = 内向，椅子摆在伞的朝海一侧）。
     const sx = Math.sin(spot.yaw); const sz = Math.cos(spot.yaw);
-    for (const side of [-0.7, 0.7]) {
-      const lx = spot.x - sx * 1.6 + sz * side; const lz = spot.z - sz * 1.6 - sx * side;
-      host.compose(lx, y + 0.05, lz, spot.yaw, 0.6, 0.28, 1.9);
+    for (const side of [-m(0.5), m(0.5)]) {
+      const lx = spot.x - sx * m(1.6) + sz * side; const lz = spot.z - sz * m(1.6) - sx * side;
+      host.compose(lx, y + 0.02, lz, spot.yaw, m(REAL.lounger.width), m(REAL.lounger.height), m(REAL.lounger.length));
       loungers.setMatrixAt(lounger, host.matrix);
       loungers.setColorAt(lounger, host.color.set(spot.seed > 0.6 ? "#fff4ec" : "#4fd1d9"));
       lounger += 1;
@@ -262,8 +264,9 @@ export function buildBeachLife(host: SeasideHost, courts: Array<{ x: number; z: 
   const box = (w: number, h: number, d: number, x: number, y: number, z = 0) => new THREE.BoxGeometry(w, h, d).translate(x, y + h / 2, z);
   const clothesParts = [box(0.15, 0.82, 0.18, -0.1, 0), box(0.15, 0.82, 0.18, 0.1, 0), box(0.4, 0.58, 0.22, 0, 0.82)];
   const skinParts = [box(0.1, 0.56, 0.11, -0.26, 0.86), box(0.1, 0.56, 0.11, 0.26, 0.86), new THREE.SphereGeometry(0.13, 8, 6).translate(0, 1.6, 0)];
-  const clothesGeometry = mergeGeometries(clothesParts);
-  const skinGeometry = mergeGeometries(skinParts);
+  // 人形按 1 单位 = 1 米建（身高 ~1.75）：整体乘 METER_MODEL_SCALE 换算到当前比例尺。
+  const clothesGeometry = mergeGeometries(clothesParts).scale(METER_MODEL_SCALE, METER_MODEL_SCALE, METER_MODEL_SCALE);
+  const skinGeometry = mergeGeometries(skinParts).scale(METER_MODEL_SCALE, METER_MODEL_SCALE, METER_MODEL_SCALE);
   [...clothesParts, ...skinParts].forEach((g) => g.dispose());
   type Pose = { x: number; z: number; yaw: number; lying?: boolean; seed: number };
   const people: Pose[] = [];
@@ -274,14 +277,14 @@ export function buildBeachLife(host: SeasideHost, courts: Array<{ x: number; z: 
   };
   // 每块沙排场 4 名球员，两边各二，面向球网。
   for (const court of courts) for (let k = 0; k < 4; k += 1) {
-    const side = k < 2 ? -1 : 1; const lane = k % 2 === 0 ? -1.6 : 1.6;
-    const p = local(court, lane, side * (3.2 + hashSeed(`player:${court.x}:${k}`) * 1.6));
+    const side = k < 2 ? -1 : 1; const lane = k % 2 === 0 ? -m(2) : m(2);
+    const p = local(court, lane, side * m(3 + hashSeed(`player:${court.x}:${k}`) * 3));
     people.push({ ...p, yaw: court.yaw + (side < 0 ? Math.PI / 2 : -Math.PI / 2), seed: hashSeed(`pl:${court.x}:${k}`) });
   }
   // 伞下：约三分之一的伞旁有人躺在躺椅上，另有少数站着。
   for (const spot of spots) {
-    if (spot.seed > 0.66) people.push({ ...local(spot, -1.6, 0.7), yaw: spot.yaw, lying: true, seed: spot.seed });
-    else if (spot.seed < 0.3) people.push({ ...local(spot, 0.4, -1.4), yaw: spot.yaw + spot.seed * 6, seed: spot.seed });
+    if (spot.seed > 0.66) people.push({ ...local(spot, -m(1.6), m(0.5)), yaw: spot.yaw, lying: true, seed: spot.seed });
+    else if (spot.seed < 0.3) people.push({ ...local(spot, m(0.6), -m(1.4)), yaw: spot.yaw + spot.seed * 6, seed: spot.seed });
   }
   // 水边散步的人：湿沙上，零星分布。
   for (const spot of spots) if (spot.seed > 0.4 && spot.seed < 0.52) {
@@ -297,7 +300,7 @@ export function buildBeachLife(host: SeasideHost, courts: Array<{ x: number; z: 
     const tones = ["#f1c9a5", "#d9a77c", "#b07a52", "#7a4e33"];
     people.forEach((person, i) => {
       const y = host.layout.terrain.height(person.x, person.z);
-      dummy.position.set(person.x, y + (person.lying ? 0.36 : 0), person.z);
+      dummy.position.set(person.x, y + (person.lying ? m(REAL.lounger.height) : 0), person.z);
       // 躺着 = 绕局部 x 轴放倒 90°，头朝内陆（躺椅靠背一侧）。
       dummy.rotation.set(person.lying ? -Math.PI / 2 : 0, person.yaw + (person.lying ? Math.PI : 0), 0, "YXZ");
       dummy.scale.setScalar(0.92 + person.seed * 0.16);
@@ -329,11 +332,13 @@ export function buildBeachLife(host: SeasideHost, courts: Array<{ x: number; z: 
       parts.setMatrixAt(n, dummy.matrix); parts.setColorAt(n, host.color.set(color)); n += 1;
     };
     for (const court of courts) {
-      put(court, -3.5, 0, 14, 0.04, 0.14, 0.01, "#f6f2e6"); put(court, 3.5, 0, 14, 0.04, 0.14, 0.01, "#f6f2e6");
-      put(court, 0, -7, 0.14, 0.04, 7, 0.01, "#f6f2e6"); put(court, 0, 7, 0.14, 0.04, 7, 0.01, "#f6f2e6");
-      put(court, -4.1, 0, 0.12, 2.45, 0.12, 0, "#e9e4d6"); put(court, 4.1, 0, 0.12, 2.45, 0.12, 0, "#e9e4d6");
-      put(court, 0, 0, 0.03, 0.9, 8.2, 1.5, "#6f7b84");   // 球网（纯黑像一块板，灰调读作网）
-      put(court, 0, 0, 0.05, 0.08, 8.2, 2.4, "#f6f2e6");  // 网顶白带
+      // 场地 16 × 8 m（长轴沿岸），网柱在边线外 0.5，网高 2.43（REAL.volleyballCourt）。
+      const L = m(REAL.volleyballCourt.length); const W = m(REAL.volleyballCourt.width); const net = m(REAL.volleyballCourt.netHeight);
+      put(court, -W / 2, 0, L, 0.02, m(0.1), 0.005, "#f6f2e6"); put(court, W / 2, 0, L, 0.02, m(0.1), 0.005, "#f6f2e6");
+      put(court, 0, -L / 2, m(0.1), 0.02, W, 0.005, "#f6f2e6"); put(court, 0, L / 2, m(0.1), 0.02, W, 0.005, "#f6f2e6");
+      put(court, -W / 2 - m(0.5), 0, m(0.12), net, m(0.12), 0, "#e9e4d6"); put(court, W / 2 + m(0.5), 0, m(0.12), net, m(0.12), 0, "#e9e4d6");
+      put(court, 0, 0, m(0.03), m(1), W + m(1), net - m(1), "#6f7b84");   // 球网（纯黑像一块板，灰调读作网）
+      put(court, 0, 0, m(0.05), m(0.08), W + m(1), net - m(0.04), "#f6f2e6");  // 网顶白带
     }
     parts.count = n;
     parts.castShadow = true;
@@ -377,7 +382,10 @@ export function buildBeachRibbon(host: SeasideHost): void {
   });
   const positions: number[] = []; const colors: number[] = [];
   const bands: Array<[number, number, THREE.Color]> = [];
-  const foam = new THREE.Color("#eef5f2"); const wetSand = new THREE.Color("#cdb487"); const drySand = new THREE.Color("#f3e5c2");
+  // 水线外侧曾铺一条 7 宽的不透明近白「浪花」带（#eef5f2，−6…+1）：均匀、不动、不透明，读作水边一圈白水泥
+  // （用户截图「湿沙外接近水的区域为什么是白色」）。浪花交给水面着色器的岸线涟漪（动态、不规则、随深度淡出）；
+  // 这里只留一窄条比湿沙更深的冲刷带（刚退浪、被水浸透的沙），把湿沙收到水线里。
+  const swash = new THREE.Color("#b39b70"); const wetSand = new THREE.Color("#cdb487"); const drySand = new THREE.Color("#f3e5c2");
   const point = (x: number, z: number, nx: number, nz: number, d: number) => {
     const px = x + nx * d; const pz = z + nz * d;
     return [px, terrain.height(px, pz) + 0.05, pz];
@@ -395,7 +403,7 @@ export function buildBeachRibbon(host: SeasideHost): void {
       };
       const s0 = at(t0); const s1 = at(t1);
       bands.length = 0;
-      bands.push([-6, 1.0, foam], [1.0, Math.min(wet, s0.depth - 1), wetSand], [Math.min(wet, s0.depth - 1), s0.depth, drySand]);
+      bands.push([-2, 1.5, swash], [1.5, Math.min(wet, s0.depth - 1), wetSand], [Math.min(wet, s0.depth - 1), s0.depth, drySand]);
       for (const [from, to, color] of bands) {
         const to1 = color === drySand ? s1.depth : to;
         const q = [point(s0.x, s0.z, s0.nx, s0.nz, from), point(s1.x, s1.z, s1.nx, s1.nz, from),
@@ -449,19 +457,20 @@ export function buildMarina(host: SeasideHost): void {
     const length = 30 + (i % 2) * 6;
     const sx = harbor.x + ux * (shore - 3) + vx * lateral; const sz = harbor.z + uz * (shore - 3) + vz * lateral;
     const cx = sx + ux * length / 2; const cz = sz + uz * length / 2;
-    host.compose(cx, 0.35, cz, yaw, length, 0.35, 2.2);
+    host.compose(cx, 0.35, cz, yaw, length, 0.35, m(REAL.pier.width));
     piers.setMatrixAt(p++, host.matrix);
     // 栈桥两侧每隔 6 泊一条船（长 7–9），颜色按种子在白/海军蓝/珊瑚之间。
     // 截图验收：每 6 一条时船挤成一整块、把栈桥都盖住了——改为每 8 一个泊位、约四成空位，船体收窄并加白色舱室。
-    for (let along = 7; along < length - 3 && b < 40; along += 8) for (const side of [-1, 1]) {
+    // 码头小艇 7–12 m、船宽 2.8 m（REAL.marinaBoat），泊位间距 ~6（= 12 m）。
+    for (let along = 5; along < length - 3 && b < 40; along += 6) for (const side of [-1, 1]) {
       const seed = hashSeed(`marina:${i}:${along}:${side}`);
       if (seed < 0.45 || b >= 40) continue;
-      const bx = sx + ux * along + vx * side * 3.6; const bz = sz + uz * along + vz * side * 3.6;
-      const len = 6 + seed * 2;
-      host.compose(bx, -0.15, bz, yaw + Math.PI / 2, 2.1, 1.2, len);
+      const bx = sx + ux * along + vx * side * (m(REAL.pier.width) / 2 + m(REAL.marinaBoat.beam) / 2 + m(0.6)); const bz = sz + uz * along + vz * side * (m(REAL.pier.width) / 2 + m(REAL.marinaBoat.beam) / 2 + m(0.6));
+      const len = m(REAL.marinaBoat.min + seed * (REAL.marinaBoat.max - REAL.marinaBoat.min));
+      host.compose(bx, -0.15, bz, yaw + Math.PI / 2, m(REAL.marinaBoat.beam), m(1.4), len);
       boats.setMatrixAt(b, host.matrix);
       boats.setColorAt(b, host.color.set(seed > 0.85 ? "#1f3b5c" : seed > 0.7 ? "#e8775f" : "#ffffff"));
-      host.compose(bx - ux * len * 0.08, 1.0, bz - uz * len * 0.08, yaw + Math.PI / 2, 1.5, 0.9, len * 0.4);
+      host.compose(bx - ux * len * 0.08, -0.15 + m(1.4), bz - uz * len * 0.08, yaw + Math.PI / 2, m(2), m(1), len * 0.4);
       cabins.setMatrixAt(b, host.matrix);
       b += 1;
     }
@@ -515,33 +524,34 @@ export function buildLifeguardTowers(host: SeasideHost): void {
     // 遮阳带/壁柱/霓虹招牌从楼的侧面戳出来（真机截图：白色横杆伸出墙外）。
     const yaw = Math.atan2(sample.inward.x, sample.inward.z);
     const pal = palettes[t % palettes.length];
-    const legH = 2.6 + seed * 0.8;
-    const hutW = 3.2 + seed * 0.8;
-    const hutH = 2.2 + seed * 0.5;
+    const legH = m(REAL.lifeguardTower.legHeight + seed * 0.6);
+    const hutW = m(REAL.lifeguardTower.hutWidth + seed * 0.6);
+    const hutH = m(REAL.lifeguardTower.hutHeight + seed * 0.4);
+    const k = METER_MODEL_SCALE; // 立柱/平台/檐/踏步的其余尺寸也按米建模：统一乘这个系数
     const x = sample.dryOuter.x; const z = sample.dryOuter.z;
     // 四根立柱（架高是第一特征）。
     for (let leg = 0; leg < 4; leg += 1) {
-      const lx = x + (leg % 2 === 0 ? -1 : 1) * (hutW / 2 - 0.25);
-      const lz = z + (leg < 2 ? -1 : 1) * (1.1);
-      host.compose(lx, ground, lz, yaw, 0.28, legH, 0.28);
+      const lx = x + (leg % 2 === 0 ? -1 : 1) * (hutW / 2 - 0.25 * k);
+      const lz = z + (leg < 2 ? -1 : 1) * (1.1 * k);
+      host.compose(lx, ground, lz, yaw, 0.28 * k, legH, 0.28 * k);
       structureMesh.setMatrixAt(cursor + leg, host.matrix);
       structureMesh.setColorAt(cursor + leg, host.color.set("#8a7a68"));
     }
     cursor += 4;
     // 平台。
-    host.compose(x, ground + legH, z, yaw, hutW + 0.6, 0.22, 2.6);
+    host.compose(x, ground + legH, z, yaw, hutW + 0.6 * k, 0.22 * k, m(REAL.lifeguardTower.hutDepth));
     structureMesh.setMatrixAt(cursor, host.matrix);
     structureMesh.setColorAt(cursor, host.color.set(pal.wall));
     // 值守小屋（条纹墙身）。
-    host.compose(x, ground + legH + 0.22, z, yaw, hutW, hutH, 2.2);
+    host.compose(x, ground + legH + 0.22 * k, z, yaw, hutW, hutH, 2.2 * k);
     structureMesh.setMatrixAt(cursor + 1, host.matrix);
     structureMesh.setColorAt(cursor + 1, host.color.set(pal.wall));
     cursor += 2;
     // 檐顶（出挑薄板 + 中央通风塔）。
-    host.compose(x, ground + legH + 0.22 + hutH, z, yaw, hutW + 1.0, 0.18, 3.0);
+    host.compose(x, ground + legH + 0.22 * k + hutH, z, yaw, hutW + 1.0 * k, 0.18 * k, 3.0 * k);
     structureMesh.setMatrixAt(cursor, host.matrix);
     structureMesh.setColorAt(cursor, host.color.set(pal.accent));
-    host.compose(x, ground + legH + 0.22 + hutH + 0.18, z, yaw, 0.8, 0.7, 0.8);
+    host.compose(x, ground + legH + 0.22 * k + hutH + 0.18 * k, z, yaw, 0.8 * k, 0.7 * k, 0.8 * k);
     structureMesh.setMatrixAt(cursor + 1, host.matrix);
     structureMesh.setColorAt(cursor + 1, host.color.set(pal.accent));
     cursor += 2;
@@ -549,16 +559,16 @@ export function buildLifeguardTowers(host: SeasideHost): void {
     const outward = { x: -sample.inward.x, z: -sample.inward.z };
     for (let step = 0; step < 3; step += 1) {
       const sy = ground + (legH * (step + 1)) / 4;
-      const sx = x + outward.x * (1.4 + step * 0.7);
-      const sz = z + outward.z * (1.4 + step * 0.7);
-      host.compose(sx, sy, sz, yaw, 1.2, 0.12, 0.45);
+      const sx = x + outward.x * (1.4 + step * 0.7) * k;
+      const sz = z + outward.z * (1.4 + step * 0.7) * k;
+      host.compose(sx, sy, sz, yaw, 1.2 * k, 0.12 * k, 0.45 * k);
       stripeMesh.setMatrixAt(t * 4 + step, host.matrix);
     }
     // 条纹：小屋顶部一圈色环。
-    host.compose(x, ground + legH + 0.22 + hutH * 0.65, z, yaw, hutW + 0.05, 0.3, 2.25);
+    host.compose(x, ground + legH + 0.22 * k + hutH * 0.65, z, yaw, hutW + 0.05 * k, 0.3 * k, 2.25 * k);
     stripeMesh.setMatrixAt(t * 4 + 3, host.matrix); // 曾写 t*3+2：覆盖第三级踏步，且相邻塔的槽位互相踩
     // 夜间指示灯（小屋顶部小光球）。
-    host.compose(x, ground + legH + 0.22 + hutH + 0.18 + 0.7, z, 0, 1, 1, 1);
+    host.compose(x, ground + legH + (0.22 + 0.18 + 0.7) * k + hutH, z, 0, k, k, k);
     glowMesh.setMatrixAt(t, host.matrix);
   }
   structureMesh.count = cursor;

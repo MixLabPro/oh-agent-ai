@@ -1,34 +1,24 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
-import vm from "node:vm";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const engine = path.join(repo, "apps/agent-city/ui/src/engine");
-const require = createRequire(path.join(repo, "apps/desktop/ui-dev/package.json"));
-const THREE = require("three");
-const { buildSync } = require("esbuild");
-// Execute the production infrastructure function (systems/roadSystem.ts) without a DOM/WebGL context.
-const bundle = buildSync({ stdin: {
-  contents: `import * as THREE from "three";
-    import { createCityPlan, clearsHighways, SegmentIndex, segmentDistance } from "./cityPlan";
-    import { buildInfrastructure } from "./systems/roadSystem";
-    export { createCityPlan, clearsHighways, SegmentIndex, segmentDistance };
-    export class Harness {
-      layout; mesh; positionVector = new THREE.Vector3(); euler = new THREE.Euler();
-      quaternion = new THREE.Quaternion(); scaleVector = new THREE.Vector3();
-      matrix = new THREE.Matrix4(); color = new THREE.Color();
-      constructor(layout) { this.layout = layout; }
-      makeInstanced(geometry, material, count) { return this.mesh = new THREE.InstancedMesh(geometry, material, count); }
-      run() { buildInfrastructure(this); }
-    }`, resolveDir: engine, loader: "ts",
-}, bundle: true, write: false, format: "cjs", platform: "node", external: ["three"], logLevel: "silent" });
-const mod = { exports: {} };
-vm.runInNewContext(bundle.outputFiles[0].text, { module: mod, exports: mod.exports, require, process, console, Math, Map, Set });
-const { Harness, createCityPlan, clearsHighways, SegmentIndex, segmentDistance } = mod.exports;
+import { loadCity } from "./city-kit/index.mjs";
+// 原生加载同一生产函数；避免 vm 沙箱把完整规划放慢约八倍。
+const { THREE, createCityPlan, clearsHighways, SegmentIndex, segmentDistance, buildSkeleton, emptyNetwork, buildInfrastructure, buildDistrictExpressways, EXPRESSWAY_DECK_THICKNESS } = await loadCity({
+  "pkg:three": ["* as THREE"],
+  "engine/cityPlan.ts": ["createCityPlan", "clearsHighways", "SegmentIndex", "segmentDistance"],
+  "engine/planner/skeleton.ts": ["buildSkeleton"],
+  "engine/planner/network.ts": ["emptyNetwork"],
+  "engine/systems/roadSystem.ts": ["buildInfrastructure", "buildDistrictExpressways"],
+  "engine/render/shared.ts": ["EXPRESSWAY_DECK_THICKNESS"],
+});
+class Harness {
+  group = new THREE.Group(); disposables = [];
+  positionVector = new THREE.Vector3(); euler = new THREE.Euler();
+  quaternion = new THREE.Quaternion(); scaleVector = new THREE.Vector3();
+  matrix = new THREE.Matrix4(); color = new THREE.Color();
+  constructor(layout) { this.layout = layout; }
+  makeInstanced(geometry, material, count) { return this.mesh = new THREE.InstancedMesh(geometry, material, count); }
+  run() { buildInfrastructure(this); }
+}
 const harness = new Harness({ roadEdges: [{ bridge: true, width: 8, points: [{ x: -40, z: 0 }, { x: 40, z: 0 }] }],
   terrain: { height: (x) => Math.abs(x) >= 40 ? 1.2 : -3 } });
 harness.run();
@@ -38,6 +28,25 @@ harness.mesh.getMatrixAt(0, matrix);
 assert(Math.abs(matrix.elements[0] - 80.5) < 0.001, "deck connects both banks");
 assert(Math.abs(matrix.elements[13] + matrix.elements[5] - 1.2) < 0.001, "deck top meets approaches above water");
 assert(harness.mesh.count > 12, "bridge includes edge lines and dashed center markings in the furniture batch");
+// 出口的连续短弧不能被桥面渲染的旧 6 单位阈值吃掉（用户截图：桥面断开但桥墩还在）。
+{
+  const points = [{ x: -120, z: 0 }, { x: -9, z: 0 }, { x: -6, z: 2 }, { x: -3, z: 4 }, { x: 0, z: 6 }];
+  const short = new Harness({ highways: [points], terrain: { height: () => 1.2 } });
+  buildDistrictExpressways(short);
+  const mesh = short.group.getObjectByName("city-district-expressways"), matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3(), rotation = new THREE.Quaternion(), scale = new THREE.Vector3();
+  const decks = [];
+  for (let i = 0; i < mesh.count; i += 1) {
+    mesh.getMatrixAt(i, matrix); matrix.decompose(position, rotation, scale);
+    if (Math.abs(scale.y - EXPRESSWAY_DECK_THICKNESS) < 1e-5) decks.push(position.clone());
+  }
+  assert.equal(decks.length, points.length - 1, "every nonzero segment, including consecutive short exit arcs, has a bridge deck");
+  for (let i = 1; i < points.length; i += 1) {
+    assert.ok(Math.abs(decks[i - 1].x - (points[i - 1].x + points[i].x) / 2) < 1e-5);
+    assert.ok(Math.abs(decks[i - 1].z - (points[i - 1].z + points[i].z) / 2) < 1e-5);
+  }
+  for (const disposable of short.disposables) disposable.dispose();
+}
 const distant = new SegmentIndex([[{ x: 150, z: 0 }, { x: 150, z: 10 }]]);
 assert(distant.closerThan({ x: 0, z: 0 }, 160), "large footprint queries search beyond adjacent cells");
 assert(!distant.closerThan({ x: 0, z: 0 }, 140), "large footprint guard remains distance-based");
@@ -74,5 +83,22 @@ for (const tier of [1, 5, 10]) {
   }
   assert.ok(runs > 0, `tier ${tier}: at least one expressway run survives in the seed corpus`);
   assert.ok(crossings > 0, `tier ${tier}: elevated river crossing retained somewhere in the seed corpus`);
+}
+// 双保险：语料级不变量（上）依赖真实 seed 的地理运气；再用显式的平岛/窄河检验
+// 真实骨架函数——地面不可建的河岸退让必须不截断架空环线（合成地理，确定性）。
+{
+  const R = 600, coastDistance = (x, z) => R - Math.hypot(x, z);
+  const inRiver = (x, z) => coastDistance(x, z) > 0 && Math.abs(x) < 18;
+  const height = (x, z) => coastDistance(x, z) > 0 && !inRiver(x, z) ? 1.2 : -3;
+  const buildable = (x, z) => coastDistance(x, z) > 12 && Math.abs(x) > 30;
+  const geo = { R, hasRiver: true, maxWaterSpan: 140, coastDistance, landClearance: (x, z) => Math.min(coastDistance(x, z), Math.abs(x) - 18),
+    coast: Array.from({ length: 96 }, (_, i) => ({ x: R * Math.cos(i / 96 * Math.PI * 2), z: R * Math.sin(i / 96 * Math.PI * 2) })),
+    river: [], riverX: () => 0, riverWidth: () => 18, riverShift: 0,
+    hillDir: { x: 0, z: 0 }, hillProj: () => 0, hillLine: 10000, height, buildable,
+    terrain: { height, buildable, slope: () => 0 }, islets: [], waterEdges: [], isletClearance: () => -Infinity };
+  const result = buildSkeleton({ geo, seed: 42, core: { x: -100, z: 0 }, publicSites: [], landmarks: [],
+    shoreSiteKinds: new Set(), random: () => 0.5, network: emptyNetwork(), inRiver });
+  assert(result.ringRuns.some(run => run.some(p => inRiver(p.x, p.z))), "explicit river fixture retains an elevated crossing");
+  assert(result.ringRuns.some(run => run.some(p => !buildable(p.x, p.z))), "the witness really crosses ground setbacks");
 }
 console.log("City infrastructure: real bridge deck/rails/piers and expressway clearance/crossings across tiers passed.");

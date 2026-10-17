@@ -39,7 +39,17 @@ export function buildSeasideBoulevard(env: SeasideBoulevardWorld, params: Seasid
   let seaside: SeasideBand | null = null;
   if (config) {
     const blockedAzimuths: Array<{ at: number; halfWidth: number; weight?: number }> = [];
-    const azimuthOf = (p: Vec2) => { let a = Math.atan2(p.z - core.z, p.x - core.x); if (a < 0) a += Math.PI * 2; return a; };
+    // 开湾：方位从东岛中心量。从西岛的市中心量时，东岛外岸的窗口会扫到北端湾口的河口禁区，
+    // 海滨带改落到西岛山脚下（seed 807065449/5 档实测：方位 3.5–4.4、一半采样陡坡无效、整段降级）。
+    // 从东岛中心看，外岸朝 +x、两个湾口在南北两端，正好错开。
+    const eastShore = config.bayHalfWidth > 0 && hasRiver ? coast.filter((p) => p.x > riverX(p.z) + riverWidth(p.z)) : [];
+    // 中心取「外岸点质心」与同一 z 处湾东岸的中点：只用外岸质心时，外岸内凹会让它落进海里，
+    // 内向法线反指海面、酒店线全部 off-land（seed 1703342472/2 档实测 14/23）。
+    const shoreMid = eastShore.length >= 3
+      ? { x: eastShore.reduce((sum, p) => sum + p.x, 0) / eastShore.length, z: eastShore.reduce((sum, p) => sum + p.z, 0) / eastShore.length }
+      : null;
+    const center: Vec2 = shoreMid ? { x: (shoreMid.x + riverX(shoreMid.z) + riverWidth(shoreMid.z)) / 2, z: shoreMid.z } : core;
+    const azimuthOf = (p: Vec2) => { let a = Math.atan2(p.z - center.z, p.x - center.x); if (a < 0) a += Math.PI * 2; return a; };
     for (const site of publicSites) if (site.kind === "harbor") blockedAzimuths.push({ at: azimuthOf(site), halfWidth: (30 * Math.PI) / 180, weight: 3 });
     if (hasRiver) {
       for (const point of coast) {
@@ -53,8 +63,9 @@ export function buildSeasideBoulevard(env: SeasideBoulevardWorld, params: Seasid
       riverDistance: (x, z) => (hasRiver ? Math.abs(x - riverX(z)) - riverWidth(z) : Infinity),
       reservations: [...publicSites, ...landmarks].map((site) => ({ x: site.x, z: site.z, radius: site.radius })),
       blockedAzimuths,
+      ...(eastShore.length >= 3 ? { eligibleShore: (p: Vec2) => p.x > riverX(p.z) + riverWidth(p.z) } : {}),
     };
-    seaside = buildSeasideBand(coast, core, world, config, seed);
+    seaside = buildSeasideBand(coast, center, world, config, seed);
   }
 
   // 滨海大道位于酒店排与棕榈步道之间。只消费合法连续岸段；无效样本处断开，

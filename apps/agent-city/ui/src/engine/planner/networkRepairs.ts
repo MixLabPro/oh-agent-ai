@@ -17,7 +17,7 @@ export const COMPONENT_REPAIR_CONFIG = { version: 1, maxSources: 12, maxRouteLen
 function componentView(ctx: RepairContext) {
   return { roadNodes: [...ctx.network.nodes.values()], roadEdges: [...ctx.network.edges.values()],
     publicSites: ctx.publicSites, landmarks: ctx.landmarks, seaside: ctx.seaside, coastRoads: ctx.coastRoadRuns,
-    riverRoadRuns: ctx.riverRoadRuns, coast: ctx.coast, river: ctx.geo.river, core: ctx.core, primaryAnchorNodeId: ctx.primaryAnchorNodeId };
+    riverRoadRuns: ctx.riverRoadRuns, coast: ctx.coast, river: ctx.geo.river, waterEdges: ctx.geo.waterEdges, core: ctx.core, primaryAnchorNodeId: ctx.primaryAnchorNodeId };
 }
 
 /** Components, including planned coast ends, need a real route to the shared
@@ -129,6 +129,7 @@ function plannedEndWorld(ctx: RepairContext, sites: Array<{ x: number; z: number
     coastRoadRunEnds: ctx.coastRoadRunEnds,
     coast: ctx.coast,
     river: ctx.geo.river,
+    waterEdges: ctx.geo.waterEdges,
   };
 }
 

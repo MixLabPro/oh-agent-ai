@@ -11,6 +11,8 @@ import { pagodaModel } from "../models/landmarks/pagoda";
 import { drawTwinTowers } from "./landmarks/twinTowers";
 import { drawTwistTower } from "./landmarks/twistTower";
 import { drawVillaComplex } from "./landmarks/villaComplex";
+import { drawIsletMansion } from "./landmarks/isletMansion";
+import { drawIsletGrounds } from "./landmarks/isletGrounds";
 import { drawSuspensionBridge } from "./landmarks/suspensionBridge";
 
 const modelBuilder = (model: BuildingModel) => compiledBuilder(model, hashSeed);
@@ -30,5 +32,7 @@ export const LANDMARK_BUILDERS: Record<string, (ctx: LandmarkCtx) => void> = {
   "ferris-wheel": modelBuilder(ferrisWheelModel),
   "pagoda": modelBuilder(pagodaModel),
   "villa-complex": drawVillaComplex,
+  "islet-mansion": drawIsletMansion,
+  "islet-grounds": drawIsletGrounds,
   "suspension-bridge": drawSuspensionBridge,
 };

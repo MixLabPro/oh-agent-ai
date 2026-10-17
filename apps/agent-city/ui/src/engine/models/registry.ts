@@ -18,6 +18,8 @@ export const UNPARADIGMED: Record<string, string> = {
   "twin-towers": "运行时 renderCanvas 窗贴图 + 日/夜两张贴图经 host.landmarkWindows 切换（需 panel 件与夜窗通道，批 3 一并做）",
   "twist-tower": "运行时 renderCanvas 窗贴图 + 日/夜两张贴图经 host.landmarkWindows 切换（同 twin-towers）",
   "villa-complex": "自包含模块 cityLandmarkVilla（件数组自带，另行收编）",
+  "islet-mansion": "自包含模块 cityIsletMansion（布局期装饰，规划层不知道它；件数组自带，另行收编）",
+  "islet-grounds": "豪宅岛场地（环路/支路/棕榈，实例化网格），布局与 cityIsletEstate 同源；另行收编",
   "suspension-bridge": "路径依赖：随过河桥与路网高度定形（SPEC §7 定为不迁），灯串直接加进 host.group",
 };
 
@@ -47,6 +49,8 @@ export const LANDMARK_LABELS: Record<string, string> = {
   "twisting-deco-tower": "扭转装饰艺术塔",
   airport: "机场岛", // cityAirport.ts 建造
   "villa-complex": "地中海庄园", // cityLandmarkVilla.ts 建造
+  "islet-mansion": "豪宅岛庄园", // cityIsletMansion.ts 建造
+  "islet-grounds": "豪宅岛场地", // render/landmarks/isletGrounds.ts 建造
   ...Object.fromEntries(BUILDING_MODELS.map((m) => [m.id, m.title])), // 已声明化的建筑：名称由 model.title 派生
 };
 export const CIVIC_LABELS: Record<string, string> = Object.fromEntries(SITE_CLASSES

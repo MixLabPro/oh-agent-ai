@@ -2,6 +2,7 @@
  * 夜景照明系统（路灯 / 光斑 / 灯带 / 霓虹 / 昼夜亮度驱动）：自 cityParts.ts 原样搬出（纯搬迁，见 docs/CITY_ENGINE_SPLIT_SPEC.md）。
  * 函数体与原方法逐字一致，仅 `this.` → `host.`；host 是 CityParts 本身，下面的接口只列出这里实际用到的成员。
  */
+import { m, REAL } from "../worldScale";
 import * as THREE from "three";
 import { LIGHT_BUDGET, lampTier, nightFactor, windowRate } from "../cityLightBudget";
 import { activeTheme } from "../cityTheme";
@@ -108,10 +109,11 @@ export function buildNightLights(host: NightHost): NightLights {
     poolRadius *= 0.6 + 0.4 * tier; // N3：路灯按道路等级分档——主干最亮最大，支路/步道小而暗
     headMesh.setColorAt(lamps, host.color.setScalar(0.5 + 0.5 * tier));
     poolMesh.setColorAt(lamps, host.color.setScalar(0.4 + 0.6 * tier));
-    host.compose(x, base, z, 0, 1, 4.6, 1);
+    // 杆高 8 m（REAL.lamp）：行车道路灯 6–10 m。灯头同步，光斑半径/落点不动。
+    host.compose(x, base, z, 0, 1, m(REAL.lamp.height), 1);
     poles.setMatrixAt(lamps, host.matrix);
     // 灯头悬在路中心一侧（臂长 0.7），朝路面。
-    host.compose(x - nx * 0.45, base + 4.55, z - nz * 0.45, yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
+    host.compose(x - nx * 0.45, base + m(REAL.lamp.height) - 0.05, z - nz * 0.45, yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
     headMesh.setMatrixAt(lamps, host.matrix);
     // 光斑贴坡：平圆片只对平地成立——海岸坡（10 单位内抬升 1.2）与丘陵 fbm 的坡度远超
     // 0.12 的离地余量，圆片上坡一侧钻进路面下，被深度测试沿两平面交线切成直线（贴地

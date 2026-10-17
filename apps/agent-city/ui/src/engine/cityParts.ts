@@ -38,7 +38,7 @@ import { compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./surf
 import type { CitySurfaceSource } from "./surface/citySurfacePort";
 import { collectSceneSolids } from "./surface/sceneSolids";
 import { groundRoadTopAt } from "./surface/structureCompiler";
-import { buildInfrastructure, buildCulDeSacBulbs, buildChannelizedJunctions, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
+import { buildInfrastructure, buildCulDeSacBulbs, buildJunctionIslands, buildChannelizedJunctions, buildDistrictExpressways, buildHighwayRamps, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
 import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
@@ -47,7 +47,7 @@ import { artDecoTowerGeometry, BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESS
 import type { BuildingRuntime, Car, CarPath, NightLights, QualityLevel } from "./render/types";
 export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
-import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
+import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildOceanDrive, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
 
 /** 静态城（只依赖 seed 的部分：地形/基建/高架/公共设施/地标/远山/树/水面/
  *  车/船/云/花园）。模块级缓存——数据刷新重建时整段复用，重建成本只剩建筑层；
@@ -184,7 +184,7 @@ export class CityParts {
       && staticCityCache.layout.coastalConfigKey === layout.coastalConfigKey
       && staticCityCache.layout.activityKey === layout.activityKey // G1：建成区变化 → 地面与路网重画
       && staticCityCache.layout.highways === layout.highways
-      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings]) ? staticCityCache : null;
+      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings, staticCityCache.layout.oceanDrive]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings, layout.oceanDrive]) ? staticCityCache : null;
     if (!staticCity) {
       staticCityCache?.disposables.forEach((disposable) => disposable.dispose());
       const staticBucket: Array<{ dispose: () => void }> = [];
@@ -193,8 +193,10 @@ export class CityParts {
       this.buildRoadSurface();
       this.buildInfrastructure();
       this.buildCulDeSacBulbs();
+      buildJunctionIslands(this as unknown as RoadHost);
       this.buildChannelizedJunctions();
       this.buildDistrictExpressways();
+      buildHighwayRamps(this as unknown as RoadHost);
       this.nightLights = this.buildNightLights();
       this.buildPublicSites();
       this.buildMarina();
@@ -211,6 +213,7 @@ export class CityParts {
       this.buildTrussBridges();
       this.registerDrivingRoots("landmark", () => this.buildDistrictLandmarks());
       this.registerDrivingRoots("context", () => this.buildUrbanContext());
+      buildOceanDrive(this as unknown as BuildingSystemHost);
       this.buildSeaMountains();
       this.buildBeachRibbon();
       const seaside = this.layout.seaside;
@@ -633,14 +636,16 @@ export class CityParts {
   /** 城区地标（S5「每个区也需要有自己的地标建筑物」）：离城区中心最近的空地块上一座三级收分的装饰艺术塔，
    *  墙身取区色粉彩、玻璃带窗、霓虹勾边与塔尖，夜里亮窗（与双子塔同一套 landmarkWindows）。
    *  高度取本区最高会话楼 × 1.15（58–110）——城区天际线的峰值；装饰，不代表会话。 */
-  /** 城区地标高度（绝对口径，用户确认）：下限 = 全城最高会话楼 × 1.1（≈40，不低于会话楼），每个会话 +0.37，上限 160。
+  /** 城区地标高度（绝对口径，用户确认）：下限 = 全城最高会话楼 × 1.1（≈40，不低于会话楼），每个会话 +0.16，上限 90（= 180 m）。
+   *  2026-10-15 在 2 米比例尺下从「+0.37、上限 160（320 m）」压下来：2000 会话时四个城区全顶到 320 m，是周围楼的 6–10 倍，
+   *  还高过所有致敬地标（电视塔 144 m、双子塔 157 m）——地标该是城区的天际线峰值，不是另一座城市。下面的「实测」是旧口径的数。
    *  只随本区会话数增长，别的城区增长不会把它压矮；回放中按「截至游标已开始的会话数」逐层加盖（applyCursor）。
    *  实测（700 模拟会话）：DeepSeek 43 → 56，ZCode 82 → 70，Claude Code 120 → 84，Codex 135 → 90。
    *  曾按「最少 → 最多城区」相对插值：最大城区恒为 90、最小恒为 40，全体同比增长时高度不变，别区增长还会变矮。 */
   districtLandmarkHeight(districtId: string, sessions?: number): number {
     const own = sessions ?? this.model.districts.find((d) => d.id === districtId)?.sessionCount ?? 0;
     const floor = Math.max(30, ...this.model.buildings.map((b) => b.height)) * 1.1;
-    return Math.min(160, floor + 0.37 * own);
+    return Math.min(90, floor + 0.16 * own);
   }
 
   private districtLandmarkGroups: THREE.Object3D[] | null = null;
@@ -795,9 +800,7 @@ export class CityParts {
   /** display/civicProgress 直接对齐 target：模型重建后的第一步。重建时 display
    *  被初始化为「已完工」（closed 的 builtFraction=1，civic 全 1），回放中若任由
    *  动画循环追赶，整城会先闪满高、再被压回时间轴进度——数据加载不应改变城市
-   *  已呈现的样子。
-   *  all=true：连还在「长入」的楼也立即对齐——回放起点 / 拖时间轴是时间跳变，城市应当直接是那一刻的样子，
-   *  而不是先让整座城从当前高度慢慢缩下去（回放看起来就不是从第一栋楼开始）。 */
+   *  已呈现的样子。 */
   snapToTargets(all = false): void {
     if (this.drivingFreezeCount) { this.drivingDeferredSnap = all || this.drivingDeferredSnap === true; return; }
     this.contextProgress.set(this.contextTarget);

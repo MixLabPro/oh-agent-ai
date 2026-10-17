@@ -14,7 +14,12 @@ assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // Preserve the existing stages and register the new production causeway guard.
 // 63 + city-opt 的 5 个（villa-placement / model-envelope / site-registry / site-registry-scene / joint-site-road）+ 规划修复的 6 个守卫（verify-plan-patch / -road-rules / -sites / -repair-controller / -bulldozer / -remap）+ R2 的 verify-city-import-boundary。计数锁防的是悄悄增减，
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
-assert.equal(manifest.length, 88);
+// 88（驾驶线）+ 视觉风格线 3 个（junction-rings / highway-ramps / world-scale）。计数锁防的是悄悄增减，
+// 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
+assert.equal(manifest.length, 91);
+for (const id of ["verify-city-junction-rings", "verify-city-highway-ramps"])
+  for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
+    .some(stage => stage.id === id));
 assert(selectStages("fast").some((stage) => stage.id === "verify-city-import-boundary"), "import boundary guard must run in fast mode");
 assert(selectStages("module", "planning").some((stage) => stage.id === "verify-city-import-boundary"));
 for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)

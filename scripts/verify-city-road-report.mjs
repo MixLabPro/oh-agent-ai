@@ -33,10 +33,10 @@ installCanvasShim();
 globalThis.window ??= globalThis;
 globalThis.devicePixelRatio ??= 1;
 
-const { buildCityModel, layoutCity, createCityPlan, scaleTierFor, MIAMI_COASTAL, roadReport } = await loadCity({
+const { buildCityModel, layoutCity, createCityPlan, scaleTierFor, MIAMI_COASTAL, roadReport, segmentDistance } = await loadCity({
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
-  "engine/cityPlan.ts": ["createCityPlan", "scaleTierFor"],
+  "engine/cityPlan.ts": ["createCityPlan", "scaleTierFor", "segmentDistance"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/planner/report.ts": ["roadReport"],
 });
@@ -183,6 +183,19 @@ dump.display = displayReport;
     + ` blocks(live/vac)=${d ? `${d.liveBlocks}/${d.vacantBlocks}` : "n/a"} service=${d ? d.activityServiceRate : "n/a"}`
     + ` vacNarrow=${d ? `${d.vacantNarrowRoads.totalLength}(reserved=${d.vacantNarrowRoads.reservedLength},unsupported=${d.vacantNarrowRoads.unsupportedLength})` : "n/a"}`
     + ` doors=${displayReport.facilities.doorsOk}/${displayReport.facilities.total} bridges=${g.bridges.total}(bad=${g.bridges.violations.length})`);
+}
+
+// 匝道落在 8 宽干道上时，活动裁剪仍须保留实际宿主；否则坡道已落地但地面路被删成空地。
+{
+  const rampModel = buildCityModel({ rows: rows(2000), findings: [], windowStartMs: GENERATED_AT - 30 * 86_400_000,
+    windowEndMs: GENERATED_AT, windowLabel: "30d", totalSessions: 2000, truncated: false, generatedAt: GENERATED_AT });
+  const rampLayout = layoutCity(rampModel, null, 42, MIAMI_COASTAL);
+  assert.ok(rampLayout.highwayRamps.length > 0, "the witness must contain real accepted ramps");
+  const landings = [...rampLayout.highwayRamps.map(ramp => ramp.points.at(-1)),
+    ...rampLayout.highways.filter(run => Math.hypot(run[0].x - run.at(-1).x, run[0].z - run.at(-1).z) > 0.01).flatMap(run => [run[0], run.at(-1)])];
+  for (const point of landings) assert.ok(rampLayout.roadEdges.some(edge => !edge.bridge
+    && edge.points.slice(1).some((b, i) => segmentDistance(point, edge.points[i], b) < 0.02)),
+  "display must retain the real ground road at every accepted highway/ramp landing");
 }
 
 // 聚合：最差 seed 点名（完整规划图按未分类端点数，并列按锐角路口数、再按 seed；交叉数另点一名）。

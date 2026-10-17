@@ -2,6 +2,7 @@
  * 会话楼系统：自 cityParts.ts 原样搬出（纯搬迁，见 docs/CITY_ENGINE_SPLIT_SPEC.md §4-6）。
  * 函数体与原方法逐字一致，仅 `this.` → `host.`；cityParts 里保留同名一行转发。
  */
+import { m, REAL } from "../worldScale";
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../../cityModel";
 import { HOTEL_CROWN_MAX_FINS, hotelCrownPlan, type CrownPiece } from "../cityHotelCrown";
@@ -134,6 +135,12 @@ export function buildRuntimes(host: BuildingSystemHost): void {
         // 装饰艺术楼墙面用执行环境强调色的粉彩版（而不是执行环境的浅墙色）：浅墙色在黄昏暖光下被压成灰，
         // 海滨要的是一眼能认出的粉、薄荷、青、紫。
         runtime.paletteWall = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.52).multiplyScalar(0.96 + building.seed * 0.08);
+        // Ocean Drive 街墙地块：墙面按楼在风格圣经粉彩里逐栋变化（一条街同一执行环境，整排一个色读不出 Ocean Drive）；
+        // 执行环境身份留在下面的女儿墙/遮阳棚强调色与屋顶上。
+        if (runtime.slot.blockId.startsWith("oceandrive:")) {
+          const pastels = ["#f08b92", "#a5d8c3", "#f2d8ae", "#9fd6e0", "#f5e3a3", "#e7b8d8"];
+          runtime.paletteWall = new THREE.Color(pastels[Math.floor(building.seed * 997) % pastels.length]);
+        }
         // 转角柱与墙同色略亮；女儿墙与遮阳棚用执行环境强调色的粉彩版——海滨一眼看出是哪个执行环境。
         const accent = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.35);
         host.decoCornerMesh.setColorAt(runtime.deco, runtime.paletteWall.clone().multiplyScalar(1.06));
@@ -147,14 +154,14 @@ export function buildRuntimes(host: BuildingSystemHost): void {
       if (host.formOf(building) === "tower" && zone !== "waterfront" && hashSeed(`cylinder:${building.id}`) < 0.14 && cylinderCount < 64) { runtime.cylinder = cylinderCount; cylinderCount += 1; }
       runtime.shaftPrimary = shaftCursor[runtime.facade];
       mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
-      (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
+      (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / m(REAL.floorHeight))));
       (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftPrimary, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
       instanceMap.set(runtime.shaftPrimary, building.id);
       shaftCursor[runtime.facade] += 1;
       if (wantsUpper) {
         runtime.shaftUpper = shaftCursor[runtime.facade];
         mesh.setColorAt(runtime.shaftUpper, runtime.paletteWall.clone().multiplyScalar(0.94));
-        (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftUpper, Math.max(2, Math.round((building.height * 0.28) / 3.1)));
+        (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftUpper, Math.max(2, Math.round((building.height * 0.28) / m(REAL.floorHeight))));
         (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftUpper, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
         instanceMap.set(runtime.shaftUpper, building.id);
         shaftCursor[runtime.facade] += 1;
@@ -275,9 +282,45 @@ export function buildRuntimes(host: BuildingSystemHost): void {
     for (const runtime of host.runtimes) host.applyConstruction(runtime, runtime.settled);
 }
 
+/**
+ * 会话楼在地块背后还能加深多少（世界单位）：街区里两排地块背对背、中间留着一条空地（地块深 8，街区约 50×50，
+ * 临街那排的地块中心离边 12，所以每排背后到街区中线还有 ~8 的空地，一直闲置）。
+ * 沿地块进深轴（局部 +z = (sin yaw, cos yaw)）朝街区内部量：到街区中心留 0.8 的楼缝（对面那排也会加深，各让半条）、
+ * 到街区边界留 3.5（路缘 + 人行道）。裁切出的单排街区靠第二条约束收住。海滨酒店 / Ocean Drive 地块不在 layout.blocks 里，恒 0。
+ */
+const roomCache = new WeakMap<object, Map<string, number>>();
+function inwardRoom(layout: BuildingSystemHost["layout"], slot: { id: string; blockId: string; x: number; z: number; yaw: number; depth: number }): number {
+  let byId = roomCache.get(layout);
+  if (!byId) { byId = new Map(); roomCache.set(layout, byId); }
+  const cached = byId.get(slot.id);
+  if (cached !== undefined) return cached;
+  const block = layout.blocks.find((candidate) => candidate.id === slot.blockId);
+  let room = 0;
+  if (block && block.polygon.length >= 3) {
+    const ax = Math.sin(slot.yaw); const az = Math.cos(slot.yaw);
+    const toCentre = (block.x - slot.x) * ax + (block.z - slot.z) * az;
+    const sign = toCentre >= 0 ? 1 : -1;
+    const dx = ax * sign; const dz = az * sign;
+    let hit = Infinity;
+    for (let i = 0; i < block.polygon.length; i += 1) {
+      const a = block.polygon[i]; const b = block.polygon[(i + 1) % block.polygon.length];
+      const ex = b.x - a.x; const ez = b.z - a.z;
+      const denom = dx * ez - dz * ex;
+      if (Math.abs(denom) < 1e-9) continue;
+      const t = ((a.x - slot.x) * ez - (a.z - slot.z) * ex) / denom;
+      const u = ((a.x - slot.x) * dz - (a.z - slot.z) * dx) / denom;
+      if (t > 0.01 && u >= 0 && u <= 1 && t < hit) hit = t;
+    }
+    room = Math.max(0, Math.min(Math.abs(toCentre) - 0.8, hit - 3.5) - slot.depth / 2);
+    room = Math.min(room, 9);
+  }
+  byId.set(slot.id, room);
+  return room;
+}
+
 export function applyConstruction(host: BuildingSystemHost, runtime: BuildingRuntime, immediate: boolean): void {
     const building = runtime.building;
-    const { x, z } = runtime.slot;
+    let { x, z } = runtime.slot;
     const g = runtime.groundY;
     const visible = immediate ? runtime.target : runtime.display;
     const fraction = Math.max(0, Math.min(1, visible));
@@ -300,9 +343,33 @@ export function applyConstruction(host: BuildingSystemHost, runtime: BuildingRun
     if (host.formOf(building) !== "tower" && host.formOf(building) !== "landmark") widths[0] = Math.max(widths[0], streetWidth);
     widths[0] = Math.min(widths[0], runtime.slot.width - 0.8);
     widths[1] = Math.min(widths[1], runtime.slot.depth - 2);
+    // 占地加粗（用户：「session building 现在太细了」）。塔身曾只有 fp·0.72 ≈ 3 m 见方、高 30–48 m（高宽比 10–16:1），
+    // 板楼/中层深度只有 4–5。改为：面宽几乎铺满地块（7.2 − 0.8 = 6.4）、进深朝街区内部加深到背后的闲置空地
+    // （inwardRoom，通常 +7～9），再按形态取比例；楼的临街一面位置不变（只往后长），不压别的地块。
+    // 海滨酒店 / Ocean Drive 地块自有一套（下面覆盖）。
+    let deepen = 0;
+    if (!runtime.slot.blockId.startsWith("hotel:") && !runtime.slot.blockId.startsWith("oceandrive:")) {
+      const form = host.formOf(building);
+      const room = inwardRoom(host.layout, runtime.slot);
+      const frontSetback = 0.5; // 楼前沿离地块前沿
+      const depthRoom = runtime.slot.depth - 2 * frontSetback + room; // 临街到街区背后的可用进深
+      const vary = 0.92 + building.seed * 0.08;
+      const frontage = (runtime.slot.width - 0.8) * vary; // 并入相邻空地块的高楼 slot.width = 14.4 → 面宽 13.6
+      const share = form === "tower" || form === "landmark" ? 0.66 : form === "slab" ? 0.82 : form === "block" ? 0.74 : 0.7;
+      widths = [frontage, Math.max(widths[1], depthRoom * share)];
+      deepen = (widths[1] / 2) - (runtime.slot.depth / 2 - frontSetback); // 前沿固定，中心沿内向轴后移
+      if (deepen > 0) {
+        const block = host.layout.blocks.find((candidate) => candidate.id === runtime.slot.blockId);
+        const ax = Math.sin(runtime.slot.yaw); const az = Math.cos(runtime.slot.yaw);
+        const sign = block && ((block.x - runtime.slot.x) * ax + (block.z - runtime.slot.z) * az) < 0 ? -1 : 1;
+        x += ax * sign * deepen; z += az * sign * deepen;
+      }
+    }
     // 海滨酒店地块上的会话楼：铺满宽地块成为一栋酒店（低楼走装饰艺术立面，见 facadeFor 的海滨规则）。
     // 楼高仍由 token 决定——酒店是会话，不是装饰。
     if (runtime.slot.blockId.startsWith("hotel:")) widths = [runtime.slot.width * 0.92, runtime.slot.depth * 0.9];
+    // Ocean Drive 街墙地块：会话楼铺满面宽（楼缝 1–2.5 由排地块时留），否则落成细塔，街墙读不出来（截图）。
+    if (runtime.slot.blockId.startsWith("oceandrive:")) widths = [runtime.slot.width * 0.97, runtime.slot.depth * 0.92];
 
     // Parcel frontage owns orientation; podium, shaft and roof share it.
     const yaw = runtime.slot.yaw;
@@ -337,7 +404,7 @@ export function applyConstruction(host: BuildingSystemHost, runtime: BuildingRun
       host.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, host.matrix);
     }
     if (runtime.podium >= 0) {
-      host.compose(x, g, z, yaw, fp * 1.16, podiumHeight > 0.1 ? podiumHeight : 0, fp * 1.16);
+      host.compose(x, g, z, yaw, Math.max(fp * 1.16, widths[0] * 1.06), podiumHeight > 0.1 ? podiumHeight : 0, Math.max(fp * 1.16, widths[1] * 1.06));
       host.podiumMesh.setMatrixAt(runtime.podium, host.matrix);
     }
     if (runtime.roof >= 0) {
@@ -768,4 +835,62 @@ export function writeContext(host: BuildingSystemHost): void {
     }
     context.bodies.instanceMatrix.needsUpdate = true;
     context.crowns.instanceMatrix.needsUpdate = true;
+}
+
+/**
+ * Ocean Drive Art Deco 街墙（layout.oceanDrive）：饱和粉彩（不同于背景楼的降饱和——这条街就是 Vice City 的招牌）、
+ * 立面窗格按 4 层一铺（背景楼按 11 层铺，矮楼会挤成密格）、白色压顶、约一半正面一块竖向霓虹招牌。
+ * 固定街景：不参与背景楼的回放生长（回放起点也有这条街）。
+ */
+export function buildOceanDrive(host: BuildingSystemHost): void {
+  const buildings = host.layout.oceanDrive ?? [];
+  if (!buildings.length) return;
+  const facade = makeDecoFacadeTexture();
+  facade.colorSpace = THREE.SRGBColorSpace;
+  facade.repeat.set(6, 2);
+  const bodyGeometry = artDecoTowerGeometry();
+  const bodyMaterial = new THREE.MeshLambertMaterial({ map: facade });
+  const bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, buildings.length);
+  const capGeometry = BOX.clone();
+  const capMaterial = new THREE.MeshLambertMaterial({ color: "#fbf6ec" });
+  const caps = new THREE.InstancedMesh(capGeometry, capMaterial, buildings.length);
+  const signCount = buildings.filter((b) => b.sign).length;
+  const signGeometry = BOX.clone();
+  const signMaterial = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
+  const signs = new THREE.InstancedMesh(signGeometry, signMaterial, Math.max(1, signCount));
+  // 风格圣经调色：珊瑚 / 薄荷 / 沙奶油 / 浅青 / 淡黄 / 粉紫；招牌：霓虹品红 / 霓虹青 / 暖黄
+  const walls = ["#f08b92", "#a5d8c3", "#f2d8ae", "#9fd6e0", "#f5e3a3", "#e7b8d8"];
+  const neon = ["#f04ea3", "#52e1e4", "#ffd36e"];
+  let signIndex = 0;
+  buildings.forEach((building, index) => {
+    const y = Math.max(0.3, host.layout.terrain.height(building.x, building.z));
+    const height = building.floors * m(REAL.floorHeight) + m(REAL.groundFloorExtra);
+    host.compose(building.x, y, building.z, building.yaw, building.width, height, building.depth);
+    bodies.setMatrixAt(index, host.matrix);
+    bodies.setColorAt(index, host.color.set(walls[Math.floor(building.seed * walls.length) % walls.length]));
+    host.compose(building.x, y + height, building.z, building.yaw, building.width * 0.96, 0.9, building.depth * 0.96);
+    caps.setMatrixAt(index, host.matrix);
+    if (building.sign) {
+      // 招牌贴正面（朝滨海大道一侧 = 局部 −z）靠一端，竖向细长，略高出压顶
+      const along = building.width * 0.32 * (building.seed < 0.5 ? -1 : 1);
+      const out = building.depth / 2 + 0.5;
+      const cos = Math.cos(building.yaw); const sin = Math.sin(building.yaw);
+      const sx = building.x + along * cos - out * sin; const sz = building.z - along * sin - out * cos;
+      host.compose(sx, y + height * 0.35, sz, building.yaw, 0.7, height * 0.75 + 1.5, 0.5);
+      signs.setMatrixAt(signIndex, host.matrix);
+      signs.setColorAt(signIndex, host.color.set(neon[Math.floor(building.seed * 97) % neon.length]));
+      signIndex += 1;
+    }
+  });
+  signs.count = signIndex;
+  for (const mesh of [bodies, caps, signs]) {
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.castShadow = mesh !== signs;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+  }
+  bodies.name = "city-ocean-drive-facades"; caps.name = "city-ocean-drive-rooftops"; signs.name = "city-ocean-drive-signs";
+  host.group.add(bodies, caps, signs);
+  host.disposables.push(bodyGeometry, bodyMaterial, facade, capGeometry, capMaterial, signGeometry, signMaterial);
 }

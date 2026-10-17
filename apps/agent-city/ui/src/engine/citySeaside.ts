@@ -38,27 +38,39 @@ export type CoastalConfig = {
   siteMargin: number;
   /** 有效采样占比低于该值 → 整段降级。 */
   minValidRatio: number;
+  /** 中央海湾（Vice City 式「东岛海滩 + 西岛大陆」）：半宽占岛东西半宽的比例，0 = 不开湾、保持原来的窄河。
+   *  湾是把南北向的河整体放宽：两岸成两座岛，跨湾靠主干道的桥（堤道）。 */
+  bayHalfWidth: number;
+  /** 海湾中线相对岛中心的东偏（占岛半宽的比例，正 = 东）：东岛窄（海滩城），西岛宽（大陆）。 */
+  bayShift: number;
 };
 
 export const MIAMI_COASTAL: CoastalConfig = {
   profile: "miami-coastal",
-  version: 1,
+  version: 3,
   biome: "tropical",
-  preferredAzimuth: Math.PI / 2,
+  // 海滩朝 +x：开湾后 +x 一侧是窄的东岛，海滩铺在它背向海湾的外岸（Ocean Beach 的位置）。
+  // 曾朝 +z（π/2），海滩落在整岛的南端，与海湾、东西两岛的构图无关。
+  preferredAzimuth: 0,
   azimuthTolerance: 1.2,
   segmentArc: (85 * Math.PI) / 180,
-  wetSandWidth: 7,
-  // 沙滩加宽 6（真机反馈「沙滩略微再宽一些」，还要放得下沙排场），其后各带整体内移 6。
-  drySandWidth: 20,
-  promenadeOffset: 24,
-  boulevardOffset: 36,
-  hotelOffset: 54,
-  bandOuter: 70,
+  // 海滨休闲带按 South Beach 的断面放宽（用户反馈「沙滩景观带不够宽」）：
+  // 湿沙 0–8 → 干沙 8–40（遮阳伞/沙排场）→ 棕榈公园 40–62（草坪 + 三排错落棕榈，natureSystem 种）
+  // → 步道 62 → 滨海大道 74 → 酒店线 92。曾是干沙到 20、步道紧贴在 24，沙滩和大道之间没有公园。
+  wetSandWidth: 8,
+  drySandWidth: 40,
+  promenadeOffset: 62,
+  boulevardOffset: 74,
+  hotelOffset: 92,
+  bandOuter: 108,
   maxCoastalSlope: 0.9,
   maxCoastalHeight: 6,
   riverMargin: 26,
   siteMargin: 14,
   minValidRatio: 0.6,
+  // 比例照 Vice City 地图：西岛 ~45%、海湾 ~25%、东岛 ~20%（东岛最窄处约 0.4 个岛半宽）。
+  bayHalfWidth: 0.22,
+  bayShift: 0.33,
 };
 
 export type SeasideSample = {
@@ -104,14 +116,16 @@ export function seasideHotelLots(band: SeasideBand | null): Array<{ id: string; 
   for (let i = 0; i < count; i += 1) {
     const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
     const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
-    const width = (30 + seed * 14) * 0.65;
+    // 酒店比普通会话楼大，但要和城市同一个比例尺：普通地块 7.2 × 8，酒店 11–15 × 9.6（约 1.5–2 倍）。
+    // 曾是 19.5–28.6 × 11.2（约 3 倍宽），贴着 7 宽的窄楼像放错了比例尺（用户反馈）。
+    const width = 11 + seed * 4;
     // 最小净距：两座酒店用地中心至少隔 max(两座宽度和的一半 + 4, 32)，防短岸
     // 段上相邻采样太近导致酒店体量互相交错（曾只按采样均匀分布，短岸时未查间距）。
-    const minGap = Math.max(width * 0.5 + 16, 32);
+    const minGap = Math.max(width * 0.5 + 12, 24);
     const tooClose = lots.some((lot) => Math.hypot(lot.x - sample.hotelLine.x, lot.z - sample.hotelLine.z) < minGap);
     if (tooClose) continue;
     lots.push({ id: `hotel:${i}`, x: sample.hotelLine.x, z: sample.hotelLine.z, yaw: Math.atan2(sample.inward.x, sample.inward.z),
-      width, depth: 16 * 0.7 });
+      width, depth: 9.6 });
   }
   return lots;
 }
@@ -127,6 +141,8 @@ export type SeasideWorld = {
   reservations: Array<{ x: number; z: number; radius: number }>;
   /** 排除朝向（港口/河口等），at 为方位角、halfWidth 为半宽。 */
   blockedAzimuths: Array<{ at: number; halfWidth: number; weight?: number }>;
+  /** 可选：只在满足它的水线点上选段（开湾时 = 湾东侧，海滩只铺东岛外岸）。 */
+  eligibleShore?: (p: Vec2) => boolean;
 };
 
 const normalizeAngle = (a: number): number => {
@@ -190,8 +206,17 @@ function buildSample(point: Vec2, inward: Vec2, azimuth: number, world: SeasideW
 export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorld, config: CoastalConfig, seed: number): SeasideBand {
   const n = coast.length;
   const azimuthOf = (p: Vec2) => normalizeAngle(Math.atan2(p.z - center.z, p.x - center.x));
-  const samplesPerWindow = Math.max(4, Math.round((config.segmentArc / (Math.PI * 2)) * n));
-  const step = Math.max(3, Math.round(samplesPerWindow / 6));
+  // 限定岸段（开湾 = 东岛外岸）时，窗口不长于该岸最长的连续段：东岛外岸常只有十几个海岸点，
+  // 固定 85° 窗口（~23 点）放不下，整条海滨带退化成 no-coast（seed 1703318715/2 档实测）。
+  let eligibleRun = n;
+  if (world.eligibleShore) {
+    const ok = coast.map((p) => world.eligibleShore!(p));
+    let run = 0; eligibleRun = 0;
+    for (let i = 0; i < 2 * n && eligibleRun < n; i += 1) { run = ok[i % n] ? run + 1 : 0; eligibleRun = Math.max(eligibleRun, Math.min(run, n)); }
+  }
+  const samplesPerWindow = Math.max(4, Math.min(eligibleRun, Math.round((config.segmentArc / (Math.PI * 2)) * n)));
+  // 限定岸段时逐点滑窗：窗口与连续段等长，步长 3 会错过唯一能放下的起点。
+  const step = world.eligibleShore ? 1 : Math.max(3, Math.round(samplesPerWindow / 6));
   let best: { from: number; score: number; samples: SeasideSample[] } | null = null;
   for (let start = 0; start < n; start += step) {
     const samples: SeasideSample[] = [];
@@ -201,6 +226,7 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
       const inward = coastInwardNormal(coast, center, index);
       samples.push(buildSample(point, inward, azimuthOf(point), world, config));
     }
+    if (world.eligibleShore && samples.some((sample) => !world.eligibleShore!(sample.waterline))) continue;
     const midAzimuth = azimuthOf(coast[(start + Math.round(samplesPerWindow / 2)) % n]);
     const outward = normalizeAngle(midAzimuth);
     const orientationBonus = Math.max(0, 1 - angleDelta(outward, config.preferredAzimuth) / Math.max(0.001, config.azimuthTolerance));
@@ -328,6 +354,8 @@ export function validRuns(band: SeasideBand): SeasideSample[][] {
 }
 
 export const promenadeSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.promenade);
+/** 离水线 d 处的平行折线（棕榈公园的树行用；无效采样处同样断开）。 */
+export const bandSegmentsAt = (band: SeasideBand, d: number): Vec2[][] => offsetSegments(band, (sample) => offset(sample.waterline, sample.inward, d));
 /** Valid vehicle-road centerlines; invalid river/terrain/reservation samples split the route. */
 export const boulevardSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.boulevard);
 
@@ -336,3 +364,59 @@ export const encodeDistance = (d: number, range: number): number => Math.max(0, 
 export const decodeDistance = (v: number, range: number): number => (v * 2 - 1) * range;
 /** 量化误差上界：8bit 通道 → range/127.5。用于「误差 < 过渡宽度」的预算断言。 */
 export const distanceQuantizationError = (range: number): number => range / 127.5;
+
+/**
+ * Ocean Drive 分段线：海滨带合法采样按水线 z 排序，取 55% 分位。z 低于它的南段是 Ocean Beach / Washington Beach
+ * （Art Deco 街墙，背景楼），以北留给会话酒店（Vice Point 的中高层）。南北口径与湾内岛一致（+z = 北）。
+ */
+export function oceanDriveSplitZ(band: SeasideBand | null): number {
+  const zs = (band && !band.degraded ? band.samples.filter((s) => s.valid).map((s) => s.waterline.z) : []).sort((a, b) => a - b);
+  return zs.length ? zs[Math.floor(zs.length * 0.55)] : -Infinity;
+}
+
+export type OceanDriveBuilding = Vec2 & { id: string; yaw: number; width: number; depth: number; floors: number; seed: number; sign: boolean };
+
+/**
+ * Ocean Drive Art Deco 街墙（用户：「东岛南段 Ocean Beach / Washington Beach：2–6 层连续的 Art Deco 酒店街墙」）。
+ * 沿酒店线（hotelOffset）连续排楼：面宽 9–13、楼缝 0.8–2、进深 9–11、2–6 层（与普通会话地块 7.2 × 8 同一比例尺）；约一半正面带竖向霓虹招牌。
+ * 是背景楼（街景），不占会话、不进统计——楼高由数据决定的原则不动，会话楼排在它们后面的街区里。
+ * accept 由调用方判路网/用地净空（压路口处自然断开，读作横街）。
+ */
+export function oceanDriveWall(band: SeasideBand | null, config: CoastalConfig, seed: number,
+  accept: (lot: { x: number; z: number; yaw: number; width: number; depth: number }) => boolean): OceanDriveBuilding[] {
+  if (!band || band.degraded) return [];
+  const split = oceanDriveSplitZ(band);
+  const out: OceanDriveBuilding[] = [];
+  const rand = (salt: string) => hashSeed(`ocean-drive:${seed}:${salt}`);
+  bandSegmentsAt(band, config.hotelOffset).forEach((segment, si) => {
+    let carry = 0;
+    for (let i = 1; i < segment.length; i += 1) {
+      const a = segment[i - 1]; const b = segment[i];
+      const length = Math.hypot(b.x - a.x, b.z - a.z);
+      if (length < 1e-3) continue;
+      const tx = (b.x - a.x) / length; const tz = (b.z - a.z) / length;
+      let s = carry;
+      while (s < length) {
+        const k = out.length;
+        // 面宽 9–13、进深 9–11：普通会话地块 7.2 × 8，街墙略宽一点（1.25–1.8 倍）才读得出「一栋酒店」。
+        // 曾是 12–21 × 14–18（约 5 倍占地），和会话楼不是同一个比例尺（用户反馈）。
+        const width = 9 + rand(`w${si}:${i}:${k}`) * 4;
+        const centre = s + width / 2;
+        const x = a.x + tx * centre; const z = a.z + tz * centre;
+        const depth = 9 + rand(`d${si}:${i}:${k}`) * 2;
+        // 正面（局部 −z）朝海：折线走向不定，按最近海滨采样的内向法线校正（招牌挂在正面，朝滨海大道）
+        let yaw = Math.atan2(-tz, tx);
+        let nearest: SeasideSample | null = null; let nd = Infinity;
+        for (const sample of band.samples) { const d = Math.hypot(sample.hotelLine.x - x, sample.hotelLine.z - z); if (sample.valid && d < nd) { nd = d; nearest = sample; } }
+        if (nearest && (-Math.sin(yaw)) * nearest.inward.x + (-Math.cos(yaw)) * nearest.inward.z > 0) yaw += Math.PI;
+        if (z < split && centre <= length + width * 0.3 && accept({ x, z, yaw, width, depth })) {
+          out.push({ id: `ocean-drive:${si}:${i}:${k}`, x, z, yaw, width, depth, floors: 2 + Math.floor(rand(`f${si}:${i}:${k}`) * 5),
+            seed: rand(`s${si}:${i}:${k}`), sign: rand(`g${si}:${i}:${k}`) < 0.5 });
+        }
+        s += width + 0.8 + rand(`gap${si}:${i}:${k}`) * 1.2;
+      }
+      carry = s - length;
+    }
+  });
+  return out;
+}

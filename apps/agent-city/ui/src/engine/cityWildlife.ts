@@ -9,6 +9,10 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { hashSeed } from "../cityModel";
+import { m, REAL, VISUAL_BOOST } from "./worldScale";
+
+/** 鸟模型几何翼展 3.76（两翼尖 z=±1.88）；按真实翼展（军舰鸟/褐鹈鹕 ≈2.2 m）× 视觉放大 VISUAL_BOOST.bird。曾固定 ×2.2 = 8.3 m 翼展，是真鸟的近 4 倍、且没有登记。 */
+const BIRD_SCALE = m(REAL.bird.wingspan * VISUAL_BOOST.bird) / 3.76;
 
 type Mountain = { center: { x: number; z: number }; radius: number; height: number; seed: number };
 
@@ -58,7 +62,8 @@ class BirdFlocks {
     this.wingMaterial = new THREE.MeshLambertMaterial({ color: "#354353", transparent: true, side: THREE.DoubleSide, flatShading: true });
     // 头鸟在前，两翼逐级后撤；间距按翼展留白，避免远景各鸟融合成一团。
     this.offsets = [[0, 0], [0.13, -0.085], [0.13, 0.085], [0.26, -0.17], [0.26, 0.17], [0.39, -0.25], [0.39, 0.25]]
-      .map(([back, side]) => [back * 90, side * 90] as [number, number]);
+      // 队形间距随鸟体同比：×90 是按 2.2 倍鸟体定的，鸟缩到真实尺寸后间距一起缩（≈1.5 翼展）
+      .map(([back, side]) => [back * 90 * BIRD_SCALE / 2.2, side * 90 * BIRD_SCALE / 2.2] as [number, number]);
     const total = this.offsets.length * 2;
     this.bodyMesh = new THREE.InstancedMesh(bodyGeometry, this.bodyMaterial, total);
     this.bodyMesh.name = "city-birds";
@@ -137,7 +142,7 @@ class BirdFlocks {
         );
         this.euler.set(bank + flap * 0.018, Math.atan2(-tangentZ, tangentX), pitch, "YXZ");
         this.birdQuaternion.setFromEuler(this.euler);
-        this.scaleVector.setScalar(2.2 * (0.96 + flap * 0.04));
+        this.scaleVector.setScalar(BIRD_SCALE * (0.96 + flap * 0.04));
         this.matrix.compose(this.position, this.birdQuaternion, this.scaleVector);
         this.bodyMesh.setMatrixAt(index, this.matrix);
         // 左翼：绕前进轴 (+x) 抬/压；右翼反相 + z 镜像——两翼同起同落。

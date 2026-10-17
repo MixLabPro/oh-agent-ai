@@ -116,7 +116,7 @@ export function frontSitesAndAssignJointSites(w: SiteFrontageWorld) {
         "sitesOverlap", "stationStadiumSetback", "stationDoorFacesRoad", "archStraddlesRoad"].includes(constraint.id));
       const ownerView = (candidateNetwork: Network, sites: PublicSite[], marks: Landmark[]) => ({
         roadEdges: [...candidateNetwork.edges.values()], roadNodes: [...candidateNetwork.nodes.values()], publicSites: sites, landmarks: marks,
-        blocks: [], terrain, core, coast, river, seaside: null, coastRoads: [], riverRoadRuns: [], primaryAnchorNodeId,
+        blocks: [], terrain, core, coast, river, waterEdges: (geo as { waterEdges?: Vec2[][] }).waterEdges ?? [], seaside: null, coastRoads: [], riverRoadRuns: [], primaryAnchorNodeId,
       } as unknown as ConstraintPlan);
       const ownerIdentity = (violation: ReturnType<typeof ownerRules[number]["measure"]>[number], sites: typeof currentSites) =>
         violation.identity ?? sites.find((site) => site.kind === violation.site && site.x === violation.at?.x && site.z === violation.at?.z)?.id

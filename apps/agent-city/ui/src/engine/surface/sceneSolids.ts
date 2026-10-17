@@ -46,6 +46,9 @@ export function collectSceneSolids(root: THREE.Object3D): SolidInput[] {
       if (o.isInstancedMesh) { o.getMatrixAt!(i, m); m.premultiply(o.matrixWorld); } else m.copy(o.matrixWorld);
       box.getCenter(c).applyMatrix4(m);
       const e = m.elements; const sx = (box.max.x - box.min.x) / 2, sy = (box.max.y - box.min.y) / 2, sz = (box.max.z - box.min.z) / 2;
+      // 平面装饰片（小岛庄园地面、广场圆盘等 city-landmark-* 家族新增成员）包围盒高度为 0：
+      // 零体积盒子不是有效障碍（swept SAT 无从产生阻挡），跳过而不是让碰撞索引整体拒绝。
+      if (sx < 1e-6 || sy < 1e-6 || sz < 1e-6) continue;
       const axes = [{ x: e[0] * sx, y: e[1] * sx, z: e[2] * sx }, { x: e[4] * sy, y: e[5] * sy, z: e[6] * sy }, { x: e[8] * sz, y: e[9] * sz, z: e[10] * sz }] as const;
       corner.set(c.x + Math.abs(axes[0].x) + Math.abs(axes[1].x) + Math.abs(axes[2].x), c.y + Math.abs(axes[0].y) + Math.abs(axes[1].y) + Math.abs(axes[2].y), 0);
       if (corner.y < PARKED_BELOW) continue;

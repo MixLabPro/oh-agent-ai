@@ -209,6 +209,12 @@ export class CityEngine {
   private gameFrame: ((dt: number) => void) | null = null;
 
   constructor(private readonly options: CityEngineOptions) {
+    // 开发调试钩子（仅 vite dev + ?cityDebug）：把场景与 THREE 挂到 window，供比例尺测量等脚本遍历真实场景图。生产构建不含。
+    if (import.meta.env.DEV && typeof location !== "undefined" && new URLSearchParams(location.search).has("cityDebug")) {
+      const self = this;
+      // 相机与控制器在构造后段才建好：用 getter 延迟取（截图/量尺寸时把镜头摆到指定物体旁）。
+      (window as unknown as { __cityEngine?: unknown }).__cityEngine = { scene: this.scene, THREE, get camera() { return self.camera; }, get controls() { return self.controls; } };
+    }
     const canvas = options.canvas;
     // 抗锯齿不再按屏幕像素密度关闭：视网膜屏在 0 档以 1.25 倍渲染再拉伸，没有 MSAA 时楼边与路缘锯齿很重。
     const lowPower = { antialias: true, powerPreference: "low-power" as const, stencil: false };
@@ -1120,7 +1126,7 @@ export class CityEngine {
     this.cursorMs = ms;
     if (options?.playing !== undefined) this.playing = options.playing;
     if (options?.speed !== undefined) this.playbackSpeed = options.speed;
-    if (ms !== null) { this.parts?.applyCursor(ms, false, this.playbackSpeed * 1000); this.parts?.snapToTargets(true); } // 时间跳变（开始回放/拖时间轴）：直接是那一刻的城市
+    if (ms !== null) { this.parts?.applyCursor(ms, false, this.playbackSpeed * 1000); this.parts?.snapToTargets(true); } // 时间跳变时直接对齐城市
     else if (this.model) this.parts?.applyCursor(this.model.windowEndMs, true);
     this.noteActivity();
   }

@@ -1,4 +1,4 @@
-import { createCityShape, MAX_TIER, targetParcels, RADIUS_CALIBRATION_CONFIG, type createCityPlan } from "../cityPlan";
+import { bayOf, createCityShape, MAX_TIER, targetParcels, RADIUS_CALIBRATION_CONFIG, type createCityPlan } from "../cityPlan";
 import type { CoastalConfig } from "../citySeaside";
 import type { TerrainField } from "../cityLayout";
 import { buildGeography } from "../planner/geography";
@@ -19,7 +19,7 @@ export type PlanningWorkerResponse =
   | { version: typeof PLANNING_PROTOCOL_VERSION; requestId: string; status: "failed"; reason: string;
       stop?: PlanningStop; workBudget?: PlanningWorkSnapshot };
 const coastalNumbers = ["version", "preferredAzimuth", "azimuthTolerance", "segmentArc", "wetSandWidth", "drySandWidth",
-  "promenadeOffset", "boulevardOffset", "hotelOffset", "bandOuter", "maxCoastalSlope", "maxCoastalHeight", "riverMargin", "siteMargin", "minValidRatio"] as const;
+  "promenadeOffset", "boulevardOffset", "hotelOffset", "bandOuter", "maxCoastalSlope", "maxCoastalHeight", "riverMargin", "siteMargin", "minValidRatio", "bayHalfWidth", "bayShift"] as const;
 export function validPlanningWorkSnapshot(budget: PlanningWorkSnapshot, limits: PlanningWorkCounts): boolean {
   return !!budget && !budget.stop && !!budget.limits && !!budget.consumed
     && Object.keys(budget.limits).length === PLANNING_WORK_UNITS.length && Object.keys(budget.consumed).length === PLANNING_WORK_UNITS.length
@@ -61,7 +61,7 @@ export function hydratePlanningPlan(snapshot: PlanningPlanSnapshot, input: Plann
     || !plan.derivedFinalization?.ok || !plan.capacity?.satisfied || plan.planningOutcome?.status === "failed"
     || !Array.isArray(plan.roadNodes) || !Array.isArray(plan.roadEdges) || !Array.isArray(plan.blocks)) throw new Error("invalid-planning-snapshot");
   const collections = ["publicSites", "landmarks", "bridges", "parkTrees", "highways", "carPaths", "districtAnchors",
-    "coastRoads", "riverRoadRuns", "coast", "culDeSacEnds", "siteObligations"] as const;
+    "coastRoads", "riverRoadRuns", "coast", "culDeSacEnds", "siteObligations", "junctionRings", "highwayRamps"] as const;
   if (collections.some(key => !Array.isArray(plan[key]))) throw new Error("incomplete-planning-snapshot");
   const point = (value: { x: number; z: number }) => !!value && Number.isFinite(value.x) && Number.isFinite(value.z);
   const nodes = new Map(plan.roadNodes.map(node => [node.id, node]));
@@ -92,7 +92,7 @@ export function hydratePlanningPlan(snapshot: PlanningPlanSnapshot, input: Plann
   const budget = (plan as GeneratedCityPlan & { workBudget?: PlanningWorkSnapshot }).workBudget;
   if (!budget || !validPlanningWorkSnapshot(budget, input.limits))
     throw new Error("invalid-planning-budget-snapshot");
-  const geo = buildGeography(input.seed, plan.islandRadius, createCityShape(input.seed), { memoize: input.memoizeTerrain }), terrain = geo.terrain;
+  const geo = buildGeography(input.seed, plan.islandRadius, createCityShape(input.seed), { memoize: input.memoizeTerrain, bay: bayOf(input.coastal) }), terrain = geo.terrain;
   if (plan.terrain?.radius !== terrain.radius || plan.terrain?.hasRiver !== terrain.hasRiver
     || plan.terrain?.center?.x !== terrain.center.x || plan.terrain?.center?.z !== terrain.center.z)
     throw new Error("invalid-planning-terrain-snapshot");

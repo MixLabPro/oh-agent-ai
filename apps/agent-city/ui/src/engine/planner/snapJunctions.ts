@@ -590,6 +590,7 @@ export function trimLeafBeforeUnsafeCrossing(ctx: RepairContext): { changes: num
     coastRoadRunEnds: ctx.coastRoadRunEnds,
     coast: ctx.coast,
     river: ctx.geo.river,
+    waterEdges: ctx.geo.waterEdges,
   };
   const world = { network: ctx.network, geo: ctx.geo, inRiver: ctx.inRiver, reservations: () => [...ctx.publicSites, ...ctx.landmarks] };
   let changes = 0;

@@ -41,7 +41,7 @@ const targeted = [...new Set(REPAIR_STRATEGIES.map((s) => s.constraint))];
 {
   const a = { id: "100:20", x: 100, z: 20 }, b = { id: "120:20", x: 120, z: 20 };
   const road = { id: "100:20/120:20", from: a.id, to: b.id, width: 5, kind: "local", structure: "ground-road", points: [a, b] };
-  const ctx = { network: { nodes: new Map([[a.id, a], [b.id, b]]), edges: new Map([[road.id, road]]) }, primaryAnchorNodeId: a.id, publicSites: [], landmarks: [],
+  const ctx = { network: { nodes: new Map([[a.id, a], [b.id, b]]), edges: new Map([[road.id, road]]), version: 0 }, primaryAnchorNodeId: a.id, publicSites: [], landmarks: [],
     blocks: [{ id: "block", x: 0, z: 0, polygon: [{ x: -4, z: -4 }, { x: 4, z: -4 }, { x: 4, z: 4 }, { x: -4, z: 4 }],
       parcels: [{ id: "parcel", x: 0, z: 0, yaw: 0, width: 2, depth: 2 }] }], core: { x: 0, z: 0 },
     geo: { terrain: { height: () => -1 }, river: null }, seaside: null, coast: [], coastRoadRuns: [], riverRoadRuns: [],
@@ -92,3 +92,7 @@ for (const [tier, i, cfg] of islands) {
 }
 console.log(`City solve: ${REPAIR_STRATEGIES.length} strategies over ${targeted.length} constraints (${targeted.join(", ")}); ${islands.length} islands never worse after solve; deterministic.`);
 console.log(`  ${rows.join(" | ")}`);
+
+// Long-road subdivision must not reveal a crowded corridor after publication.
+const crowdedWitness = createCityPlan(2001361477, 3, MIAMI_COASTAL);
+assert.equal(count(crowdedWitness, "crowdedArterials"), 0, "late trunk splits must not strand a protected crowded arterial");

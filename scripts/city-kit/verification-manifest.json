@@ -518,5 +518,23 @@
     "file": "verify-city-shared-runtime.mjs",
     "env": {},
     "shared": false
+  },
+  {
+    "id": "verify-city-junction-rings",
+    "file": "verify-city-junction-rings.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-highway-ramps",
+    "file": "verify-city-highway-ramps.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-world-scale",
+    "file": "verify-city-world-scale.mjs",
+    "env": {},
+    "shared": false
   }
 ]

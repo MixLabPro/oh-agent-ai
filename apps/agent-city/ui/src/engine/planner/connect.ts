@@ -26,6 +26,7 @@ import type { Geography } from "./geography";
 import { corridorBlocked, corridorFailure, validateCandidate, VALIDATION_CONFIG, type CorridorPolicy, type RouteCandidate, type RouteSegment } from "./validation";
 import { ROAD_RELATION_CONFIG, classifyRoadSegments } from "./relations";
 import { CONNECTION_BUDGET } from "./connectionBudget";
+import { roadCandidateCrowding } from "./roadAdmission";
 
 export { corridorFailure, VALIDATION_CONFIG } from "./validation";
 export type { CorridorPolicy, RouteCandidate, RouteSegment, CandidateValidation, CandidateViolation } from "./validation";
@@ -611,7 +612,10 @@ function proposeBridgeCandidate(request: ConnectionRequest, world: ConnectorWorl
     // 连线水段分析：首/末水采样界定连续水段；无水 = 纯地面引道。
     // 6 单位采样只用于提出桥跨候选；最终各段按统一路幅终筛，不以历史漏检授予豁免。
     const n = Math.max(4, Math.ceil(Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z) / (VALIDATION_CONFIG.sampleSpacing / 2)));
-    const maxWetLength = CONNECTOR_CONFIG.bridgeMaxSpanSamples * CONNECTOR_CONFIG.bridgeSampleSpacing;
+    // 开湾（geo.maxWaterSpan > 140）时跨湾堤道按湾宽放开：84 是窄河口径，东岛的孤立街网永远接不上
+    // 大陆，整岛被当孤立分量裁掉（4 种子 × 3 档实测 4/12 东岛 0 地块）。
+    const bayWet = (world.geo as { maxWaterSpan?: number }).maxWaterSpan ?? 0;
+    const maxWetLength = Math.max(CONNECTOR_CONFIG.bridgeMaxSpanSamples * CONNECTOR_CONFIG.bridgeSampleSpacing, bayWet > 140 ? bayWet : 0);
     const at = (k: number) => ({ x: request.source.x + (candidate.p.x - request.source.x) * (k / n), z: request.source.z + (candidate.p.z - request.source.z) * (k / n) });
     const width = roadWidthOf(request);
     const distance = Math.hypot(candidate.p.x - request.source.x, candidate.p.z - request.source.z);
@@ -842,6 +846,95 @@ export function runMiniRoundabout(world: ConnectorWorld, center: { id: string; x
   for (const e of world.network.edges.values()) if (e.from === center.id || e.to === center.id) { incident = true; break; }
   if (!incident) world.network.nodes.delete(center.id);
   return { ok: true, version: committed.version, strategy: "mini-roundabout", patch: proposal.patch, radius: proposal.radius, ring: proposal.ring };
+}
+
+// ── 路口环岛（CITY_ROAD_NETWORK_SPEC §5「环岛：度 ≥ 5，或 ≥ 3 条主干交汇」+ 支路小环，2026-10-15）──
+// 与上面的 mini-roundabout 同一套构造（切点、腿剩余段、弧段走廊/交叉/角度复核、事务提交、清孤立环心），
+// 区别只在适用面：不限三岔（3–6 条腿）、不要求锐角灰带（这里是按路口等级主动建环，不是修锐角）、
+// 半径/环道宽/弧段步长由调用方给（主干环岛 16–20、宽 8；支路小环 10、宽 5），弧段按 ≤ arcStepDeg 细分，
+// 环看起来是圆而不是菱形。只接受两点直线腿：多点腿（重绘过的曲线路）拆掉重建会丢形状，不碰。
+// mini-roundabout 原路径不动（它服务 acuteJunctions 修复，行为由基线钉住）。
+
+export type JunctionRingOptions = { radii: readonly number[]; arcStepDeg: number; ringArterial: boolean; maxSegments: number };
+export type JunctionRingResult =
+  | { ok: true; version: number; radius: number; ring: Vec2[] }
+  | { ok: false; reason: ConnectionFailure; detail: string };
+
+export function runJunctionRing(world: ConnectorWorld, center: { id: string; x: number; z: number }, legs: RoadEdge[], options: JunctionRingOptions,
+  groundCorridorFailure?: (a: Vec2, b: Vec2, width: number) => ConnectionFailure | null): JunctionRingResult {
+  const centerId = center.id;
+  if (legs.length < 3 || legs.length > 6) return { ok: false, reason: "no-target", detail: `junction ring needs 3–6 legs, got ${legs.length}` };
+  for (const leg of legs) {
+    if (leg.from !== centerId && leg.to !== centerId) return { ok: false, reason: "no-target", detail: `leg ${leg.id} not incident` };
+    if (!roundaboutRebuildable(leg) || leg.points.length !== 2) return { ok: false, reason: "no-target", detail: `leg ${leg.id} not rebuildable` };
+  }
+  const directed = legs.map((leg) => {
+    const far = leg.from === centerId ? leg.points[leg.points.length - 1] : leg.points[0];
+    const a = Math.atan2(far.z - center.z, far.x - center.x);
+    return { leg, far, a: ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2), len: Math.hypot(far.x - center.x, far.z - center.z) };
+  }).sort((x, y) => x.a - y.a || (x.leg.id < y.leg.id ? -1 : 1));
+  const ringWidth = options.ringArterial ? 8 : 5;
+  const policy = fallbackPolicy(world, { roadClass: options.ringArterial ? "arterial" : "local", primary: false } as Parameters<typeof fallbackPolicy>[1]);
+  const legIds = new Set(legs.map((e) => e.id));
+  let last: { reason: ConnectionFailure; detail: string } = { reason: "no-target", detail: "no radius candidate" };
+  for (const radius of options.radii) {
+    if (directed.some((d) => d.len - radius < CONNECTOR_CONFIG.roundaboutMinOuter)) { last = { reason: "no-target", detail: `a leg is too short for r=${radius}` }; continue; }
+    const ring: Array<{ p: Vec2; leg: number }> = [];
+    for (let k = 0; k < directed.length; k += 1) {
+      const d = directed[k];
+      ring.push({ p: keyOf({ x: center.x + ((d.far.x - center.x) / d.len) * radius, z: center.z + ((d.far.z - center.z) / d.len) * radius }), leg: k });
+      const a0 = d.a;
+      const a1 = k + 1 < directed.length ? directed[k + 1].a : directed[0].a + Math.PI * 2;
+      const span = a1 - a0;
+      const n = Math.max(1, Math.ceil((span * 180) / Math.PI / options.arcStepDeg));
+      for (let s = 1; s < n; s += 1) ring.push({ p: keyOf({ x: center.x + radius * Math.cos(a0 + (span * s) / n), z: center.z + radius * Math.sin(a0 + (span * s) / n) }), leg: -1 });
+    }
+    if (ring.length > options.maxSegments) { last = { reason: "no-target", detail: `ring has ${ring.length} segments at r=${radius}` }; continue; }
+    let failure: ConnectionFailure | null = null; let detail = "";
+    for (let k = 0; k < ring.length && !failure; k += 1) {
+      const p = ring[k].p; const q = ring[(k + 1) % ring.length].p;
+      if (Math.hypot(q.x - p.x, q.z - p.z) < CONNECTOR_CONFIG.roundaboutMinChord) { failure = "no-target"; detail = `arc chord ${k} too short at r=${radius}`; break; }
+      const corridor = groundCorridorFailure ? groundCorridorFailure(p, q, ringWidth) : corridorFailure(world, p, q, policy);
+      if (corridor) { failure = corridor; detail = `arc chord ${k} failed ${corridor} at r=${radius}`; break; }
+      for (const other of world.network.edges.values()) {
+        if (legIds.has(other.id)) continue;
+        for (let j = 1; j < other.points.length; j += 1) if (crosses(p, q, other.points[j - 1], other.points[j])) { failure = "crossing"; detail = `arc chord ${k} crosses ${other.id} at r=${radius}`; break; }
+        if (failure) break;
+      }
+    }
+    if (failure) { last = { reason: failure, detail }; continue; }
+    const addEdges: NetworkPatch["addEdges"] = directed.map((d, k) => ({ a: ring.find((r) => r.leg === k)!.p, b: d.far, arterial: d.leg.kind === "arterial", primary: d.leg.width >= 12 }));
+    for (let k = 0; k < ring.length; k += 1) addEdges.push({ a: ring[k].p, b: ring[(k + 1) % ring.length].p, arterial: options.ringArterial });
+    // 建环会把原本共享环心的整腿拆成不共享节点的短段；即使不交叉，也可能与旁边干道平行贴近。
+    // 与道路准入和最终 crowdedArterials 同源校验，包含新增边之间的冲突；失败继续尝试下一半径，正式路网不动。
+    const crowding = roadCandidateCrowding([...world.network.edges.values()].filter((edge) => !legIds.has(edge.id)), addEdges);
+    if (crowding) { last = { reason: "no-target", detail: `crowded arterial candidate ${crowding.candidateIndex} near ${crowding.hostId} at r=${radius}` }; continue; }
+    const ringPoints = ring.map((r) => r.p);
+    const committed = commitNetworkPatch(world.network, { baseVersion: world.network.version ?? 0, removeEdgeIds: legs.map((e) => e.id), splits: [], addEdges }, (draft) => {
+      for (const point of ringPoints) {
+        const id = roadNodeId(keyOf(point)); const node = draft.nodes.get(id); if (!node) continue;
+        const dirs: number[] = [];
+        for (const e of draft.edges.values()) {
+          if (e.from !== id && e.to !== id) continue;
+          const other = e.from === id ? e.points[1] : e.points[e.points.length - 2];
+          dirs.push(Math.atan2(other.z - node.z, other.x - node.x));
+        }
+        if (dirs.length < 3) continue;
+        const sorted = dirs.map((a) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)).sort((x, y) => x - y);
+        for (let m = 0; m < sorted.length; m += 1) {
+          const gap = (m + 1 < sorted.length ? sorted[m + 1] : sorted[0] + Math.PI * 2) - sorted[m];
+          if (gap < (30 * Math.PI) / 180) return `junction-angle ring node ${id}`;
+        }
+      }
+      return null;
+    });
+    if (!committed.ok) { last = { reason: committed.reason === "stale-base" ? "stale-base" : "junction-angle", detail: committed.detail ?? committed.reason }; continue; }
+    let incident = false;
+    for (const e of world.network.edges.values()) if (e.from === centerId || e.to === centerId) { incident = true; break; }
+    if (!incident) world.network.nodes.delete(centerId);
+    return { ok: true, version: committed.version, radius, ring: ringPoints };
+  }
+  return { ok: false, ...last };
 }
 
 // ── 阶梯汇总 + 事务提交（§4.3：草稿验证、失败零副作用）───────────────────────────────────

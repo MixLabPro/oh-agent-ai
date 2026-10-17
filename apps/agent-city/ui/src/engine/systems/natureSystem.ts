@@ -8,7 +8,7 @@ import { hashSeed } from "../../cityModel";
 import type { CityLayout, Vec2 } from "../cityLayout";
 import type { LoadedFlora } from "../cityFlora";
 import { SegmentIndex } from "../cityPlan";
-import { promenadeSegments } from "../citySeaside";
+import { bandSegmentsAt, promenadeSegments } from "../citySeaside";
 import { roadPaintPlan } from "../cityRoadPaint";
 import { renderRoadEdges } from "../cityRoadJunctions";
 import { activeTheme } from "../cityTheme";
@@ -61,6 +61,35 @@ export function treeSpots(host: NatureHost): Array<{ x: number; z: number; y: nu
             const y = terrain.height(px, pz);
             if (y < 0.5 || y > 6) continue;
             spots.push({ x: px, z: pz, y, seed: hashSeed(`palmtree:${px.toFixed(1)}:${pz.toFixed(1)}`) });
+          }
+        }
+      }
+    }
+  }
+  // 棕榈公园（干沙与步道之间，South Beach 的 Lummus Park 式）：三排错落的棕榈林，行距 ~6、株距 9–13 抖动，
+  // 不成整齐的树阵；只种在合法海滨段上（bandSegmentsAt 在无效采样处断开）。
+  {
+    const seaside = host.layout.seaside; const config = host.layout.coastalConfig;
+    if (seaside && !seaside.degraded && config && config.promenadeOffset - config.drySandWidth >= 14) {
+      const terrain = host.layout.terrain;
+      const from = config.drySandWidth + 4; const to = config.promenadeOffset - 4;
+      const rows = Math.max(1, Math.floor((to - from) / 6) + 1);
+      for (let row = 0; row < rows; row += 1) {
+        const d = from + ((to - from) * row) / Math.max(1, rows - 1);
+        for (const segment of bandSegmentsAt(seaside, d)) {
+          let carry = (row * 4.3) % 9;
+          for (let i = 1; i < segment.length; i += 1) {
+            const a = segment[i - 1]; const b = segment[i];
+            const length = Math.hypot(b.x - a.x, b.z - a.z);
+            let t = carry;
+            while (t < length) {
+              const x = a.x + ((b.x - a.x) * t) / length; const z = a.z + ((b.z - a.z) * t) / length;
+              const seed = hashSeed(`palmpark:${x.toFixed(1)}:${z.toFixed(1)}`);
+              const y = terrain.height(x, z);
+              if (y >= 0.5 && y <= 6 && seed > 0.18) spots.push({ x, z, y, seed });
+              t += 9 + seed * 4;
+            }
+            carry = t - length;
           }
         }
       }

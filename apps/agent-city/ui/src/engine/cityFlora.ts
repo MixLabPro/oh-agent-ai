@@ -5,6 +5,7 @@
  * 种子决定生态带、生态带决定树种；树种之间按树位的确定性 hash 分配。
  * 随应用离线打包、运行时不联网；加载失败时城市保留程序化树（与贴图素材同一套降级规则）。
  */
+import { m } from "./worldScale";
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
@@ -30,31 +31,32 @@ import defaultFallUrl from "../assets/flora/tree_default_fall.glb?url";
 import simpleFallUrl from "../assets/flora/tree_simple_fall.glb?url";
 import tallUrl from "../assets/flora/tree_tall.glb?url";
 
-/** 一个树种：模型、在场景中的高度（世界单位）、出现权重、可选的整体染色（樱花粉 / 枫红）。 */
+/** 一个树种：模型、在场景中的高度（世界单位，由真实米数经 worldScale.m 换算）、出现权重、可选的整体染色（樱花粉 / 枫红）。 */
 export type FloraSpecies = { url: string; height: number; weight: number; tint?: string };
 
+// 高度按真实米数写（1 单位 = 2 m）：棕榈 8–14、阔叶 9–12、松 12–18、灌木 1.5–2。曾直接写世界单位 6–12，按 2 m 读高了一倍。
 export const BIOME_FLORA: Record<Biome, FloraSpecies[]> = {
   tropical: [
-    { url: palmUrl, height: 9, weight: 3 }, { url: palmBendUrl, height: 8.5, weight: 2 }, { url: palmTallUrl, height: 11, weight: 2 },
-    { url: palmShortUrl, height: 6.5, weight: 2 }, { url: bushLargeUrl, height: 2.4, weight: 2 },
+    { url: palmUrl, height: m(11), weight: 3 }, { url: palmBendUrl, height: m(10), weight: 2 }, { url: palmTallUrl, height: m(14), weight: 2 },
+    { url: palmShortUrl, height: m(8), weight: 2 }, { url: bushLargeUrl, height: m(2), weight: 2 },
   ],
   temperate: [
-    { url: oakUrl, height: 8, weight: 3 }, { url: defaultUrl, height: 7, weight: 3 }, { url: detailedUrl, height: 8.5, weight: 2 },
-    { url: fatUrl, height: 6, weight: 2 }, { url: bushUrl, height: 2.2, weight: 2 },
+    { url: oakUrl, height: m(12), weight: 3 }, { url: defaultUrl, height: m(10), weight: 3 }, { url: detailedUrl, height: m(12), weight: 2 },
+    { url: fatUrl, height: m(9), weight: 2 }, { url: bushUrl, height: m(1.5), weight: 2 },
   ],
   boreal: [
-    { url: pineRoundUrl, height: 9, weight: 3 }, { url: pineTallUrl, height: 12, weight: 3 }, { url: pineDefaultUrl, height: 10, weight: 2 },
-    { url: coneDarkUrl, height: 8, weight: 2 }, { url: bushUrl, height: 2, weight: 1 },
+    { url: pineRoundUrl, height: m(14), weight: 3 }, { url: pineTallUrl, height: m(18), weight: 3 }, { url: pineDefaultUrl, height: m(15), weight: 2 },
+    { url: coneDarkUrl, height: m(12), weight: 2 }, { url: bushUrl, height: m(1.5), weight: 1 },
   ],
   savanna: [
-    { url: plateauUrl, height: 7.5, weight: 4 }, { url: thinUrl, height: 8, weight: 2 }, { url: bushTriangleUrl, height: 2.3, weight: 3 },
+    { url: plateauUrl, height: m(10), weight: 4 }, { url: thinUrl, height: m(11), weight: 2 }, { url: bushTriangleUrl, height: m(2), weight: 3 },
   ],
   eastasian: [
-    { url: defaultFallUrl, height: 6.5, weight: 3, tint: "#ffb7cf" }, // 樱花
-    { url: simpleFallUrl, height: 6, weight: 2, tint: "#d9442e" },    // 枫
-    { url: tallUrl, height: 8, weight: 2 },                            // 垂柳（近似）
-    { url: pineRoundUrl, height: 7.5, weight: 2 },                     // 园林松
-    { url: bushUrl, height: 2, weight: 2 },
+    { url: defaultFallUrl, height: m(7), weight: 3, tint: "#ffb7cf" }, // 樱花
+    { url: simpleFallUrl, height: m(8), weight: 2, tint: "#d9442e" },  // 枫
+    { url: tallUrl, height: m(10), weight: 2 },                        // 垂柳（近似）
+    { url: pineRoundUrl, height: m(9), weight: 2 },                    // 园林松
+    { url: bushUrl, height: m(1.5), weight: 2 },
   ],
 };
 
