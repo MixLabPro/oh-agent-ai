@@ -62,6 +62,20 @@ const request = (over = {}) => ({ x: 0, z: 0, heading: 0, layerId: "ground",
 
 // Budget fail-closed.
 {
+  const emptyInstances = buildingSolid("empty-instances", []);
+  const emptyDraw = { ...buildingSolid("empty-draw", [[0, 0, 1, 1, 1]]), indices: new Uint32Array() };
+  const converted = m.renderedSolidsToObstacles([emptyInstances, emptyDraw]);
+  assert.equal(converted.status, "ready", "valid captured meshes with no drawn triangles are empty collision");
+  assert.equal(converted.obstacles.length, 0);
+  const malformed = { ...emptyInstances, indices: new Uint32Array([999, 0, 1]) };
+  assert.equal(m.renderedSolidsToObstacles([malformed]).status, "unavailable", "empty instances do not excuse malformed geometry");
+  const f = hostFixture([emptyInstances, emptyDraw]); const runtime = new m.GameRuntime();
+  assert.equal((await m.createCityCarSession(f.host, runtime, request())).status, "ready");
+  runtime.exit(); assert.equal(f.state.releases, 1);
+}
+
+// Budget fail-closed.
+{
   const many = Array.from({ length: m.RENDERED_OBSTACLE_LIMITS.solids + 1 }, (_, i) => buildingSolid(`s${i}`, [[i, 0, 1, 1, 1]]));
   assert.equal(m.renderedSolidsToObstacles(many).status, "unavailable");
   const one = buildingSolid("many-instances", Array.from({ length: m.RENDERED_OBSTACLE_LIMITS.obstacles + 1 }, (_, i) => [i, 0, 1, 1, 1]));

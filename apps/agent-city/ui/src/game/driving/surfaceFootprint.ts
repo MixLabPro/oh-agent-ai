@@ -15,7 +15,7 @@
  * 不包含：固体障碍（建筑/护栏/桥墩，CollisionIndex 由调用方另行检查）、TOI/滑动（Agent C）。
  * 结果失败即关闭；本模块不会把任何道路标为已通行。 */
 import type { SurfacePointState, SurfaceRegionsBuild, RegionBoundarySegment } from "../../engine/surface/surfaceRegions";
-import { DRIVING_FOOTPRINT } from "./vehicleFootprint";
+import { DRIVING_FOOTPRINT, GAMEPLAY_DRIVING_FOOTPRINT } from "./vehicleFootprint";
 import { carBody, type CollisionIndex } from "./CollisionIndex";
 
 export const SURFACE_FOOTPRINT_RULES_VERSION = 2;
@@ -52,6 +52,15 @@ export const DEFAULT_FOOTPRINT_PARAMS: FootprintParams = Object.freeze({
   maxSamples: 512,
   maxSegmentsPerQuery: 4096,
 });
+/** Manual gameplay tolerances are deliberately separate from the audited V1
+ * contract: approximate body width, 5 cm curb buffer, while grade and step
+ * safety remain unchanged. */
+export const GAMEPLAY_FOOTPRINT_PARAMS: FootprintParams = Object.freeze({
+  ...DEFAULT_FOOTPRINT_PARAMS,
+  lateralMargin: 0.05,
+  longitudinalMargin: 0.05,
+});
+export { GAMEPLAY_DRIVING_FOOTPRINT };
 
 /** `y` (optional): the support height the car comes from — picks the layer in multi-layer regions. */
 export type GroundPose = Readonly<{ x: number; z: number; heading: number; y?: number }>;

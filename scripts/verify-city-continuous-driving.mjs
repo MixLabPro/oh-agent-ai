@@ -108,6 +108,21 @@ assert.equal(roomy.validateTrajectory(initial,result,result.trajectory),true);
 const forged=result.trajectory.map(p=>({...p}));forged[forged.length-1].x=8;
 assert.equal(roomy.validateTrajectory(initial,{...result,x:8},forged),false);
 const forward={forward:true,backward:false,left:false,right:false},idle={forward:false,backward:false,left:false,right:false};
+const brakeReverseWorld={move:(before,desired)=>({...desired,y:before.y,pitch:before.pitch,roll:before.roll,
+  surfaceId:before.surfaceId,blocked:false})};
+{
+  let state={...k.initialDrivingState(),speed:3};
+  state=k.stepDriving(state,{...idle,backward:true},brakeReverseWorld);
+  assert.ok(state.speed>0&&state.speed<3,"S-style opposing input brakes before reverse");
+  let stopped=false;
+  for(let tick=0;tick<24;tick++) {
+    state=k.stepDriving(state,{...idle,backward:true},brakeReverseWorld);
+    if(state.speed<0){stopped=true;break;}
+  }
+  assert.ok(stopped,"holding S after braking through rest selects reverse");
+  const coast=k.stepDriving({...k.initialDrivingState(),speed:3},idle,brakeReverseWorld);
+  assert.ok(coast.speed>0&&coast.speed<3,"releasing pedals retains inertia and coasts down gradually");
+}
 const planeWorld=slope=>({move:(before,want)=>({...want,y:want.x*slope,pitch:Math.atan(slope),roll:0,surfaceId:"plane",blocked:false})});
 for(const slope of [-0.2,0.2]) {
   let state={...k.initialDrivingState(),pitch:Math.atan(slope)};

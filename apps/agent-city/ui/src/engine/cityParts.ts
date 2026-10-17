@@ -428,9 +428,10 @@ export class CityParts {
     }
     // The hero light beam is a transparent lighting effect, not architectural geometry.
     this.drivingRoots = this.drivingRoots.filter((root) => root.object !== this.heroParts?.beam);
+    const lightEffects = [this.nightLights?.neon, this.nightLights?.pools, this.nightLights?.strips,
+      this.lifeguardGlowMaterial, this.signageNeonMaterial].filter(Boolean);
     for (const root of this.drivingRoots) root.object.traverse((object) => {
-      if (object instanceof THREE.Mesh && this.nightLights &&
-        [this.nightLights.neon, this.nightLights.pools, this.nightLights.strips].includes(object.material as THREE.MeshBasicMaterial)) object.userData.cityDrivingNonSolid = true;
+      if (object instanceof THREE.Mesh && lightEffects.includes(object.material as THREE.MeshBasicMaterial)) object.userData.cityDrivingNonSolid = true;
     });
   }
 

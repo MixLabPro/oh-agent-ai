@@ -64,7 +64,7 @@ for (const hz of [30, 120]) {
   assert.ok(f.adapter.snapshot.speed < before.speed, "long frame clears held acceleration");
   const oldHook = f.host.hook;
   f.host.current = false; oldHook(DRIVING_DT);
-  assert.equal(f.runtime.snapshot.phase, "error"); assert.equal(f.runtime.snapshot.reason, "stale-car-world");
+  assert.equal(f.runtime.snapshot.phase, "error"); assert.equal(f.runtime.snapshot.reason, "stale-game-world");
   assert.equal(f.host.releases, 1); assert.equal(f.host.hook, null);
   const replacement = fixture(); assert.equal(await f.runtime.enter(replacement.lease, replacement.adapter), true);
   oldHook(DRIVING_DT); assert.equal(replacement.host.moves, 0, "old callback cannot advance replacement");

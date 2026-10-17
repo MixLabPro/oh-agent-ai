@@ -207,3 +207,16 @@
 .city-repair-audit li { display: flex; justify-content: space-between; gap: 6px; align-items: flex-start; line-height: 1.4; }
 .city-repair-audit li.city-repair-error b { color: #ffb4a8; }
 .city-repair-audit li.city-repair-warning b { color: #ffd98a; }
+
+/* The diagnostic HUD stays usable above the scene at narrow window sizes. */
+.city-driving-hud { position: absolute; z-index: 40; left: 20px; bottom: 24px; width: min(360px, calc(100% - 40px)); box-sizing: border-box; padding: 20px; border: 1px solid #3b5167; border-radius: 14px; background: #112033f2; color: #edf3fc; box-shadow: 0 12px 36px #0005; }
+.city-driving-hud h2 { margin: 8px 0; font-size: 20px; }
+.city-driving-hud p { font-size: 12px; line-height: 1.6; color: #bacadd; }
+.city-driving-hud .city-driving-badge { color: #f3ce8a; margin: 0; }
+.city-driving-hud output { display: block; margin: 18px 0 6px; font-size: 32px; font-variant-numeric: tabular-nums; }
+.city-driving-hud output small { font-size: 12px; color: #bacadd; }
+.city-driving-hud .city-driving-gear { margin: 0 0 14px; font-weight: 600; color: #9fb8d4; }
+.city-driving-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.city-driving-hud button { min-height: 44px; padding: 8px 14px; color: #edf3fc; background: #243d56; border: 1px solid #53728e; border-radius: 8px; cursor: pointer; }
+.city-driving-hud :is(button, summary):focus-visible { outline: 3px solid #ffd994; outline-offset: 3px; }
+.city-driving-hud summary { cursor: pointer; font-size: 12px; }

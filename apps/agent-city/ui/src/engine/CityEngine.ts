@@ -36,7 +36,11 @@ import { CityAmbient } from "./cityAmbient";
 import { CityWildlife } from "./cityWildlife";
 import { planAirport, roadSamples } from "./cityAirport";
 import { LIGHT_BUDGET, nightFactor } from "./cityLightBudget";
-import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
+import { DRIVING_PARAMS } from "../game/DrivingSimulation";
+import { CarCamera } from "../game/CarCamera";
+import { FlightCameraControls } from "../game/FlightCameraControls";
+import { RainbowArch, RainOverlay } from "./cityWeather";
+import { CityEnvironment, type CityEnvironmentSnapshot } from "./environment/CityEnvironment";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 import { buildingFrame, isSelectionGesture } from "./cityCameraInteraction";
 import type { ReturnCameraView } from "../game/types";
@@ -102,9 +106,17 @@ export class CityEngine {
   /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
   /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
+  private readonly environment = new CityEnvironment();
+  private environmentSnapshot = this.environment.sample(Date.now());
+  /** Shared facts for lighting, rain, audio and future world systems. */
+  get environmentState(): CityEnvironmentSnapshot { return this.environmentSnapshot; }
   private readonly surfacePort = new CitySurfacePort();
   private readonly drivingWorldPort = new CitySurfacePort();
   private drivingWorldFrame: { token: symbol; run: (dt: number) => void } | null = null;
+  private drivingCameraInitialized = false;
+  private drivingCamera: CarCamera | null = null;
+  private drivingControls: FlightCameraControls | null = null;
+  private drivingShakeUntil = 0;
   /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
   private baseLayout: CityLayout | null = null;
   private repairHook: RepairHook | null = null;
@@ -125,6 +137,7 @@ export class CityEngine {
   private cursorMs: number | null = null; // null = live（跟随现在）
   /** 昼夜相位缓存（上次 apply 的 hour，变化才写 uniform）。 */
   private lastSkyHour = -1;
+  private lastWeatherKey = "";
   private aurora: CityAurora | null = null;
   private ambient: CityAmbient | null = null;
   private wildlife: CityWildlife | null = null;
@@ -1138,6 +1151,36 @@ export class CityEngine {
     this.noteActivity();
   }
 
+  /** Car presentation shares the leased frame loop; no independent camera timer.
+   * 与演练场同一套 VehicleChaseCamera 内核（阻尼 15/20）：手动 lerp(5/10) 版本存在
+   * ~2.7 单位稳态滞后，驾驶中的转动与变向会持续糊。环绕/缩放由挂在该帧上的
+   * FlightCameraControls 驱动（见 captureDrivingWorld 的 setFrameHook）。 */
+  presentDrivingCamera(pose: Readonly<{ x: number; y: number; z: number; heading: number; speed?: number }>, dt = 1 / 60): void {
+    if (!this.drivingWorldFrame || ![pose.x, pose.y, pose.z, pose.heading].every(Number.isFinite)) return;
+    if (!this.drivingCamera) {
+      const reducedMotion = typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      this.drivingCamera = new CarCamera(this.camera, reducedMotion);
+    }
+    const safeDt = Number.isFinite(dt) ? Math.max(0, Math.min(0.1, dt)) : 0;
+    const target = { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading, speed: pose.speed ?? 0, maxSpeed: DRIVING_PARAMS.maxForward };
+    if (!this.drivingCameraInitialized) { this.drivingCameraInitialized = true; this.drivingCamera.reset(target); }
+    this.drivingCamera.update(safeDt, target, { terrain: (x: number, z: number) => this.layout?.terrain.height(x, z) ?? 0 });
+    // 撞击相机抖动（演练场同参数：200ms、平方衰减、水平 0.3 / 垂直减半）。
+    const nowMs = performance.now();
+    if (nowMs < this.drivingShakeUntil) {
+      const decay = (this.drivingShakeUntil - nowMs) / 200;
+      const amp = 0.3 * decay * decay;
+      this.camera.position.x += (Math.random() - 0.5) * amp;
+      this.camera.position.y += (Math.random() - 0.5) * amp * 0.5;
+    }
+  }
+
+  /** 撞击反馈入口（由驾驶 present 回调在 blocked 上升沿调用）：触发短暂相机抖动。 */
+  pulseDrivingImpact(): void {
+    if (!this.drivingWorldFrame) return;
+    this.drivingShakeUntil = performance.now() + 200;
+  }
+
   /** 指针射线与地形的交点（迭代逼近地形高度，3 轮足够；射线朝天或在城市包围盒外返回 null）。 */
   private groundPointAtPointer(): { x: number; z: number } | null {
     if (!this.layout) return null;
@@ -1169,6 +1212,7 @@ export class CityEngine {
   }
 
   private handleClick(): void {
+    if (this.drivingWorldFrame) return;
     if (!this.parts) return;
     if (this.repairHook) {
       const picked = this.pick();
@@ -1360,7 +1404,7 @@ export class CityEngine {
     this.noteActivityIfNeeded();
 
     // 游戏持有相机时不进入空闲降帧：飞行是持续活动，20fps 环境帧率会打断手感与物理步进节奏。
-    const idle = this.cameraOwner !== "game" && now - this.lastActivityAt > IDLE_AFTER_MS && !this.tween && !this.playing;
+    const idle = !this.drivingWorldFrame && this.cameraOwner !== "game" && now - this.lastActivityAt > IDLE_AFTER_MS && !this.tween && !this.playing;
     if (idle && !this.surfaceDirty && !this.qualityDirty && now - this.lastRenderAt < IDLE_FRAME_INTERVAL_MS) return;
 
     this.updateScene(dt);
@@ -1639,29 +1683,30 @@ export class CityEngine {
   private updateDaylight(): void {
     // 航拍用固定的「黄昏渐入」：15:00 → 19:36 随片长线性推进，片尾城市全亮。
     // 不能跟随真实时钟（导出的片子必须可复现），也不能跟随回放游标（90 天窗口在片中转 90 个昼夜，会频闪）。
-    let hour: number;
-    if (this.cinematic) {
-      hour = CINEMATIC_HOUR_FROM + (CINEMATIC_HOUR_TO - CINEMATIC_HOUR_FROM) * Math.min(1, this.cinematic.lastSeconds / this.cinematic.plan.durationSec);
-    } else {
-      const now = this.cursorMs !== null ? new Date(this.cursorMs) : new Date();
-      hour = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
-    }
+    const cinematicHour = this.cinematic
+      ? CINEMATIC_HOUR_FROM + (CINEMATIC_HOUR_TO - CINEMATIC_HOUR_FROM) * Math.min(1, this.cinematic.lastSeconds / this.cinematic.plan.durationSec)
+      : undefined;
+    this.environmentSnapshot = this.environment.sample(this.cursorMs ?? Date.now(), cinematicHour);
+    const hour = this.environmentSnapshot.hour;
+    const weather = this.environmentSnapshot.weather;
+    const weatherKey = `${this.environmentSnapshot.mode}:${weather.kind}:${Math.round(weather.intensity * 100)}:${Math.round(weather.overcast * 100)}:${Math.round(weather.rainbow * 100)}`;
     // 插值随秒连续；仅在跨过 0.02h（~72s）时重写 uniform，避免无谓上传。
-    if (Math.abs(hour - this.lastSkyHour) < (this.cinematic ? 0.0005 : 0.02)) return;
+    if (Math.abs(hour - this.lastSkyHour) < (this.cinematic ? 0.0005 : 0.02) && weatherKey === this.lastWeatherKey) return;
     this.lastSkyHour = hour;
+    this.lastWeatherKey = weatherKey;
     this.applyDayMix(hour);
     this.parts?.setNightHour(hour);
     const sky = skyStateAt(hour, this.themeName);
     this.applySky(sky);
     // 天气（按日期确定性）：航拍/胶片导出走晴朗（可复现），回放与实况按当天。
-    if (!this.cinematic) this.applyWeather(this.cursorMs ?? Date.now());
+    if (!this.cinematic) this.applyWeather(this.environmentSnapshot);
   }
 
   /** 天气后处理（applySky 之后）：阴/雨对光照、雾、天色、云、水色的幂等调制——
    *  applySky 每个节流 tick 先按预设重写，这里再乘天气系数，不累积。夜灯判定
    *  在 applySky 内由未调制的 sunIntensity 推导，雨天中午不会被误判成夜晚开灯。 */
-  private applyWeather(ms: number): void {
-    const state = weatherAt(ms);
+  private applyWeather(environment: CityEnvironmentSnapshot): void {
+    const state = environment.weather;
     const overcast = state.overcast;
     if (!this.rain) {
       this.rain = new RainOverlay();
@@ -1782,14 +1827,15 @@ export class CityEngine {
 
   private updateScene(dt: number): void {
     // A frozen driving consumer uses the existing host frame, never a second rAF.
-    this.drivingWorldFrame?.run(dt);
     this.updateDaylight();
+    this.drivingWorldFrame?.run(dt);
     this.aurora?.update(dt);
     this.ambient?.update(dt, this.elapsed);
     this.wildlife?.update(dt, this.elapsed);
     // 雨丝层贴相机前方；航拍期间强制晴朗（applyWeather 不跑，手动关掉防残留）。
     if (this.cinematic) this.rain?.setAmount(0);
     else this.rain?.update(dt, this.elapsed, this.camera);
+    if (this.drivingWorldFrame) { this.parts?.update(dt, this.elapsed); return; }
     // 游戏模式：环境装饰照常更新，但回放推进/tween/轨道相机/地形夹取/拾取全部让位——
     // 相机与模拟只由 gameFrame 回调推进（单一所有权，§4）。渲染仍走本循环。
     if (this.cameraOwner === "game" && this.gameFrame) {
@@ -1917,9 +1963,22 @@ export class CityEngine {
     try { lease = parts.acquireDrivingWorldSource(); }
     catch { return Object.freeze({ status: "unavailable" }); }
     let active = true; const token = Symbol("driving-world-frame");
+    let returnView: ReturnCameraView | null = null;
+    let controlsEnabled = true, autoRotate = false;
+    const detachFrame = () => {
+      if (this.drivingWorldFrame?.token !== token) return;
+      this.drivingWorldFrame = null;
+      this.drivingCameraInitialized = false;
+      this.drivingShakeUntil = 0;
+      this.drivingControls?.detach(); this.drivingControls = null;
+      this.drivingCamera?.dispose(); this.drivingCamera = null;
+      this.controls.enabled = controlsEnabled; this.controls.autoRotate = autoRotate;
+      if (returnView && !this.disposed) this.restoreReturnView(returnView);
+      returnView = null;
+    };
     const release = () => {
       if (!active) return; active = false;
-      if (this.drivingWorldFrame?.token === token) this.drivingWorldFrame = null;
+      detachFrame();
       lease.release();
       this.drivingWorldPort.releaseFrozenSource(lease.source);
     };
@@ -1929,10 +1988,24 @@ export class CityEngine {
       const leaseCurrent = () => active && this.parts === parts && capture.isLeaseCurrent();
       const current = () => active && this.parts === parts && capture.isCurrent();
       const setFrameHook = (hook: ((dt: number) => void) | null) => {
-        if (!hook) { if (this.drivingWorldFrame?.token === token) this.drivingWorldFrame = null; return; }
+        if (!hook) { detachFrame(); return; }
         if (!leaseCurrent()) throw new Error("stale-driving-world");
         if (this.cinematic || this.gameFrame || this.cameraOwner !== "orbit" || (this.drivingWorldFrame && this.drivingWorldFrame.token !== token)) throw new Error("driving-frame-already-owned");
-        this.drivingWorldFrame = { token, run: (dt) => { if (!leaseCurrent()) { this.drivingWorldFrame = null; hook(dt); return; } hook(dt); } };
+        if (!returnView) {
+          returnView = this.captureReturnView(); controlsEnabled = this.controls.enabled; autoRotate = this.controls.autoRotate;
+          this.clearCameraMomentum(); this.tween = null; this.controls.enabled = false; this.controls.autoRotate = false;
+        }
+        // 驾驶期间的鼠标环绕/滚轮缩放/双击复位：挂在画布上，与帧租约同生命周期。
+        // headless（无真实 DOM 画布）不挂——Node 验证脚本走不到这里的事件面。
+        if (!this.drivingControls && !this.options.headless && this.options.canvas instanceof HTMLElement) {
+          this.drivingControls = new FlightCameraControls({
+            canvas: this.options.canvas,
+            camera: () => this.drivingCamera,
+            isActive: () => !!this.drivingWorldFrame,
+          });
+          this.drivingControls.attach();
+        }
+        this.drivingWorldFrame = { token, run: (dt) => { if (!leaseCurrent()) detachFrame(); hook(dt); } };
       };
       return Object.freeze({ ...capture, isCurrent: current, isLeaseCurrent: leaseCurrent, release, setFrameHook,
         verifyCurrent: () => active && this.parts === parts && capture.verifyCurrent(),
@@ -1950,6 +2023,9 @@ export class CityEngine {
     this.surfacePort.invalidate();
     this.drivingWorldPort.invalidate();
     this.drivingWorldFrame = null;
+    this.drivingControls?.detach(); this.drivingControls = null;
+    this.drivingCamera?.dispose(); this.drivingCamera = null;
+    this.drivingCameraInitialized = false;
     this.stopLoop();
     this.gameFrame = null;
     this.cameraOwner = "orbit";

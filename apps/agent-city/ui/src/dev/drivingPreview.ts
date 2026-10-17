@@ -4,6 +4,8 @@ import { CarVisuals } from "../game/CarVisuals";
 import { DrivingWorld } from "../game/DrivingWorld";
 import { DrivingKernel } from "../game/driving/DrivingKernel";
 import { DrivingInput } from "../game/DrivingInput";
+import { CarCamera } from "../game/CarCamera";
+import { FlightCameraControls } from "../game/FlightCameraControls";
 import { DRIVING_DT, initialDrivingState, type DrivingEnvironment } from "../game/DrivingSimulation";
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const stage = element<HTMLElement>("stage");
@@ -47,42 +49,48 @@ for (const x of [-29, -13, 3, 23, 32]) for (const z of [-29, 29]) {
     leaf.rotation.z = 1.22; leaf.rotation.y = i * Math.PI * 2 / 5;
   }
 }
-const world = new DrivingWorld([{ id: "pad", layer: "ground", minX: -35, maxX: 35, minZ: -24, maxZ: 24, base: 0, slopeX: 0, slopeZ: 0, connections: [] }], obstacles);
-let reason = "";
+// 可越障碍测试区（视觉装饰，不参与碰撞或支撑面——车轮碾过时视觉上"压扁"减速带，街机风格）。
+// 注意：DrivingSurface 的 sampleSupport 在重叠时优先返回 prior surface，所以减速带不能做成
+// surface patch（会被 pad 遮住），只能做纯视觉。等实现可越障碍高度规则后再改为物理支撑。
+// 对比参照：右侧 kiosk（高墙，完全阻挡）。
+for (let x = -5; x < 5; x += 2.5) box(x + 1.25, 0.06, 0, 2.2, 0.025, 4.2, "#f4c542");
+for (let x = -5; x < 5; x += 2.5) box(x + 1.25, 0.075, 0, 2.2, 0.012, 4.4, "#d4a017");
+box(-9, 0.09, -15, 6, 0.03, 6, "#b8b2a8");
+box(-9, 0.105, -15, 5.6, 0.015, 5.6, "#a09a90");
+const world = new DrivingWorld([
+  { id: "pad", layer: "ground", minX: -35, maxX: 35, minZ: -24, maxZ: 24, base: 0, slopeX: 0, slopeZ: 0, connections: [] },
+], obstacles);
+let reason = ""; let shakeUntil = 0;
 const environment: DrivingEnvironment = { move: (previous, desired) => { const result = world.move(previous, desired); reason = result.reason ?? ""; return result; } };
 const kernel = new DrivingKernel(environment, {
   baseSnapshotHash: "synthetic-pad-v1", vehicleConfigHash: "coral-coast-v1", kernelBuildId: "arcade-wrapper-v1",
   physicsVersion: 1, collisionVersion: 1, queryVersion: 1,
 });
 const car = new CarVisuals(); scene.add(car.root);
+// CarCamera replaces the manual follow(): shared VehicleChaseCamera core with orbit/zoom.
+const carCam = new CarCamera(camera, false);
+const camControls = new FlightCameraControls({ canvas, camera: () => carCam, isActive: () => !paused });
+camControls.attach();
+const follow = (dt: number, snap = false) => {
+  const target = { x: state.x, y: state.y, z: state.z, heading: state.heading, speed: state.speed, maxSpeed: 13 };
+  if (snap) carCam.reset(target);
+  else carCam.update(dt, target, {
+    occlusion: (x: number, _y: number, z: number) => {
+      // Simplified: check against kiosk/planter bounding boxes only.
+      for (const o of obstacles) {
+        if (x >= o.minX - 0.5 && x <= o.maxX + 0.5 && z >= o.minZ - 0.5 && z <= o.maxZ + 0.5) return false;
+      }
+      return true;
+    },
+    terrain: () => 0,
+  });
+};
+const reset = () => { input.clear(); state = initialDrivingState(-22, 0); prior = state; accumulator = 0; reason = ""; shakeUntil = 0; follow(0, true); };
 let state = initialDrivingState(-22, 0); let prior = state;
 let paused = true; let previousTime = 0; let accumulator = 0; let frame = 0; let hudAt = 0;
 const notice = element<HTMLElement>("notice"); const pauseButton = element<HTMLButtonElement>("pause");
 const syncPause = () => { pauseButton.textContent = paused ? "继续试驾" : "暂停"; notice.hidden = !paused; if (paused) notice.textContent = "已暂停。点击「继续试驾」重新聚焦画布；R 可回到起点。"; };
 const setPaused = (next: boolean) => { paused = next; input.clear(); accumulator = 0; prior = state; syncPause(); };
-const target = new THREE.Vector3(); const look = new THREE.Vector3();
-const cameraAnchor = new THREE.Vector3(); const cameraDirection = new THREE.Vector3();
-const cameraRay = new THREE.Raycaster();
-const cameraObstacles = [kiosk, roof, planter];
-scene.updateMatrixWorld(true);
-const constrainCamera = (position: THREE.Vector3) => {
-  cameraAnchor.set(state.x, state.y + 0.8, state.z);
-  cameraDirection.copy(position).sub(cameraAnchor);
-  const distance = cameraDirection.length();
-  cameraDirection.normalize(); cameraRay.set(cameraAnchor, cameraDirection); cameraRay.far = distance;
-  const hit = cameraRay.intersectObjects(cameraObstacles, false)[0];
-  if (hit) position.copy(cameraAnchor).addScaledVector(cameraDirection, Math.max(0.35, hit.distance - 0.35));
-  position.y = Math.max(state.y + 0.35, position.y);
-};
-const follow = (dt: number, snap = false) => {
-  target.set(state.x - Math.cos(state.heading) * 7.2, state.y + 4.4, state.z - Math.sin(state.heading) * 7.2);
-  constrainCamera(target);
-  camera.position.lerp(target, snap ? 1 : 1 - Math.exp(-5 * dt));
-  constrainCamera(camera.position);
-  look.set(state.x + Math.cos(state.heading) * 2.5, state.y + 0.55, state.z + Math.sin(state.heading) * 2.5);
-  camera.lookAt(look);
-};
-const reset = () => { input.clear(); state = initialDrivingState(-22, 0); prior = state; accumulator = 0; reason = ""; follow(0, true); };
 const input = new DrivingInput(canvas, { isRunning: () => !paused, pause: () => setPaused(true), togglePause: () => setPaused(!paused), reset }); input.attach();
 const onPause = () => { setPaused(!paused); if (!paused) canvas.focus(); };
 const onReset = () => { reset(); if (!paused) canvas.focus(); };
@@ -97,13 +105,23 @@ const tick = (now: number) => {
   if (!paused && rawDt > 0.25) setPaused(true);
   const dt = Math.min(rawDt, 0.1);
   if (!paused) {
-    accumulator += dt; let steps = 0;
-    while (accumulator >= DRIVING_DT && steps < 5) { prior = state; state = { ...kernel.step(state, input.snapshot()).state }; accumulator -= DRIVING_DT; steps++; }
+    accumulator += dt; let steps = 0; let hitThisFrame = false;
+    while (accumulator >= DRIVING_DT && steps < 5) { prior = state; const step = kernel.step(state, input.snapshot()); state = { ...step.state }; if (step.motion.blocked) hitThisFrame = true; accumulator -= DRIVING_DT; steps++; }
     if (steps === 5 && accumulator >= DRIVING_DT) accumulator = 0;
+    if (hitThisFrame) { car.pulseImpact(); shakeUntil = now + 200; }
+  }
+  // Camera shake on impact: brief decaying offset around the smoothed position.
+  if (now < shakeUntil) {
+    const decay = (shakeUntil - now) / 200;
+    const amp = 0.3 * decay * decay;
+    camera.position.x += (Math.random() - 0.5) * amp;
+    camera.position.y += (Math.random() - 0.5) * amp * 0.5;
   }
   const alpha = paused ? 1 : accumulator / DRIVING_DT;
-  car.update({ ...state, x: prior.x + (state.x - prior.x) * alpha, z: prior.z + (state.z - prior.z) * alpha,
-    heading: prior.heading + (state.heading - prior.heading) * alpha, distance: prior.distance + (state.distance - prior.distance) * alpha });
+  const lerp = (key: "x" | "z" | "heading" | "distance" | "pitch" | "roll" | "steering") =>
+    prior[key] + (state[key] - prior[key]) * alpha;
+  car.update({ ...state, x: lerp("x"), z: lerp("z"), heading: lerp("heading"), distance: lerp("distance"),
+    pitch: lerp("pitch"), roll: lerp("roll"), steering: lerp("steering") });
   if (!paused) follow(dt);
   if (now - hudAt >= 100) {
     hudAt = now; element("speed").textContent = Math.abs(state.speed).toFixed(1);

@@ -1,5 +1,7 @@
 # 城市驾驶核心代码：Agent 接手指南
 
+2026-10-17 运行时增量：飞机与汽车已接入同一 GameRuntime 实现、共同定步时钟/KeyboardInput 与宿主 CityEnvironment；完整 GameScenePort 与统一固体源仍待后续。详见 `CITY_SHARED_VEHICLE_RUNTIME_NOTES.md`。以下早期分工保留作历史，完成状态以收尾检查表为准。
+
 日期：2026-10-15；分支 `codex/city-driving-car-model`。
 先读 [架构设计](CITY_DRIVING_ARCHITECTURE_SPEC.md) 与 [产品 SPEC](CITY_GAME_VEHICLE_MODE_SPEC.md)，再运行本文验收命令。本次已有实现是基础契约与合成试跑内核，**不是城市通行认证器已完成**。
 

@@ -43,6 +43,8 @@ const approachZero = (speed: number, amount: number) => Math.sign(speed) * Math.
 export function stepDriving(previous: DrivingState, input: DrivingInputState, world: DrivingEnvironment): DrivingState {
   const p = DRIVING_PARAMS;
   let speed = previous.speed;
+  // `backward` is the keyboard's S pedal too: against forward motion it brakes
+  // first, then the held input selects reverse once the car reaches rest.
   const direction = Number(input.forward) - Number(input.backward);
   const opposing = direction !== 0 && Math.sign(speed) !== direction && Math.abs(speed) > p.zeroSpeed;
   const braking = (input.forward && input.backward) || opposing;

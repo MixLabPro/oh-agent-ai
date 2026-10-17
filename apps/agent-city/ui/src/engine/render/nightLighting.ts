@@ -98,8 +98,12 @@ export function buildNightLights(host: NightHost): NightLights {
   poolMesh.renderOrder = 2;
   const stripMesh = host.makeInstanced(BOX, strips, 2200);
   const spacing = 30;
+  // 光斑贴坡的临时基向量（makeBasis 列）。
+  const poolTangent = new THREE.Vector3();
+  const poolNormal = new THREE.Vector3();
+  const poolBitangent = new THREE.Vector3();
   let lamps = 0;
-  const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number, poolReach = 3.2, poolRadius = 9.5, tier = 1) => {
+  const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number, poolReach = 3.2, poolRadius = 9.5, tier = 1, flat = false) => {
     if (lamps >= 4600) return;
     poolRadius *= 0.6 + 0.4 * tier; // N3：路灯按道路等级分档——主干最亮最大，支路/步道小而暗
     headMesh.setColorAt(lamps, host.color.setScalar(0.5 + 0.5 * tier));
@@ -109,7 +113,24 @@ export function buildNightLights(host: NightHost): NightLights {
     // 灯头悬在路中心一侧（臂长 0.7），朝路面。
     host.compose(x - nx * 0.45, base + 4.55, z - nz * 0.45, yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
     headMesh.setMatrixAt(lamps, host.matrix);
-    host.compose(x - nx * poolReach, base + 0.12, z - nz * poolReach, 0, poolRadius, 1, poolRadius);
+    // 光斑贴坡：平圆片只对平地成立——海岸坡（10 单位内抬升 1.2）与丘陵 fbm 的坡度远超
+    // 0.12 的离地余量，圆片上坡一侧钻进路面下，被深度测试沿两平面交线切成直线（贴地
+    // 追尾相机读作「挡光的影子」，随镜头移动而变，夜间 UAT 实拍确认）。四向采样局部
+    // 坡度，把圆片摆成坡面切平面；坡度截断 ±0.5 防河岸陡坎把圆片立起来。高架灯落在
+    // 平桥面上（flat），不采样桥下地面。
+    if (flat) {
+      host.compose(x - nx * poolReach, base + 0.12, z - nz * poolReach, 0, poolRadius, 1, poolRadius);
+    } else {
+      const cx = x - nx * poolReach, cz = z - nz * poolReach;
+      const heightAt = (dx: number, dz: number) => Math.max(0, host.layout.terrain.height(cx + dx, cz + dz));
+      const slopeX = Math.max(-0.5, Math.min(0.5, (heightAt(poolRadius, 0) - heightAt(-poolRadius, 0)) / (poolRadius * 2)));
+      const slopeZ = Math.max(-0.5, Math.min(0.5, (heightAt(0, poolRadius) - heightAt(0, -poolRadius)) / (poolRadius * 2)));
+      poolNormal.set(-slopeX, 1, -slopeZ).normalize();
+      poolTangent.set(1, slopeX, 0).normalize();
+      poolBitangent.crossVectors(poolTangent, poolNormal).normalize();
+      host.matrix.makeBasis(poolTangent.multiplyScalar(poolRadius), poolNormal, poolBitangent.multiplyScalar(poolRadius))
+        .setPosition(cx, heightAt(0, 0) + 0.14, cz);
+    }
     poolMesh.setMatrixAt(lamps, host.matrix);
     lamps += 1;
   };
@@ -180,7 +201,7 @@ export function buildNightLights(host: NightHost): NightLights {
       for (let t = 14 - carry; t < length; t += 34) {
         const side = Math.floor((t + length * 0.37 + a.x) / 34) % 2 === 0 ? 1 : -1;
         const deckTop = heights[i - 1] + (heights[i] - heights[i - 1]) * (t / length) + EXPRESSWAY_DECK_THICKNESS;
-        lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, deckTop, yaw, 5.1, EXPRESSWAY_DECK_WIDTH / 2 - 0.3);
+        lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, deckTop, yaw, 5.1, EXPRESSWAY_DECK_WIDTH / 2 - 0.3, 1, true);
       }
       carry = (length - (14 - carry)) % 34;
     }

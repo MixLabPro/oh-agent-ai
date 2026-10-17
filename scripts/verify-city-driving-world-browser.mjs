@@ -17,7 +17,7 @@ try {
   const result = await page.evaluate(async (model) => {
     const { CityEngine } = await import("/src/engine/CityEngine.ts");
     const { captureRenderedSolids } = await import("/src/engine/surface/renderedSolids.ts");
-    const { createCityCarSession } = await import("/src/game/runtime/createCityCarSession.ts");
+    const { createCityCarSession, createCityCarDiagnosticSession } = await import("/src/game/runtime/createCityCarSession.ts");
     const { GameRuntime } = await import("/src/game/runtime/GameRuntime.ts");
     const check = (ok, message) => { if (!ok) throw new Error(message); };
     const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
@@ -73,15 +73,22 @@ try {
       check((await engine.captureDrivingWorld()).status === "unavailable" && engine.parts.drivingFreezeCount === 0, "instance budget fails closed without retained freeze"); shaft.count = originalCount;
       const old = await acquire(); engine.applyModel(model, true); check(!old.isCurrent(), "rebuild invalidates lease"); old.release();
       const runtime = new GameRuntime();
-      const entry = await createCityCarSession(engine, runtime, { x: 0, z: 0, heading: 0, layerId: "ground",
-        collider: { dimensions: { halfWidth: 0.9, halfLength: 2, halfHeight: 0.75 }, centerHeight: 0.75, vehicleConfigHash: "synthetic-browser-car" }, present() {} });
-      check(entry.status === "unavailable" && entry.reason === "unavailable-rendered-collision", "real city factory closes unsupported architectural collision");
-      check(engine.parts.drivingFreezeCount === 0 && engine.drivingWorldFrame === null, "refused entry releases freeze and frame ownership"); runtime.dispose();
+      // 旧契约（渲染建筑碰撞不支持 → unavailable-rendered-collision）随三源碰撞合并而过时：
+      // 真实城市现在能进。fail-closed 断言改用仍然成立的无效车辆配置路径。
+      const invalid = await createCityCarSession(engine, runtime, { x: 0, z: 0, heading: 0, layerId: "ground",
+        collider: { dimensions: { halfWidth: 0.9, halfLength: 2, halfHeight: 0.75 }, centerHeight: 0.75, vehicleConfigHash: "" }, present() {} });
+      check(invalid.status === "unavailable" && invalid.reason === "invalid-vehicle-config", "invalid vehicle config fails closed");
+      check(engine.parts.drivingFreezeCount === 0 && engine.drivingWorldFrame === null, "refused entry releases freeze and frame ownership");
+      const entry = await createCityCarDiagnosticSession(engine, runtime, { collider: { dimensions: { halfWidth: 0.9, halfLength: 2, halfHeight: 0.75 }, centerHeight: 0.75, vehicleConfigHash: "synthetic-browser-car" }, present() {} });
+      check(entry.status === "ready" && entry.coverage.includes("buildings"), `real city diagnostic session enters with rendered-building collision (got ${entry.status}${entry.status === "unavailable" ? ":" + entry.reason : ":" + entry.coverage})`);
+      check(engine.drivingWorldFrame !== null, "session owns the host frame");
+      runtime.dispose();
+      check(engine.parts.drivingFreezeCount === 0 && engine.drivingWorldFrame === null, "runtime disposal releases freeze and frame ownership");
       const fresh = await acquire(); matchActual(fresh); engine.dispose(); check(!fresh.isCurrent(), "dispose invalidates lease"); fresh.release();
       check((await engine.captureDrivingWorld()).status === "unavailable", "disposed world unavailable");
       return { meshes: solids.length, roles: [...roles], instances: solids.reduce((n, s) => n + s.transforms.length / 16, 0) };
     } finally { for (const lease of leases) lease.release(); engine.dispose(); }
   }, model);
   assert.deepEqual(errors, []);
-  console.log(`Driving world browser: ${result.meshes} registered meshes / ${result.instances} instances (${result.roles.join(", ")}); exact render buffers/matrices, independent freeze leases, deferred timeline, token frame hook, cancellation, mutation, rebuild and disposal passed.`);
+  console.log(`Driving world browser: ${result.meshes} registered meshes / ${result.instances} instances (${result.roles.join(", ")}); exact render buffers/matrices, independent freeze leases, deferred timeline, token frame hook, cancellation, mutation, rebuild, disposal and real-city diagnostic entry passed.`);
 } finally { await browser.close(); }

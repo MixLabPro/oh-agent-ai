@@ -4,6 +4,7 @@
  */
 import { DrivingKernel, validDrivingState } from "../driving/DrivingKernel";
 import type { DrivingInputState, DrivingState } from "../DrivingSimulation";
+import type { VehicleAdapter } from "./GameScenePort";
 
 export type CarWorldBinding = Readonly<{
   revision: string;
@@ -17,8 +18,9 @@ export type CarPresentation = Readonly<{
   state: Readonly<DrivingState>;
   blocked: boolean;
   reason: string | null;
+  frameSeconds: number;
 }>;
-export class CarAdapter {
+export class CarAdapter implements VehicleAdapter<DrivingInputState> {
   private state: Readonly<DrivingState>;
   private previous: Readonly<DrivingState>;
   private prepared = false;
@@ -53,7 +55,7 @@ export class CarAdapter {
     this.previous = this.state; this.state = result.state;
     this.blocked = result.motion.blocked; this.reason = result.motion.reason;
   }
-  present(alpha: number): void {
+  present(alpha: number, frameSeconds = 0): void {
     this.assertReady();
     // A future verified portal transition must not synthesize a pose between
     // different support handles. Present the accepted endpoint until that
@@ -66,7 +68,7 @@ export class CarAdapter {
     }
     const delta = this.state.heading - this.previous.heading;
     state.heading = this.previous.heading + Math.atan2(Math.sin(delta), Math.cos(delta)) * t;
-    this.render(Object.freeze({ revision: this.revision, state: Object.freeze(state), blocked: this.blocked, reason: this.reason }));
+    this.render(Object.freeze({ revision: this.revision, state: Object.freeze(state), blocked: this.blocked, reason: this.reason, frameSeconds }));
   }
   reset(): void {
     this.assertReady();

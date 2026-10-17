@@ -6,19 +6,24 @@
 import type { CityDrivingWorldCapture } from "../../engine/CityEngine";
 import type { ReadyCitySurfaceCapture } from "../../engine/surface/citySurfacePort";
 import { buildSurfaceIndex } from "../../engine/surface/SurfaceIndex";
-import { renderedSolidsToObstacles } from "../../engine/surface/renderedSolidObstacles";
+import { renderedSolidsToObstacles, RENDERED_OBSTACLE_LIMITS } from "../../engine/surface/renderedSolidObstacles";
 import { buildSurfaceRegions } from "../../engine/surface/surfaceRegions";
-import { initialDrivingState, DRIVING_PHYSICS_VERSION } from "../DrivingSimulation";
+import { initialDrivingState, DRIVING_PHYSICS_VERSION, type DrivingInputState } from "../DrivingSimulation";
 import { DrivingKernel } from "../driving/DrivingKernel";
-import { boxSolidFromCorners, buildVersionedCollisionIndex, COLLISION_RULES_VERSION, type CollisionDimensions, type SolidInput } from "../driving/CollisionIndex";
+import { boxSolidFromCorners, buildVersionedCollisionIndex, type CollisionDimensions, type SolidInput } from "../driving/CollisionIndex";
 import type { StructureObstacle } from "../../engine/surface/compileSurface";
-import { createStructureCollisionBinding, SurfaceDrivingEnvironment } from "../driving/SurfaceDrivingWorld";
-import { SURFACE_FOOTPRINT_RULES_VERSION } from "../driving/surfaceFootprint";
+import { ContinuousDrivingEnvironment, CONTINUOUS_DRIVING_QUERY_VERSION } from "../driving/ContinuousDrivingEnvironment";
+import { DRIVING_COLLISION_VERSION } from "../driving/DrivingCollision";
+import { GAMEPLAY_FOOTPRINT_PARAMS } from "../driving/surfaceFootprint";
+import { GAMEPLAY_COLLISION_INSET, GAMEPLAY_DRIVING_FOOTPRINT } from "../driving/vehicleFootprint";
 import { CarAdapter, type CarPresentation } from "./CarAdapter";
 import { GameRuntime } from "./GameRuntime";
+import { diagnosticSpawn } from "./diagnosticSpawn";
 
-/** Conservative combined budget: a proxy flood cannot silently disable entry. */
-const COMBINED_SOLID_LIMIT = 4096;
+/** Total world-build budget, distinct from the BVH's 4096 per-query candidates.
+ * A 500-session city includes thousands of architectural instances. Retain the
+ * converter's bounded world limit without increasing any runtime query budget. */
+const COMBINED_SOLID_LIMIT = RENDERED_OBSTACLE_LIMITS.obstacles;
 
 /** Structures (exact descriptors) + whitelisted scene proxies (buildings/landmarks),
  * capped; overflow is an explicit unavailable, never a silent half-collision. */
@@ -47,8 +52,17 @@ export type CityCarRequest = Readonly<{
 export type CityCarEntry =
   | Readonly<{ status: "ready"; worldRevision: string; coverage: "structures-only" | "structures-and-scene-proxies" | "structures-and-buildings" | "structures-and-buildings-and-scene-proxies"; adapter: CarAdapter }>
   | Readonly<{ status: "unavailable"; reason: string }>;
-export async function createCityCarSession(host: CityCarHost, runtime: GameRuntime, request: CityCarRequest,
+export async function createCityCarSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>, request: CityCarRequest,
   signal?: AbortSignal): Promise<CityCarEntry> {
+  return createSession(host, runtime, request, false, signal);
+}
+/** Diagnostic-only entry. Does not confirm/persist a product spawn or release roads. */
+export async function createCityCarDiagnosticSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>,
+  request: Pick<CityCarRequest, "collider" | "present">, signal?: AbortSignal): Promise<CityCarEntry> {
+  return createSession(host, runtime, { ...request, x: 0, z: 0, heading: 0, layerId: "" }, true, signal);
+}
+async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>, request: CityCarRequest,
+  diagnostic: boolean, signal?: AbortSignal): Promise<CityCarEntry> {
   const unavailable = (reason: string): CityCarEntry => Object.freeze({ status: "unavailable", reason });
   if (signal?.aborted) return unavailable("cancelled");
   const capture = await host.captureDrivingWorld(signal);
@@ -69,23 +83,40 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     const regions = buildSurfaceRegions(snapshot.surface, surfaceIndex);
     if (regions.status !== "ready") return unavailable(`surface-regions:${regions.reason}`);
     const rendered = renderedSolidsToObstacles(snapshot.renderedSolids,
-      { obstacles: COMBINED_SOLID_LIMIT, solids: COMBINED_SOLID_LIMIT });
+      { obstacles: Math.max(0, COMBINED_SOLID_LIMIT - snapshot.obstacles.length - snapshot.sceneSolids.length), solids: RENDERED_OBSTACLE_LIMITS.solids });
     if (rendered.status !== "ready") return unavailable(rendered.reason);
     const solids = combinedSolidInputs(snapshot, rendered.obstacles);
     if (!solids) return unavailable("scene-solids-over-budget");
     const collision = buildVersionedCollisionIndex(capture.worldRevision, solids);
     if (collision.status !== "ready") return unavailable(`collision-index:${collision.reason}`);
-    const binding = createStructureCollisionBinding({ surfaceRevision: capture.revision, worldRevision: capture.worldRevision,
-      index: collision.index, dimensions: request.collider.dimensions, centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent });
-    const environment = new SurfaceDrivingEnvironment(regions, undefined, undefined, binding);
-    const point = regions.classify(request.x, request.z, request.layerId);
-    if (point.status !== "drivable") return unavailable(`spawn:${point.cause}`);
-    const support = environment.place(request.x, request.z, request.heading, point.regionId);
-    if (!support) return unavailable("unsafe-car-spawn");
-    const spawn = { ...initialDrivingState(request.x, request.z, request.heading, point.regionId), ...support };
+    // Manual play gets a small horizontal body clearance so conservative scene
+    // proxies and curb contacts do not turn a brush into a full stop. Vertical
+    // clearance stays exact. Audit environments keep the authored dimensions.
+    const gameplayDimensions = Object.freeze({
+      halfLength: Math.max(0.1, request.collider.dimensions.halfLength - GAMEPLAY_COLLISION_INSET),
+      halfWidth: Math.max(0.1, request.collider.dimensions.halfWidth - GAMEPLAY_COLLISION_INSET),
+      halfHeight: request.collider.dimensions.halfHeight,
+    });
+    const environment = new ContinuousDrivingEnvironment(regions, {
+      surfaceRevision: capture.revision, worldRevision: capture.worldRevision, solidRevision: capture.worldRevision,
+      solids: collision.index.solids(), dimensions: gameplayDimensions,
+      centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent,
+    }, GAMEPLAY_DRIVING_FOOTPRINT, GAMEPLAY_FOOTPRINT_PARAMS);
+    if (!diagnostic) {
+      const point = regions.classify(request.x, request.z, request.layerId);
+      if (point.status !== "drivable") return unavailable(`spawn:${point.cause}`);
+    }
+    const spawn = (() => {
+      if (diagnostic) return diagnosticSpawn(snapshot.surface, regions, environment);
+      const point = regions.classify(request.x, request.z, request.layerId);
+      if (point.status !== "drivable") return null;
+      const support = environment.place(request.x, request.z, request.heading, point.regionId);
+      return support ? { ...initialDrivingState(request.x, request.z, request.heading, point.regionId), ...support } : null;
+    })();
+    if (!spawn) return unavailable(diagnostic ? "no-safe-diagnostic-spawn" : "unsafe-car-spawn");
     const kernel = new DrivingKernel(environment, { baseSnapshotHash: capture.worldRevision,
-      vehicleConfigHash: request.collider.vehicleConfigHash, kernelBuildId: "city-car-structure-kernel-v1",
-      physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: COLLISION_RULES_VERSION, queryVersion: SURFACE_FOOTPRINT_RULES_VERSION });
+      vehicleConfigHash: `${request.collider.vehicleConfigHash}-forgiving-collider-v3`, kernelBuildId: "city-car-continuous-gameplay-v3",
+      physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: DRIVING_COLLISION_VERSION, queryVersion: CONTINUOUS_DRIVING_QUERY_VERSION });
     const adapter = new CarAdapter({ revision: capture.worldRevision, kernel, isCurrent: leaseCurrent,
       validateSpawn: (state) => {
         const placed = environment.place(state.x, state.z, state.heading, state.surfaceId);

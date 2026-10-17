@@ -44,6 +44,17 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
     return check.ok?{ok:true as const,pose:{x:target.x,z:target.z,heading:target.heading,y:check.support.y,pitch:check.support.pitch,roll:check.support.roll,surfaceId:check.support.regionId}}
       :{ok:false as const,reason:`support:${check.reason}:${check.detail}`};
   };
+  /** Safe placement uses the same relaxed gameplay footprint and frozen solids
+   * as motion, so a start pose cannot be accepted inside an obstacle. */
+  place(x:number,z:number,heading:number,regionId:string,y?:number):Readonly<{y:number;pitch:number;roll:number}>|null {
+    if(!this.current())return null;
+    const support=footprintSupport(this.regions,{x,z,heading,y},regionId,this.footprint,this.params);
+    if(!support.ok)return null;
+    const pose:SupportedPose={x,y:support.y,z,heading,pitch:support.pitch,roll:support.roll,surfaceId:support.regionId};
+    const checked=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,pose,this.binding.dimensions,{...this.motionParams,maxSlides:0});
+    return this.current()&&checked.status==="moved"&&checked.contacts.length===0
+      ?Object.freeze({y:support.y,pitch:support.pitch,roll:support.roll}):null;
+  }
   move(previous:DrivingState,desired:DrivingMotion):DrivingMoveResult {
     const stopped=(reason:string,unresolved=false):DrivingMoveResult=>({...previous,blocked:true,reason,travelledDistance:0,speedFraction:0,queryStatus:unresolved?"unresolved":"resolved",trajectory:Object.freeze([{...previous}])});
     if(!this.current())return stopped("stale-world",true);

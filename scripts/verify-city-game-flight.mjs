@@ -180,8 +180,11 @@ const flatLayout = {
     const speedRatio = (s0.speed - params.minSpeed) / (params.maxSpeed - params.minSpeed);
     const back = params.planeRadius * 5.2 * (1 + 0.35 * Math.max(0, Math.min(1, speedRatio)));
     const rel = at(cam, s0);
-    assert.ok(Math.abs(rel.x + Math.cos(s0.heading) * back) < 1e-3 && Math.abs(rel.z + Math.sin(s0.heading) * back) < 1e-3, "默认机位在机后 back 处");
-    assert.ok(Math.abs(rel.y - params.planeRadius * 2.4) < 1e-3, "默认机位在机上 up 处");
+    const dx = Math.abs(rel.x + Math.cos(s0.heading) * back);
+    const dz = Math.abs(rel.z + Math.sin(s0.heading) * back);
+    const dy = Math.abs(rel.y - params.planeRadius * 2.4);
+    assert.ok(dx < 1e-3 && dz < 1e-3, `默认机位在机后 back 处 (dx=${dx}, dz=${dz}, expected back=${back}, rel.x=${rel.x}, rel.z=${rel.z}, planeRadius=${params.planeRadius})`);
+    assert.ok(dy < 1e-3, `默认机位在机上 up 处 (dy=${dy})`);
   }
   // 环绕：半径守恒；向右拖(+yaw)后相机绕到飞机左侧（航向 0 时 -Z）。
   {
@@ -311,7 +314,7 @@ const flatLayout = {
   const interrupts = [];
   const input = new FlightInput({ isGameFocused: () => canvasFocused, shouldConsumeArrows: () => canvasFocused, onInterrupt: (reason) => interrupts.push(reason) });
   input.attach();
-  const key = (code, target = null, extra = {}) => (listeners.get("window:keydown") ?? []).forEach((fn) => fn({ code, target, isComposing: false, repeat: false, preventDefault: () => {}, ...extra }));
+  const key = (code, target = null, extra = {}) => (listeners.get("window:keydown") ?? []).forEach((fn) => fn({ code, target, isComposing: false, repeat: false, preventDefault: () => {}, stopImmediatePropagation: () => {}, ...extra }));
   const keyUp = (code) => (listeners.get("window:keyup") ?? []).forEach((fn) => fn({ code, target: null }));
   // 画布未聚焦：按键不进入飞行状态（HUD 按钮/宿主控件聚焦时不误控飞机）。
   key("KeyW");

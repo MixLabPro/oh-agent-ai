@@ -8,14 +8,19 @@ import { loadCity } from "./city-kit/index.mjs";
 import { makeFixtures } from "./city-kit/surface-region-fixtures.mjs";
 const m = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
-  "game/runtime/createCityCarSession.ts": ["createCityCarSession"],
+  "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
+  "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
+  "game/driving/CollisionIndex.ts": ["buildVersionedCollisionIndex"],
+  "game/driving/SurfaceDrivingWorld.ts": ["SurfaceDrivingEnvironment", "createStructureCollisionBinding"],
+  "game/runtime/diagnosticSpawn.ts": ["diagnosticSpawn"],
+  "game/runtime/createCityCarSession.ts": ["createCityCarSession", "createCityCarDiagnosticSession"],
   "game/runtime/GameRuntime.ts": ["GameRuntime"],
 });
 const { patch, grid, snapshot } = makeFixtures(m);
 const surface = snapshot([patch("pad", "carriageway", grid(-30, -8, 30, 8, 10, 4))]);
-function hostFixture() {
+function hostFixture(overrides = {}) {
   const state = { releases: 0, hooks: 0, current: true, hook: null };
-  const world = { revision: "world-fixture", surface, obstacles: [], renderedSolids: [], sceneSolids: [], landings: [], counts: {}, obstacleCoverage: "structures-only" };
+  const world = { revision: "world-fixture", surface, obstacles: [], renderedSolids: [], sceneSolids: [], landings: [], counts: {}, obstacleCoverage: "structures-only", ...overrides };
   const capture = { status: "ready", revision: surface.revision, worldRevision: world.revision,
     isCurrent: () => state.current, isLeaseCurrent: () => state.current, verifyCurrent: () => state.current,
     readWorld: () => state.current ? world : null,
@@ -78,4 +83,101 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   assert.ok(releasedViaFail || f.state.hook === null, "清理至少断开帧钩子；fixture 守卫下的释放差异不构成本守卫目标");
 }
 
-console.log("Driving entry: entry-pause start, resume/pause/exit lease semantics, spawn-refusal and stale-world paths passed.");
+// 4) Diagnostic selection shares the same frozen world and full-body collision.
+{
+  const f = hostFixture(); const runtime = new m.GameRuntime();
+  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request);
+  assert.equal(result.status, "ready");
+  assert.equal(runtime.snapshot.phase, "paused");
+  assert.ok(Number.isFinite(result.adapter.snapshot.x));
+  runtime.exit(); assert.equal(f.state.releases, 1);
+}
+{
+  const wall = { id: "blocking-all-spawns", role: "building", kind: "box", center: { x: 0, y: 1, z: 0 },
+    halfAxes: [{ x: 100, y: 0, z: 0 }, { x: 0, y: 3, z: 0 }, { x: 0, y: 0, z: 100 }] };
+  const f = hostFixture({ sceneSolids: [wall] }); const runtime = new m.GameRuntime();
+  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request);
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.reason, "no-safe-diagnostic-spawn");
+  assert.equal(f.state.hooks, 0); assert.equal(f.state.releases, 1);
+}
+// 5) Diagnostic spawn must face clear road. A wall blocks the first candidate's
+// forward and reverse corridor asymmetrically; the search should continue to a
+// point with short swept clearance in both directions and use the road's long axis.
+{
+  const wall = { id: "curb-at-first-candidate", role: "building", kind: "box", center: { x: 2.1, y: 1, z: 0 },
+    halfAxes: [{ x: 0.3, y: 0, z: 0 }, { x: 0, y: 3, z: 0 }, { x: 0, y: 0, z: 8 }] };
+  const blockedStartSurface = snapshot([patch("long-road", "carriageway", grid(-30, -8, 30, 8, 10, 4))]);
+  const index = m.buildSurfaceIndex(blockedStartSurface);
+  assert.equal(index.status, "ready");
+  const regions = m.buildSurfaceRegions(blockedStartSurface, index);
+  assert.equal(regions.status, "ready");
+  const collision = m.buildVersionedCollisionIndex("spawn-clearance-world", [wall]);
+  assert.equal(collision.status, "ready");
+  const binding = m.createStructureCollisionBinding({ surfaceRevision: blockedStartSurface.revision,
+    worldRevision: "spawn-clearance-world", index: collision.index, dimensions: request.collider.dimensions,
+    centerHeight: request.collider.centerHeight, isCurrent: () => true });
+  const environment = new m.SurfaceDrivingEnvironment(regions, undefined, undefined, binding);
+  const spawn = m.diagnosticSpawn(blockedStartSurface, regions, environment);
+  assert.ok(spawn, "a clear diagnostic pose should be found beyond the blocked first candidate");
+  assert.ok(Math.abs(spawn.x) > 5, "search should skip the blocked midpoint and find a clear pose along the strip");
+  assert.ok(Math.abs(Math.sin(spawn.heading)) < 0.01, "pose heading should follow the road's long axis");
+  const forward = environment.move(spawn, { x: spawn.x + Math.cos(spawn.heading) * 2.5,
+    z: spawn.z + Math.sin(spawn.heading) * 2.5, heading: spawn.heading, travelBudget: 2.5 });
+  const backward = environment.move(spawn, { x: spawn.x - Math.cos(spawn.heading) * 2.5,
+    z: spawn.z - Math.sin(spawn.heading) * 2.5, heading: spawn.heading, travelBudget: 2.5 });
+  assert.equal(forward.blocked, false, "accepted diagnostic pose must have forward clearance");
+  assert.equal(backward.blocked, false, "preferred diagnostic pose should allow reverse recovery");
+}
+// A spawn between splitter noses can pass a short clearance probe yet be boxed
+// in a few units later. The search must skip that intersection pocket.
+{
+  const longRoad = snapshot([patch("splitter-approach", "carriageway", grid(-30, -8, 30, 8, 10, 4))]);
+  const index = m.buildSurfaceIndex(longRoad);
+  const regions = m.buildSurfaceRegions(longRoad, index);
+  const environment = {
+    place: () => ({ y: 0, pitch: 0, roll: 0 }),
+    move: (start, desired) => {
+      const crossesBlocker = Math.min(start.x, desired.x) <= 3.8 && Math.max(start.x, desired.x) >= 3.2 &&
+        Math.abs((start.z + desired.z) / 2) < 2;
+      return { ...desired, y: 0, pitch: 0, roll: 0, surfaceId: start.surfaceId,
+        blocked: crossesBlocker, travelledDistance: crossesBlocker ? 0 : 6 };
+    },
+  };
+  const spawn = m.diagnosticSpawn(longRoad, regions, environment);
+  assert.ok(spawn, "a useful run-up exists away from the splitter nose");
+  assert.ok(Math.abs(spawn.x) > 5, "spawn search must reject a pocket that only has short clearance");
+}
+console.log("Driving entry: paused start, resume/pause/exit, stale-world paths, diagnostic placement, blocked-spawn refusal, and directional clearance passed.");
+
+// Optional rendered CityParts regression: no browser/real user data; exercises
+// the exact frozen source used by CityEngine, including >4096 world instances.
+if (process.argv.includes("--cities")) {
+  const { sceneKit, buildParts } = await import("./city-kit/scene-parts.mjs");
+  const kit = await sceneKit({ "engine/surface/citySurfacePort.ts": ["CitySurfacePort"],
+    "game/runtime/createCityCarSession.ts": ["createCityCarDiagnosticSession"], "game/runtime/GameRuntime.ts": ["GameRuntime"] });
+  for (const [count, seed] of [[0, 1], [90, 42], [500, 7]]) {
+    const { parts } = buildParts(kit, count, seed);
+    const lease = parts.acquireDrivingWorldSource(), port = new kit.CitySurfacePort(), runtime = new kit.GameRuntime();
+    let frame = null;
+    try {
+      const capture = await port.capture(lease.source); assert.equal(capture.status, "ready");
+      const host = { captureDrivingWorld: async () => ({ ...capture, setFrameHook: (next) => { frame = next; },
+        release: () => { lease.release(); port.releaseFrozenSource(lease.source); } }) };
+      // Weather lighting remains live during a geometry freeze. Light-only
+      // visibility changes must not add/remove physical architecture.
+      parts.setNightGlow(1); parts.setNightHour(23);
+      assert.equal(capture.verifyCurrent(), true, "night lighting must preserve frozen solids");
+      parts.setNightGlow(0.05); parts.setNightHour(12);
+      assert.equal(capture.verifyCurrent(), true, "day lighting must preserve frozen solids");
+      const entry = await kit.createCityCarDiagnosticSession(host, runtime, request);
+      assert.equal(entry.status, "ready", `${count}/${seed}: ${entry.reason}`);
+      assert.equal(runtime.resume(), true); runtime.setInput({ forward: true });
+      for (let tick = 0; tick < 120; tick++) frame(1 / 60);
+      assert.equal(runtime.snapshot.phase, "running");
+      const instances = lease.source.rendered.solids.reduce((n, solid) => n + solid.transforms.length / 16, 0);
+      if (count === 500) assert.ok(instances > 4096, "world total must not be confused with query candidate limit");
+      console.log(`Diagnostic city ${count}/${seed}: ${instances} rendered instances, ${entry.coverage}, 120 runtime ticks`);
+    } finally { runtime.dispose(); lease.release(); parts.dispose(); }
+  }
+}

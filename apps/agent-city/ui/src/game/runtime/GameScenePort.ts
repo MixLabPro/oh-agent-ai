@@ -6,13 +6,17 @@ export type GameSelection =
 export type CameraPose = Readonly<{
   position: readonly [number, number, number]; target: readonly [number, number, number]; fov: number;
 }>;
-export interface GameSceneLease<Snapshot, VisualObject> {
-  readonly token: symbol;
+export interface RuntimeSceneLease {
   readonly revision: string;
+  isCurrent(): boolean;
+  setFrameHook(callback: ((dt: number) => void) | null): void;
+  release(): void;
+}
+export interface GameSceneLease<Snapshot, VisualObject> extends RuntimeSceneLease {
+  readonly token: symbol;
   readonly snapshot: Snapshot;
   attach(objects: readonly VisualObject[]): void;
   detach(objects: readonly VisualObject[]): void;
-  setFrameHook(callback: ((dt: number) => void) | null): void;
   setCamera(pose: CameraPose): void;
   setAmbientCarsVisible(visible: boolean): void;
   /** Token-checked, idempotent; restores return state and latest pending projection. */
@@ -21,10 +25,14 @@ export interface GameSceneLease<Snapshot, VisualObject> {
 export interface GameScenePort<Snapshot, VisualObject> {
   acquire(selection: GameSelection, runId: number, signal: AbortSignal): Promise<GameSceneLease<Snapshot, VisualObject>>;
 }
-export interface VehicleAdapter {
-  prepare(signal: AbortSignal): Promise<void>;
-  fixedStep(): void;
-  present(alpha: number): void;
+export interface VehicleAdapter<Input = unknown> {
+  readonly revision: string;
+  isCurrent(): boolean;
+  prepare(signal: AbortSignal): void | Promise<void>;
+  /** false ends this frame's catch-up at an activity boundary (e.g. countdown). */
+  fixedStep(input: Readonly<Input>, dt: number): void | boolean;
+  present(alpha: number, frameSeconds: number): void;
+  settle(): void;
   reset(): void;
   dispose(): void;
 }

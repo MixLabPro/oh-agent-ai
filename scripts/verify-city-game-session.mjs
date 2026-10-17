@@ -17,7 +17,7 @@ const load = (file, extraGlobals = {}) => {
     // 曾无此项——游戏声音提交（6f2437ec）后本守卫在构建阶段就失败，main 上同样红。
     bundle: true, write: false, format: "cjs", platform: "node", loader: { ".m4a": "empty" } }).outputFiles[0].text;
   const mod = { exports: {} };
-  vm.runInNewContext(code, { module: mod, exports: mod.exports, console, Date, Math, Map, Set, Number, String, Array, Object, JSON,
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, console, AbortController, Date, Math, Map, Set, Number, String, Array, Object, JSON,
     performance: { now: () => Date.now() }, ...extraGlobals });
   return mod.exports;
 };
@@ -299,4 +299,37 @@ function fakeEngine() {
   session.exit();
 }
 
+// Shared-clock migration: full flight session is frame-rate independent, and
+// overload uses the same bounded-pause policy as the car runtime.
+{
+  const results = [];
+  for (const hz of [30, 60, 120]) {
+    const engine = fakeEngine(); engine.currentLayout = layout; engine.currentModel = model;
+    const session = new GameSession(engine, { onState() {}, onExited() {} });
+    assert.equal(session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok, true);
+    documentShim.activeElement = engine.domCanvas; pressKey("KeyW"); pressKey("KeyD");
+    for (let frame = 0; frame < hz * 2; frame++) {
+      if (frame === hz) releaseKey("KeyD");
+      engine.frame(1 / hz);
+    }
+    results.push({ ...session.sim });
+    engine.frame(0.2);
+    assert.equal(session.controller.snapshot.paused?.reason, "lag", "shared overload policy");
+    session.exit();
+  }
+  for (const result of results.slice(1)) for (const field of ["x", "y", "z", "heading", "speed", "verticalSpeed", "bank", "simTime"])
+    assert.ok(Math.abs(result[field] - results[0][field]) < 1e-9, `shared clock changed flight ${field}`);
+}
+// A stale world releases ownership and can prepare a new flight activity.
+{
+  const engine = fakeEngine(); engine.currentLayout = layout; engine.currentModel = model;
+  const session = new GameSession(engine, { onState() {}, onExited() {} });
+  assert.equal(session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok, true);
+  engine.currentModel = { ...model }; engine.frame(1 / 60);
+  assert.equal(session.controller.snapshot.error?.message, "stale-game-world");
+  assert.equal(engine.owner, "orbit"); assert.equal(session.snapshot().telemetry, null);
+  session.retryPrepare();
+  assert.equal(session.controller.snapshot.error, null); assert.ok(session.snapshot().telemetry);
+  session.exit();
+}
 console.log("verify-city-game-session: ok");

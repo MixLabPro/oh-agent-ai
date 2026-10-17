@@ -33,8 +33,16 @@ export function renderedSolidsToObstacles(solids: readonly RenderedSolid[], limi
   for (const solid of solids) {
     const { positions, indices, transforms } = solid;
     if (!(positions instanceof Float32Array) || !(indices instanceof Uint32Array) || !(transforms instanceof Float64Array)
-      || (transforms.length & 15) !== 0 || transforms.length === 0) return { status: "unavailable", reason: "invalid-rendered-solid" };
-    if (!transforms.every(Number.isFinite)) return { status: "unavailable", reason: "invalid-rendered-solid" };
+      || (transforms.length & 15) !== 0 || positions.length % 3 || indices.length % 3) return { status: "unavailable", reason: "invalid-rendered-solid" };
+    if (!transforms.every(Number.isFinite) || !positions.every(Number.isFinite)
+      || !indices.every((i) => i < positions.length / 3)) return { status: "unavailable", reason: "invalid-rendered-solid" };
+    for (let offset = 0; offset < transforms.length; offset += 16) {
+      if (transforms[offset + 3] !== 0 || transforms[offset + 7] !== 0 || transforms[offset + 11] !== 0 || transforms[offset + 15] !== 1)
+        return { status: "unavailable", reason: "invalid-rendered-solid" };
+    }
+    // captureRenderedSolids retains empty draw ranges and zero-instance meshes
+    // for freshness checks. They draw no triangles and therefore add no solid.
+    if (transforms.length === 0 || indices.length === 0) continue;
     // Local AABB over referenced vertices only — unused buffer tails must not
     // inflate the conservative bound.
     let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -59,7 +67,7 @@ export function renderedSolidsToObstacles(solids: readonly RenderedSolid[], limi
         if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) { finite = false; break; }
         corners.push(p);
       }
-      if (!finite) { skippedDegenerate += 1; continue; }
+      if (!finite) return { status: "unavailable", reason: "invalid-rendered-solid" };
       let cMinY = corners[0].y, cMaxY = corners[0].y;
       for (const corner of corners) { if (corner.y < cMinY) cMinY = corner.y; if (corner.y > cMaxY) cMaxY = corner.y; }
       if (cMaxY - cMinY <= 1e-9) { skippedDegenerate += 1; continue; }

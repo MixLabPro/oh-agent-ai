@@ -91,7 +91,7 @@ export class CarVisuals {
     const dark = material({ color: "#202b32", roughness: 0.8 });
     const glass = material({ color: "#73b8c0", roughness: 0.16, metalness: 0.2, transparent: true, opacity: 0.48, depthWrite: false, side: THREE.DoubleSide });
     const trim = material({ color: "#f2dfbb", roughness: 0.65, metalness: 0.05 });
-    const head = material({ color: "#fff1ce", emissive: "#ffe4ab", emissiveIntensity: 0.5 });
+    const head = material({ color: "#fff1ce", emissive: "#ffe4ab", emissiveIntensity: 1.0 });
     this.brake = material({ color: "#ad2825", emissive: "#ff2921", emissiveIntensity: 0.12 });
     this.reverse = material({ color: "#c8d1c5", emissive: "#edfff6", emissiveIntensity: 0 });
     const add = (name: string, pieces: THREE.BufferGeometry[], mat: THREE.Material, parent: THREE.Object3D = this.bodyPivot) => {
@@ -147,6 +147,17 @@ export class CarVisuals {
     add("headlights", [-1, 1].map((side) => box(1.112, 0.65, side * 0.42, 0.018, 0.09, 0.22)), head);
     add("brake-lights", [-1, 1].map((side) => box(-1.366, 0.425, side * 0.4, 0.025, 0.075, 0.39)), this.brake);
     add("reverse-lights", [-1, 1].map((side) => box(-1.367, 0.425, side * 0.13, 0.026, 0.06, 0.1)), this.reverse);
+    // 真前灯：灯罩贴片只自发光、照不亮路面（夜间前方全黑的根因）。两个聚光灯随
+    // 车身姿态（root 子对象）指向正前偏下，常亮——白天被环境光淹没，夜里打出光池。
+    for (const side of [-1, 1]) {
+      const beam = new THREE.SpotLight("#ffe9c4", 36, 18, 0.42, 0.5, 1.35);
+      beam.position.set(1.0, 0.6, side * 0.42);
+      const beamTarget = new THREE.Object3D();
+      beamTarget.position.set(9, -0.3, side * 0.5);
+      beamTarget.name = "headlightTarget";
+      this.root.add(beam, beamTarget);
+      beam.target = beamTarget;
+    }
 
     const wheelMaterial = material({ vertexColors: true, roughness: 0.72, metalness: 0.12 });
     const colored = (geometry: THREE.BufferGeometry, color: string) => {
@@ -187,7 +198,22 @@ export class CarVisuals {
     });
     this.brake.emissiveIntensity = state.braking ? 2 : 0.12;
     this.reverse.emissiveIntensity = state.reversing ? 1.5 : 0;
+    if (this.impactLight) {
+      this.impactLight.intensity = Math.max(0, this.impactLight.intensity - 0.12);
+    }
   }
+
+  /** Collision feedback: brief warm light pulse from the impact point. */
+  pulseImpact(): void {
+    if (!this.impactLight) {
+      this.impactLight = new THREE.PointLight("#ffb257", 0, 8, 2);
+      this.impactLight.position.set(0, 0.6, 0);
+      this.root.add(this.impactLight);
+    }
+    this.impactLight.intensity = 6;
+  }
+
+  private impactLight: THREE.PointLight | null = null;
 
   dispose(): void {
     if (this.disposed) return;

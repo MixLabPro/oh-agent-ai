@@ -11,6 +11,8 @@ import { supportsBackgroundFilm } from "./export/filmJob";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { replayStartMs } from "./replayRange";
 import { useCityGame } from "./game/useCityGame";
+import { CITY_DRIVING_UAT, useCityDrivingUat } from "./game/useCityDrivingUat";
+import { DrivingHud } from "./game/DrivingHud";
 
 const windowOptions = [7, 30, 90, 366] as const;
 declare const __CITY_GAME_UAT__: boolean;
@@ -57,16 +59,25 @@ export function CityApp() {
   filmRef.current = !!experience.film;
   const busyRef = useRef(experience.busy);
   busyRef.current = experience.busy;
+  const drivingActive = useRef(false);
+  const planRepairActive = useRef(false);
   const game = useCityGame(engineRef, {
     cinemaActive: () => cinemaRef.current,
     filmActive: () => filmRef.current,
-    busy: () => busyRef.current,
+    busy: () => busyRef.current || drivingActive.current,
     labelsVisible: () => labelsRef.current,
     requestRefresh: () => setRefresh((value) => value + 1),
     locale: () => (language === "en" ? "en" : "zh-Hans"),
   });
+  const driving = useCityDrivingUat(engineRef, {
+    cinemaActive: () => cinemaRef.current,
+    gameActive: () => game.active,
+    busy: () => busyRef.current || filmRef.current || planRepairActive.current,
+  });
+  drivingActive.current = driving.active;
   // 规划修复（开发开关 ?cityPlan / cityPlanDev=1；未开启时 hook 什么都不做）。与游戏/航拍/导出/忙碌互斥。
-  const planRepair = usePlanRepair(engineRef, { seed: experience.seed, model: experience.model, blocked: cinema || game.active || experience.busy || !!experience.film });
+  const planRepair = usePlanRepair(engineRef, { seed: experience.seed, model: experience.model, blocked: cinema || game.active || driving.active || experience.busy || !!experience.film });
+  planRepairActive.current = planRepair.state.active;
   const appliedWindow = useRef<number | null>(null);
   const fingerprint = useRef("");
   useEffect(() => observeHealth(() => engineRef.current?.diagnosticState() ?? { engineMissing: true }), []);
@@ -114,7 +125,7 @@ export function CityApp() {
   }, []);
 
   useEffect(() => {
-    if (!projection || !engineRef.current || experience.busy) return;
+    if (!projection || !engineRef.current || experience.busy || game.active || driving.active) return;
     const from = Date.parse(projection.window.from);
     const to = Date.parse(projection.window.to);
     const rows: CitySessionRow[] = projection.sessions.map((session) => ({
@@ -160,13 +171,13 @@ export function CityApp() {
       fingerprint.current = signature;
     }
     experience.refreshSelection();
-  }, [projection, experience.busy]);
+  }, [projection, experience.busy, game.active, driving.active]);
 
   useEffect(() => {
-    if (experience.busy) return;
+    if (experience.busy || game.active || driving.active) return;
     if (!cinema) engineRef.current?.setLabelsVisible(labels);
     engineRef.current?.setQualityMode(quality);
-  }, [projection, labels, quality, cinema, experience.busy]);
+  }, [projection, labels, quality, cinema, experience.busy, game.active, driving.active]);
 
   const dataAvailable = projection !== null && projection.status !== "unavailable";
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
@@ -185,9 +196,12 @@ export function CityApp() {
     // 修复城市入口放在「更多工具」里（用户：不要悬浮在画面上）。进入后的编辑面板仍在页面内；
     // 上限 9→10 见 host 校验器（plugin_host.rs::valid_tools）。
     { id: "repair", commandId: "city.repair", label: planRepair.state.active ? "退出修复" : "修复城市", kind: "button" as const, enabled: planRepair.state.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film) },
-  ].map((tool: { id: string; label: string; options?: Array<{ value: string; label: string }> }) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "game" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
+    ...(CITY_DRIVING_UAT ? [{ id: "car", commandId: "city.car", label: driving.active ? "退出试驾" : "试驾汽车 · UAT", kind: "button" as const,
+      enabled: driving.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film && !planRepair.state.active) }] : []),
+  ].map((tool) => ({ ...tool, enabled: tool.id === "car" ? tool.enabled : tool.enabled && !driving.active })).map((tool: { id: string; label: string; options?: Array<{ value: string; label: string }> }) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "game" || tool.id === "car" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
   const execute = (commandId: string, value?: string) => {
     const engine = engineRef.current;
+    if (driving.active && commandId !== "city.car") throw new Error("driving_active");
     switch (commandId) {
       case "city.window": {
         const days = Number(value);
@@ -210,6 +224,10 @@ export function CityApp() {
       case "city.repair":
         if (planRepair.state.active) planRepair.exit(); else planRepair.enter();
         break;
+      case "city.car":
+        if (!CITY_DRIVING_UAT) throw new Error("command_unavailable");
+        if (driving.active) driving.exit(); else { experience.setOptions(false); experience.clearSelection(); driving.enter(); }
+        break;
       case "city.game":
         if (game.active) game.exit();
         else game.enterPractice();
@@ -225,7 +243,7 @@ export function CityApp() {
   useEffect(() => connect((command) => executeRef.current(command.commandId, command.value)), []);
   // Publishing the first toolbar is the host's ready handshake. An empty scene
   // or loaded DTO alone must not arm the runtime watchdog during shader boot.
-  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, planRepair.state.active, experience.busy, experience.film?.frame, experience.film?.total]);
+  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, driving.active, planRepair.state.active, experience.busy, experience.film?.frame, experience.film?.total]);
   const sceneMessage = sceneUnavailable ? "当前环境无法显示三维城市，仍可查看会话摘要。"
     : !dataAvailable || projection.status === "empty" ? status : null;
   return cityView((
@@ -237,9 +255,10 @@ export function CityApp() {
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
           : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>
       </header>}
-      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} planRepair={planRepair}
+      <div hidden={driving.active}><CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} planRepair={planRepair}
         windowDays={windowDays} windowOptions={windowOptions} onWindowDays={(days) => setWindowDays(days as WindowDays)} labels={labels} onLabels={(next) => { engineRef.current?.setLabelsVisible(next); setLabels(next); }}
-        onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} />
+        onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} /></div>
+      {CITY_DRIVING_UAT && <DrivingHud driving={driving} />}
     </section>
   ), language);
 }
