@@ -142,7 +142,7 @@ function integrated(hz,slope=0){
   const support=k.footprintSupport(r,{x:0,z:0,heading:0},id);assert.ok(support.ok);
   let state={...k.initialDrivingState(0,0,0,id),y:support.y,pitch:support.pitch,roll:support.roll};
   const kernel=k.createContinuousDrivingKernel(environment,{worldRevision:"integrated",vehicleConfigHash:"test-config",kernelBuildId:"test-C"});
-  assert.equal(kernel.identity.physicsVersion,2);assert.equal(kernel.identity.collisionVersion,3);assert.equal(kernel.identity.queryVersion,3);
+  // physics v3：非对称转向回正（steeringReturnResponse）。assert.equal(kernel.identity.physicsVersion,3);assert.equal(kernel.identity.collisionVersion,4);assert.equal(kernel.identity.queryVersion,3);
   const validator=new k.ContinuousWorldValidator(environment,s=>s.x);assert.equal(validator.validateStart(state),"valid");
   const clock=new k.FixedStepClock();let contacts=0;
   for(let frame=0;frame<hz*3;frame++)clock.advance(1/hz,false,()=>{

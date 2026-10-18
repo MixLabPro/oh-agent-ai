@@ -5,7 +5,7 @@ import { makeFixtures } from "./city-kit/surface-region-fixtures.mjs";
 const m = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
   "engine/surface/renderedSolidObstacles.ts": ["renderedSolidsToObstacles"],
-  "game/runtime/createCityCarSession.ts": ["createCityCarSession"],
+  "game/runtime/createCityCarSession.ts": ["createCityCarSession", "createCityCarDiagnosticSession"],
   "game/runtime/GameRuntime.ts": ["GameRuntime"],
 });
 const { patch, grid, snapshot } = makeFixtures(m);
@@ -20,13 +20,15 @@ function hostFixture(renderedSolids = [], sceneSolids = []) {
     readWorld: () => state.current ? world : null,
     setFrameHook: (hook) => { state.hook = hook; if (hook) state.hooks++; },
     release: () => { if (!state.current) return; state.current = false; state.releases++; state.hook = null; } };
-  return { state, host: { captureDrivingWorld: async () => capture } };
+  const lease = { revision: world.revision, snapshot: { drivingWorld: capture, staticWorld: capture }, isCurrent: () => state.current,
+    setFrameHook: (hook) => { state.hook = hook; if (hook) state.hooks++; }, release: capture.release };
+  return { state, host: { gameScenePort: { acquireResult: async () => ({ status: "ready", lease }) } } };
 }
 const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   collider: { dimensions: { halfLength: 1.4, halfWidth: .7, halfHeight: .5 }, centerHeight: .55, vehicleConfigHash: "explicit-fixture-v1" }, present: () => {} };
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
-  const result = await m.createCityCarSession(f.host, runtime, request);
+  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request);
   assert.equal(result.status, "ready"); assert.equal(runtime.snapshot.phase, "paused");
   assert.equal(runtime.snapshot.revision, "world-fixture"); assert.equal(result.adapter.snapshot.surfaceId, "region:ground:pad");
   const entryChecks = f.state.deepChecks;
@@ -41,7 +43,7 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   // 白名单场景代理没有对应的 renderedSolid 时仍参与碰撞并标注 coverage。
   const wallProxy = { id: "bld-1", role: "building", kind: "box", center: { x: 0, y: 2, z: 6 }, halfAxes: [{ x: 2, y: 0, z: 0 }, { x: 0, y: 2, z: 0 }, { x: 0, y: 0, z: 0.5 }] };
   const f = hostFixture([], [wallProxy]); const runtime = new m.GameRuntime();
-  const result = await m.createCityCarSession(f.host, runtime, request);
+  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request);
   assert.equal(result.status, "ready", `building city must be drivable via proxies: ${result.reason}`);
   assert.equal(result.coverage, "structures-and-scene-proxies");
   assert.equal(f.state.releases, 0, "successful entry keeps the freeze");
@@ -56,7 +58,7 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
 {
   // Malformed rendered solids fail closed and never start a frame hook.
   const f = hostFixture([Object.freeze({ id: "malformed-mesh", role: "building", positions: undefined, indices: undefined, transforms: new Float64Array(16) })]); const runtime = new m.GameRuntime();
-  const result = await m.createCityCarSession(f.host, runtime, request);
+  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request);
   assert.equal(result.status, "unavailable"); assert.equal(result.reason, "invalid-rendered-solid");
   assert.equal(f.state.releases, 1, "entry refusal releases displayed geometry freeze");
   assert.equal(f.state.hooks, 0, "architecture without collision never starts a frame hook");
@@ -65,12 +67,12 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
   const result = await m.createCityCarSession(f.host, runtime, { ...request, x: 29.5 });
-  assert.equal(result.status, "unavailable"); assert.equal(result.reason, "unsafe-car-spawn");
-  assert.equal(f.state.releases, 1); assert.equal(f.state.hooks, 0);
+  assert.equal(result.status, "unavailable"); assert.equal(result.reason, "validated-spawn-required");
+  assert.equal(f.state.releases, 0); assert.equal(f.state.hooks, 0);
 }
 {
   const f = hostFixture(); const runtime = new m.GameRuntime(); const abort = new AbortController();
-  const result = await m.createCityCarSession(f.host, runtime, request, abort.signal);
+  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request, abort.signal);
   assert.equal(result.status, "ready"); abort.abort();
   assert.equal(runtime.snapshot.phase, "idle"); assert.equal(f.state.releases, 1);
 }

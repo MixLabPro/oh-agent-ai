@@ -168,11 +168,18 @@ const flatLayout = {
 {
   const THREE = createRequire(new URL("../apps/agent-city/ui/package.json", import.meta.url))("three");
   const { FlightCamera, ZOOM_MIN, ZOOM_MAX } = load("game/FlightCamera.ts");
-  const open = { terrainHeight: () => 0, isPointClear: () => true };
+  // Use real world camera queries; endpoint-only point mocks cannot satisfy the
+  // swept near-plane contract introduced by the shared camera foundation.
+  const cameraWorld = (staticSolids = []) => new FlightWorld({ layout: flatLayout, model: model0, cursorMs: null, staticSolids });
+  const wallSolid = (axis) => ({ id: `camera-wall:${axis}`, role: "wall", kind: "box",
+    center: { x: axis === "x" ? -503.75 : 0, y: 100, z: axis === "z" ? -503.75 : 0 },
+    halfAxes: [{ x: axis === "x" ? 496.25 : 1000, y: 0, z: 0 }, { x: 0, y: 100, z: 0 },
+      { x: 0, y: 0, z: axis === "z" ? 496.25 : 1000 }] });
+  const open = cameraWorld(); // Camera geometry fixtures stay within this real world's vertical bounds.
   const rig = () => ({ cam: new THREE.PerspectiveCamera(52, 1.5, 1.5, 8000) });
   const settle = (c, s, w = open, frames = 400) => { for (let i = 0; i < frames; i += 1) c.update(1 / 60, s, params, w); };
   const at = (cam, s) => cam.position.clone().sub(new THREE.Vector3(s.x, s.y, s.z));
-  const s0 = sim.initialSimState({ x: 100, y: 80, z: 50, heading: 0.4 }, params);
+  const s0 = sim.initialSimState({ x: 100, y: 40, z: 50, heading: 0.4 }, params);
 
   // 默认位：机后 back、机上 up（与改造前同一公式的解析值）。
   {
@@ -188,7 +195,7 @@ const flatLayout = {
   }
   // 环绕：半径守恒；向右拖(+yaw)后相机绕到飞机左侧（航向 0 时 -Z）。
   {
-    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 40, z: 0, heading: 0 }, params);
     c.reset(s, params); settle(c, s); const r0 = at(cam, s).length();
     c.orbitBy(Math.PI / 2, 0); settle(c, s);
     const side = at(cam, s);
@@ -197,7 +204,7 @@ const flatLayout = {
   }
   // 缩放：与倍率成正比，夹在上下限；非法输入被拒绝；侧面最近时翼尖仍在近裁剪面之外。
   {
-    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 40, z: 0, heading: 0 }, params);
     c.reset(s, params); settle(c, s); const d = at(cam, s).length();
     c.zoomBy(0.5); settle(c, s); assert.ok(Math.abs(at(cam, s).length() / d - 0.5) < 1e-3 || Math.abs(at(cam, s).length() / d - ZOOM_MIN) < 1e-3, "zoom 0.5 → 距离减半(或夹到下限)");
     c.zoomBy(1e-9); settle(c, s); assert.ok(Math.abs(at(cam, s).length() / d - ZOOM_MIN) < 1e-3, "下限夹取");
@@ -211,7 +218,7 @@ const flatLayout = {
   }
   // 俯仰不翻转：拖到极限相机不越过正上方/正下方。
   {
-    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 200, z: 0, heading: 0 }, params);
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 40, z: 0, heading: 0 }, params);
     c.reset(s, params); c.orbitBy(0, 99); settle(c, s);
     const hi = at(cam, s); const dir = new THREE.Vector3(); cam.getWorldDirection(dir);
     assert.ok(Math.atan2(hi.y, Math.hypot(hi.x, hi.z)) < Math.PI / 2 - 0.05 && Math.abs(dir.y) < 0.9999, "俯仰上限不到正顶");
@@ -221,15 +228,15 @@ const flatLayout = {
   }
   // 遮挡收缩在环绕后仍生效（相机侧后方有墙时被拉近，而不是穿墙）。
   {
-    const wall = { terrainHeight: () => 0, isPointClear: (_x, _y, z) => !(z < -3 * params.planeRadius) };
-    const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    const wall = cameraWorld([wallSolid("z")]);
+    const s = sim.initialSimState({ x: 0, y: 40, z: 0, heading: 0 }, params);
     const a = rig().cam, b = rig().cam; const ca = new FlightCamera(a, true), cb = new FlightCamera(b, true);
     ca.reset(s, params); cb.reset(s, params); ca.orbitBy(Math.PI / 2, 0); cb.orbitBy(Math.PI / 2, 0);
     settle(ca, s, wall); settle(cb, s, open);
     assert.ok(Math.abs(a.position.z) < Math.abs(b.position.z) - 1, "环绕到有墙一侧时相机被拉近");
     // 墙在飞机正后方(-X 轴向)时，相机在默认追尾位被拉近；环绕到飞机前方(远离墙)后不该再被拉近——
     // 遮挡采样必须沿「当前」相机方向，而不是写死在机后。
-    const behind = { terrainHeight: () => 0, isPointClear: (x) => !(x < -3 * params.planeRadius) };
+    const behind = cameraWorld([wallSolid("x")]);
     const f1 = rig().cam, f2 = rig().cam; const cf1 = new FlightCamera(f1, true), cf2 = new FlightCamera(f2, true);
     cf1.reset(s, params); cf2.reset(s, params); cf2.orbitBy(Math.PI, 0);
     settle(cf1, s, behind); settle(cf2, s, behind);
@@ -237,7 +244,7 @@ const flatLayout = {
   }
   // yaw 连续绕多圈穿过 ±π 接缝：逐帧位移有界(无瞬移)，松手后 resetOrbit 回到追尾位。
   {
-    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 80, z: 0, heading: 0 }, params);
+    const { cam } = rig(); const c = new FlightCamera(cam, true); const s = sim.initialSimState({ x: 0, y: 40, z: 0, heading: 0 }, params);
     c.reset(s, params); let maxJump = 0; const prev = cam.position.clone();
     for (let k = 0; k < 16; k += 1) { c.orbitBy(Math.PI / 4, 0); for (let i = 0; i < 40; i += 1) { c.update(1 / 60, s, params, open); maxJump = Math.max(maxJump, cam.position.distanceTo(prev)); prev.copy(cam.position); } }
     assert.ok(maxJump < params.planeRadius, `绕圈逐帧位移有界(${maxJump.toFixed(2)})`);

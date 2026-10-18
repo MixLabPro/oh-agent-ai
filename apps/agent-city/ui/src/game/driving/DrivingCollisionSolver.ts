@@ -2,7 +2,7 @@
  * The support callback is B's authority and can refuse any projection; recovery
  * from initial overlap is intentionally left to SafeRecovery. */
 import type { Solid, CollisionDimensions } from "./CollisionIndex";
-import { sweepBody, interpolateBody, type BodyPose, type SweepLimits, type SweepContact } from "./DrivingCollision";
+import { sweepBody, interpolateBody, type BodyPose, type SweepOptions, type SweepContact } from "./DrivingCollision";
 export type SupportedPose=BodyPose & Readonly<{surfaceId:string}>;
 export type MotionProjection=Readonly<{ok:true;pose:SupportedPose}>|Readonly<{ok:false;reason:string}>;
 export type CollisionMotionWorld=Readonly<{
@@ -13,7 +13,7 @@ export type CollisionMotionWorld=Readonly<{
 export type ResolvedMotion=Readonly<{status:"moved"|"stopped"|"unresolved";reason:string;pose:SupportedPose;
   path:readonly SupportedPose[];contacts:readonly SweepContact[];distance:number;speedFraction:number;tests:number}>;
 export function resolveDrivingCollision(solids:readonly Solid[],world:CollisionMotionWorld,from:SupportedPose,to:SupportedPose,
-  dimensions:CollisionDimensions,options:Partial<SweepLimits>&Readonly<{maxSlides?:number}>={}):ResolvedMotion {
+  dimensions:CollisionDimensions,options:SweepOptions&Readonly<{maxSlides?:number}>={}):ResolvedMotion {
   const maxSlides=options.maxSlides??4,contacts:SweepContact[]=[],path:SupportedPose[]=[Object.freeze({...from})];
   let current=path[0],goal=to,distance=0,tests=0,elapsed=0;
   let velocity:Readonly<{x:number;y:number;z:number}>|null=null,initialVelocityLength=0;

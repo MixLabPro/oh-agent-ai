@@ -42,8 +42,12 @@ export class DrivingKernel {
       throw new Error("unexpected-position-jump");
     }
     if(details.trajectory) {
+      // 这两个界按「本世界合法运动」校准，而不是平地直行的净位移：
+      // · 里程：接触滑移/边界滑动的受挡改向让路径长度可超净位移（多段前缀），3× 仍远低于传送级异常。
+      // · 3D 位移：支撑面在接缝两侧可合法跳变——桥头引道路面 ↔ 桥面板高差实测 ~0.25，
+      //   加纵坡投影（sec 因子，满速 ~0.02）取 0.5 余量。满速过桥头 3D≈0.33，原 0.217 上限必误杀。
       const distance=Math.abs(state.distance-previous.distance);
-      if(distance>maxStep||Math.hypot(state.x-previous.x,state.y-previous.y,state.z-previous.z)>maxStep)throw new Error("unexpected-surface-distance-jump");
+      if(distance>maxStep*3||Math.hypot(state.x-previous.x,state.y-previous.y,state.z-previous.z)>maxStep+0.5)throw new Error("unexpected-surface-distance-jump");
     }
     return Object.freeze({ state: Object.freeze(state), motion: Object.freeze({ blocked, reason, ...details, ...(details.trajectory?{trajectory:Object.freeze(details.trajectory)}:{}) }) });
   }

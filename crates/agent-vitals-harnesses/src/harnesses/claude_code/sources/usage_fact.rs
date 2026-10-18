@@ -49,6 +49,9 @@ pub struct UsageFactEmitResult {
     /// 不进 `--json` payload（CLI 输出面与 Python 字节镜像不含它），只随
     /// sync 管线落 `session_excerpts` 表。
     pub session_excerpts: Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt>,
+    /// V32 会话标题（ai-title 记录）。同上：只随 sync 管线落 `sessions.title`，
+    /// 不进 CLI 输出面。
+    pub session_titles: Vec<agent_vitals_domain::contracts::workflow::SessionTitle>,
     pub attempts: HashMap<String, i64>,
     pub total_rows: i64,
     pub skip_rows: i64,
@@ -450,13 +453,15 @@ pub fn claude_jsonl_to_usage_facts(
         attempts.insert("bad_id".to_string(), bad_id);
     }
     // V16：workflow 富化与任务意图摘录同一次读取产出（分开口会双读整个文件）。
-    let (workflow_events, session_excerpts) = super::workflow::claude_file_to_workflow_events(
+    // V32：会话标题同趟带出（ai-title 也在同一份记录流里）。
+    let (workflow_events, session_excerpts, session_titles) = super::workflow::claude_file_to_workflow_events(
         path, machine_namespace, source_profile, native_session_id,
     )?;
     Ok(UsageFactEmitResult {
         facts,
         workflow_events,
         session_excerpts,
+        session_titles,
         attempts,
         total_rows,
         skip_rows,

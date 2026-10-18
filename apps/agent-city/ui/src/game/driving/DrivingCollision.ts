@@ -3,9 +3,11 @@
  * grazing/precision/budget never becomes a clear path. Input solids are the frozen
  * convex collision proxies supplied by B, not arbitrary renderer meshes. */
 import { boxPoly, type Solid, type V3, type CollisionPose, type CollisionDimensions } from "./CollisionIndex";
-export const DRIVING_COLLISION_VERSION = 3;
+import { conservativeVehicleVerticalRadius, isValidMountableHeight, type MountablePolicy } from "./staticSolidContracts";
+export const DRIVING_COLLISION_VERSION = 5; // v5: explicit mountable policy + conservative tilted-body lower bound
 export type BodyPose = CollisionPose;
 export type SweepLimits = Readonly<{skin:number;timeTolerance:number;maxTests:number;maxCandidates:number;maxIntervals:number;maxSourceSolids:number;maxPolyVertices:number;maxAxes:number}>;
+export type SweepOptions = Partial<SweepLimits> & Readonly<{ mountablePolicy?: MountablePolicy }>;
 export const DEFAULT_SWEEP_LIMITS:SweepLimits=Object.freeze({skin:1e-4,timeTolerance:1e-7,maxTests:200000,maxCandidates:4096,maxIntervals:4096,maxSourceSolids:20000,maxPolyVertices:256,maxAxes:1024});
 export type SweepContact=Readonly<{solidId:string;time:number;timeUpper:number;normal:V3;kind:"translation"|"rotation"}>;
 export type BodySweep=Readonly<{status:"clear"|"contact"|"unresolved";reason:string;contact:SweepContact|null;tests:number}>;
@@ -30,7 +32,8 @@ const solidTrees=new WeakMap<readonly Solid[],SolidTree|null>();
 function unionBounds(a:SolidBounds,b:SolidBounds):SolidBounds{return {minX:Math.min(a.minX,b.minX),minY:Math.min(a.minY,b.minY),minZ:Math.min(a.minZ,b.minZ),maxX:Math.max(a.maxX,b.maxX),maxY:Math.max(a.maxY,b.maxY),maxZ:Math.max(a.maxZ,b.maxZ)};}
 function solidTree(solids:readonly Solid[],spend:()=>void):SolidTree|null {
   if(solidTrees.has(solids))return solidTrees.get(solids)!;
-  for(const s of solids){spend();if(![s.minX,s.minY,s.minZ,s.maxX,s.maxY,s.maxZ].every(Number.isFinite)||s.minX>s.maxX||s.minY>s.maxY||s.minZ>s.maxZ)throw new TypeError("invalid-solid-bounds");}
+  for(const s of solids){spend();if(![s.minX,s.minY,s.minZ,s.maxX,s.maxY,s.maxZ].every(Number.isFinite)||s.minX>s.maxX||s.minY>s.maxY||s.minZ>s.maxZ||
+    !isValidMountableHeight(s.mountableHeight))throw new TypeError("invalid-solid-bounds");}
   const build=(items:Solid[]):SolidTree|null=>{
     if(!items.length)return null;
     let bounds:SolidBounds=items[0];for(let i=1;i<items.length;i++)bounds=unionBounds(bounds,items[i]);
@@ -44,10 +47,11 @@ function solidTree(solids:readonly Solid[],spend:()=>void):SolidTree|null {
 }
 function overlapsBounds(a:SolidBounds,b:SolidBounds):boolean{return a.minX<=b.maxX&&a.maxX>=b.minX&&a.minY<=b.maxY&&a.maxY>=b.minY&&a.minZ<=b.maxZ&&a.maxZ>=b.minZ;}
 /** source must be an immutable snapshot, owned by the caller's versioned world. */
-export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dimensions:CollisionDimensions,options:Partial<SweepLimits>={}):BodySweep {
+export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dimensions:CollisionDimensions,options:SweepOptions={}):BodySweep {
   const p={...DEFAULT_SWEEP_LIMITS,...options};let tests=0;
   const result=(status:BodySweep["status"],reason:string,contact:SweepContact|null=null):BodySweep=>Object.freeze({status,reason,contact:contact?Object.freeze({...contact,normal:Object.freeze({...contact.normal})}):null,tests});
-  if(![from.x,from.y,from.z,from.heading,from.pitch,from.roll,to.x,to.y,to.z,to.heading,to.pitch,to.roll,dimensions.halfLength,dimensions.halfWidth,dimensions.halfHeight].every(Number.isFinite)||
+  const mountablePolicy=options.mountablePolicy??"disabled";
+  if((mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")||![from.x,from.y,from.z,from.heading,from.pitch,from.roll,to.x,to.y,to.z,to.heading,to.pitch,to.roll,dimensions.halfLength,dimensions.halfWidth,dimensions.halfHeight].every(Number.isFinite)||
     ![dimensions.halfLength,dimensions.halfWidth,dimensions.halfHeight,p.skin,p.timeTolerance].every(n=>Number.isFinite(n)&&n>0)||p.timeTolerance>=1||
     ![p.maxTests,p.maxCandidates,p.maxIntervals,p.maxSourceSolids,p.maxPolyVertices,p.maxAxes].every(n=>Number.isSafeInteger(n)&&n>0))return result("unresolved","invalid-input");
   if(solids.length>p.maxSourceSolids)return result("unresolved","budget");
@@ -74,9 +78,15 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
       if(node.solids){for(const solid of node.solids){spend();if(!overlapsBounds(solid,query))continue;if(solid.poly.vertices.length>p.maxPolyVertices)throw new Budget();
         candidates.push(solid);if(candidates.length>p.maxCandidates)throw new Budget();}}
       else{if(node.right)stack.push(node.right);if(node.left)stack.push(node.left);}}
-    candidates.sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
+    // Mountable is explicit gameplay policy. The lower bound covers the full vehicle
+    // projection throughout interpolated pitch/roll; endpoint-only half-height math
+    // can otherwise erase a curb which intersects a tilted front/rear corner.
+    const verticalRadius=conservativeVehicleVerticalRadius(dimensions.halfLength,dimensions.halfWidth,dimensions.halfHeight,from.pitch,to.pitch,from.roll,to.roll);
+    const sweepBottom=Math.min(from.y,to.y)-verticalRadius;
+    const blocking=candidates.filter((solid)=>!(mountablePolicy==="gameplay"&&solid.mountableHeight!==undefined&&solid.maxY-sweepBottom<=solid.mountableHeight));
+    blocking.sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
     let best:SweepContact|null=null;
-    for(const solid of candidates) {
+    for(const solid of blocking) {
       const axes=(a:ReturnType<typeof poly>)=>{
         if(a.faces.length+solid.poly.faces.length+a.edges.length*solid.poly.edges.length>p.maxAxes)throw new Budget();
         return [...a.faces,...solid.poly.faces,...a.edges.flatMap(x=>solid.poly.edges.map(y=>cross(x,y)))];

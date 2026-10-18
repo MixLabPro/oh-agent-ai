@@ -5,11 +5,14 @@
 import type { SurfaceRegionsBuild } from "../../engine/surface/surfaceRegions";
 import type { DrivingEnvironment, DrivingMoveResult, DrivingMotion, DrivingState, DrivingTrajectoryPose, DrivingContact } from "../DrivingSimulation";
 import type { Solid, CollisionDimensions } from "./CollisionIndex";
-import { DEFAULT_FOOTPRINT_PARAMS, footprintSupport, validateMotion, type FootprintParams, type VehicleFootprint } from "./surfaceFootprint";
+import { DEFAULT_FOOTPRINT_PARAMS, footprintSupport, mountableQueryOf, validateMotion, type FootprintParams, type MountableQuery, type VehicleFootprint } from "./surfaceFootprint";
 import { DRIVING_FOOTPRINT } from "./vehicleFootprint";
 import { resolveDrivingCollision, type SupportedPose } from "./DrivingCollisionSolver";
 import { DEFAULT_SWEEP_LIMITS, interpolateBody, type SweepLimits, type BodyPose } from "./DrivingCollision";
-export const CONTINUOUS_DRIVING_QUERY_VERSION=3;
+import { isValidMountableHeight, MOUNTABLE_POLICY_VERSION, type MountablePolicy } from "./staticSolidContracts";
+export const CONTINUOUS_DRIVING_QUERY_VERSION=4;
+export const CONTINUOUS_MOUNTABLE_POLICY_VERSION=MOUNTABLE_POLICY_VERSION;
+export type ContinuousEnvironmentPolicy=Readonly<{boundarySlide?:boolean;mountablePolicy?:MountablePolicy}>;
 export type ContinuousWorldBinding=Readonly<{
   surfaceRevision:string;worldRevision:string;solidRevision:string;solids:readonly Solid[];
   dimensions:CollisionDimensions;centerHeight:number;isCurrent():boolean;
@@ -18,20 +21,31 @@ export type ContinuousMotionParams=Partial<SweepLimits>&Readonly<{maxSlides?:num
 export const CONTINUOUS_MOTION_DEFAULTS=Object.freeze({maxSlides:4,maxSupportSegments:64,supportStep:0.1});
 export class ContinuousDrivingEnvironment implements DrivingEnvironment {
   private readonly solids:readonly Solid[];
+  private readonly mountable:MountableQuery|null;
   constructor(private readonly regions:SurfaceRegionsBuild,private readonly binding:ContinuousWorldBinding,
     private readonly footprint:VehicleFootprint=DRIVING_FOOTPRINT,private readonly params:FootprintParams=DEFAULT_FOOTPRINT_PARAMS,
-    private readonly motionParams:ContinuousMotionParams={}) {
+    private readonly motionParams:ContinuousMotionParams={},policy:ContinuousEnvironmentPolicy={}) {
     if(regions.status!=="ready"||regions.revision!==binding.surfaceRevision||!binding.worldRevision||binding.solidRevision!==binding.worldRevision||typeof binding.isCurrent!=="function"||![binding.dimensions.halfLength,binding.dimensions.halfWidth,binding.dimensions.halfHeight].every(n=>Number.isFinite(n)&&n>0)||!Number.isFinite(binding.centerHeight)||binding.centerHeight<0)throw new Error("invalid-continuous-world");
     this.binding=Object.freeze({...binding,dimensions:Object.freeze({...binding.dimensions})});
     this.footprint=Object.freeze({...footprint});this.params=Object.freeze({...params});this.motionParams=Object.freeze({...motionParams});
+    const mountablePolicy=policy.mountablePolicy??"disabled",boundarySlide=policy.boundarySlide??false;
+    if((mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")||typeof boundarySlide!=="boolean")throw new Error("invalid-continuous-policy");
+    this.policy=Object.freeze({boundarySlide,mountablePolicy});
+    const maxSlides=motionParams.maxSlides??CONTINUOUS_MOTION_DEFAULTS.maxSlides,maxSupportSegments=motionParams.maxSupportSegments??CONTINUOUS_MOTION_DEFAULTS.maxSupportSegments,supportStep=motionParams.supportStep??CONTINUOUS_MOTION_DEFAULTS.supportStep;
+    const sweep={...DEFAULT_SWEEP_LIMITS,...motionParams};
+    if(!Number.isSafeInteger(maxSlides)||maxSlides<0||maxSlides>16||!Number.isSafeInteger(maxSupportSegments)||maxSupportSegments<1||
+      !Number.isFinite(supportStep)||supportStep<=0||!Number.isFinite(sweep.skin)||sweep.skin<=0||!Number.isFinite(sweep.timeTolerance)||sweep.timeTolerance<=0||sweep.timeTolerance>=1||
+      ![sweep.maxTests,sweep.maxCandidates,sweep.maxIntervals,sweep.maxSourceSolids,sweep.maxPolyVertices,sweep.maxAxes].every(n=>Number.isSafeInteger(n)&&n>0))throw new Error("invalid-continuous-budget");
     const maxSolids=motionParams.maxSourceSolids??DEFAULT_SWEEP_LIMITS.maxSourceSolids;
     const maxVertices=motionParams.maxPolyVertices??DEFAULT_SWEEP_LIMITS.maxPolyVertices;
     let elements=0;const maxAxes=motionParams.maxAxes??DEFAULT_SWEEP_LIMITS.maxAxes;
     if(!Number.isSafeInteger(maxAxes)||maxAxes<1||!Number.isSafeInteger(maxSolids)||maxSolids<1||!Number.isSafeInteger(maxVertices)||maxVertices<1||binding.solids.length>maxSolids||
-      binding.solids.some(s=>(elements+=s.poly.vertices.length+s.poly.faces.length+s.poly.edges.length)>1000000||s.poly.vertices.length>maxVertices||s.poly.faces.length+s.poly.edges.length*3>maxAxes))throw new Error("continuous-world-budget");
+      binding.solids.some(s=>(elements+=s.poly.vertices.length+s.poly.faces.length+s.poly.edges.length)>1000000||s.poly.vertices.length>maxVertices||s.poly.faces.length+s.poly.edges.length*3>maxAxes||!isValidMountableHeight(s.mountableHeight)))throw new Error("continuous-world-budget");
     // Own proxy facts so a caller cannot change collision geometry under a lease.
     this.solids=Object.freeze(binding.solids.map(s=>Object.freeze({...s,poly:{vertices:s.poly.vertices.map(v=>Object.freeze({...v})),faces:s.poly.faces.map(v=>Object.freeze({...v})),edges:s.poly.edges.map(v=>Object.freeze({...v}))}})));
+    this.mountable=mountablePolicy==="gameplay"?mountableQueryOf(this.solids):null;
   }
+  private readonly policy:Readonly<{boundarySlide:boolean;mountablePolicy:MountablePolicy}>;
   get worldRevision():string{return this.binding.worldRevision;}
   private current(){return this.binding.isCurrent()&&this.regions.status==="ready"&&this.regions.revision===this.binding.surfaceRevision;}
   private body=(pose:SupportedPose):BodyPose=>{
@@ -40,25 +54,49 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
   };
   private constrain=(from:SupportedPose,target:SupportedPose)=>{
     if(!this.current())return {ok:false as const,reason:"stale-world"};
-    const check=validateMotion(this.regions,from,target,from.surfaceId,this.footprint,this.params);
-    return check.ok?{ok:true as const,pose:{x:target.x,z:target.z,heading:target.heading,y:check.support.y,pitch:check.support.pitch,roll:check.support.roll,surfaceId:check.support.regionId}}
-      :{ok:false as const,reason:`support:${check.reason}:${check.detail}`};
+    const check=validateMotion(this.regions,from,target,from.surfaceId,this.footprint,this.params,undefined,this.mountable??undefined);
+    if(check.ok)return {ok:true as const,pose:{x:target.x,z:target.z,heading:target.heading,y:check.support.y,pitch:check.support.pitch,roll:check.support.roll,surfaceId:check.support.regionId}};
+    // 游玩档角落蹭界滑动（街机惯例，默认关——审计会话保持触线即拒的 fail-closed）：
+    // 车身角碰到区域边界时不整步拒绝，把剩余运动投影到边界线段切向重试一次，
+    // 与固体层的法向滑移同一思想：蹭到角顺过去，掉切向分量之外的速度。
+    if(this.policy.boundarySlide&&check.reason==="unsupported-footprint"&&check.witness){
+      const w=check.witness,tx=w.bx-w.ax,tz=w.bz-w.az,len=Math.hypot(tx,tz)||1,ux=tx/len,uz=tz/len;
+      const along=(target.x-from.x)*ux+(target.z-from.z)*uz;
+      if(Math.abs(along)>1e-6){
+        const slide={x:from.x+ux*along,z:from.z+uz*along,heading:target.heading};
+        const retry=validateMotion(this.regions,from,slide,from.surfaceId,this.footprint,this.params,undefined,this.mountable??undefined);
+        if(retry.ok)return {ok:true as const,pose:{x:slide.x,z:slide.z,heading:slide.heading,y:retry.support.y,pitch:retry.support.pitch,roll:retry.support.roll,surfaceId:retry.support.regionId}};
+      }
+    }
+    return {ok:false as const,reason:`support:${check.reason}:${check.detail}`};
   };
   /** Safe placement uses the same relaxed gameplay footprint and frozen solids
    * as motion, so a start pose cannot be accepted inside an obstacle. */
   place(x:number,z:number,heading:number,regionId:string,y?:number):Readonly<{y:number;pitch:number;roll:number}>|null {
     if(!this.current())return null;
-    const support=footprintSupport(this.regions,{x,z,heading,y},regionId,this.footprint,this.params);
+    const support=footprintSupport(this.regions,{x,z,heading,y},regionId,this.footprint,this.params,undefined,this.mountable??undefined);
     if(!support.ok)return null;
     const pose:SupportedPose={x,y:support.y,z,heading,pitch:support.pitch,roll:support.roll,surfaceId:support.regionId};
-    const checked=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,pose,this.binding.dimensions,{...this.motionParams,maxSlides:0});
+    const checked=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,pose,this.binding.dimensions,{...this.motionParams,mountablePolicy:this.policy.mountablePolicy,maxSlides:0});
     return this.current()&&checked.status==="moved"&&checked.contacts.length===0
       ?Object.freeze({y:support.y,pitch:support.pitch,roll:support.roll}):null;
   }
   move(previous:DrivingState,desired:DrivingMotion):DrivingMoveResult {
+    const steps=this.motionSteps(previous,desired);let next=steps.next();
+    while(!next.done)next=steps.next();
+    return next.value;
+  }
+  /** Preparation-only driver of the identical motion job. All collision budgets,
+   * contacts and trajectory state remain in one generator across host yields. */
+  async moveAsync(previous:DrivingState,desired:DrivingMotion,checkpoint:()=>Promise<void>):Promise<DrivingMoveResult> {
+    const steps=this.motionSteps(previous,desired);let next=steps.next();
+    while(!next.done){await checkpoint();next=steps.next();}
+    return next.value;
+  }
+  private *motionSteps(previous:DrivingState,desired:DrivingMotion):Generator<void,DrivingMoveResult,void> {
     const stopped=(reason:string,unresolved=false):DrivingMoveResult=>({...previous,blocked:true,reason,travelledDistance:0,speedFraction:0,queryStatus:unresolved?"unresolved":"resolved",trajectory:Object.freeze([{...previous}])});
     if(!this.current())return stopped("stale-world",true);
-    const support=footprintSupport(this.regions,previous,previous.surfaceId,this.footprint,this.params);
+    const support=footprintSupport(this.regions,previous,previous.surfaceId,this.footprint,this.params,undefined,this.mountable??undefined);
     if(!support.ok||Math.abs(support.y-previous.y)>1e-6||Math.abs(support.pitch-previous.pitch)>1e-6||Math.abs(support.roll-previous.roll)>1e-6)return stopped("invalid-start-support",true);
     const maxSegments=this.motionParams.maxSupportSegments??CONTINUOUS_MOTION_DEFAULTS.maxSupportSegments,step=this.motionParams.supportStep??CONTINUOUS_MOTION_DEFAULTS.supportStep;
     if(!Number.isSafeInteger(maxSegments)||maxSegments<1||!Number.isFinite(step)||step<=0)return stopped("invalid-support-budget",true);
@@ -70,11 +108,13 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
     const testBudget=this.motionParams.maxTests??200000;
     const trajectory:SupportedPose[]=[pose];const contacts:DrivingContact[]=[];
     for(let i=1;i<=count;i++) {
+      yield;
+      if(!this.current())return stopped("stale-world",true);
       // Advance along the remaining requested direction rather than teleport back
       // to a pre-collision target after a slide displaced the vehicle sideways.
       const next={...pose,x:pose.x+(desired.x-previous.x)/count,z:pose.z+(desired.z-previous.z)/count,
         heading:pose.heading+(desired.heading-previous.heading)/count};
-      const resolved=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,next,this.binding.dimensions,{...this.motionParams,maxTests:Math.max(1,testBudget-tests)});
+      const resolved=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,next,this.binding.dimensions,{...this.motionParams,mountablePolicy:this.policy.mountablePolicy,maxTests:Math.max(1,testBudget-tests)});
       tests+=resolved.tests;
       if(tests>testBudget)return stopped("continuous-collision:budget",true);
       if(resolved.status==="unresolved")return stopped(`continuous-collision:${resolved.reason}`,true);
@@ -83,12 +123,20 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
         time:(i-1+c.time)/count,timeUpper:(i-1+c.timeUpper)/count,normal:Object.freeze({...c.normal}),kind:c.kind})));
       let exhausted=false;
       for(const endpoint of resolved.path.slice(1)) {
-        const length=Math.hypot(endpoint.x-pose.x,endpoint.y-pose.y,endpoint.z-pose.z),remaining=Math.max(0,roadBudget-distance);
+        // 路面预算按 3D 弧长计费（坡道距离语义不变）；可越路缘的支撑跳变（0→岛顶）
+        // 不是油门行程——端点被可越固体覆盖时，竖直落差按可越预算豁免，否则爬升会
+        // 吃光本步预算、把车裁回台阶之前，死锁在路缘线上。
+        const riseAllowance=this.mountable&&(()=>{
+          const dx=endpoint.x-pose.x,dz=endpoint.z-pose.z,len=Math.hypot(dx,dz)||1,reach=Math.max(this.binding.dimensions.halfLength,this.footprint.wheelbase/2,this.footprint.track/2);
+          // 支撑跳变发生在车轮过线而车身中心仍在岛外——用车头/车尾探针判定可越覆盖。
+          return this.mountable!.covers(endpoint.x+dx/len*reach,endpoint.z+dz/len*reach)||this.mountable!.covers(pose.x-dx/len*reach,pose.z-dz/len*reach)||this.mountable!.covers(endpoint.x,endpoint.z)||this.mountable!.covers(pose.x,pose.z);
+        })()?this.mountable.riseBudget:0;
+        const length=Math.hypot(endpoint.x-pose.x,endpoint.y-pose.y,endpoint.z-pose.z)-Math.min(Math.abs(endpoint.y-pose.y),riseAllowance),remaining=Math.max(0,roadBudget-distance);
         if(length>remaining+1e-10) {
           let fraction=remaining/length,trimmed:ReturnType<typeof resolveDrivingCollision>|null=null;
           for(let attempt=0;attempt<12;attempt++) {
             const target={...interpolateBody(pose,endpoint,fraction),surfaceId:pose.surfaceId};
-            trimmed=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,target,this.binding.dimensions,{...this.motionParams,maxSlides:0,maxTests:Math.max(1,testBudget-tests)});
+            trimmed=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,target,this.binding.dimensions,{...this.motionParams,mountablePolicy:this.policy.mountablePolicy,maxSlides:0,maxTests:Math.max(1,testBudget-tests)});
             tests+=trimmed.tests;
             if(tests>testBudget)return stopped("continuous-collision:budget",true);
             if(trimmed.status!=="moved")return stopped(`travel-prefix:${trimmed.reason}`,true);
@@ -115,7 +163,7 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
     if(!same(path[0],previous)||!same(path[path.length-1],next))return false;
     const start=this.constrain(path[0],path[0]);
     if(!start.ok||!same(start.pose,path[0]))return false;
-    const stationary=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},path[0],path[0],this.binding.dimensions,{...this.motionParams,maxSlides:0});
+    const stationary=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},path[0],path[0],this.binding.dimensions,{...this.motionParams,mountablePolicy:this.policy.mountablePolicy,maxSlides:0});
     if(stationary.status!=="moved"||stationary.contacts.length)return false;
     let tests=stationary.tests;const budget=this.motionParams.maxTests??200000;
     for(let i=1;i<path.length;i++) {
@@ -123,7 +171,7 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
       const support=this.constrain(a,b);if(!support.ok||!same(support.pose,b))return false;
       // resolve with zero slides: any contact means the submitted piece was not
       // collision-free. A forged endpoint or path cannot turn contact into pass.
-      const checked=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},a,b,this.binding.dimensions,{...this.motionParams,maxSlides:0,maxTests:Math.max(1,budget-tests)});
+      const checked=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},a,b,this.binding.dimensions,{...this.motionParams,mountablePolicy:this.policy.mountablePolicy,maxSlides:0,maxTests:Math.max(1,budget-tests)});
       tests+=checked.tests;
       if(tests>budget)return false;
       if(checked.status!=="moved"||checked.contacts.length||!same(checked.pose,b))return false;

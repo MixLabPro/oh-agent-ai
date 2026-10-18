@@ -1,8 +1,8 @@
 import { sameAuditKey, validateManifest } from "./AuditIdentity";
 import type { AuditManifest, RoadAuditCaseResult, StaticUnitEvidence } from "./contracts";
-export type UnitRelease = Readonly<{ unitId: string; status: "passed" | "blocked" | "pending" | "excluded"; reason: string }>;
+export type UnitRelease = Readonly<{ unitId: string; status: "passed" | "blocked" | "pending" | "excluded" | "closed"; reason: string }>;
 export type AuditReleaseDecision = Readonly<{
-  ready: boolean; candidateCount: number; mandatoryCount: number; passedCount: number;
+  ready: boolean; candidateCount: number; mandatoryCount: number; passedCount: number; closedCount: number;
   units: readonly UnitRelease[]; reasons: readonly string[];
 }>;
 /** No graph mutation. The consumer must enforce every returned direction/turn
@@ -51,5 +51,5 @@ export function evaluateAuditRelease(manifest: AuditManifest, staticResults: rea
   if (!manifest.units.some((unit) => unit.kind === "spawn-access" && !exclusions.has(unit.id))) reasons.push("spawn-access-case-required");
   if (passedCount !== mandatory.length) reasons.push("mandatory-coverage-incomplete");
   return Object.freeze({ ready: reasons.length === 0, candidateCount: units.length, mandatoryCount: mandatory.length,
-    passedCount, units: Object.freeze(units.map((unit) => Object.freeze(unit))), reasons: Object.freeze(reasons) });
+    passedCount, closedCount: 0, units: Object.freeze(units.map((unit) => Object.freeze(unit))), reasons: Object.freeze(reasons) });
 }

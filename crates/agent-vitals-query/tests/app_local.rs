@@ -26,6 +26,7 @@ fn local_projection_is_bounded_redacted_window_scoped_and_honest() {
     let db = AuthorityDb::open(&default_authority_path(&dir), now).unwrap();
     db.begin_run("fixture", "cli", now).unwrap();
     for (key, harness, ts) in [("private-native-session", "codex", Some(now)),
+        ("untitled-session", "codex", Some(now)),
         ("old-session", "codex", Some(now - 40 * 86_400_000)),
         ("unknown-session", "private-harness-name", None)] {
         db.conn().execute("INSERT INTO sessions(session_key,harness,native_session_id,machine_namespace,last_observed_at_ms)
@@ -39,6 +40,9 @@ fn local_projection_is_bounded_redacted_window_scoped_and_honest() {
     db.conn().execute("INSERT INTO session_excerpts(session_key,ordinal,role,excerpt,provenance,ingested_run_id)
         VALUES('private-native-session',0,'user_first',?1,'truncated','fixture')",
         ["帮我修复登录页".repeat(80)]).unwrap();
+    // V32 楼名：有标题的会话投影出（有界、带来源）；超长标题被截到契约上限。
+    db.conn().execute("UPDATE sessions SET title = ?1, title_source = 'codex_thread_name'
+        WHERE session_key = 'private-native-session'", ["标题".repeat(300)]).unwrap();
     for (id, harness, status, opened) in [("public-issue", "codex", "open", now),
         ("closed-issue", "codex", "closed", now), ("old-issue", "codex", "open", now - 40 * 86_400_000),
         ("unknown-issue", "private-harness-name", "open", now)] {
@@ -49,16 +53,25 @@ fn local_projection_is_bounded_redacted_window_scoped_and_honest() {
     }
     let result = city_projection(&dir, 30, now).unwrap();
     assert_eq!(result["source"], "local");
-    assert_eq!(result["coverage"]["total"], 1);
+    assert_eq!(result["coverage"]["total"], 2);
     assert_eq!(result["coverage"]["unknown_time"], 1);
     assert_eq!(result["coverage"]["findings_state"], "partial");
     assert_eq!(result["findings"], serde_json::json!([{"harness":"codex","severity":"warning","count":1}]));
     assert_eq!(result["sessions"][0]["tokens"]["input"], 60);
     assert_eq!(result["sessions"][0]["tokens"]["total"], 100);
+    // 两个窗口内会话按 first ASC + key 排序：private-native-session 在前（有标题），
+    // untitled-session 在后（无标题 → null，不编造）。
+    assert_eq!(result["sessions"].as_array().unwrap().len(), 2);
+    assert_eq!(result["sessions"][1]["title"], serde_json::Value::Null);
+    assert_eq!(result["sessions"][1]["title_source"], serde_json::Value::Null);
     let excerpt = &result["sessions"][0]["task_excerpts"][0];
     assert!(excerpt["text"].as_str().unwrap().chars().count() <= 200);
     assert_eq!(excerpt["provenance"], "truncated");
     assert_eq!(excerpt["is_excerpt"], true);
+    // V32：标题投影（有界 + 来源）；old-session 无标题行 → title 为 null（不编造）。
+    let title = result["sessions"][0]["title"].as_str().unwrap();
+    assert_eq!(title.chars().count(), 256, "超长标题截到契约上限");
+    assert_eq!(result["sessions"][0]["title_source"], "codex_thread_name");
     let encoded = result.to_string();
     for forbidden in ["private-native-session", "private-machine", "private-event", "private-harness-name", "private-error", "public-issue", "source_id", "native_event_id"] {
         assert!(!encoded.contains(forbidden), "projection leaked {forbidden}");

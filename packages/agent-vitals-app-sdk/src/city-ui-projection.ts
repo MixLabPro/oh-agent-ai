@@ -10,6 +10,12 @@ export type CityUiProjectionV2 = {
   sessions: Array<{
     id: string;
     harness: string;
+    /** 会话标题（V32，City 楼名）：codex thread_name / claude ai-title /
+     *  dsh workspace title 的已脱敏、已截断投影；null = 无标题证据（UI 走
+     *  fallback 命名）。本地 app 投影专用，不进 MCP/export 面。 */
+    title?: string | null;
+    /** 标题来源闭集：codex_thread_name | claude_ai_title | dsh_workspace_title。 */
+    title_source?: string | null;
     first_event_at: string;
     last_event_at: string;
     tokens: { input: number; output: number; total: number };

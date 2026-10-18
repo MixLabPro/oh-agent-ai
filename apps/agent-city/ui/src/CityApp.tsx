@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { buildCityModel, type CitySessionRow } from "./cityModel";
+import { prepareCityLayout } from "./engine/cityLayout";
+import { MIAMI_COASTAL } from "./engine/citySeaside";
 import { CityEngine } from "./engine/CityEngine";
 import { tauriCityDataProvider, type CityProjectionV1 } from "./data/provider";
 import "./city.css";
@@ -126,11 +128,15 @@ export function CityApp() {
 
   useEffect(() => {
     if (!projection || !engineRef.current || experience.busy || game.active || driving.active) return;
+    const preparation = new AbortController();
+    const engine = engineRef.current;
     const from = Date.parse(projection.window.from);
     const to = Date.parse(projection.window.to);
     const rows: CitySessionRow[] = projection.sessions.map((session) => ({
       session_ref: session.id,
       harness: session.harness,
+      title: session.title ?? null,
+      title_source: session.title_source ?? null,
       first_event_at: session.first_event_at,
       last_event_at: session.last_event_at,
       event_count: session.event_count ?? 1,
@@ -166,12 +172,19 @@ export function CityApp() {
     experience.setModel(model);
     const signature = JSON.stringify([projection.window, projection.harnesses, projection.sessions, projection.findings]);
     if (signature !== fingerprint.current) {
-      engineRef.current.applyModel(model, appliedWindow.current === projection.window.days);
-      appliedWindow.current = projection.window.days;
-      fingerprint.current = signature;
+      void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal }).then(() => {
+        if (preparation.signal.aborted || engineRef.current !== engine) return;
+        engine.applyModel(model, appliedWindow.current === projection.window.days);
+        appliedWindow.current = projection.window.days;
+        fingerprint.current = signature;
+        experience.refreshSelection();
+      }).catch(() => {
+        if (!preparation.signal.aborted) setSceneUnavailable(true);
+      });
     }
     experience.refreshSelection();
-  }, [projection, experience.busy, game.active, driving.active]);
+    return () => preparation.abort();
+  }, [projection, experience.busy, experience.seed, game.active, driving.active]);
 
   useEffect(() => {
     if (experience.busy || game.active || driving.active) return;
@@ -181,7 +194,7 @@ export function CityApp() {
 
   const dataAvailable = projection !== null && projection.status !== "unavailable";
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
-  const toolbarReady = dataLoaded && (sceneUnavailable || !dataAvailable || projection.status === "empty" || firstModelFrame);
+  const toolbarReady = true; // UI/command channel ready; scene actions stay disabled until the first model frame.
   const tools: Tool[] = [
     // 时间范围、显示标签移入城市设置（用户：这两个应放设置里）；画质同样在设置里。city.window / city.labels 命令仍保留给宿主与自动化。
     { id: "catalog", commandId: "city.catalog", label: "建筑说明", kind: "button", enabled: !cinema && !game.active },
@@ -241,8 +254,8 @@ export function CityApp() {
   const executeRef = useRef(execute);
   executeRef.current = execute;
   useEffect(() => connect((command) => executeRef.current(command.commandId, command.value)), []);
-  // Publishing the first toolbar is the host's ready handshake. An empty scene
-  // or loaded DTO alone must not arm the runtime watchdog during shader boot.
+  // Publishing the first toolbar acknowledges the responsive plugin shell, not
+  // scene completion. Planning runs on a local worker while scene tools stay disabled.
   useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, driving.active, planRepair.state.active, experience.busy, experience.film?.frame, experience.film?.total]);
   const sceneMessage = sceneUnavailable ? "当前环境无法显示三维城市，仍可查看会话摘要。"
     : !dataAvailable || projection.status === "empty" ? status : null;
@@ -258,7 +271,11 @@ export function CityApp() {
       <div hidden={driving.active}><CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} planRepair={planRepair}
         windowDays={windowDays} windowOptions={windowOptions} onWindowDays={(days) => setWindowDays(days as WindowDays)} labels={labels} onLabels={(next) => { engineRef.current?.setLabelsVisible(next); setLabels(next); }}
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} /></div>
-      {CITY_DRIVING_UAT && <DrivingHud driving={driving} />}
+      {CITY_DRIVING_UAT && <DrivingHud model={{ active: driving.active, entryError: driving.entryError,
+        initialPaused: driving.initialPaused, hud: driving.hud, diagnostics: driving.diagnostics() }}
+        actions={{ clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,
+          resume: driving.resume, openUiContext: driving.openUiContext }}
+        locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />}
     </section>
   ), language);
 }

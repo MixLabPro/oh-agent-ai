@@ -95,10 +95,17 @@ export function bridgeDeckProfile(layout: BridgeLayoutInput, from: Vec2, to: Vec
 export function bridgeDeckParts(edge: RoadEdge, layout: BridgeLayoutInput): BoxPart[] {
   const [a,b]=edge.points,profile=bridgeDeckProfile(layout,a,b,edge.width);
   const change=Math.abs(profile.leanTo-profile.leanFrom)*edge.width;
-  if(change<=0.08)return bridgeDeckSectionParts(edge,layout,profile);
-  // A rigid slab cannot meet opposite bank leans. Short overlapping slabs
-  // distribute the roll change; the worst lateral seam step is bounded by 0.02.
-  const count=Math.min(256,Math.max(2,Math.ceil(profile.length/8),Math.ceil(change/0.04)));
+  const parts: BoxPart[] = change<=0.08 ? bridgeDeckSectionParts(edge,layout,profile) : bridgeDeckSplitParts(edge,layout,profile);
+  appendDeadEndBarriers(edge, layout, parts, profile);
+  return parts;
+}
+
+/** A rigid slab cannot meet opposite bank leans. Short overlapping slabs
+ * distribute the roll change; the worst lateral seam step is bounded by 0.02. */
+function bridgeDeckSplitParts(edge: RoadEdge, layout: BridgeLayoutInput, profile: ReturnType<typeof bridgeDeckProfile>): BoxPart[] {
+  const [a,b]=edge.points;
+  const roll=Math.abs(profile.leanTo-profile.leanFrom)*edge.width;
+  const count=Math.min(256,Math.max(2,Math.ceil(profile.length/8),Math.ceil(roll/0.04)));
   const parts:BoxPart[]=[];
   for(let i=0;i<count;i++){
     const t0=i/count,t1=(i+1)/count,point=(t:number)=>({x:a.x+(b.x-a.x)*t,z:a.z+(b.z-a.z)*t});
@@ -109,6 +116,18 @@ export function bridgeDeckParts(edge: RoadEdge, layout: BridgeLayoutInput): BoxP
   }
   parts.push(...bridgeDeckSectionParts(edge,layout,profile).filter(p=>p.role==="bridge-pier"));
   return parts;
+}
+
+/** 断头端封闭（视觉诚实化，2026-10-18）：无接地引道的桥端在桥面尽头加一道横栏。
+ * 视觉不再承诺一条驾驶面拒绝的引道；compileSurface 把 bridge-railing 转成固体障碍，
+ * 碰撞层把车挡在驾驶面真实的终点——两层说同一句话（演示城悬索桥 to 端 no-ground 实测）。 */
+function appendDeadEndBarriers(edge: RoadEdge, layout: BridgeLayoutInput, parts: BoxPart[], profile: ReturnType<typeof bridgeDeckProfile>): void {
+  const [a, b] = edge.points;
+  const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+  for (const end of [a, b] as const) {
+    if (landsOnRoad(layout, end)) continue;
+    parts.push(part(end.x, profile.at(end === a ? 0 : 1) + 0.45, end.z, 0.3, 0.9, Math.max(1, edge.width - 0.6), "#b9bcb2", "bridge-railing", yaw));
+  }
 }
 function bridgeDeckSectionParts(edge: RoadEdge, layout: BridgeLayoutInput, profile: ReturnType<typeof bridgeDeckProfile>): BoxPart[] {
   const parts: BoxPart[] = [];

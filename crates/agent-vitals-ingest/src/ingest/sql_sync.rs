@@ -390,6 +390,9 @@ pub struct SqlSyncOutcome {
     pub workflow_changed: usize,
     /// 任务摘录本轮实际新插的行数（同上）。
     pub excerpts_changed: usize,
+    /// 会话标题本轮实际变更的行数（V32：codex/dsh 侧车索引每 tick 重读，
+    /// 变更计数保证「无重命名轮」零写入、不推 revision——R3-F4 纪律）。
+    pub titles_changed: usize,
     pub errors: Vec<String>,
 }
 
@@ -408,6 +411,7 @@ fn outcome_is_factual(outcome: &SqlSyncOutcome) -> bool {
         || outcome.enriched > 0
         || outcome.workflow_changed > 0
         || outcome.excerpts_changed > 0
+        || outcome.titles_changed > 0
 }
 
 /// SQL 权威库中的源文件指纹。例行同步用它决定是否需要重解析；没有行就是 dirty。
@@ -470,6 +474,7 @@ pub(crate) struct RuntimeQuotaSnapshot<'a> {
     pub observed_at_ms: i64,
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_flat_facts_with_sources(
     db: &AuthorityDb,
@@ -485,8 +490,41 @@ pub(crate) fn write_flat_facts_with_sources(
     now: i64,
 ) -> Result<SqlSyncOutcome, String> {
     write_flat_facts_with_sources_and_extension(db, harness, machine_namespace, sources,
-        checkpoint_overrides, facts, workflow_events, session_excerpts,
+        checkpoint_overrides, facts, workflow_events, session_excerpts, &[],
         route_evidence, runtime_snapshot, now, None)
+}
+
+/// 会话标题的条件 UPDATE（V32 共用腿）：按
+/// `(harness, machine_namespace, native_session_id)` 自然键更新，仅当值真变
+/// 时写——codex/dsh 侧车索引每 tick 重读，无变更轮必须零行、不推 revision。
+/// 不存在的会话行安静跳过（标题不凭空造会话；无 facts 的索引条目没有楼）。
+/// 返回实际变更行数。
+fn apply_session_title_updates(
+    conn: &rusqlite::Connection,
+    harness: &str,
+    machine_namespace: &str,
+    titles: &[agent_vitals_domain::contracts::workflow::SessionTitle],
+) -> Result<usize, AuthorityError> {
+    let mut changed = 0;
+    for title in titles {
+        if title.validate().is_err() {
+            continue;
+        }
+        changed += conn.execute(
+            "UPDATE sessions SET title = ?3, title_source = ?4
+             WHERE harness = ?1 AND machine_namespace = ?2 AND native_session_id = ?5
+               AND deleted_at_ms IS NULL
+               AND (title IS NOT ?3 OR title_source IS NOT ?4)",
+            rusqlite::params![
+                harness,
+                machine_namespace,
+                title.title,
+                title.source,
+                title.native_session_id,
+            ],
+        )?;
+    }
+    Ok(changed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -499,6 +537,7 @@ pub(crate) fn write_flat_facts_with_sources_and_extension(
     facts: &[Value],
     workflow_events: &[WorkflowEvent],
     session_excerpts: &[agent_vitals_domain::contracts::workflow::SessionExcerpt],
+    session_titles: &[agent_vitals_domain::contracts::workflow::SessionTitle],
     route_evidence: Option<&agent_vitals_provider::RouteEvidence>,
     runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
     now: i64,
@@ -573,6 +612,7 @@ pub(crate) fn write_flat_facts_with_sources_and_extension(
         if facts.is_empty()
             && workflow_events.is_empty()
             && session_excerpts.is_empty()
+            && session_titles.is_empty()
             // MSRV 1.74：`is_none_or` 稳定于 1.82，这里用 `map_or`。
             && runtime_snapshot.as_ref().map_or(true, |write| write.snapshots.is_empty())
         {
@@ -642,7 +682,7 @@ pub(crate) fn write_flat_facts_with_sources_and_extension(
                 )?;
             }
         }
-        if facts.is_empty() && workflow_events.is_empty() && session_excerpts.is_empty() {
+        if facts.is_empty() && workflow_events.is_empty() && session_excerpts.is_empty() && session_titles.is_empty() {
             // 能过上面那条短路还到这里 = 本轮有快照写入或 backfill：快照载荷
             // （配额滚动窗口）是用户可见状态，按事实性提交（R3-F4 裁决）。
             return Ok(((), true));
@@ -726,6 +766,13 @@ pub(crate) fn write_flat_facts_with_sources_and_extension(
                 now,
             )?;
         }
+        // V32：解析产出的会话标题（claude ai-title；事实已先把 sessions 行
+        // upsert 好，标题按自然键补上）。侧车索引型标题（codex/dsh）走独立的
+        // apply_session_titles 趟，不经此路径。
+        if !session_titles.is_empty() {
+            outcome.titles_changed =
+                apply_session_title_updates(conn, harness, machine_namespace, session_titles)?;
+        }
         // 事件总线（spec §1.2）：FactsIngested 与本批事实**同事务**落 outbox——
         // 早于此处返回的空批短路（上方 is_empty 分支）不发射。
         //
@@ -778,6 +825,78 @@ pub(crate) fn write_flat_facts_with_sources_and_extension(
             .finish_run(&run_id, "succeeded", None, None, now)
             .map_err(|e| format!("finish_run: {e}"))
             .map(|_| outcome),
+        Err(e) => {
+            let message = e.to_string();
+            let _ = db.finish_run(&run_id, "failed", Some(ERR_DB_ERROR), Some(&message), now);
+            Err(message)
+        }
+    }
+}
+
+/// 侧车索引型会话标题（codex `session_index.jsonl` / DSH `workspace.json`）的
+/// 独立应用趟（V32）。索引每 tick 重读，与脏文件无关——用户重命名线程后
+/// rollout 未变也要能刷标题。纪律：
+/// - **先读后写**：全部标题与库内现值一致（含「会话行不存在」）→ 零写事务、
+///   零 sync_runs 行（R3-F4：无变更轮不得留痕/推 revision）。
+/// - 有变更才 begin_run + 单事务条件 UPDATE；变更行数返回给调用方上报告。
+pub(crate) fn apply_session_titles(
+    db: &AuthorityDb,
+    harness: &str,
+    machine_namespace: &str,
+    titles: &[agent_vitals_domain::contracts::workflow::SessionTitle],
+    now: i64,
+) -> Result<usize, String> {
+    // 预检：只留 validate 过关且「库里有行、值确有变化」的标题。
+    let mut pending: Vec<&agent_vitals_domain::contracts::workflow::SessionTitle> = Vec::new();
+    {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT title, title_source FROM sessions
+                 WHERE harness = ?1 AND machine_namespace = ?2 AND native_session_id = ?3
+                   AND deleted_at_ms IS NULL",
+            )
+            .map_err(|e| format!("titles precheck: {e}"))?;
+        for title in titles {
+            if title.validate().is_err() {
+                continue;
+            }
+            let existing: Option<(Option<String>, Option<String>)> = stmt
+                .query_row(
+                    rusqlite::params![harness, machine_namespace, title.native_session_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(|e| format!("titles precheck: {e}"))?;
+            match existing {
+                // 无会话行（索引条目从未被任何事实见过）→ 跳过：标题不凭空造楼。
+                None => {}
+                Some((t, s)) if t.as_deref() == Some(title.title.as_str())
+                    && s.as_deref() == Some(title.source.as_str()) => {}
+                Some(_) => pending.push(title),
+            }
+        }
+    }
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let run_id = new_run_id(TRIGGER_SYNC);
+    db.begin_run(&run_id, TRIGGER_SYNC, now)
+        .map_err(|e| format!("begin_run {run_id}: {e}"))?;
+    let result: Result<usize, AuthorityError> = db.with_immediate_txn(|conn| {
+        let owned: Vec<agent_vitals_domain::contracts::workflow::SessionTitle> =
+            pending.into_iter().cloned().collect();
+        apply_session_title_updates(conn, harness, machine_namespace, &owned)
+    });
+    match result {
+        Ok(changed) => db
+            .finish_run(&run_id, "succeeded", None, None, now)
+            .map_err(|e| format!("finish_run: {e}"))
+            .map(|_| changed),
         Err(e) => {
             let message = e.to_string();
             let _ = db.finish_run(&run_id, "failed", Some(ERR_DB_ERROR), Some(&message), now);
@@ -1208,7 +1327,7 @@ mod tests {
             engine_version:"1.4.0".into() };
         assert!(write_flat_facts_with_sources_and_extension(&db, "harness:zcode", "m",
             &[(src.clone(), (99, 99))], &overrides, std::slice::from_ref(&fact),
-            &[], &[], None, None, 2_000, Some(&context)).is_err());
+            &[], &[], &[], None, None, 2_000, Some(&context)).is_err());
         assert_eq!(db.revision().unwrap(), before);
         for table in ["usage_facts", "extension_fact_provenance", "sessions", "event_outbox"] {
             let count: i64 = db.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [],
@@ -1225,7 +1344,7 @@ mod tests {
         context.generation = 1;
         let accepted = write_flat_facts_with_sources_and_extension(&db, "harness:zcode", "m",
             &[(src.clone(), (99, 99))], &overrides, std::slice::from_ref(&fact),
-            &[], &[], None, None, 3_000, Some(&context)).unwrap();
+            &[], &[], &[], None, None, 3_000, Some(&context)).unwrap();
         assert_eq!(accepted.inserted, 1);
         assert_eq!(db.revision().unwrap(), before + 1);
         let checkpoint = crate::source_graph::read_checkpoint(db.conn(), "harness:zcode",
@@ -1920,6 +2039,87 @@ mod tests {
             provider == "minimax" && *amount == 11_400
         }), "failed migration must roll back the legacy-bill revoke: {bills:?}");
         assert!(db.pending_billing_import_candidates().unwrap().is_empty());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// V32 会话标题（City 楼名）的写入纪律，三个断言族：
+    /// - 主写入路径（claude 解析产出）：事实先把 sessions 行 upsert 好，标题
+    ///   按自然键补上；同批重放（全 duplicate + 标题未变）titles_changed=0、
+    ///   revision 不动（R3-F4：索引/重扫每 tick 重读，无变更轮必须静默）；
+    /// - 独立趟（codex/dsh 侧车索引）：标题真变时应用 + 推 revision；无变更
+    ///   重跑零写、零 sync_runs 行（REFRESH_STORM：不留每 tick 心跳批次）；
+    /// - 索引条目指向不存在的会话 → 安静跳过（标题不凭空造会话/楼）。
+    #[test]
+    fn session_titles_apply_conditionally_and_stay_silent_without_change() {
+        use agent_vitals_domain::contracts::workflow::SessionTitle;
+        let home = tmp_home("v32-titles");
+        let db = open_db(&home);
+        let src = home.join("s.jsonl");
+        let overrides = std::collections::HashMap::new();
+        let fact = serde_json::json!({"harness":"claude-code", "machine_namespace":"m",
+            "source_profile":"default", "native_session_id":"s1", "source_event_id":"e1",
+            "observation_kind":"token_count", "event_ts_utc":"2026-09-23T01:02:03Z",
+            "model_id":"claude-sonnet-5", "uncached_input_tokens":100,
+            "cache_read_tokens":50, "cache_write_tokens":10, "output_tokens":5});
+        let title = SessionTitle {
+            native_session_id: "s1".to_string(),
+            title: "修复菜单栏图标".to_string(),
+            source: "claude_ai_title".to_string(),
+        };
+        // 主写入路径：事实 + 标题同批 → sessions 行带标题。
+        let outcome = write_flat_facts_with_sources_and_extension(&db, "claude-code", "m",
+            &[(src.clone(), (10, 10))], &overrides, std::slice::from_ref(&fact),
+            &[], &[], std::slice::from_ref(&title), None, None, 1_000, None).unwrap();
+        assert_eq!(outcome.inserted, 1);
+        assert_eq!(outcome.titles_changed, 1);
+        let stored: (String, String) = db.conn().query_row(
+            "SELECT title, title_source FROM sessions WHERE native_session_id = 's1'", [],
+            |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(stored, ("修复菜单栏图标".to_string(), "claude_ai_title".to_string()));
+        // 同批重放：事实全 duplicate、标题未变 → titles_changed=0、revision 不动。
+        let revision = db.revision().unwrap();
+        let replay = write_flat_facts_with_sources_and_extension(&db, "claude-code", "m",
+            &[(src.clone(), (10, 10))], &overrides, std::slice::from_ref(&fact),
+            &[], &[], std::slice::from_ref(&title), None, None, 2_000, None).unwrap();
+        assert_eq!(replay.duplicate, 1);
+        assert_eq!(replay.titles_changed, 0);
+        assert_eq!(db.revision().unwrap(), revision, "无标题变更的重放不得推 revision");
+
+        // 独立趟：同值重跑 → 0 且不产生新 sync_runs 批次（先读后写纪律）。
+        let runs_before: i64 = db.conn().query_row("SELECT COUNT(*) FROM sync_runs", [],
+            |row| row.get(0)).unwrap();
+        assert_eq!(apply_session_titles(&db, "claude-code", "m",
+            std::slice::from_ref(&title), 3_000).unwrap(), 0);
+        let runs_after: i64 = db.conn().query_row("SELECT COUNT(*) FROM sync_runs", [],
+            |row| row.get(0)).unwrap();
+        assert_eq!(runs_before, runs_after, "无变更轮不得留下 sync_runs 批次");
+        assert_eq!(db.revision().unwrap(), revision);
+
+        // 独立趟：重命名（codex 侧车索引的典型场景——rollout 未变）→ 应用 + 推 revision。
+        let renamed = SessionTitle {
+            native_session_id: "s1".to_string(),
+            title: "修复菜单栏图标（改名）".to_string(),
+            source: "claude_ai_title".to_string(),
+        };
+        assert_eq!(apply_session_titles(&db, "claude-code", "m",
+            std::slice::from_ref(&renamed), 4_000).unwrap(), 1);
+        assert_eq!(db.revision().unwrap(), revision + 1);
+        let stored: (String, String) = db.conn().query_row(
+            "SELECT title, title_source FROM sessions WHERE native_session_id = 's1'", [],
+            |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(stored.0, "修复菜单栏图标（改名）");
+
+        // 索引条目指向不存在的会话 → 安静跳过（0 行，无 run，无 revision）。
+        let orphan = SessionTitle {
+            native_session_id: "never-seen".to_string(),
+            title: "幽灵会话".to_string(),
+            source: "codex_thread_name".to_string(),
+        };
+        let revision = db.revision().unwrap();
+        assert_eq!(apply_session_titles(&db, "claude-code", "m",
+            std::slice::from_ref(&orphan), 5_000).unwrap(), 0);
+        assert_eq!(db.revision().unwrap(), revision);
+        drop(db);
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

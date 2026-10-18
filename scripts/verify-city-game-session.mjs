@@ -60,18 +60,46 @@ const returnView = { position: [10, 10, 10], target: [0, 0, 0], up: [0, 1, 0], f
   controls: { minDistance: 3, maxDistance: 900, enablePan: true, zoomToCursor: true, orbitLockedId: null } };
 function fakeEngine() {
   let frameHook = null;
-  return {
-    currentLayout: null, currentModel: null, replayCursor: null, owner: "orbit",
-    setCameraOwner(owner) { this.owner = owner; return true; },
-    captureReturnView: () => structuredClone(returnView),
-    restoreReturnView(view) { this.restored = view; },
-    attachGameObjects: () => {}, detachGameObjects: () => {},
-    setGameFrameHook: (fn) => { frameHook = fn; },
-    get frame() { return (dt) => frameHook?.(dt); },
+  const engine = {
+    currentLayout: null, currentModel: null, replayCursor: null, owner: "orbit", attached: new Set(), releaseCount: 0,
     setLabelsVisible: () => {},
     renderCamera: new THREE.PerspectiveCamera(50, 1.6, 0.1, 2000),
     domCanvas: {},
+    gameScenePort: { acquireResult: async (_selection, runId, signal) => {
+      if (signal.aborted) throw new Error("cancelled");
+      const capturedModel = engine.currentModel;
+      const current = () => engine.currentModel === capturedModel;
+      const staticWorld = { status: "ready", revision: `test-world:${runId}`, worldRevision: `test-world:${runId}`,
+        isCurrent: current, isLeaseCurrent: current, verifyCurrent: current,
+        readWorld: () => { if (engine.throwOnReadWorld) throw new Error("snapshot-read-failed"); return current() ? ({ revision: `test-world:${runId}`, worldRevision: `test-world:${runId}`, layout, obstacles: [], sceneSolids: [], renderedSolids: [], surface: {} }) : null; } };
+      const snapshot = Object.freeze({ staticWorld });
+      const lease = { token: Symbol(), hostEpoch: 1, selection: _selection, runId, revision: staticWorld.worldRevision, snapshot,
+        isCurrent: current, attach: (objects) => objects.forEach((object) => engine.attached.add(object)),
+        detach: (objects) => objects.forEach((object) => engine.attached.delete(object)),
+        setCamera: (pose) => { engine.pose = pose; }, setAmbientCarsVisible: () => {},
+        setFrameHook: (hook) => { frameHook = hook; }, release: () => { engine.releaseCount++; frameHook = null; engine.owner = "orbit"; engine.restored = returnView; } };
+      return { status: "ready", lease };
+    }, acquire: async (...args) => {
+      const result = await engine.gameScenePort.acquireResult(...args);
+      if (result.status !== "ready") throw new Error(result.reason);
+      return result.lease;
+    } },
+    get frame() { return (dt) => frameHook?.(dt); },
   };
+  return engine;
+}
+
+// If static preparation throws after acquiring the host scene, the token and
+// partial run resources are still returned before the error panel is shown.
+{
+  const engine = fakeEngine(); engine.currentLayout = layout; engine.currentModel = model; engine.throwOnReadWorld = true;
+  const session = new GameSession(engine, { onState() {}, onExited() {} });
+  const result = await session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false });
+  assert.ok(!result.ok && result.reason !== "not-ready", "throwing snapshot read fails preparation");
+  assert.equal(engine.releaseCount, 1, "preparation exception releases acquired scene lease");
+  assert.equal(engine.owner, "orbit", "preparation exception restores host state");
+  assert.equal(session.snapshot().telemetry, null);
+  session.dispose();
 }
 
 // ── 1) 准备失败 → 重试完整重建（不再进入空局面）──
@@ -82,14 +110,14 @@ function fakeEngine() {
   // 调用方报告 cityReady=true 但引擎布局尚未到位（分页/竞态）：控制器已进入 preparing，
   // ensureRunObjects 失败 → 错误面板。旧实现此时 world/params 为 null，重试会空跑。
   const host = { cityReady: true, cinemaActive: false, filmActive: false, busy: false };
-  const failed = session.enter({ mode: "practice" }, host);
+  const failed = await session.enter({ mode: "practice" }, host);
   assert.ok(!failed.ok && failed.reason === "not-ready");
   assert.equal(session.controller.snapshot.phase, "preparing");
   assert.ok(session.controller.snapshot.error, "失败进入错误面板");
   assert.ok(!session.snapshot().telemetry, "失败时不该有模拟读数");
   // 引擎数据到位后重试：必须长出完整模拟对象。
   engine.currentLayout = layout; engine.currentModel = model;
-  session.retryPrepare();
+  await session.retryPrepare();
   const snapshot = session.snapshot();
   assert.equal(snapshot.controller.phase, "practice", "重试后进入练习");
   assert.ok(snapshot.telemetry, "重试后必须有模拟读数（telemetry 非空 = sim 存在）");
@@ -111,7 +139,7 @@ function fakeEngine() {
   engine.currentLayout = layout; engine.currentModel = model;
   const session = new GameSession(engine, { onState: () => {}, onExited: () => {} });
   const host = { cityReady: true, cinemaActive: false, filmActive: false, busy: false };
-  const entered = session.enter({ mode: "race" }, host);
+  const entered = await session.enter({ mode: "race" }, host);
   assert.ok(entered.ok, `挑战可进入（${entered.ok ? "" : entered.reason}）`);
   assert.equal(session.snapshot().controller.phase, "countdown");
   assert.ok(session.snapshot().mission, "挑战带任务实例");
@@ -138,12 +166,12 @@ function fakeEngine() {
   const engine = fakeEngine();
   engine.currentLayout = layout; engine.currentModel = model;
   const session = new GameSession(engine, { onState: () => {}, onExited: () => {} });
-  assert.ok(session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok);
+  assert.ok((await session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok);
   for (let frame = 0; frame < 200; frame += 1) engine.frame(1 / 60);
   session.controller.raceFinished();
   assert.equal(session.snapshot().controller.phase, "result");
   const before = session.snapshot().courseId;
-  session.newCourse();
+  await session.newCourse();
   const afterNew = session.snapshot();
   assert.equal(afterNew.controller.phase, "countdown", "换路线后立即进入新倒计时（不再卡 result）");
   assert.ok(afterNew.mission && afterNew.mission.progress === 0, "新路线带全新任务");
@@ -162,9 +190,14 @@ function fakeEngine() {
   engine.currentLayout = layout; engine.currentModel = model;
   const session = new GameSession(engine, { onState: () => {}, onExited: () => {} });
   const host = { cityReady: true, cinemaActive: false, filmActive: false, busy: false };
-  assert.ok(session.enter({ mode: "practice" }, host).ok);
+  assert.ok((await session.enter({ mode: "practice" }, host)).ok);
+  const lastSafePose = engine.pose;
+  session.world.queryCameraSweep = () => ({ status: "unresolved" });
+  engine.frame(1 / 60);
+  assert.equal(session.controller.snapshot.paused?.reason, "camera-safety", "unresolved camera query visibly pauses flight");
+  assert.equal(engine.pose, lastSafePose, "unresolved camera query does not write the reset or unsafe scratch pose");
   session.exit();
-  assert.ok(session.enter({ mode: "practice" }, host).ok, "退出后可再次进入");
+  assert.ok((await session.enter({ mode: "practice" }, host)).ok, "退出后可再次进入");
   assert.ok(session.snapshot().telemetry);
   session.exit();
 }
@@ -174,7 +207,7 @@ function fakeEngine() {
   const engine = fakeEngine();
   engine.currentLayout = layout; engine.currentModel = model;
   const session = new GameSession(engine, { onState: () => {}, onExited: () => {} });
-  assert.ok(session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok);
+  assert.ok((await session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok);
   const cruise = session.snapshot().telemetry.speed;
   // 未聚焦（焦点在宿主控件）：按住 W 推进 2s，速度不得上升。
   documentShim.activeElement = null;
@@ -209,17 +242,19 @@ function fakeEngine() {
   // 注入「总是失败」的路线工厂：真实布局不会生成失败，无法覆盖 no-course 分支。
   const session = new GameSession(engine, { onState: () => {}, onExited: () => {} }, () => null);
   const host = { cityReady: true, cinemaActive: false, filmActive: false, busy: false };
-  const refused = session.enter({ mode: "race" }, host);
+  const refused = await session.enter({ mode: "race" }, host);
   assert.ok(!refused.ok && refused.reason === "no-course", "注入工厂令生成失败");
   assert.ok(session.controller.snapshot.error, "进入错误面板");
   const v0 = session.snapshot().variant;
   // 错误面板「重试准备」：no-course 失败 → variant +1（仍失败）。
-  session.retryPrepare();
+  await session.retryPrepare();
   assert.equal(session.snapshot().variant, v0 + 1, "生成失败的重试换 variant");
+  assert.equal(session.world.staticContentRevision, `test-world:${session.controller.snapshot.runId}`,
+    "retry rebuilds the frozen flight world when the newly acquired host revision changes");
   // 错误面板「换一条路线」：恰好 +1（曾与重试推断叠加成 +2）。
-  session.newCourse();
+  await session.newCourse();
   assert.equal(session.snapshot().variant, v0 + 2, "换路线只递增一次");
-  session.newCourse();
+  await session.newCourse();
   assert.equal(session.snapshot().variant, v0 + 3, "再次换路线仍只 +1");
   session.exit();
 }
@@ -231,7 +266,7 @@ function fakeEngine() {
   const records = [];
   const session = new GameSession(engine, { onState: () => {}, onExited: () => {},
     onRecord: (...record) => records.push(record) });
-  assert.ok(session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok);
+  assert.ok((await session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok);
   documentShim.activeElement = engine.domCanvas;
   const held = new Set();
   const setKeys = (next) => {
@@ -283,7 +318,7 @@ function fakeEngine() {
   const engine = fakeEngine();
   engine.currentLayout = layout; engine.currentModel = model;
   const session = new GameSession(engine, { onState: () => {}, onExited: () => {} });
-  assert.ok(session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok);
+  assert.ok((await session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok);
   documentShim.activeElement = engine.domCanvas;
   const stop = startUatPilot(session, engine);
   for (let frame = 0; frame < 18000 && session.controller.snapshot.phase !== "result"; frame += 1) {
@@ -300,35 +335,87 @@ function fakeEngine() {
 }
 
 // Shared-clock migration: full flight session is frame-rate independent, and
-// overload uses the same bounded-pause policy as the car runtime.
+// overload uses the same bounded time-drop policy as the car runtime.
 {
   const results = [];
   for (const hz of [30, 60, 120]) {
     const engine = fakeEngine(); engine.currentLayout = layout; engine.currentModel = model;
     const session = new GameSession(engine, { onState() {}, onExited() {} });
-    assert.equal(session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok, true);
+    assert.equal((await session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok, true);
     documentShim.activeElement = engine.domCanvas; pressKey("KeyW"); pressKey("KeyD");
     for (let frame = 0; frame < hz * 2; frame++) {
       if (frame === hz) releaseKey("KeyD");
       engine.frame(1 / hz);
     }
     results.push({ ...session.sim });
+    const beforeOverload = session.sim.simTime;
     engine.frame(0.2);
-    assert.equal(session.controller.snapshot.paused?.reason, "lag", "shared overload policy");
+    assert.equal(session.controller.snapshot.paused, null, "shared overload policy keeps the activity running");
+    assert.ok(Math.abs(session.sim.simTime - beforeOverload - 5 / 60) < 1e-9, "overload advances at most five fixed ticks");
+    engine.frame(NaN);
+    assert.equal(session.controller.snapshot.paused?.reason, "lag", "invalid frame deltas still visibly pause");
     session.exit();
   }
   for (const result of results.slice(1)) for (const field of ["x", "y", "z", "heading", "speed", "verticalSpeed", "bank", "simTime"])
     assert.ok(Math.abs(result[field] - results[0][field]) < 1e-9, `shared clock changed flight ${field}`);
 }
+// A compact deterministic race crosses one real physics-driven ring at 30/60/120 Hz.
+// It exercises countdown, the five-tick overload cap, timeout, and exactly-once
+// settlement without running the long generated-course acceptance routes below.
+{
+  const courseFactory = ({ world, params, variant, citySeed, physicsVersion }) => {
+    const base = world.findSafeSpawn(params.planeRadius + 1.5, params.planeRadius * 5.2, params.planeRadius * 2.4);
+    if (!base) return null;
+    const nx = Math.cos(base.heading), nz = Math.sin(base.heading);
+    const back = Math.max(params.maxSpeed * 1.6, 30);
+    return { kind: "generated", rings: [{ x: base.x + nx * (back + 8), y: base.y, z: base.z + nz * (back + 8), nx, ny: 0, nz, radius: 30 }],
+      timeLimitMs: 20_000, referenceMs: 2_000, ringRadius: 30, courseId: `small-race:${citySeed}:${physicsVersion}:${variant}`, variant };
+  };
+  for (const hz of [30, 60, 120]) {
+    const engine = fakeEngine(); engine.currentLayout = layout; engine.currentModel = model;
+    const records = [];
+    const session = new GameSession(engine, { onState() {}, onExited() {}, onRecord: (...record) => records.push(record) }, courseFactory);
+    assert.equal((await session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok, true);
+    // Fractional render deltas (especially 120 Hz) do not land on an exact
+    // fixed-tick boundary, so give the countdown one small bounded margin.
+    for (let frame = 0; frame < hz * 3 + 10; frame++) engine.frame(1 / hz);
+    assert.equal(session.controller.snapshot.phase, "racing", `${hz} Hz countdown settles at its deadline`);
+    const elapsedBeforeDrop = session.snapshot().mission.elapsedMs;
+    engine.frame(0.2);
+    assert.equal(session.controller.snapshot.phase, "racing", "bounded long frame does not timeout or pause the race");
+    assert.ok(Math.abs(session.snapshot().mission.elapsedMs - elapsedBeforeDrop - 5 * 1000 / 60) < 1e-9, "long frame advances exactly five fixed ticks");
+    for (let frame = 0; frame < hz * 4 && session.controller.snapshot.phase !== "result"; frame++) engine.frame(1 / hz);
+    assert.equal(session.snapshot().mission.result?.finished, true, `${hz} Hz actual flight crosses the deterministic ring`);
+    const settled = session.snapshot().mission.result;
+    for (let frame = 0; frame < hz; frame++) engine.frame(1 / hz);
+    assert.deepEqual(session.snapshot().mission.result, settled, "result remains settled after additional frames");
+    assert.equal(records.length, 1, "race records exactly once");
+    session.exit();
+  }
+  // A genuinely unreachable ring times out through the same mission/runtime path.
+  const timeoutCourse = ({ world, params, variant, citySeed, physicsVersion }) => {
+    const base = world.findSafeSpawn(params.planeRadius + 1.5, params.planeRadius * 5.2, params.planeRadius * 2.4);
+    if (!base) return null;
+    return { kind: "generated", rings: [{ x: base.x + 1_000_000, y: base.y, z: base.z, nx: 1, ny: 0, nz: 0, radius: 30 }],
+      timeLimitMs: 500, referenceMs: 500, ringRadius: 30, courseId: `timeout-race:${citySeed}:${physicsVersion}:${variant}`, variant };
+  };
+  const engine = fakeEngine(); engine.currentLayout = layout; engine.currentModel = model;
+  const records = [], session = new GameSession(engine, { onState() {}, onExited() {}, onRecord: (...record) => records.push(record) }, timeoutCourse);
+  assert.equal((await session.enter({ mode: "race" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok, true);
+  for (let frame = 0; frame < 300 && session.controller.snapshot.phase !== "result"; frame++) engine.frame(1 / 60);
+  assert.equal(session.snapshot().mission.result?.finished, false, "unreachable course times out");
+  assert.equal(records.length, 0, "timeout does not persist a success record");
+  session.exit();
+}
 // A stale world releases ownership and can prepare a new flight activity.
 {
   const engine = fakeEngine(); engine.currentLayout = layout; engine.currentModel = model;
   const session = new GameSession(engine, { onState() {}, onExited() {} });
-  assert.equal(session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false }).ok, true);
+  assert.equal((await session.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false })).ok, true);
   engine.currentModel = { ...model }; engine.frame(1 / 60);
   assert.equal(session.controller.snapshot.error?.message, "stale-game-world");
   assert.equal(engine.owner, "orbit"); assert.equal(session.snapshot().telemetry, null);
-  session.retryPrepare();
+  await session.retryPrepare();
   assert.equal(session.controller.snapshot.error, null); assert.ok(session.snapshot().telemetry);
   session.exit();
 }

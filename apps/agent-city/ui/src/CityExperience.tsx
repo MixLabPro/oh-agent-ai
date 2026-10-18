@@ -25,6 +25,12 @@ declare const __CITY_GAME_UAT__: boolean;
 
 const dateLabel = (ms: number) => new Date(ms).toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
 const tokens = (n: number) => n.toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
+/** 会话标题来源 → 展示名（V32 楼名）。未知来源原样展示，不编造。 */
+const titleSourceLabel = (source?: string | null) =>
+  source === "codex_thread_name" ? "Codex 线程名"
+  : source === "claude_ai_title" ? "Claude AI 标题"
+  : source === "dsh_workspace_title" ? "DSH 工作区名"
+  : source ?? null;
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -246,13 +252,14 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   // 放在进场关键路径会把进入游戏冻结住。城市就绪后的空闲时机先建好（不发声）。
   useEffect(() => {
     if (disabled || !ui.model || landingPreview) return;
-    const warm = () => prewarmAudioContext();
+    let active = true;
+    const warm = () => { if (active) prewarmAudioContext(); };
     if (typeof requestIdleCallback === "function") {
       const id = requestIdleCallback(warm, { timeout: 4000 });
-      return () => cancelIdleCallback(id);
+      return () => { active = false; cancelIdleCallback(id); };
     }
     const timer = setTimeout(warm, 1500);
-    return () => clearTimeout(timer);
+    return () => { active = false; clearTimeout(timer); };
   }, [disabled, ui.model, landingPreview]);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
@@ -405,7 +412,10 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     {selected && !cinema && !gameActive && <aside className="city-detail-panel" aria-label="建筑详情">
       <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
       <p>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</p>
-      {model && selected.tokensTotal >= Math.max(...model.buildings.map((b) => b.tokensTotal)) && <p className="city-hero-note">全城之最：本窗口 token 最多的会话。它戴尖顶冠，夜里顶上亮一道探照光柱，方便在全城找到它。</p>}<h2>{model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}</h2>
+      {model && selected.tokensTotal >= Math.max(...model.buildings.map((b) => b.tokensTotal)) && <p className="city-hero-note">全城之最：本窗口 token 最多的会话。它戴尖顶冠，夜里顶上亮一道探照光柱，方便在全城找到它。</p>}
+      {/* 楼名（V32）：会话标题优先；无标题证据时回退城区名（聚合楼没有标题，恒走回退）。 */}
+      <h2>{session?.title ?? model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}</h2>
+      {session?.title && <p className="city-session-title-source">标题来自{titleSourceLabel(session.title_source) ?? "未知来源"}</p>}
       <dl><dt>Token</dt><dd>{tokens(selected.tokensTotal)}</dd><dt>状态</dt><dd>{selected.active ? "活跃 · 施工中" : "非活跃 · 已封顶"}</dd>
         <dt>进度估算</dt><dd>{Math.round(selected.builtFraction * 100)}%</dd><dt>起始时间</dt><dd>{dateLabel(selected.startedAt)}</dd>
         <dt>事件数</dt><dd>{session?.event_count ?? "未投影"}</dd><dt>费用</dt><dd>尚未接入</dd></dl>
@@ -421,7 +431,9 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     <dialog className="city-dialog" ref={detailsRef} onCancel={(event) => { event.preventDefault(); event.stopPropagation(); ui.setDetails(false); }} onClose={() => ui.setDetails(false)} aria-label="会话详情">
       <header className="city-dialog-header"><h2>会话详情</h2><button className="city-close" aria-label="关闭会话详情" onClick={() => ui.setDetails(false)}>×</button></header>
       <div className="city-dialog-body">
-      {session && <><p>{session.harness} · {session.first_event_at}</p><dl><dt>输入 token（含缓存）</dt><dd>{tokens(session.tokens.input)}</dd><dt>输出 token</dt><dd>{tokens(session.tokens.output)}</dd><dt>统计截止</dt><dd>{session.last_event_at}</dd></dl>
+      {session && <><p>{session.harness} · {session.first_event_at}</p>
+        {session.title && <p className="city-session-title" title={session.title}>{session.title}<span className="city-session-title-source"> · {titleSourceLabel(session.title_source) ?? "未知来源"}</span></p>}
+        <dl><dt>输入 token（含缓存）</dt><dd>{tokens(session.tokens.input)}</dd><dt>输出 token</dt><dd>{tokens(session.tokens.output)}</dd><dt>统计截止</dt><dd>{session.last_event_at}</dd></dl>
         <h3>用户输入摘录</h3>{session.task_excerpts?.length ? session.task_excerpts.map((excerpt, i) => <section key={i} className="city-excerpt"><p>{excerpt.role === "user_first" ? "首次输入" : "后续输入"} · {excerpt.provenance === "truncated" ? "已截断" : excerpt.provenance === "scrubbed" ? "已清理" : "有限摘录"}</p><blockquote>{excerpt.text}</blockquote></section>) : <p>当前数据没有可用摘录。</p>}
         <p>摘录并非完整提示词。原始日志、调用详情、模型、费用及异常尚未开放为此插件的详情投影。</p></>}
       </div>
@@ -457,7 +469,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
       {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}</>}
       <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.lockSelection(e.target.value); else ui.clearSelection(); ui.setOptions(false); }}>
-        <option value="">请选择</option>{(ui.projection?.sessions ?? []).map((session) => <option key={session.id} value={session.id}>{session.harness} · {session.first_event_at} · {tokens(session.tokens.total)} tokens</option>)}
+        <option value="">请选择</option>{(ui.projection?.sessions ?? []).map((session) => <option key={session.id} value={session.id}>{session.title ? `${session.title} · ` : ""}{session.harness} · {session.first_event_at} · {tokens(session.tokens.total)} tokens</option>)}
       </select>
       {ui.error && <p role="alert">{ui.error}</p>}
       </div>
@@ -472,6 +484,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     {!cinema && !gameActive && <PlanRepairPanel repair={planRepair} />}
     {game.active && game.snapshot && <GameHud snapshot={game.snapshot} locale={language === "en" ? "en" : "zh-Hans"} persist={{ tier: game.persistTier, saveFailed: game.saveFailed }} actions={{
       onResume: game.resume, onRestart: game.restart, onExit: game.exit, onRetryPrepare: game.retryPrepare, onNewCourse: game.newCourse, onSoundVolume: game.setSoundVolume, onToggleSfx: game.toggleSfx, onToggleMusic: game.toggleMusic,
+      onPause: () => game.pause("user"),
     }} />}
     {debug && ui.stats && <p className="city-perf">{ui.stats.fps} FPS · {ui.stats.drawCalls} draw calls · {ui.stats.buildings} buildings · geo {ui.stats.geometries} · tex {ui.stats.textures} · quality {ui.stats.quality}</p>}
   </>, language);

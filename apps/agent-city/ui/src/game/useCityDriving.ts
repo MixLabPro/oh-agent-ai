@@ -4,9 +4,13 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { CityEngine } from "../engine/CityEngine";
 import { EMPTY_DRIVING_INPUT, DRIVING_DT, type DrivingState, type DrivingInputState } from "./DrivingSimulation";
 import { GameRuntime } from "./runtime/GameRuntime";
-import { createCityCarSession, createCityCarDiagnosticSession } from "./runtime/createCityCarSession";
+import { createCityCarSession, createCityCarDiagnosticSession, type CityCarSceneCapability } from "./runtime/createCityCarSession";
 import type { CollisionDimensions } from "./driving/CollisionIndex";
 import type { CarPresentation } from "./runtime/CarAdapter";
+import type { CameraClearanceQuery, ChaseCameraSafety } from "./VehicleChaseCamera";
+import type { RuntimeDiagnosticSnapshot } from "./runtime/RuntimeDiagnostics";
+import type { VerifiedSpawnCredential } from "./driving/spawnPoints";
+import { resolveFormalSpawn, SpawnConfirmationStore, type SpawnCandidateChoice, type SpawnConfirmationBinding, type SpawnConfirmationSnapshot } from "./driving/SpawnConfirmation";
 
 export const CITY_CAR_COLLIDER: Readonly<{ dimensions: CollisionDimensions; centerHeight: number; vehicleConfigHash: string }> = Object.freeze({
   dimensions: Object.freeze({ halfLength: 1.4, halfWidth: 0.7, halfHeight: 0.575 }),
@@ -19,12 +23,17 @@ export type DrivingHudSnapshot = Readonly<{
   gear: "D" | "R" | "B" | "N";
 }>;
 const IDLE_HUD: DrivingHudSnapshot = Object.freeze({ phase: "idle", reason: null, speed: 0, blocked: false, coverage: null, gear: "N" });
-export type DrivingPresentation = (state: Readonly<DrivingState>, blocked: boolean, reason: string | null, frameSeconds: number) => void;
+export type DrivingPresentation = (state: Readonly<DrivingState>, blocked: boolean, reason: string | null, frameSeconds: number,
+  cameraSweep: CameraClearanceQuery, scene: CityCarSceneCapability) => ChaseCameraSafety | void;
 
 export function useCityDriving(engine: RefObject<CityEngine | null>, options: Readonly<{
   present: DrivingPresentation;
-  /** Confirmed product spawn; diagnostics use a separate explicit entry below. */
-  spawn: Readonly<{ x: number; z: number; heading: number; layerId: string }> | null;
+  /** Validator-issued spawn credential; diagnostics use a separate explicit entry below. */
+  spawn: VerifiedSpawnCredential | null;
+  /** Exact current scene and released-graph identity; absent means formal entry is unavailable. */
+  spawnBinding?: SpawnConfirmationBinding | null;
+  /** Diagnostic-only callers opt out so UAT never creates confirmation state. */
+  confirmationEnabled?: boolean;
   cinemaActive: () => boolean; gameActive: () => boolean; busy: () => boolean;
 }>) {
   const [hud, setHud] = useState<DrivingHudSnapshot>(IDLE_HUD);
@@ -34,6 +43,10 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
   const preparing = useRef(false);
   const latest = useRef({ speed: 0, blocked: false, reason: null as string | null, coverage: null as string | null, gear: "N" as DrivingHudSnapshot["gear"] });
   const optionsRef = useRef(options); optionsRef.current = options;
+  const confirmationRef = useRef<SpawnConfirmationStore | null>(null);
+  if (!confirmationRef.current) confirmationRef.current = new SpawnConfirmationStore();
+  const confirmationStore = confirmationRef.current;
+  const [spawnConfirmation, setSpawnConfirmation] = useState<SpawnConfirmationSnapshot>(confirmationStore.snapshot);
   const alive = useRef(true);
   const publish = useCallback(() => {
     if (!alive.current) return;
@@ -44,8 +57,25 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
   }, []);
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; abortRef.current?.abort(); runtimeRef.current?.dispose(); runtimeRef.current = null; };
-  }, []);
+    if (options.confirmationEnabled === false) return () => { alive.current = false; abortRef.current?.abort(); runtimeRef.current?.dispose(); runtimeRef.current = null; };
+    const unsubscribe = confirmationStore.subscribe(() => setSpawnConfirmation(confirmationStore.snapshot));
+    return () => { alive.current = false; unsubscribe(); abortRef.current?.abort(); runtimeRef.current?.dispose(); runtimeRef.current = null; };
+  }, [confirmationStore, options.confirmationEnabled]);
+  useEffect(() => {
+    if (options.confirmationEnabled === false) return;
+    const binding = options.spawnBinding;
+    const current = confirmationStore.snapshot;
+    if (!binding) {
+      if (current.status !== "unavailable") confirmationStore.markUnavailable("released-graph-unavailable");
+      return;
+    }
+    if ((current.status === "derived" || current.status === "validated" || current.status === "confirmed") &&
+      (current.binding.sceneId !== binding.sceneId || current.binding.worldRevision !== binding.worldRevision ||
+        current.binding.graphBoundaryHash !== binding.graphBoundaryHash || current.binding.vehicleConfigHash !== binding.vehicleConfigHash)) {
+      confirmationStore.invalidate("scene-or-vehicle-changed");
+    }
+  }, [confirmationStore, options.confirmationEnabled, options.spawnBinding?.sceneId, options.spawnBinding?.worldRevision,
+    options.spawnBinding?.graphBoundaryHash, options.spawnBinding?.vehicleConfigHash]);
   useEffect(() => {
     if (hud.phase === "idle") return;
     const timer = window.setInterval(publish, 100);
@@ -58,22 +88,30 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     if (optionsRef.current.cinemaActive() || optionsRef.current.gameActive() || optionsRef.current.busy()) {
       setEntryError("互斥状态（航拍/游戏/忙碌）中不可驾驶。"); return false;
     }
-    const spawn = optionsRef.current.spawn;
-    if (!diagnostic && !spawn) { setEntryError("本城没有可用的驾驶出生点。"); return false; }
+    const currentOptions = optionsRef.current;
+    const authorization = diagnostic ? null : resolveFormalSpawn(confirmationStore, currentOptions.spawnBinding, currentOptions.spawn);
+    if (!diagnostic && !authorization?.ok) {
+      setEntryError(authorization?.reason === "released-graph-or-spawn-unavailable"
+        ? "正式道路图尚不可用，暂不能开始驾驶。" : "驾驶出生点尚未完成当前场景确认，暂不能开始。"); return false;
+    }
+    const confirmedSpawn = authorization?.ok ? authorization.credential : null;
     const abort = new AbortController(); abortRef.current = abort;
     const runtime = new GameRuntime<DrivingInputState>({ dt: DRIVING_DT, emptyInput: () => ({ ...EMPTY_DRIVING_INPUT }) }); runtimeRef.current = runtime;
     preparing.current = true;
     latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N" };
     setEntryError(null); setHud({ ...IDLE_HUD, phase: "preparing" });
-    const request = { collider: CITY_CAR_COLLIDER, present: (frame: CarPresentation) => {
+    const request = { collider: CITY_CAR_COLLIDER, onPreparationMetric: runtime.recordPreparation.bind(runtime), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
       latest.current = { ...latest.current, speed: Math.abs(frame.state.speed), blocked: frame.blocked, reason: frame.reason,
         gear: frame.state.reversing ? "R" : frame.state.braking ? "B" : frame.state.speed > 0 ? "D" : "N" };
-      optionsRef.current.present(frame.state, frame.blocked, frame.reason, frame.frameSeconds);
+      const cameraSafety = optionsRef.current.present(frame.state, frame.blocked, frame.reason, frame.frameSeconds, frame.cameraSweep, scene);
+      if (cameraSafety) runtime.noteCameraSafety(cameraSafety);
+      if (cameraSafety === "unresolved") runtime.pause("camera-safety");
     } };
     try {
       const entry = diagnostic
         ? await createCityCarDiagnosticSession(host, runtime, request, abort.signal)
-        : await createCityCarSession(host, runtime, { ...request, ...spawn! }, abort.signal);
+        : await createCityCarSession(host, runtime, { ...request, x: confirmedSpawn!.x, z: confirmedSpawn!.z, heading: confirmedSpawn!.heading,
+          layerId: confirmedSpawn!.layerId, validatedSpawn: confirmedSpawn! }, abort.signal);
       if (abort.signal.aborted || runtimeRef.current !== runtime || !alive.current) { runtime.dispose(); return false; }
       preparing.current = false;
       if (entry.status !== "ready") {
@@ -87,18 +125,26 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
       if (alive.current && !abort.signal.aborted) { setEntryError(`暂不能开始驾驶：${error instanceof Error ? error.message : "city-driving-entry-failed"}`); publish(); }
       return false;
     }
-  }, [engine, publish]);
+  }, [confirmationStore, engine, publish]);
   const exit = useCallback(() => {
     abortRef.current?.abort(); abortRef.current = null;
     preparing.current = false;
     runtimeRef.current?.dispose(); runtimeRef.current = null;
     latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N" }; publish();
   }, [publish]);
-  const pause = useCallback(() => { runtimeRef.current?.pause("user-paused"); publish(); }, [publish]);
+  const pause = useCallback((reason = "user-paused") => { runtimeRef.current?.pause(reason); publish(); }, [publish]);
   const resume = useCallback(() => { runtimeRef.current?.resume(); publish(); }, [publish]);
   const toggle = useCallback(() => {
     if (runtimeRef.current?.snapshot.phase === "running") pause(); else resume();
   }, [pause, resume]);
   const setInput = useCallback((input: Partial<DrivingInputState>) => { runtimeRef.current?.setInput({ ...EMPTY_DRIVING_INPUT, ...input }); }, []);
-  return { hud, entryError, clearEntryError: () => setEntryError(null), enter: () => start(false), enterDiagnostic: () => start(true), exit, pause, resume, toggle, setInput, physicsStep: DRIVING_DT };
+  const deriveSpawnCandidates = useCallback((binding: SpawnConfirmationBinding, candidates: readonly SpawnCandidateChoice[]) => optionsRef.current.confirmationEnabled === false ? false : confirmationStore.derive(binding, candidates), [confirmationStore]);
+  const validateSpawnCandidate = useCallback((binding: SpawnConfirmationBinding, credential: VerifiedSpawnCredential) => optionsRef.current.confirmationEnabled === false ? false : confirmationStore.validate(binding, credential), [confirmationStore]);
+  const confirmSpawn = useCallback((binding: SpawnConfirmationBinding, spawnId: string) => optionsRef.current.confirmationEnabled === false ? false : confirmationStore.confirm(binding, spawnId), [confirmationStore]);
+  const cancelSpawn = useCallback(() => { if (optionsRef.current.confirmationEnabled !== false) confirmationStore.cancel(); }, [confirmationStore]);
+  const invalidateSpawn = useCallback((reason?: string) => { if (optionsRef.current.confirmationEnabled !== false) confirmationStore.invalidate(reason); }, [confirmationStore]);
+  const diagnostics = useCallback((): RuntimeDiagnosticSnapshot | null => runtimeRef.current?.diagnostics ?? null, []);
+  return { hud, entryError, clearEntryError: () => setEntryError(null), spawnConfirmation,
+    deriveSpawnCandidates, validateSpawnCandidate, confirmSpawn, cancelSpawn, invalidateSpawn,
+    enter: () => start(false), enterDiagnostic: () => start(true), exit, pause, resume, toggle, setInput, diagnostics, physicsStep: DRIVING_DT };
 }

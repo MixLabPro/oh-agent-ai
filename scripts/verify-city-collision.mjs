@@ -28,7 +28,8 @@ const MAX_ON_ROAD = 7;
 const totals = { scenes: 0, solids: 0, onRoad: {}, runs: 0, driven: 0, collisionBlocks: 0, rampsUp: 0, ramps: 0 };
 for (const sessions of [0, 90, 500]) for (const seed of [1, 7, 42, 2026, 65537]) {
   const { parts } = buildParts(kit, sessions, seed);
-  const source = parts.drivingSurfaceSource(); assert.ok(source?.solids, "the rendered city exposes its solids to the capture");
+  const frozen = parts.acquireStaticSceneSource();
+  const source = frozen.drivingSource; assert.ok(source?.solids, "the rendered city exposes its solids to the capture");
   const capture = await new kit.CitySurfacePort().capture(source);
   assert.equal(capture.status, "ready");
   const surface = capture.read(); const regions = kit.buildSurfaceRegions(surface, kit.buildSurfaceIndex(surface)); assert.equal(regions.status, "ready");
@@ -66,6 +67,7 @@ for (const sessions of [0, 90, 500]) for (const seed of [1, 7, 42, 2026, 65537])
     ramps.push(`${l.end}:${r.result}(${r.maxY.toFixed(1)})`);
   }
   totals.scenes++; totals.solids += collision.report.solids;
+  frozen.release();
   console.log(`Collision: ${sessions} sessions, seed ${seed}: ${collision.report.solids} solids, ${onRoad.length} on road ${JSON.stringify(onRoad.map((s) => s.role))}, straight ${JSON.stringify(outcomes)}, ramps [${ramps.join(" ")}].`);
 }
 assert.ok(totals.driven >= totals.runs * 0.6, `straight runs with solids regressed (${totals.driven}/${totals.runs})`);

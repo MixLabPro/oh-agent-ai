@@ -16,11 +16,13 @@
  * 合并：通过只来自试跑通过且固体覆盖完整；挡住只来自证据；其余都是 inconclusive 并带原因。
  * 有证据却跑通了，是模拟缺陷（simulation-invalid），不是通过。 */
 import type { CityDrivingSnapshot, ReadyCitySurfaceCapture } from "../../../engine/surface/citySurfacePort";
+import { compileCitySolidInputs } from "../../../engine/surface/compileCitySolidInputs";
 import { buildSurfaceIndex } from "../../../engine/surface/SurfaceIndex";
 import { buildSurfaceRegions } from "../../../engine/surface/surfaceRegions";
 import type { RegionBoundarySegment, SurfaceRegionsBuild } from "../../../engine/surface/surfaceRegions";
+import { CITY_SOLID_COMPILER_VERSION, MOUNTABLE_POLICY_VERSION, type MountablePolicy } from "../staticSolidContracts";
 import { initialDrivingState, type DrivingInputState, type DrivingState } from "../../DrivingSimulation";
-import { boxPoly, buildCollisionIndex, type CollisionIndex, type SolidInput } from "../CollisionIndex";
+import { boxPoly, buildCollisionIndex, type CollisionIndex } from "../CollisionIndex";
 import { DrivingKernel, type KernelStep } from "../DrivingKernel";
 import { structureSolids } from "../citySolids";
 import { DEFAULT_FOOTPRINT_PARAMS, footprintSupport, type FootprintParams, type VehicleFootprint } from "../surfaceFootprint";
@@ -38,7 +40,7 @@ import type { AuditEvidenceSink } from "./AuditEvidenceStore";
 import { GateAuditObserver } from "./GateAuditObserver";
 import type { AuditCause, AuditKey, AuditVerdict, AuditWorldValidator, DirectedGate, RoadAuditCase, RoadAuditCaseResult, RoutePilot, StaticUnitEvidence, StepValidation } from "./contracts";
 
-export const ROAD_PASSABILITY_AUDIT_VERSION = 1;
+export const ROAD_PASSABILITY_AUDIT_VERSION = 2;
 
 type P = Readonly<{ x: number; z: number }>;
 type Ready = Extract<SurfaceRegionsBuild, { status: "ready" }>;
@@ -48,7 +50,7 @@ export type PassabilityWorld = Readonly<{
   worldRevision: string; surfaceRevision: string; regions: Ready;
   /** Exact solids only (structure descriptors): allowed as blocking evidence. */
   exact: CollisionIndex;
-  /** Exact + conservative scene proxies: what the dynamic run drives against. */
+  /** Shared static-solid compilation: structures, scene proxies, and rendered envelopes. */
   dynamic: CollisionIndex;
   /** "complete" when every rendered solid family is represented in `dynamic` (exactly or by a proxy). */
   coverage: "complete" | "structures-only";
@@ -76,14 +78,23 @@ export function passabilityWorld(snapshot: CityDrivingSnapshot, regions: Surface
   if (regions.revision !== snapshot.surface.revision) return Object.freeze({ status: "unresolved", reason: "surface-revision-mismatch" });
   const structure = structureSolids(snapshot.obstacles);
   const exactInputs = structure.filter((s) => !NON_EVIDENCE_ROLES.has(s.role));
-  let exact: CollisionIndex; let dynamic: CollisionIndex;
+  let exact: CollisionIndex; let dynamic: CollisionIndex; let capturedRenderedInstances = 0;
   try {
     exact = buildCollisionIndex(exactInputs);
-    dynamic = buildCollisionIndex([...structure, ...(snapshot.sceneSolids as readonly SolidInput[])]);
+    const compiled = compileCitySolidInputs(snapshot);
+    if (compiled.status !== "ready") return Object.freeze({ status: "unresolved", reason: `static-solids:${compiled.reason}` });
+    dynamic = compiled.collisionIndex;
+    capturedRenderedInstances = compiled.counts.renderedInstances;
   } catch (error) { return Object.freeze({ status: "unresolved", reason: error instanceof Error ? error.message : "collision-index" }); }
-  // Buildings are covered only by captured scene proxies (conservative supersets of the rendered meshes).
-  // Rendered buildings without proxies, or a capture with no scene at all, would be driven through unseen.
-  const coverage = snapshot.sceneSolids.length > 0 || (options.declareNoBuildings === true && snapshot.renderedSolids.length === 0) ? "complete" : "structures-only";
+  // Dynamic collisions consume the same compiled inputs as manual vehicles and flight.
+  // Exact cut witnesses remain limited to non-proxy structural descriptors above.
+  // A captured rendered layer is complete because its instances compile to conservative boxes;
+  // a scene proxy can also conservatively cover the layer. Plan-only snapshots still need an
+  // explicit no-buildings assertion before a run can certify passability.
+  const hasCapturedRenderedLayer = snapshot.obstacleCoverage === "structures-and-rendered-buildings" &&
+    (snapshot.renderedSolids.length === 0 || capturedRenderedInstances > 0);
+  const coverage = hasCapturedRenderedLayer || snapshot.sceneSolids.length > 0 ||
+    (options.declareNoBuildings === true && snapshot.renderedSolids.length === 0) ? "complete" : "structures-only";
   return Object.freeze({ status: "ready", world: Object.freeze({ worldRevision: snapshot.revision, surfaceRevision: snapshot.surface.revision, regions, exact, dynamic, coverage, isCurrent, runCurrent: throttledCurrent(isCurrent) }) });
 }
 
@@ -127,6 +138,8 @@ export type PassabilityOptions = Readonly<{
   /** Dynamic engine: C's continuous kernel (default) or the legacy whole-step-rejection environment. */
   engine?: "continuous" | "legacy";
   collider?: AuditCollider;
+  /** Explicit curb/island policy; defaults to strict disabled for both kernel and independent validator. */
+  mountablePolicy?: MountablePolicy;
   /** Pilot factory (D's RoutePilot); default B's CorridorPilot. The key's controllerVersion names it. */
   pilot?: (path: readonly P[], cruise: number) => RoutePilot;
 }>;
@@ -139,13 +152,16 @@ export const CONTINUOUS_AUDIT_COLLIDER: AuditCollider = Object.freeze({
   centerHeight: 0.1 + (1.25 - 0.1) / 2 });
 /** Key fields the continuous engine is calibrated to. vehicleConfigHash names the vehicle, collider,
  * dynamics and solver parameters it covers — a key from the legacy engine never matches. */
-export function continuousAuditKeyFields(collider: AuditCollider = CONTINUOUS_AUDIT_COLLIDER) {
+export function continuousAuditKeyFields(collider: AuditCollider = CONTINUOUS_AUDIT_COLLIDER, mountablePolicy: MountablePolicy = "disabled") {
   const d = collider.dimensions;
-  return Object.freeze({ physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: DRIVING_COLLISION_VERSION, queryVersion: CONTINUOUS_DRIVING_QUERY_VERSION,
+  if(mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")throw new Error("invalid-mountable-policy");
+  return Object.freeze({ snapshotCompilerVersion: CITY_SOLID_COMPILER_VERSION,
+    physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: DRIVING_COLLISION_VERSION, queryVersion: CONTINUOUS_DRIVING_QUERY_VERSION,
     vehicleConfigHash: JSON.stringify(["car-v1", "collider", d.halfLength, d.halfWidth, d.halfHeight, collider.centerHeight,
       "sweep", DEFAULT_SWEEP_LIMITS.skin, DEFAULT_SWEEP_LIMITS.timeTolerance, DEFAULT_SWEEP_LIMITS.maxTests,
       "motion", CONTINUOUS_MOTION_DEFAULTS.maxSlides, CONTINUOUS_MOTION_DEFAULTS.maxSupportSegments, CONTINUOUS_MOTION_DEFAULTS.supportStep,
-      "footprint", DEFAULT_FOOTPRINT_PARAMS.lateralMargin, DEFAULT_FOOTPRINT_PARAMS.longitudinalMargin, DEFAULT_FOOTPRINT_PARAMS.maxSlope]) });
+      "footprint", DEFAULT_FOOTPRINT_PARAMS.lateralMargin, DEFAULT_FOOTPRINT_PARAMS.longitudinalMargin, DEFAULT_FOOTPRINT_PARAMS.maxSlope,
+      "mountable-policy", MOUNTABLE_POLICY_VERSION, mountablePolicy]) });
 }
 function support0(regions: Ready, p: P, heading: number, regionId: string, y: number, footprint: VehicleFootprint, params: FootprintParams): DrivingState | null {
   const s = footprintSupport(regions, { x: p.x, z: p.z, heading, y }, regionId, footprint, params);
@@ -313,8 +329,11 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
     return Object.freeze({ key, routeId: route.id, worldRevision: world.worldRevision, auditVersion: ROAD_PASSABILITY_AUDIT_VERSION, verdict, cause,
       witness, detail, run, evidence: Object.freeze(evidenceFor(key, route.units, topology, geometry, evidenceWitness)) });
   };
+  const mountablePolicy=options.mountablePolicy??"disabled";
+  if(mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")return finish("inconclusive","unconfirmed","invalid-mountable-policy",null,null,"inconclusive","inconclusive");
   try { auditKeyId(key); } catch { return finish("inconclusive", "unconfirmed", "invalid-audit-key", null, null, "inconclusive", "inconclusive"); }
   if (key.baseSnapshotHash !== world.worldRevision) return finish("inconclusive", "unconfirmed", "key-world-mismatch", null, null, "inconclusive", "inconclusive");
+  if (key.snapshotCompilerVersion !== CITY_SOLID_COMPILER_VERSION) return finish("inconclusive", "unconfirmed", "key-compiler-mismatch", null, null, "inconclusive", "inconclusive");
   if (!world.isCurrent()) return finish("inconclusive", "unconfirmed", "stale-world", null, null, "inconclusive", "inconclusive");
   if (!route.id || !route.units.length || route.path.length < 2 || !route.path.every(finiteP) || !(route.halfWidth > 0)) return finish("inconclusive", "unconfirmed", "invalid-route", null, null, "inconclusive", "inconclusive");
   const regions = world.regions;
@@ -337,7 +356,7 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
   // ── Dynamic run on the same kernel (C continuous by default; legacy whole-step kept for comparison) ──
   const engine = options.engine ?? "continuous";
   if (engine === "continuous") {
-    const expect = continuousAuditKeyFields(options.collider);
+    const expect = continuousAuditKeyFields(options.collider,mountablePolicy);
     if (key.physicsVersion !== expect.physicsVersion || key.collisionVersion !== expect.collisionVersion || key.queryVersion !== expect.queryVersion || key.vehicleConfigHash !== expect.vehicleConfigHash) {
       return finish("inconclusive", "unconfirmed", "key-engine-mismatch", witness, null, "passed", witness ? "blocked" : "passed");
     }
@@ -353,13 +372,13 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
     let env: ContinuousDrivingEnvironment;
     try {
       env = new ContinuousDrivingEnvironment(regions, { surfaceRevision: regions.revision, worldRevision: world.worldRevision, solidRevision: world.worldRevision,
-        solids: world.dynamic.solids(), dimensions: collider.dimensions, centerHeight: collider.centerHeight, isCurrent: world.runCurrent }, footprint, params);
+        solids: world.dynamic.solids(), dimensions: collider.dimensions, centerHeight: collider.centerHeight, isCurrent: world.runCurrent }, footprint, params, {}, {mountablePolicy});
     } catch (error) { return finish("inconclusive", "unconfirmed", `continuous-world:${error instanceof Error ? error.message : "error"}`, witness, null, "passed", witness ? "blocked" : "passed"); }
     validatorFor = () => new CorridorValidator(new ContinuousWorldValidator(env, polylineProgress(route.path)), route.path, route.halfWidth);
     kernelFor = () => createContinuousDrivingKernel(env, { worldRevision: world.worldRevision, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId });
   } else {
-    const env = new SurfaceDrivingEnvironment(regions, footprint, params, world.dynamic);
-    validatorFor = () => new CorridorValidator(new SurfaceWorldValidator(regions, polylineProgress(route.path), footprint, params, world.dynamic), route.path, route.halfWidth);
+    const env = new SurfaceDrivingEnvironment(regions, footprint, params, world.dynamic,mountablePolicy);
+    validatorFor = () => new CorridorValidator(new SurfaceWorldValidator(regions, polylineProgress(route.path), footprint, params, world.dynamic,mountablePolicy), route.path, route.halfWidth);
     kernelFor = () => new DrivingKernel(env, { baseSnapshotHash: key.baseSnapshotHash, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId,
       physicsVersion: key.physicsVersion, collisionVersion: key.collisionVersion, queryVersion: key.queryVersion });
   }

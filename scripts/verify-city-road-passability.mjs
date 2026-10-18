@@ -9,6 +9,7 @@ const m = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
   "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
   "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
+  "engine/surface/compileCitySolidInputs.ts": ["CITY_SOLID_COMPILER_VERSION"],
   "game/driving/audit/RoadPassabilityAudit.ts": ["passabilityWorld", "auditRoute", "corridorCutEvidence", "directedEdgeRoutes", "ROAD_PASSABILITY_AUDIT_VERSION", "continuousAuditKeyFields", "CorridorValidator"],
   "game/driving/audit/GateAuditObserver.ts": ["GateAuditObserver"],
   "game/driving/audit/AuditReleasePolicy.ts": ["evaluateAuditRelease"],
@@ -18,7 +19,7 @@ const m = await loadCity({
 const { grid, patch } = makeFixtures(m);
 const REQUIRED = 2 * (m.DRIVING_FOOTPRINT.halfWidth + m.DEFAULT_FOOTPRINT_PARAMS.lateralMargin);
 const legacyKeyFor = (revision) => ({ baseSnapshotHash: revision, vehicleConfigHash: "car-v1", kernelBuildId: "fixture-build-v1", surfaceVersion: 3, queryVersion: 4,
-  snapshotCompilerVersion: 1, physicsVersion: 1, collisionVersion: 1, controllerVersion: 1, plannerVersion: 1, observerVersion: 2, manifestHash: "passability-fixture", releasePolicyVersion: 1, releaseBoundaryHash: null });
+  snapshotCompilerVersion: m.CITY_SOLID_COMPILER_VERSION, physicsVersion: 1, collisionVersion: 1, controllerVersion: 1, plannerVersion: 1, observerVersion: 2, manifestHash: "passability-fixture", releasePolicyVersion: 1, releaseBoundaryHash: null });
 // The continuous (C) engine's calibrated identity: physics/collision/query versions + a vehicle config naming collider and solver.
 const keyFor = (revision) => ({ ...legacyKeyFor(revision), ...m.continuousAuditKeyFields(), kernelBuildId: "fixture-continuous-v1" });
 const box = (id, role, x0, x1, y0, y1, z0, z1) => ({ id, role, shape: "box",
@@ -27,7 +28,7 @@ const worldOf = (patches, { obstacles = [], sceneSolids = [], renderedSolids = [
   const surface = { revision: "surface-fixture", geometryVersion: 3, patches, portals: [], renderBatches: [], report: { candidateLength: 0, geometricallyEligibleLength: 0, issues: [] } };
   const regions = m.buildSurfaceRegions(surface, m.buildSurfaceIndex(surface)); assert.equal(regions.status, "ready");
   const snapshot = { revision, surface, obstacles, landings: [], counts: { bridges: 0, expresswaySegments: 0, flares: 0, islands: 0, culDeSacs: 0 },
-    obstacleCoverage: "structures-only", renderedSolids, sceneSolids };
+    obstacleCoverage: renderedSolids.length ? "structures-and-rendered-buildings" : "structures-only", renderedSolids, sceneSolids };
   const built = m.passabilityWorld(snapshot, regions, current, { declareNoBuildings: noBuildings }); assert.equal(built.status, "ready"); return built.world;
 };
 // A 6-wide, 100-long road with sidewalks; routes run along its centreline.
@@ -116,6 +117,8 @@ const audit = (world, r = route, options) => m.auditRoute(world, keyFor(world.wo
   const fresh = worldOf([road(), ...walks]);
   const mismatch = m.auditRoute(fresh, keyFor("another-world"), route);
   assert.equal(mismatch.verdict, "inconclusive"); assert.equal(mismatch.detail, "key-world-mismatch");
+  const compilerMismatch = m.auditRoute(fresh, { ...keyFor(fresh.worldRevision), snapshotCompilerVersion: 1 }, route);
+  assert.equal(compilerMismatch.verdict, "inconclusive"); assert.equal(compilerMismatch.detail, "key-compiler-mismatch");
   assert.equal(audit(fresh, { ...route, path: [{ x: -40, z: 0 }] }).detail, "invalid-route");
 }
 // ── Continuous engine (B4): calibrated key, recovered starts, legacy comparison ──

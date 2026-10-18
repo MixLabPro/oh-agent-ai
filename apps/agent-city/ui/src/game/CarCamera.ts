@@ -4,7 +4,7 @@
  * 遮挡与地形查询由调用方注入（开发页用简单 raycast，CityEngine 版查碰撞索引）。
  */
 import * as THREE from "three";
-import { VehicleChaseCamera, type ChaseOrbitState } from "./VehicleChaseCamera";
+import { VehicleChaseCamera, type CameraClearanceQuery, type ChaseCameraSafety, type ChaseOrbitState } from "./VehicleChaseCamera";
 
 export const CAR_ZOOM_MIN = 0.5;
 export const CAR_ZOOM_MAX = 3.0;
@@ -14,6 +14,8 @@ export type CarChaseTarget = Readonly<{
   heading: number;
   speed: number;
   maxSpeed: number;
+  /** 净空扫掠起点抬升（y 传支撑面高度时必须传车半高，见 ChaseTarget.sweepLift）。 */
+  sweepLift?: number;
 }>;
 
 export class CarCamera {
@@ -64,8 +66,9 @@ export class CarCamera {
   update(dt: number, target: CarChaseTarget, queries?: {
     occlusion?: (x: number, y: number, z: number) => boolean;
     terrain?: (x: number, z: number) => number;
-  }): void {
-    this.core.update(dt, this.toRatio(target), queries);
+    cameraSweep?: CameraClearanceQuery;
+  }): ChaseCameraSafety {
+    return this.core.update(dt, this.toRatio(target), queries);
   }
 
   dispose(): void {

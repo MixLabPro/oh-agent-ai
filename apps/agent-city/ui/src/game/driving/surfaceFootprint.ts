@@ -16,9 +16,41 @@
  * 结果失败即关闭；本模块不会把任何道路标为已通行。 */
 import type { SurfacePointState, SurfaceRegionsBuild, RegionBoundarySegment } from "../../engine/surface/surfaceRegions";
 import { DRIVING_FOOTPRINT, GAMEPLAY_DRIVING_FOOTPRINT } from "./vehicleFootprint";
-import { carBody, type CollisionIndex } from "./CollisionIndex";
+import { carBody, type CollisionIndex, type Solid } from "./CollisionIndex";
+import { isValidMountableHeight } from "./staticSolidContracts";
 
-export const SURFACE_FOOTPRINT_RULES_VERSION = 2;
+export const SURFACE_FOOTPRINT_RULES_VERSION = 4;
+
+/** 可越障碍查询（mountable curbs）：覆盖 (x, z) 且顶面高出 floorY 不超过其预算的可越固体顶高。
+ *  无可越固体时为 null（审计/旧世界零开销）。由调用方从冻结固体构造（mountableQueryOf）。 */
+export type MountableQuery = Readonly<{
+  topAt(x: number, z: number, floorY: number): number | null;
+  /** (x, z) 是否被任一可越固体覆盖（XZ 包围盒判定，路面预算的爬升豁免用）。 */
+  covers(x: number, z: number): boolean;
+  /** 本组可越固体的最大爬升预算（无则 0）。 */
+  readonly riseBudget: number;
+}>;
+
+/** 从冻结固体构造可越查询。无可越固体返回 null；实现为线性扫描（分流岛数量级小）。 */
+export function mountableQueryOf(solids: readonly Solid[]): MountableQuery | null {
+  if(solids.some((solid)=>!isValidMountableHeight(solid.mountableHeight)))throw new Error("invalid-mountable-height");
+  const mountable = solids.filter((solid) => Number.isFinite(solid.mountableHeight) && (solid.mountableHeight as number) > 0);
+  if (!mountable.length) return null;
+  return Object.freeze({
+    topAt(x: number, z: number, floorY: number): number | null {
+      let top: number | null = null;
+      for (const solid of mountable) {
+        if (x < solid.minX || x > solid.maxX || z < solid.minZ || z > solid.maxZ) continue;
+        if (solid.maxY - floorY <= (solid.mountableHeight as number) && solid.maxY > (top ?? -Infinity)) top = solid.maxY;
+      }
+      return top;
+    },
+    covers(x: number, z: number): boolean {
+      return mountable.some((solid) => x >= solid.minX && x <= solid.maxX && z >= solid.minZ && z <= solid.maxZ);
+    },
+    riseBudget: Math.max(...mountable.map((solid) => solid.mountableHeight as number)),
+  });
+}
 /** A boundary farther than this from the car's support plane is never the car's boundary
  * (fast reject before the per-layer check; ≥ 10× the seam tolerance). */
 export const BOUNDARY_VERTICAL_REACH = 1.5;
@@ -145,7 +177,22 @@ function concernsCar(regions: Ready, layerIds: readonly string[], segment: Regio
   return false;
 }
 
-function boundaryHit(regions: Ready, regionId: string, polygon: P[], maxSegments: number, plane: Plane): FootprintFailure | null {
+/** curb-island 边界豁免：段两侧探测可越岛顶。段的法向两侧各探一点（0.4 深），
+ *  任一侧落在预算内可越固体上即视为可跨越路缘——该段不再是区域边界。 */
+function mountableCurbside(regions: Ready, segment: RegionBoundarySegment, mountable: MountableQuery, plane: Plane): boolean {
+  void regions;
+  const mx = (segment.ax + segment.bx) / 2, mz = (segment.az + segment.bz) / 2;
+  const ex = segment.bx - segment.ax, ez = segment.bz - segment.az;
+  const len = Math.hypot(ex, ez) || 1;
+  const nx = -ez / len, nz = ex / len;
+  const floor = planeAt(plane, mx, mz);
+  for (const side of [1, -1]) {
+    if (mountable.topAt(mx + nx * 0.4 * side, mz + nz * 0.4 * side, floor) !== null) return true;
+  }
+  return false;
+}
+
+function boundaryHit(regions: Ready, regionId: string, polygon: P[], maxSegments: number, plane: Plane, mountable?: MountableQuery): FootprintFailure | null {
   const layerIds = regions.regionById(regionId)?.layerIds ?? [];
   const xs = polygon.map((p) => p.x); const zs = polygon.map((p) => p.z);
   const box = regions.segmentsInBox(regionId, Math.min(...xs), Math.min(...zs), Math.max(...xs), Math.max(...zs), maxSegments);
@@ -154,6 +201,8 @@ function boundaryHit(regions: Ready, regionId: string, polygon: P[], maxSegments
     const clip = clipConvex(segment, polygon);
     if (!clip) continue;
     if (layerIds.length > 1 && !concernsCar(regions, layerIds, segment, clip[0], clip[1], plane)) continue;
+    // 可越路缘：island 缘石的 curb 段在后侧有预算内可越岛时不算跨界（支撑融合接管）。
+    if (mountable && segment.cause === "island" && mountableCurbside(regions, segment, mountable, plane)) continue;
     return failure("unsupported-footprint", `${segment.label}:${segment.cause}`, segment);
   }
   return null;
@@ -171,50 +220,81 @@ function validParams(f: VehicleFootprint, p: FootprintParams): boolean {
 }
 
 /** Static full-body support: center drivable in the named region, no region boundary inside
- * the margin-inflated body, four wheel contacts on the same region, slope/twist within limits. */
+ * the margin-inflated body, four wheel contacts on the same region, slope/twist within limits.
+ *
+ * mountable（可越路缘，v3）：中心/车轮落在 island 孔洞上时，若该处有预算内可越岛顶，
+ * 支撑取岛顶（法向朝上、区域不变）——车「骑」在路缘上而不是被区域拒绝。爬升量由
+ * 可越预算本身界定（≤ mountableHeight），因此融合支撑间的 wheel-twist 与中心台阶
+ * 检查按预算豁免；坡度/俯仰/滚转仍按融合平面满限检查（构造上 ≤ atan(预算/轴距)）。
+ */
 export function footprintSupport(regions: SurfaceRegionsBuild, pose: GroundPose, regionId: string,
-  footprint: VehicleFootprint = DRIVING_FOOTPRINT, params: FootprintParams = DEFAULT_FOOTPRINT_PARAMS, collision?: CollisionIndex): FootprintSupport | FootprintFailure {
+  footprint: VehicleFootprint = DRIVING_FOOTPRINT, params: FootprintParams = DEFAULT_FOOTPRINT_PARAMS, collision?: CollisionIndex, mountable?: MountableQuery): FootprintSupport | FootprintFailure {
   if (regions.status !== "ready") return failure("invalid-input", "regions-unresolved");
   if (![pose.x, pose.z, pose.heading].every(Number.isFinite) || !validParams(footprint, params)) return failure("invalid-input", "pose-or-params");
   const region = regions.regionById(regionId);
   if (!region) return failure("invalid-input", "unknown-region");
   if (pose.y !== undefined && !Number.isFinite(pose.y)) return failure("invalid-input", "pose-or-params");
-  const center = regions.supportAt(pose.x, pose.z, regionId, pose.y);
-  if (center.status === "blocked") return centerFailure(center);
-  // Another region at this XZ is not a portal: never switch implicitly (portals join regions).
-  if (center.regionId !== regionId) return failure("closed-portal", "region-change");
+  const centerQuery = regions.supportAt(pose.x, pose.z, regionId, pose.y);
+  let centerFused = false;
+  let layerId: string;
+  let center: { y: number; normal: { x: number; y: number; z: number } };
+  if (centerQuery.status === "blocked") {
+    // 可越融合：只认 island 孔洞（sidewalk 不是可行驶面，跨越留待产品另行决定）。
+    if (!(mountable && centerQuery.cause === "island")) return centerFailure(centerQuery);
+    const top = mountable.topAt(pose.x, pose.z, pose.y ?? Number.NEGATIVE_INFINITY);
+    if (top === null) return centerFailure(centerQuery);
+    center = { y: top, normal: { x: 0, y: 1, z: 0 } };
+    layerId = "ground"; // 分流岛只在地面层（编译器按 ground 路缘产出）。
+    centerFused = true;
+  } else {
+    if (centerQuery.regionId !== regionId) return failure("closed-portal", "region-change");
+    center = { y: centerQuery.y, normal: centerQuery.normal };
+    layerId = centerQuery.layerId;
+  }
   const plane: Plane = { x: pose.x, y: center.y, z: pose.z, normal: center.normal };
   const body = rectangle(pose, footprint.halfLength + params.longitudinalMargin, footprint.halfWidth + params.lateralMargin);
-  const hit = boundaryHit(regions, regionId, body, params.maxSegmentsPerQuery, plane);
+  const hit = boundaryHit(regions, regionId, body, params.maxSegmentsPerQuery, plane, mountable);
   if (hit) return hit;
   const contacts = rectangle(pose, footprint.wheelbase / 2, footprint.track / 2);
   // rectangle(): [rear-right, front-right, front-left, rear-left] → fl, fr, rl, rr.
   const order = [contacts[2], contacts[1], contacts[3], contacts[0]];
   const heights: number[] = [];
+  let wheelsFused = 0;
   for (const p of order) {
     const state = regions.supportAt(p.x, p.z, regionId, planeAt(plane, p.x, p.z));
+    if (state.status === "drivable") {
+      if (state.regionId !== regionId) return failure("unsupported-footprint", "wheel:region-change");
+      heights.push(state.y);
+      continue;
+    }
     // Covered by construction when no boundary crosses the body; a failure here is a rule defect.
-    if (state.status !== "drivable" || state.regionId !== regionId) return failure("unsupported-footprint", state.status === "blocked" ? `wheel:${state.cause}` : "wheel:region-change");
-    heights.push(state.y);
+    if (!(mountable && state.status === "blocked" && state.cause === "island")) {
+      return failure("unsupported-footprint", state.status === "blocked" ? `wheel:${state.cause}` : "wheel:region-change");
+    }
+    const top = mountable.topAt(p.x, p.z, planeAt(plane, p.x, p.z));
+    if (top === null) return failure("unsupported-footprint", `wheel:${state.cause}`);
+    heights.push(top); wheelsFused += 1;
   }
   const [fl, fr, rl, rr] = heights;
   const residual = Math.abs((fl - fr) - (rl - rr)) / 2;
-  if (residual > params.maxWheelResidual) return failure("excessive-step", "wheel-twist");
+  // 可越融合期间豁免 twist/step：爬升差被可越预算界定（≤ mountableHeight），非规则缺陷。
+  const mountClimbing = centerFused || wheelsFused > 0;
+  if (residual > params.maxWheelResidual && !mountClimbing) return failure("excessive-step", "wheel-twist");
   const pitch = Math.atan2((fl + fr) / 2 - (rl + rr) / 2, footprint.wheelbase);
   const roll = Math.atan2((fl + rl) / 2 - (fr + rr) / 2, footprint.track);
   const tilt = Math.acos(Math.min(1, Math.abs(center.normal.y)));
   if (Math.abs(pitch) > params.maxSlope || Math.abs(roll) > params.maxSlope || tilt > params.maxSlope) return failure("excessive-slope", "support-plane");
   const y = (fl + fr + rl + rr) / 4;
   if (collision) {
-    const blocked = solidHit(collision, carBody(pose, { y, pitch, roll }, footprint.halfLength + params.longitudinalMargin, footprint.halfWidth + params.lateralMargin));
+    const blocked = solidHit(collision, carBody(pose, { y, pitch, roll }, footprint.halfLength + params.longitudinalMargin, footprint.halfWidth + params.lateralMargin), mountable ? "gameplay" : "disabled");
     if (blocked) return blocked;
   }
-  return Object.freeze({ ok: true, regionId, layerId: center.layerId, y, pitch, roll,
+  return Object.freeze({ ok: true, regionId, layerId, y, pitch, roll,
     wheels: Object.freeze([fl, fr, rl, rr]) as readonly [number, number, number, number], normal: center.normal });
 }
 
-function solidHit(collision: CollisionIndex, body: ReturnType<typeof carBody>): FootprintFailure | null {
-  const hit = collision.hit(body);
+function solidHit(collision: CollisionIndex, body: ReturnType<typeof carBody>, mountablePolicy: "disabled" | "gameplay"): FootprintFailure | null {
+  const hit = collision.hit(body, mountablePolicy);
   if (hit.status === "clear") return null;
   if (hit.status === "hit") return failure("collision", `${hit.solid.role}:${hit.solid.id}`);
   return hit.status === "budget" ? failure("query-budget", "collision") : failure("invalid-input", "collision-body");
@@ -223,7 +303,7 @@ function solidHit(collision: CollisionIndex, body: ReturnType<typeof carBody>): 
 /** Continuous validation of one motion primitive from → to (linear in x, z, heading, or the
  * kernel's circular arc between them). Every sub-step's swept hull must stay inside the region. */
 export function validateMotion(regions: SurfaceRegionsBuild, from: GroundPose, to: GroundPose, regionId: string,
-  footprint: VehicleFootprint = DRIVING_FOOTPRINT, params: FootprintParams = DEFAULT_FOOTPRINT_PARAMS, collision?: CollisionIndex): MotionValidation {
+  footprint: VehicleFootprint = DRIVING_FOOTPRINT, params: FootprintParams = DEFAULT_FOOTPRINT_PARAMS, collision?: CollisionIndex, mountable?: MountableQuery): MotionValidation {
   const fail = (f: FootprintFailure, fraction: number): MotionValidation => Object.freeze({ ...f, lastValidFraction: fraction });
   if (![from.x, from.z, from.heading, to.x, to.z, to.heading].every(Number.isFinite)) return fail(failure("invalid-input", "pose"), 0);
   const turn = to.heading - from.heading;
@@ -231,8 +311,9 @@ export function validateMotion(regions: SurfaceRegionsBuild, from: GroundPose, t
   const distance = Math.hypot(to.x - from.x, to.z - from.z);
   const n = Math.max(1, Math.ceil(Math.abs(turn) / params.maxAngleStep), Math.ceil(distance / params.maxSampleDistance));
   if (!Number.isSafeInteger(n) || n > params.maxSamples) return fail(failure("query-budget", "motion-samples"), 0);
-  let previous = footprintSupport(regions, from, regionId, footprint, params, collision);
+  let previous = footprintSupport(regions, from, regionId, footprint, params, collision, mountable);
   if (!previous.ok) return fail(previous, 0);
+  let mountBudget = 0;
   if (regions.status !== "ready") return fail(failure("invalid-input", "regions-unresolved"), 0);
   const dTheta = Math.abs(turn) / n; const chord = distance / n;
   const halfL = footprint.halfLength + params.longitudinalMargin; const halfW = footprint.halfWidth + params.lateralMargin;
@@ -245,11 +326,20 @@ export function validateMotion(regions: SurfaceRegionsBuild, from: GroundPose, t
     const t0 = (i - 1) / n; const t1 = i / n;
     const at = (t: number): GroundPose => ({ x: from.x + (to.x - from.x) * t, z: from.z + (to.z - from.z) * t, heading: from.heading + turn * t });
     const hull = convexHull([...rectangle(at(t0), halfL + inflate, halfW + inflate), ...rectangle(at(t1), halfL + inflate, halfW + inflate)]);
-    const hit = boundaryHit(regions, regionId, hull, params.maxSegmentsPerQuery, { x: at(t0).x, y: previous.y, z: at(t0).z, normal: previous.normal });
+    const hit = boundaryHit(regions, regionId, hull, params.maxSegmentsPerQuery, { x: at(t0).x, y: previous.y, z: at(t0).z, normal: previous.normal }, mountable);
     if (hit) return fail(hit, t0);
-    const next = footprintSupport(regions, { ...at(t1), y: previous.y }, regionId, footprint, params, collision);
+    const next = footprintSupport(regions, { ...at(t1), y: previous.y }, regionId, footprint, params, collision, mountable);
     if (!next.ok) return fail(next, t0);
-    if (Math.abs(next.y - previous.y) > params.maxStepPerSample) return fail(failure("excessive-step", "center-height-jump"), t0);
+    if (mountable && mountBudget === 0) {
+      // 可越预算（本段路径任一端点邻近的最高可越顶 − 较低支撑）：上下路缘的中心台阶豁免上界。
+      const floor = Math.min(previous.y, next.y);
+      for (const probePose of [at(t0), at(t1)]) {
+        const probe = mountable.topAt(probePose.x, probePose.z, floor);
+        if (probe !== null) mountBudget = Math.max(mountBudget, Math.max(0, probe - floor));
+      }
+    }
+    const step = Math.abs(next.y - previous.y);
+    if (step > params.maxStepPerSample && !(mountable && step <= mountBudget + 1e-9)) return fail(failure("excessive-step", "center-height-jump"), t0);
     if (collision) {
       // Swept body: the mid-sample box grown by half the chord, the rotation sag and the arc
       // inflation, and stretched vertically by half the height change — covers both end poses.
@@ -257,7 +347,7 @@ export function validateMotion(regions: SurfaceRegionsBuild, from: GroundPose, t
       const grow = chord / 2 + reach * Math.sin(dTheta / 2) + inflate;
       const support = { y: (previous.y + next.y) / 2, pitch: (previous.pitch + next.pitch) / 2, roll: (previous.roll + next.roll) / 2 };
       const lift = Math.abs(next.y - previous.y) / 2 + reach * (Math.abs(next.pitch - previous.pitch) + Math.abs(next.roll - previous.roll)) / 2;
-      const blocked = solidHit(collision, carBody(mid, support, halfL, halfW, undefined, grow, lift));
+      const blocked = solidHit(collision, carBody(mid, support, halfL, halfW, undefined, grow, lift), mountable ? "gameplay" : "disabled");
       if (blocked) return fail(blocked, t0);
     }
     previous = next;

@@ -3,12 +3,15 @@
  */
 import { CAR_DIMENSIONS } from "./carDimensions";
 
-export const DRIVING_PHYSICS_VERSION = 2;
+export const DRIVING_PHYSICS_VERSION = 3;
 export const DRIVING_DT = 1 / 60;
 export const DRIVING_PARAMS = Object.freeze({
   wheelbase: CAR_DIMENSIONS.wheelbase, maxForward: 13, maxReverse: 4, acceleration: 5.5,
   reverseAcceleration: 3, braking: 12, coastDrag: 1.2, maxSteering: 0.48,
   steeringResponse: 8, zeroSpeed: 0.08, slopeGravity: 6, staticHold: 2,
+  // 回正倍率：松舵/减小转向时逼近 target 的速率 = steeringResponse × 此值。
+  // 赛车手感惯例是回正快于打舵（方向盘自回正），1 = 旧行为（对称单速率）。
+  steeringReturnResponse: 1.33,
 });
 export type DrivingInputState = { forward: boolean; backward: boolean; left: boolean; right: boolean };
 export const EMPTY_DRIVING_INPUT: DrivingInputState = { forward: false, backward: false, left: false, right: false };
@@ -61,7 +64,10 @@ export function stepDriving(previous: DrivingState, input: DrivingInputState, wo
   speed = Math.max(-p.maxReverse, Math.min(p.maxForward, speed));
   const turn = Number(input.right) - Number(input.left);
   const target = turn * p.maxSteering / (1 + Math.abs(speed) * 0.07);
-  const steering = previous.steering + (target - previous.steering) * (1 - Math.exp(-p.steeringResponse * DRIVING_DT));
+  // 非对称回正：向更小 |转向| 逼近（松舵/减小舵角）用回正速率；打舵/反向压舵仍用施加速率。
+  const returning = Math.abs(target) < Math.abs(previous.steering);
+  const response = p.steeringResponse * (returning ? p.steeringReturnResponse : 1);
+  const steering = previous.steering + (target - previous.steering) * (1 - Math.exp(-response * DRIVING_DT));
   const horizontalSpeed = speed * Math.cos(previous.pitch);
   const yaw = horizontalSpeed / p.wheelbase * Math.tan(steering) * DRIVING_DT;
   const desired = {

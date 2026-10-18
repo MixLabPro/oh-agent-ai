@@ -18,7 +18,7 @@ export type GamePhase =
 export type PausablePhase = "practice" | "countdown" | "racing";
 
 /** 暂停来源（§5）：user / 宿主隐藏 / 焦点丢失 / 菜单 / 长帧 / WebGL 上下文丢失。 */
-export type GamePauseReason = "user" | "host-hidden" | "focus-lost" | "menu" | "lag" | "context-lost";
+export type GamePauseReason = "user" | "host-hidden" | "focus-lost" | "menu" | "lag" | "context-lost" | "camera-safety";
 
 /** 允许进入错误面板（可恢复）的阶段。 */
 export type FalliblePhase = "preparing" | PausablePhase;

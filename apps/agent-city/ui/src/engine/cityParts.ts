@@ -36,12 +36,17 @@ import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type Amb
 import { buildRoadSurface, type RoadSurfaceHost } from "./systems/roadSurfaceSystem";
 import { compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./surface/groundRoadCompiler";
 import type { CitySurfaceSource } from "./surface/citySurfacePort";
+import type { RenderedSolidSource } from "./surface/renderedSolidTypes";
+import type { SolidInput } from "../game/driving/CollisionIndex";
 import { collectSceneSolids } from "./surface/sceneSolids";
 import { groundRoadTopAt } from "./surface/structureCompiler";
 import { buildInfrastructure, buildCulDeSacBulbs, buildJunctionIslands, buildChannelizedJunctions, buildDistrictExpressways, buildHighwayRamps, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
 import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
+
+export type CityStaticSceneSource = Readonly<{ layout: CityLayout; rendered: RenderedSolidSource; solids: readonly SolidInput[];
+  isCurrent: () => boolean; verifyCurrent: () => boolean }>;
 
 import { artDecoTowerGeometry, BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, baseSpeedOf, expresswayDeckHeights, mergeGeometries, originOf, samplePolyline, selfLitMaterial } from "./render/shared";
 import type { BuildingRuntime, Car, CarPath, NightLights, QualityLevel } from "./render/types";
@@ -88,6 +93,7 @@ export class CityParts {
   private drivingRoots: RenderedSolidRoot[] = [];
   private drivingFreezeCount = 0;
   private drivingFrozenSource: CitySurfaceSource | null = null;
+  private staticFrozenSource: CityStaticSceneSource | null = null;
   private drivingDisposed = false;
   private drivingDeferredCursor: [number, boolean, number] | null = null;
   private drivingDeferredSnap: boolean | null = null;
@@ -550,9 +556,9 @@ export class CityParts {
    *  may reuse an earlier layout object): the driving surface must match what is on screen. */
   drivingSurfaceSource(): CitySurfaceSource | null { return this.staticSource; }
 
-  /** Explicit, reference-counted display freeze. Several readers may hold independent leases.
+  /** Road-neutral reference-counted freeze shared by static collision and road readers.
    * Time changes queue until the last reader releases; rebuild/dispose still invalidate. */
-  acquireDrivingWorldSource(): { source: CitySurfaceSource; release: () => void } {
+  acquireStaticSceneSource(): { source: CityStaticSceneSource; drivingSource: CitySurfaceSource; release: () => void } {
     if (this.drivingDisposed || !this.staticSource) throw new Error("driving-world-unavailable");
     this.drivingFreezeCount++;
     try {
@@ -563,19 +569,22 @@ export class CityParts {
         // CityParts.update() and cursor/snap/reset writers are frozen while held,
         // so frame checks need only test the lease identity instead of traversing
         // every mesh buffer and re-collecting every proxy on every tick.
-        let frozenSource!: CitySurfaceSource;
-        const current = () => !this.drivingDisposed && this.drivingFreezeCount > 0 && this.drivingFrozenSource === frozenSource;
-        frozenSource = Object.freeze({ ...this.staticSource, solids: () => sceneSolids, solidsCurrent: current,
+        let drivingSource!: CitySurfaceSource;
+        const current = () => !this.drivingDisposed && this.drivingFreezeCount > 0 && this.drivingFrozenSource === drivingSource;
+        drivingSource = Object.freeze({ ...this.staticSource, solids: () => sceneSolids, solidsCurrent: current,
           verifySolidsCurrent: () => current() && JSON.stringify(collectSceneSolids(this.group)) === JSON.stringify(sceneSolids),
           rendered: Object.freeze({ solids: rendered.solids, isCurrent: current, verifyCurrent: () => current() && rendered.isCurrent() }) });
-        this.drivingFrozenSource = frozenSource;
+        this.drivingFrozenSource = drivingSource;
+        this.staticFrozenSource = Object.freeze({ layout: drivingSource.layout, rendered: drivingSource.rendered!, solids: sceneSolids,
+          isCurrent: current, verifyCurrent: () => current() && drivingSource.verifySolidsCurrent!() });
       }
     } catch (error) { this.drivingFreezeCount--; throw error; }
     let active = true;
-    return { source: this.drivingFrozenSource, release: () => {
+    return { source: this.staticFrozenSource!, drivingSource: this.drivingFrozenSource!, release: () => {
       if (!active) return; active = false;
       if (--this.drivingFreezeCount !== 0) return;
       this.drivingFrozenSource = null;
+      this.staticFrozenSource = null;
       if (this.drivingDisposed) return;
       const cursor = this.drivingDeferredCursor, snap = this.drivingDeferredSnap, reset = this.drivingDeferredReset;
       this.drivingDeferredCursor = null; this.drivingDeferredSnap = null; this.drivingDeferredReset = false;
@@ -583,6 +592,12 @@ export class CityParts {
       if (snap !== null) this.snapToTargets(snap);
       if (reset) this.resetAnimation();
     } };
+  }
+
+  /** Compatibility view for the road surface port, backed by the same freeze. */
+  acquireDrivingWorldSource(): { source: CitySurfaceSource; release: () => void } {
+    const frozen = this.acquireStaticSceneSource();
+    return { source: frozen.drivingSource, release: frozen.release };
   }
 
   /** 尽端回车圈（形态批 §5-3）：合法尽端（culDeSacEnds）的回车圆盘 + 路缘描边，

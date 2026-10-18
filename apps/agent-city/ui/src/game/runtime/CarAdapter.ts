@@ -5,6 +5,7 @@
 import { DrivingKernel, validDrivingState } from "../driving/DrivingKernel";
 import type { DrivingInputState, DrivingState } from "../DrivingSimulation";
 import type { VehicleAdapter } from "./GameScenePort";
+import type { CameraClearanceQuery } from "../VehicleChaseCamera";
 
 export type CarWorldBinding = Readonly<{
   revision: string;
@@ -19,6 +20,8 @@ export type CarPresentation = Readonly<{
   blocked: boolean;
   reason: string | null;
   frameSeconds: number;
+  /** Frozen query over the same compiled solids used by car movement. */
+  cameraSweep: CameraClearanceQuery;
 }>;
 export class CarAdapter implements VehicleAdapter<DrivingInputState> {
   private state: Readonly<DrivingState>;
@@ -29,7 +32,7 @@ export class CarAdapter implements VehicleAdapter<DrivingInputState> {
   private reason: string | null = null;
   readonly revision: string;
   constructor(private readonly binding: CarWorldBinding, private readonly spawn: Readonly<DrivingState>,
-    private readonly render: (frame: CarPresentation) => void) {
+    private readonly render: (frame: CarPresentation) => void, private readonly cameraSweep: CameraClearanceQuery) {
     this.binding = Object.freeze({ ...binding });
     this.revision = binding.revision;
     this.spawn = Object.freeze({ ...spawn });
@@ -68,7 +71,8 @@ export class CarAdapter implements VehicleAdapter<DrivingInputState> {
     }
     const delta = this.state.heading - this.previous.heading;
     state.heading = this.previous.heading + Math.atan2(Math.sin(delta), Math.cos(delta)) * t;
-    this.render(Object.freeze({ revision: this.revision, state: Object.freeze(state), blocked: this.blocked, reason: this.reason, frameSeconds }));
+    this.render(Object.freeze({ revision: this.revision, state: Object.freeze(state), blocked: this.blocked, reason: this.reason, frameSeconds,
+      cameraSweep: this.cameraSweep }));
   }
   reset(): void {
     this.assertReady();

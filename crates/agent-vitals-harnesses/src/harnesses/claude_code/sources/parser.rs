@@ -71,13 +71,14 @@ impl SourceParser for ClaudeCodeParser {
         let (facts, new_offset) = claude_jsonl_to_usage_facts_incremental(
             path, ctx.machine_namespace, ctx.source_profile, &sid, from_offset,
         )?;
-        let (workflow_events, session_excerpts) = claude_file_to_workflow_events(
+        let (workflow_events, session_excerpts, session_titles) = claude_file_to_workflow_events(
             path, ctx.machine_namespace, ctx.source_profile, &sid,
         )?;
         Ok(ParseOutput {
             facts,
             workflow_events,
             session_excerpts,
+            session_titles,
             new_offset,
         })
     }
@@ -92,6 +93,7 @@ impl SourceParser for ClaudeCodeParser {
             facts: r.facts,
             workflow_events: r.workflow_events,
             session_excerpts: r.session_excerpts,
+            session_titles: r.session_titles,
             new_offset,
         })
     }

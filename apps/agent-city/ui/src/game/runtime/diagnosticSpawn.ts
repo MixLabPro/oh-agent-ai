@@ -3,31 +3,35 @@
  * surface and full collision environment, including the complete car footprint. */
 import type { CompiledCitySurface } from "../../engine/surface/types";
 import type { SurfaceRegionsBuild } from "../../engine/surface/surfaceRegions";
-import { initialDrivingState, type DrivingState } from "../DrivingSimulation";
+import { initialDrivingState, type DrivingState, type DrivingMotion, type DrivingMoveResult } from "../DrivingSimulation";
 import type { DrivingEnvironment } from "../DrivingSimulation";
+import { preparationCheckpoint, preparationNow } from "./Preparation";
 
 type SpawnEnvironment = Pick<DrivingEnvironment, "move"> & Readonly<{
   place(x: number, z: number, heading: number, regionId: string, y?: number): Readonly<{ y: number; pitch: number; roll: number }> | null;
+  moveAsync?(start: DrivingState, desired: DrivingMotion, checkpoint: () => Promise<void>): Promise<DrivingMoveResult>;
 }>;
+type SpawnStep = Readonly<{ start: DrivingState; desired: DrivingMotion }> | null;
 
 // A short 2.5-unit probe accepts intersection noses between splitter islands.
 // Require a useful run-up both ways so the diagnostic car starts somewhere it
 // can actually pull away from, not merely somewhere its stationary body fits.
 const SPAWN_PROBE_DISTANCE = 6;
 
-export function diagnosticSpawn(surface: CompiledCitySurface, regions: Extract<SurfaceRegionsBuild, { status: "ready" }>,
-  environment: SpawnEnvironment): DrivingState | null {
+function* diagnosticSpawnSteps(surface: CompiledCitySurface, regions: Extract<SurfaceRegionsBuild, { status: "ready" }>,
+  environment: SpawnEnvironment): Generator<SpawnStep, DrivingState | null, DrivingMoveResult | undefined> {
   let budget = 512;
   let forwardOnly: DrivingState | null = null;
 
-  const hasShortClearance = (start: DrivingState, direction: "forward" | "backward"): boolean => {
+  function* hasShortClearance(start: DrivingState, direction: "forward" | "backward"): Generator<SpawnStep, boolean, DrivingMoveResult | undefined> {
     const sign = direction === "forward" ? 1 : -1;
     const desired = { x: start.x + Math.cos(start.heading) * SPAWN_PROBE_DISTANCE * sign,
       z: start.z + Math.sin(start.heading) * SPAWN_PROBE_DISTANCE * sign, heading: start.heading,
       travelBudget: SPAWN_PROBE_DISTANCE };
-    const moved = environment.move(start, desired);
+    const moved = yield { start, desired };
+    if (!moved) throw new Error("missing-spawn-probe-result");
     return !moved.blocked && Math.hypot(moved.x - start.x, moved.z - start.z) >= SPAWN_PROBE_DISTANCE * 0.95;
-  };
+  }
 
   const tryPose = (x: number, z: number, heading: number, layerId: string): DrivingState | null => {
     if (--budget < 0) return null;
@@ -71,14 +75,49 @@ export function diagnosticSpawn(surface: CompiledCitySurface, regions: Extract<S
     })];
     for (const [x, z] of positions) {
       for (const angle of [heading, heading + Math.PI]) {
+        yield null;
         const state = tryPose(x, z, angle, patch.layerId);
         if (!state) { if (budget <= 0) return forwardOnly; continue; }
-        if (!hasShortClearance(state, "forward")) continue;
-        if (hasShortClearance(state, "backward")) return state;
+        if (!(yield* hasShortClearance(state, "forward"))) continue;
+        if (yield* hasShortClearance(state, "backward")) return state;
         if (!forwardOnly) forwardOnly = state;
       }
     }
     if (budget <= 0) return forwardOnly;
   }
   return forwardOnly;
+}
+
+/** Synchronous audit/fixture compatibility; identical candidate order and checks. */
+export function diagnosticSpawn(surface: CompiledCitySurface, regions: Extract<SurfaceRegionsBuild, { status: "ready" }>,
+  environment: SpawnEnvironment): DrivingState | null {
+  const steps = diagnosticSpawnSteps(surface, regions, environment);
+  let next = steps.next();
+  while (!next.done) next = steps.next(next.value ? environment.move(next.value.start, next.value.desired) : undefined);
+  return next.value;
+}
+
+/** Real interactive entry yields between candidates without changing the search. */
+export async function diagnosticSpawnAsync(surface: CompiledCitySurface, regions: Extract<SurfaceRegionsBuild, { status: "ready" }>,
+  environment: SpawnEnvironment, signal?: AbortSignal, isCurrent: () => boolean = () => true): Promise<DrivingState | null> {
+  const steps = diagnosticSpawnSteps(surface, regions, environment);
+  let deadline = preparationNow() + 8;
+  const checkpoint = async () => {
+    if (signal?.aborted) throw new Error("cancelled");
+    if (!isCurrent()) throw new Error("stale-game-world");
+    if (preparationNow() >= deadline) {
+      await preparationCheckpoint(signal, isCurrent);
+      deadline = preparationNow() + 8;
+    }
+  };
+  let next = steps.next();
+  while (!next.done) {
+    await checkpoint();
+    const job = next.value;
+    const moved = !job ? undefined : environment.moveAsync
+      ? await environment.moveAsync(job.start, job.desired, checkpoint)
+      : environment.move(job.start, job.desired);
+    next = steps.next(moved);
+  }
+  return next.value;
 }

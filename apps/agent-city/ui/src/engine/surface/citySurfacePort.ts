@@ -12,6 +12,7 @@ import { buildSurfaceIndex, type SurfaceIndexBuild, type SurfacePointQuery, type
 import { checkLandingSeams, type LandingSeamOptions, type LandingSeamReport } from "./landingSeams";
 import { assertRenderedSolidBudget, copyRenderedSolids, type RenderedSolid, type RenderedSolidSource } from "./renderedSolidTypes";
 import type { SolidInput } from "../../game/driving/CollisionIndex";
+import { isValidMountableHeight } from "../../game/driving/staticSolidContracts";
 
 export type CitySurfaceSource = Readonly<{ layout: CityLayout; ground: CompiledGroundRoadSurface; rendered?: RenderedSolidSource; solids?: () => readonly SolidInput[];
   /** Optional O(1) lease check when scene solids are already frozen by their host. */ solidsCurrent?: () => boolean;
@@ -68,17 +69,17 @@ function sceneSolidValues(solids: readonly SolidInput[]): unknown[] {
   if (solids.length > 20000) throw new Error("scene-solids-budget");
   const ids = new Set<string>(); let points = 0;
   return [...solids].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map((s) => {
-    if (!s.id || ids.has(s.id) || s.id.length > 512 || !s.role || s.role.length > 512) throw new Error("invalid-scene-solid"); ids.add(s.id);
+    if (!s.id || ids.has(s.id) || s.id.length > 512 || !s.role || s.role.length > 512 || !isValidMountableHeight(s.mountableHeight)) throw new Error("invalid-scene-solid"); ids.add(s.id);
     const vertices = s.kind === "box" ? [s.center, ...s.halfAxes] : s.ring;
     points += vertices.length;
     if (points > 200000) throw new Error("scene-solids-budget");
     if (vertices.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.z) || ("y" in p && !Number.isFinite(p.y)))) throw new Error("invalid-scene-solid");
     if (s.kind === "box") {
       if (s.halfAxes.length !== 3) throw new Error("invalid-scene-solid");
-      return [s.id, s.role, s.kind, [s.center.x,s.center.y,s.center.z], s.halfAxes.map((p) => [p.x,p.y,p.z])];
+      return [s.id, s.role, s.kind, [s.center.x,s.center.y,s.center.z], s.halfAxes.map((p) => [p.x,p.y,p.z]), s.mountableHeight ?? null];
     }
     if (s.ring.length < 3 || !Number.isFinite(s.yMin) || !Number.isFinite(s.yMax) || s.yMin > s.yMax) throw new Error("invalid-scene-solid");
-    return [s.id,s.role,s.kind,s.ring.map((p) => [p.x,p.z]),s.yMin,s.yMax];
+    return [s.id,s.role,s.kind,s.ring.map((p) => [p.x,p.z]),s.yMin,s.yMax,s.mountableHeight ?? null];
   });
 }
 function copySceneSolids(solids: readonly SolidInput[]): readonly SolidInput[] {
@@ -95,13 +96,14 @@ export function canonicalCityWorldBytes(surfaceRevision: string, metadata: Struc
   const ids = new Set<string>();
   const obstacles = [...metadata.obstacles].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map((o) => {
     if (!o.id || ids.has(o.id)) throw new Error("invalid-world-obstacle-id");
+    if (!isValidMountableHeight(o.mountableHeight)) throw new Error("invalid-world-obstacle-mountable-height");
     ids.add(o.id);
     const points = o.shape === "box" ? o.corners : o.ring;
     if ((o.shape === "box" && points.length !== 8) || points.length < 3 ||
       points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.z) || ("y" in p && !Number.isFinite(p.y)))) throw new Error("invalid-world-obstacle");
     if (o.shape === "prism" && (!Number.isFinite(o.yMin) || !Number.isFinite(o.yMax) || o.yMin > o.yMax)) throw new Error("invalid-world-obstacle");
-    return o.shape === "box" ? [o.id, o.role, o.shape, o.surfacePatchId ?? null, o.corners.map((p) => [p.x, p.y, p.z])]
-      : [o.id, o.role, o.shape, o.ring.map((p) => [p.x, p.z]), o.yMin, o.yMax];
+    return o.shape === "box" ? [o.id, o.role, o.shape, o.surfacePatchId ?? null, o.corners.map((p) => [p.x, p.y, p.z]), o.mountableHeight ?? null]
+      : [o.id, o.role, o.shape, o.ring.map((p) => [p.x, p.z]), o.yMin, o.yMax, o.mountableHeight ?? null];
   });
   const landingIds = new Set<string>();
   const landings = [...metadata.landings].sort((a, b) => a.structureId < b.structureId ? -1 : a.structureId > b.structureId ? 1 : a.end < b.end ? -1 : a.end > b.end ? 1 : 0).map((l) => {
@@ -126,7 +128,7 @@ export function canonicalCityWorldBytes(surfaceRevision: string, metadata: Struc
     renderedBytes += s.positions.byteLength + s.indices.byteLength + s.transforms.byteLength;
     return s;
   });
-  const header = new TextEncoder().encode(JSON.stringify(["city-driving-world", 1, renderedSolids ? "structures-and-rendered-buildings" : "structures-only", surfaceRevision, obstacles, landings, counts,
+  const header = new TextEncoder().encode(JSON.stringify(["city-driving-world", 2, renderedSolids ? "structures-and-rendered-buildings" : "structures-only", surfaceRevision, obstacles, landings, counts,
     ...(renderedSolids ? [rendered.map((s) => [s.id, s.role, s.positions.length, s.indices.length, s.transforms.length])] : []),
     ...(sceneSolids ? [["scene-proxies", sceneSolidValues(sceneSolids)]] : [])]));
   if (!renderedSolids) return header;
@@ -210,7 +212,7 @@ export class CitySurfacePort {
     const digest = await this.hash(canonicalCityWorldBytes(revision, metadata, source.rendered ? renderedSolids : undefined, source.solids ? sceneSolids : undefined));
     if (generation !== this.generation || this.store.revision !== revision || !verifySourceCurrent()) return Object.freeze({ status: "stale" });
     if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("invalid-world-digest");
-    const worldRevision = `city-world-v1:sha256:${digest}`;
+    const worldRevision = `city-world-v2:sha256:${digest}`;
     const leaseCurrent = () => generation === this.generation && this.store.revision === revision && sourceCurrent();
     const verifyCurrent = () => generation === this.generation && this.store.revision === revision && verifySourceCurrent();
     const isCurrent = verifyCurrent;

@@ -16,6 +16,11 @@ import { DetMath as Math } from "./engine/detMath"; // 跨引擎确定性：见 
 export type CitySessionRow = {
   session_ref: string;
   harness: string;
+  /** 会话标题（V32 楼名）：codex thread_name / claude ai-title / dsh workspace
+   *  title 的脱敏截断投影；null = 无标题证据（面板走 harness + 日期 fallback）。 */
+  title: string | null;
+  /** 标题来源（codex_thread_name | claude_ai_title | dsh_workspace_title）。 */
+  title_source: string | null;
   first_event_at: string | null;
   last_event_at: string | null;
   event_count: number;

@@ -4,8 +4,9 @@
  * rotating OBB; it never certifies clearance from endpoint samples alone.
  */
 import type { StructureObstacle } from "../../engine/surface/compileSurface";
+import { conservativeVehicleVerticalRadius, isValidMountableHeight, type MountablePolicy } from "./staticSolidContracts";
 
-export const COLLISION_RULES_VERSION = 1;
+export const COLLISION_RULES_VERSION = 2;
 type V = Readonly<{ x: number; y: number; z: number }>;
 export type CollisionPose = V & Readonly<{ heading: number; pitch: number; roll: number }>;
 export type CollisionDimensions = Readonly<{ halfLength: number; halfWidth: number; halfHeight: number }>;
@@ -17,7 +18,7 @@ export type CollisionResult = Readonly<{ status: "clear" | "contact" | "unresolv
   /** Certified collision-free prefix, excluding the contact skin. */
   lastSafeFraction: number; contact: Readonly<{ obstacleId: string; toi: number; normal: V; point: V }> | null; tests: number }>;
 type Bound = { min: V; max: V };
-type IndexedSolid = { id: string; vertices: readonly V[]; normals: readonly V[]; edges: readonly V[]; bound: Bound };
+type IndexedSolid = { id: string; vertices: readonly V[]; normals: readonly V[]; edges: readonly V[]; bound: Bound; mountable?: number };
 type Node = Bound & { left?: Node; right?: Node; solids?: readonly IndexedSolid[] };
 const add = (a: V, b: V): V => ({ x: a.x+b.x, y: a.y+b.y, z: a.z+b.z });
 const sub = (a: V, b: V): V => ({ x: a.x-b.x, y: a.y-b.y, z: a.z-b.z });
@@ -71,7 +72,7 @@ function prism(obstacle: Extract<StructureObstacle,{shape:"prism"}>, spend: () =
     triangles.push([a,b,c]);remaining.splice(i,1);clipped=true;break;
   } if(!clipped)throw new Invalid();}
   triangles.push(remaining);
-  return triangles.map(t=>{const low=t.map(i=>vertices[i]), high=low.map(p=>({...p,y:yMax})); return shape(id,[...low,...high],[[0,1,2],[3,5,4],[0,3,4,1],[1,4,5,2],[2,5,3,0]]);});
+  return triangles.map(t=>{const low=t.map(i=>vertices[i]), high=low.map(p=>({...p,y:yMax})); const s=shape(id,[...low,...high],[[0,1,2],[3,5,4],[0,3,4,1],[1,4,5,2],[2,5,3,0]]); if(obstacle.mountableHeight!==undefined)s.mountable=obstacle.mountableHeight; return s;});
 }
 function body(p: CollisionPose,d: CollisionDimensions): IndexedSolid {
   // Long axis matches DrivingSimulation: heading 0 points +X; pitch raises the nose.
@@ -93,16 +94,29 @@ function separation(a: IndexedSolid,b: IndexedSolid,spend:()=>void): {gap:number
 }
 function valid(p:CollisionPose,d:CollisionDimensions){return finite(p)&&[p.heading,p.pitch,p.roll,d.halfLength,d.halfWidth,d.halfHeight].every(Number.isFinite)&&d.halfLength>0&&d.halfWidth>0&&d.halfHeight>0;}
 export type CollisionIndexBuild = Readonly<{status:"ready";index:CollisionIndex}> | Readonly<{status:"unresolved";reason:"invalid-input"|"budget"}>;
-function buildFrozenCollisionIndex(input: Readonly<{revision:string;obstacles:readonly StructureObstacle[]}>, options: Partial<CollisionLimits> = {}, staticParams?: CollisionParams): CollisionIndexBuild {
+function buildFrozenCollisionIndex(input: Readonly<{revision:string;obstacles:readonly StructureObstacle[]}>, options: Partial<CollisionLimits> = {}, staticParams?: CollisionParams, sourceSolids?: readonly SolidInput[]): CollisionIndexBuild {
   const limits={...DEFAULT_COLLISION_LIMITS,...options};let tests=0;
   const spend=()=>{if(++tests>limits.maxTests)throw new Budget();};
   try {
     if(!input.revision||!Number.isFinite(limits.skin)||limits.skin<=0||Object.entries(limits).some(([k,v])=>k!=="skin"&&(!Number.isSafeInteger(v)||v<1)))throw new Invalid();
     if(input.obstacles.length>limits.maxObstacles)throw new Budget();
     const ids=new Set<string>();const solids:IndexedSolid[]=[];let vertexCount=0;
-    for(const obstacle of input.obstacles){spend();if(!obstacle.id||ids.has(obstacle.id))throw new Invalid();ids.add(obstacle.id);
+    for(const [index,obstacle] of input.obstacles.entries()){spend();if(!obstacle.id||ids.has(obstacle.id))throw new Invalid();ids.add(obstacle.id);
       vertexCount+=obstacle.shape==="box"?obstacle.corners.length:Math.max(0,6*(obstacle.ring.length-2));if(vertexCount>limits.maxVertices)throw new Budget();
-      if(obstacle.shape==="box") {if(obstacle.corners.length!==8||obstacle.corners.some(p=>!finite(p)))throw new Invalid();solids.push(shape(obstacle.id,obstacle.corners.map(p=>({...p})),boxFaces));}
+      if(obstacle.shape==="box") {if(obstacle.corners.length!==8||obstacle.corners.some(p=>!finite(p)))throw new Invalid();
+        const source=sourceSolids?.[index];
+        let bs:IndexedSolid;
+        if(source?.kind==="box") {
+          // An affine box is convex by construction. Preserve original half-axes:
+          // subtracting large world corners loses precision for thin rotated boxes.
+          const axes=source.halfAxes;
+          if(!finite(source.center)||axes.some(a=>!finite(a)||length(a)<=1e-12))throw new Invalid();
+          const normals=[cross(axes[1],axes[2]),cross(axes[2],axes[0]),cross(axes[0],axes[1])];
+          const volume=Math.abs(dot(axes[0],normals[0])), axisVolume=axes.reduce((n,a)=>n*length(a),1);
+          if(normals.some(n=>length(n)<=1e-12)||!Number.isFinite(volume)||volume<=64*Number.EPSILON*axisVolume)throw new Invalid();
+          bs={id:source.id,vertices:obstacle.corners.map(p=>({...p})),normals:normals.map(unit),edges:axes.map(unit),bound:bounds(obstacle.corners)};
+        } else bs=shape(obstacle.id,obstacle.corners.map(p=>({...p})),boxFaces);
+        if(obstacle.mountableHeight!==undefined)bs.mountable=obstacle.mountableHeight;solids.push(bs);}
       else if(obstacle.shape==="prism")solids.push(...prism(obstacle,spend));else throw new Invalid();
     }
     let nodes=0;
@@ -110,19 +124,19 @@ function buildFrozenCollisionIndex(input: Readonly<{revision:string;obstacles:re
       if(items.length<=4)return {...bound,solids:items};const axes=["x","y","z"] as const;const axis=axes.reduce((best,a)=>bound.max[a]-bound.min[a]>bound.max[best]-bound.min[best]?a:best,"x");
       items.sort((a,b)=>(a.bound.min[axis]+a.bound.max[axis])-(b.bound.min[axis]+b.bound.max[axis])||lexical(a.id,b.id));const mid=Math.floor(items.length/2);
       return {...bound,left:tree(items.slice(0,mid))!,right:tree(items.slice(mid))!};};
-    return Object.freeze({status:"ready",index:new CollisionIndex(input.revision,tree(solids),Object.freeze(limits), input.obstacles,staticParams)});
+    return Object.freeze({status:"ready",index:new CollisionIndex(input.revision,tree(solids),Object.freeze(limits), input.obstacles,staticParams,sourceSolids)});
   } catch(e){if(e instanceof Invalid||e instanceof Budget)return Object.freeze({status:"unresolved",reason:e instanceof Budget?"budget":"invalid-input"});throw e;}
 }
 export class CollisionIndex {
   private readonly staticIndex: StaticCollisionIndex;
-  constructor(readonly revision:string, private readonly root:Node|null, readonly limits:CollisionLimits, obstacles: readonly StructureObstacle[] = [], staticParams?: CollisionParams) {
-    this.staticIndex=buildStaticCollisionIndex(obstacles.map(o=>o.shape === "box" ? boxSolidFromCorners(o.id,o.role,o.corners) : ({id:o.id,role:o.role,kind:"prism" as const,ring:o.ring,yMin:o.yMin,yMax:o.yMax})), {...DEFAULT_COLLISION_PARAMS,maxCandidates:limits.maxCandidates,...staticParams});
+  constructor(readonly revision:string, private readonly root:Node|null, readonly limits:CollisionLimits, obstacles: readonly StructureObstacle[] = [], staticParams?: CollisionParams, sourceSolids?: readonly SolidInput[]) {
+    this.staticIndex=buildStaticCollisionIndex(sourceSolids ?? obstacles.map(o=>o.shape === "box" ? {...boxSolidFromCorners(o.id,o.role,o.corners),...(o.mountableHeight===undefined?{}:{mountableHeight:o.mountableHeight})} : ({id:o.id,role:o.role,kind:"prism" as const,ring:o.ring,yMin:o.yMin,yMax:o.yMax,mountableHeight:o.mountableHeight})), {...DEFAULT_COLLISION_PARAMS,maxCandidates:limits.maxCandidates,...staticParams});
   }
   get report(): CollisionReport { return this.staticIndex.report; }
-  hit(poly: Poly): CollisionHit { return this.staticIndex.hit(poly); }
+  hit(poly: Poly, mountablePolicy: MountablePolicy = "disabled"): CollisionHit { return this.staticIndex.hit(poly, mountablePolicy); }
   solids(): readonly Solid[] { return this.staticIndex.solids(); }
-  overlap(pose:CollisionPose,dimensions:CollisionDimensions):CollisionResult{return this.sweep(pose,pose,dimensions);}
-  sweep(from:CollisionPose,to:CollisionPose,dimensions:CollisionDimensions):CollisionResult {
+  overlap(pose:CollisionPose,dimensions:CollisionDimensions,mountablePolicy:MountablePolicy="disabled"):CollisionResult{return this.sweep(pose,pose,dimensions,mountablePolicy);}
+  sweep(from:CollisionPose,to:CollisionPose,dimensions:CollisionDimensions,mountablePolicy:MountablePolicy="disabled"):CollisionResult {
     let tests=0,lastSafeFraction=0;
     const result=(status:CollisionResult["status"],reason:CollisionResult["reason"],contact:CollisionResult["contact"]=null):CollisionResult=>Object.freeze({status,reason,revision:this.revision,lastSafeFraction,contact,tests});
     const spend=()=>{if(++tests>this.limits.maxTests)throw new Budget();};
@@ -136,12 +150,19 @@ export class CollisionIndex {
     try {
       const candidates:IndexedSolid[]=[];const stack=this.root?[this.root]:[];
       while(stack.length){spend();const node=stack.pop()!;if(!intersects(node,broad))continue;if(node.solids){for(const solid of node.solids){spend();if(intersects(solid.bound,broad)){candidates.push(solid);if(candidates.length>this.limits.maxCandidates)throw new Budget();}}}else{if(node.right)stack.push(node.right);if(node.left)stack.push(node.left);}}
-      candidates.sort((a,b)=>lexical(a.id,b.id));if(!candidates.length){lastSafeFraction=1;return result("clear","none");}
+      // 可越障碍（mountable curbs）：扫掠期间车底可能的高度下界 = min(from,to).y − 半高 − 俯仰裕量。
+      // 用最保守车底判爬升——整段扫掠都不高于预算才跳过（中途爬上岛的场景 from 车底已在路面，
+      // 0.22 的岛顶在预算内，从扫掠起点即跳过；高墙/桥墩永不满足）。
+      if(mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")return result("unresolved","invalid-input");
+      const verticalRadius=conservativeVehicleVerticalRadius(dimensions.halfLength,dimensions.halfWidth,dimensions.halfHeight,from.pitch,to.pitch,from.roll,to.roll);
+      const sweepBottom=Math.min(from.y,to.y)-verticalRadius;
+      const filtered=candidates.filter((solid)=>!(mountablePolicy==="gameplay"&&solid.mountable!==undefined&&solid.bound.max.y-sweepBottom<=solid.mountable));
+      filtered.sort((a,b)=>lexical(a.id,b.id));if(!filtered.length){lastSafeFraction=1;return result("clear","none");}
       let t=0;
       for(let iteration=0;iteration<this.limits.maxIterations;iteration++){
         const p:CollisionPose={x:from.x+delta.x*t,y:from.y+delta.y*t,z:from.z+delta.z*t,heading:from.heading+(to.heading-from.heading)*t,pitch:from.pitch+(to.pitch-from.pitch)*t,roll:from.roll+(to.roll-from.roll)*t};
         const vehicle=body(p,dimensions);let nearest:{solid:IndexedSolid;gap:number;normal:V}|null=null;
-        for(const solid of candidates){const found=separation(vehicle,solid,spend);if(!Number.isFinite(found.gap))return result("unresolved","precision");if(!nearest||found.gap<nearest.gap)nearest={solid,...found};}
+        for(const solid of filtered){const found=separation(vehicle,solid,spend);if(!Number.isFinite(found.gap))return result("unresolved","precision");if(!nearest||found.gap<nearest.gap)nearest={solid,...found};}
         const hit=nearest!;
         if(hit.gap<=this.limits.skin){const point=vehicle.vertices.reduce((best,v)=>dot(v,hit.normal)<dot(best,hit.normal)?v:best,vehicle.vertices[0]);return result("contact",t===0&&hit.gap<0?"initial-overlap":"solid",Object.freeze({obstacleId:hit.solid.id,toi:t,normal:Object.freeze(hit.normal),point:Object.freeze({...point})}));}
         lastSafeFraction=t;
@@ -175,13 +196,15 @@ export class CollisionIndex {
 
 export type V3 = Readonly<{ x: number; y: number; z: number }>;
 /** Parallelepiped: centre and three half-edge vectors (an OBB when orthogonal; sheared transforms stay exact). */
-export type BoxSolidInput = Readonly<{ id: string; role: string; kind: "box"; center: V3; halfAxes: readonly [V3, V3, V3] }>;
+export type BoxSolidInput = Readonly<{ id: string; role: string; kind: "box"; center: V3; halfAxes: readonly [V3, V3, V3]; mountableHeight?: number }>;
 /** Vertical prism over a convex XZ ring (any winding; non-convex input is replaced by its hull). */
-export type PrismSolidInput = Readonly<{ id: string; role: string; kind: "prism"; ring: readonly Readonly<{ x: number; z: number }>[]; yMin: number; yMax: number }>;
+export type PrismSolidInput = Readonly<{ id: string; role: string; kind: "prism"; ring: readonly Readonly<{ x: number; z: number }>[]; yMin: number; yMax: number; mountableHeight?: number }>;
 export type SolidInput = BoxSolidInput | PrismSolidInput;
 
 type Poly = { vertices: V3[]; faces: V3[]; edges: V3[] };
-export type Solid = Readonly<{ id: string; role: string; minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number; poly: Poly }>;
+export type Solid = Readonly<{ id: string; role: string; minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number; poly: Poly;
+  /** 可越障碍（mountable curbs）：障碍顶面高出车底 ≤ 此值时跳过法向阻挡（支撑融合另行处理）。 */
+  mountableHeight?: number }>;
 export type CollisionParams = Readonly<{ cellSize: number; maxCellsPerSolid: number; maxCandidates: number }>;
 export const DEFAULT_COLLISION_PARAMS: CollisionParams = Object.freeze({ cellSize: 8, maxCellsPerSolid: 4096, maxCandidates: 4096 });
 export type CollisionReport = Readonly<{ rulesVersion: number; solids: number; rejected: number; byRole: Readonly<Record<string, number>> }>;
@@ -238,7 +261,7 @@ export function polytopesIntersect(a: Poly, b: Poly): boolean {
 export type StaticCollisionIndex = Readonly<{
   report: CollisionReport;
   /** First solid (stable: lowest id) intersecting the body. */
-  hit: (body: Poly) => CollisionHit;
+  hit: (body: Poly, mountablePolicy?: MountablePolicy) => CollisionHit;
   solids: () => readonly Solid[];
 }>;
 
@@ -246,16 +269,20 @@ function buildStaticCollisionIndex(inputs: readonly SolidInput[], params: Collis
   const solids: Solid[] = []; let rejected = 0; const byRole: Record<string, number> = Object.create(null);
   if(!Number.isFinite(params.cellSize)||params.cellSize<=0||!Number.isSafeInteger(params.maxCellsPerSolid)||params.maxCellsPerSolid<1||!Number.isSafeInteger(params.maxCandidates)||params.maxCandidates<1)throw new Error("invalid-static-collision-params");
   for (const input of [...inputs].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
+    if (!isValidMountableHeight(input.mountableHeight)) throw new Invalid();
     let poly: Poly | null = null;
     if (input.kind === "box" && staticFinite(input.center) && input.halfAxes.every(staticFinite)) {
       const volume = Math.abs(staticDot(input.halfAxes[0], staticCross(input.halfAxes[1], input.halfAxes[2])));
-      poly = volume > 1e-12 ? boxPoly(input.center, input.halfAxes) : null;
+      const axisVolume = input.halfAxes.reduce((n, axis) => n * Math.hypot(axis.x, axis.y, axis.z), 1);
+      poly = Number.isFinite(volume) && volume > 64 * Number.EPSILON * axisVolume ? boxPoly(input.center, input.halfAxes) : null;
     } else if (input.kind === "prism" && Number.isFinite(input.yMin) && Number.isFinite(input.yMax) && input.yMax > input.yMin && input.ring.every((p) => Number.isFinite(p.x) && Number.isFinite(p.z))) {
       poly = prismPoly(input.ring, input.yMin, input.yMax);
     }
     if (!poly) { rejected++; continue; }
     const xs = poly.vertices.map((v) => v.x), ys = poly.vertices.map((v) => v.y), zs = poly.vertices.map((v) => v.z);
-    solids.push(Object.freeze({ id: input.id, role: input.role, minX: Math.min(...xs), minY: Math.min(...ys), minZ: Math.min(...zs), maxX: Math.max(...xs), maxY: Math.max(...ys), maxZ: Math.max(...zs), poly: Object.freeze({ vertices: Object.freeze(poly.vertices.map(v=>Object.freeze({...v}))), faces: Object.freeze(poly.faces.map(v=>Object.freeze({...v}))), edges: Object.freeze(poly.edges.map(v=>Object.freeze({...v}))) }) as unknown as Poly }));
+    solids.push(Object.freeze({ id: input.id, role: input.role, minX: Math.min(...xs), minY: Math.min(...ys), minZ: Math.min(...zs), maxX: Math.max(...xs), maxY: Math.max(...ys), maxZ: Math.max(...zs),
+      mountableHeight: input.mountableHeight,
+      poly: Object.freeze({ vertices: Object.freeze(poly.vertices.map(v=>Object.freeze({...v}))), faces: Object.freeze(poly.faces.map(v=>Object.freeze({...v}))), edges: Object.freeze(poly.edges.map(v=>Object.freeze({...v}))) }) as unknown as Poly }));
     byRole[input.role] = (byRole[input.role] ?? 0) + 1;
   }
   const cell = params.cellSize; const grid = new Map<string, number[]>();
@@ -267,7 +294,8 @@ function buildStaticCollisionIndex(inputs: readonly SolidInput[], params: Collis
     if ((x1 - x0 + 1) * (z1 - z0 + 1) > params.maxCellsPerSolid) { oversized.push(i); return; }
     for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) { const k = `${x}:${z}`; const b = grid.get(k); if (b) b.push(i); else grid.set(k, [i]); }
   });
-  const hit = (body: Poly): CollisionHit => {
+  const hit = (body: Poly, mountablePolicy: MountablePolicy = "disabled"): CollisionHit => {
+    if(mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")return Object.freeze({status:"invalid-input"});
     if (!body.vertices.length || !body.vertices.every(staticFinite)) return Object.freeze({ status: "invalid-input" });
     const xs = body.vertices.map((v) => v.x), ys = body.vertices.map((v) => v.y), zs = body.vertices.map((v) => v.z);
     const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys), minZ = Math.min(...zs), maxZ = Math.max(...zs);
@@ -284,6 +312,8 @@ function buildStaticCollisionIndex(inputs: readonly SolidInput[], params: Collis
     for (const i of candidates) {
       const s = solids[i];
       if (s.maxX < minX || s.minX > maxX || s.maxY < minY || s.minY > maxY || s.maxZ < minZ || s.minZ > maxZ) continue;
+      // 可越障碍：顶面高出车底 ≤ 预算时跳过法向阻挡——车「爬」上去而不是撞停。
+      if (mountablePolicy === "gameplay" && s.mountableHeight !== undefined && s.maxY - minY <= s.mountableHeight) continue;
       if (polytopesIntersect(body, s.poly)) return Object.freeze({ status: "hit", solid: s });
     }
     return Object.freeze({ status: "clear" });
@@ -331,8 +361,8 @@ export function buildCollisionIndex(inputs: Readonly<{revision:string;obstacles:
 export function buildCollisionIndex(inputs: readonly SolidInput[] | Readonly<{revision:string;obstacles:readonly StructureObstacle[]}>, params: Partial<CollisionLimits> | CollisionParams = {}): CollisionIndex | CollisionIndexBuild {
   if (!Array.isArray(inputs)) return buildFrozenCollisionIndex(inputs as Readonly<{revision:string;obstacles:readonly StructureObstacle[]}>,params as Partial<CollisionLimits>);
   const obstacles: StructureObstacle[]=inputs.map(input=>input.kind === "box"
-    ? ({id:input.id,role:input.role,shape:"box",corners:boxPoly(input.center,input.halfAxes).vertices} as StructureObstacle)
-    : ({id:input.id,role:input.role,shape:"prism",ring:input.ring,yMin:input.yMin,yMax:input.yMax} as StructureObstacle));
+    ? ({id:input.id,role:input.role,shape:"box",corners:boxPoly(input.center,input.halfAxes).vertices,...(input.mountableHeight===undefined?{}:{mountableHeight:input.mountableHeight})} as StructureObstacle)
+    : ({id:input.id,role:input.role,shape:"prism",ring:input.ring,yMin:input.yMin,yMax:input.yMax,mountableHeight:input.mountableHeight} as StructureObstacle));
   const built=buildFrozenCollisionIndex({revision:"legacy-static-unversioned",obstacles},{maxCandidates:params.maxCandidates ?? DEFAULT_COLLISION_LIMITS.maxCandidates},{...DEFAULT_COLLISION_PARAMS,...params} as CollisionParams);
   if(built.status!=="ready")throw new Error(`collision-index-${built.reason}`);
   return built.index;
@@ -343,9 +373,9 @@ export function buildCollisionIndex(inputs: readonly SolidInput[] | Readonly<{re
 export function buildVersionedCollisionIndex(revision: string, solids: readonly SolidInput[], params?: CollisionParams): CollisionIndexBuild {
   try {
     const obstacles: StructureObstacle[] = solids.map((input) => input.kind === "box"
-      ? ({ id: input.id, role: input.role, shape: "box", corners: boxPoly(input.center, input.halfAxes).vertices.map((v) => ({ ...v })) } as StructureObstacle)
-      : ({ id: input.id, role: input.role, shape: "prism", ring: input.ring, yMin: input.yMin, yMax: input.yMax } as StructureObstacle));
-    return buildFrozenCollisionIndex({ revision, obstacles }, { maxCandidates: DEFAULT_COLLISION_LIMITS.maxCandidates }, params ?? DEFAULT_COLLISION_PARAMS);
+      ? ({ id: input.id, role: input.role, shape: "box", corners: boxPoly(input.center, input.halfAxes).vertices.map((v) => ({ ...v })), ...(input.mountableHeight === undefined ? {} : { mountableHeight: input.mountableHeight }) } as StructureObstacle)
+      : ({ id: input.id, role: input.role, shape: "prism", ring: input.ring, yMin: input.yMin, yMax: input.yMax, mountableHeight: input.mountableHeight } as StructureObstacle));
+    return buildFrozenCollisionIndex({ revision, obstacles }, { maxCandidates: DEFAULT_COLLISION_LIMITS.maxCandidates }, params ?? DEFAULT_COLLISION_PARAMS, solids);
   } catch (error) {
     if (error instanceof Budget) return Object.freeze({ status: "unresolved", reason: "budget" });
     return Object.freeze({ status: "unresolved", reason: "invalid-input" });

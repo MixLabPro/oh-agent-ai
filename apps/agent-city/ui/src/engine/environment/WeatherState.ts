@@ -8,11 +8,12 @@ const RAIN_THRESHOLD = 0.82;
 const OVERCAST_THRESHOLD = 0.62;
 
 /** 某时刻的天气。ms 为回放游标或真实时钟。 */
-export function weatherAt(ms: number): WeatherState {
+export function weatherAt(ms: number, utcOffsetMinutes = -new Date(ms).getTimezoneOffset()): WeatherState {
   // 按本地时间切日：曾用 ms/86_400_000（UTC 日界），天空用本地小时——北京时间每天 8 点天气突变。
-  const local = ms - new Date(ms).getTimezoneOffset() * 60_000;
+  if (!Number.isFinite(ms) || !Number.isInteger(utcOffsetMinutes) || Math.abs(utcOffsetMinutes) > 14 * 60) throw new Error("invalid-weather-time");
+  const local = ms + utcOffsetMinutes * 60_000;
   const dayIndex = Math.floor(local / 86_400_000);
-  const hour = (local / 3_600_000) % 24;
+  const hour = ((local / 3_600_000) % 24 + 24) % 24;
   // 顺序日期先过一次 Knuth 混淆再入哈希：FNV 对「末位数字 +1」的字符串雪崩
   // 不足，直接哈希会让相邻日期的天气强相关（实测连出十几天的同种天气）。
   const roll = hashSeed(`weather:${(Math.imul(dayIndex, 2654435761) ^ 0x9e3779b9) >>> 0}`);

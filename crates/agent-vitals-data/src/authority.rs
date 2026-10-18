@@ -34,7 +34,7 @@ use crate::safe_query::authority_callback;
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
 // v31 is an internal-development breaking rename: host columns become harness.
 // Existing host-column databases must be rebuilt, never silently reinterpreted.
-pub const SCHEMA_VERSION: i64 = 31;
+pub const SCHEMA_VERSION: i64 = 32;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 旧 `index.sqlite3` 是独立的遗留投影；本函数不导入、解释或删除它。
@@ -509,6 +509,8 @@ CREATE TABLE sessions (
   ended_at_ms INTEGER,
   last_observed_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
+  title TEXT,                               -- v32：会话标题（City 楼名等本地展示面；NULL = 无标题证据）
+  title_source TEXT,                        -- v32：codex_thread_name | claude_ai_title | dsh_workspace_title
   UNIQUE(harness, machine_namespace, native_session_id)
 );
 
@@ -1466,6 +1468,31 @@ fn ensure_schema_v30(conn: &Connection) -> Result<(), AuthorityError> {
     Ok(())
 }
 
+/// v32（City 楼名）：`sessions` 加 `title` / `title_source` 两列——纯加性，
+/// 无数据迁移。列存在性用 pragma 守卫（同 `apply_schema_v16` 的纪律：只把
+/// 「查无此列」当缺失，真错误上抛），幂等重跑安全。
+fn ensure_schema_v32(conn: &Connection) -> Result<(), AuthorityError> {
+    for (table, column_ddl) in [
+        ("sessions", "title TEXT"),
+        ("sessions", "title_source TEXT"),
+    ] {
+        let column = column_ddl.split_whitespace().next().unwrap_or_default();
+        let present = match conn.query_row(
+            &format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = '{column}'"),
+            [],
+            |_| Ok(true),
+        ) {
+            Ok(present) => present,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column_ddl};"))?;
+        }
+    }
+    Ok(())
+}
+
 fn ensure_schema_v27(conn: &Connection) -> Result<(), AuthorityError> {
     let has_source: bool = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('trust_monitor_state') WHERE name = 'enabled_source'",
@@ -2369,6 +2396,7 @@ impl AuthorityDb {
             "UPDATE usage_facts SET harness = 'harness:' || substr(harness, 8) WHERE harness LIKE 'plugin:%';",
         )?;
         ensure_schema_v30(conn)?;
+        ensure_schema_v32(conn)?;
         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
             rusqlite::params![super::authority::SCHEMA_VERSION.to_string()])?;
         Ok(())

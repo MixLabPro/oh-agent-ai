@@ -15,7 +15,7 @@ import { hashSeed } from "../cityModel";
 
 // v3（2026-10-12）：环法线改取相邻弦的角平分线 + 走廊验证加转弯可飞性；同一组环心在 v2/v3
 // 下法线不同，courseId 只摘要环心，所以必须升版本，否则旧成绩会挂到几何已变的路线上。
-export const COURSE_VERSION = 3;
+export const COURSE_VERSION = 4;
 const RING_COUNT = 12;
 const MAX_ATTEMPTS = 8;
 const REACTION_SECONDS_AT_MAX = 1.2;
@@ -50,12 +50,15 @@ export type CourseRequest = {
   citySeed: number;
   physicsVersion: number;
   variant: number;
+  /** Static collision compiler/content identity; part of the persistent course key. */
+  staticCollisionIdentity?: string;
 };
 
 type PathPoint = { x: number; y: number; z: number };
 
 export function generateRaceCourse(request: CourseRequest): RaceCourse | null {
   const { world, params, citySeed, physicsVersion, variant } = request;
+  const staticCollisionIdentity = request.staticCollisionIdentity ?? "legacy-no-static-snapshot";
   const bounds = world.bounds;
   const ringRadius = Math.max(8, Math.min(16, params.planeRadius * 3.4));
   const clearance = ringRadius + params.planeRadius * 1.5;
@@ -68,12 +71,12 @@ export function generateRaceCourse(request: CourseRequest): RaceCourse | null {
     if (!rings) continue;
     orientRingNormals(rings);
     if (!validateCorridor(world, rings, params, clearance)) continue;
-    return finalize(citySeed, physicsVersion, variant, rings, params, "generated");
+    return finalize(citySeed, physicsVersion, variant, rings, params, "generated", staticCollisionIdentity);
   }
 
   // 降级：城外海面弧线。
   const arcRings = generateSeaArc(world, params, ringRadius, clearance);
-  if (arcRings) return finalize(citySeed, physicsVersion, variant, arcRings.rings, params, "fallback");
+  if (arcRings) return finalize(citySeed, physicsVersion, variant, arcRings.rings, params, "fallback", staticCollisionIdentity);
   return null;
 }
 
@@ -189,12 +192,12 @@ function generateSeaArc(world: FlightWorld, params: FlightParams, ringRadius: nu
 }
 
 /** 路线几何摘要。 */
-function courseIdentity(citySeed: number, physicsVersion: number, variant: number, rings: CourseRing[], radius: number): string {
+function courseIdentity(citySeed: number, physicsVersion: number, variant: number, rings: CourseRing[], radius: number, staticCollisionIdentity: string): string {
   const digest = rings.map((ring) => `${Math.round(ring.x)},${Math.round(ring.y)},${Math.round(ring.z)}`).join(";");
-  return `course:v${COURSE_VERSION}:p${physicsVersion}:${citySeed}:${variant}:${Math.round(hashSeed(digest) * 1e9)}:r${Math.round(radius)}`;
+  return `course:v${COURSE_VERSION}:p${physicsVersion}:${citySeed}:${variant}:${Math.round(hashSeed(`${staticCollisionIdentity}:${digest}`) * 1e9)}:r${Math.round(radius)}`;
 }
 
-function finalize(citySeed: number, physicsVersion: number, variant: number, rings: CourseRing[], params: FlightParams, kind: "generated" | "fallback"): RaceCourse {
+function finalize(citySeed: number, physicsVersion: number, variant: number, rings: CourseRing[], params: FlightParams, kind: "generated" | "fallback", staticCollisionIdentity: string): RaceCourse {
   let length = 0;
   for (let index = 0; index < rings.length; index += 1) {
     const from = rings[index];
@@ -203,7 +206,7 @@ function finalize(citySeed: number, physicsVersion: number, variant: number, rin
   }
   const referenceMs = (length / params.cruiseSpeed) * 1000;
   const timeLimitMs = Math.round(referenceMs * LIMIT_FACTOR);
-  const courseId = courseIdentity(citySeed, physicsVersion, variant, rings, rings[0].radius);
+  const courseId = courseIdentity(citySeed, physicsVersion, variant, rings, rings[0].radius, staticCollisionIdentity);
   return { kind, rings, timeLimitMs, referenceMs: Math.round(referenceMs), ringRadius: rings[0].radius, courseId, variant };
 }
 

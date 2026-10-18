@@ -1,5 +1,7 @@
 import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
+import { runPlanningJob, type PlanningWorkerPort } from "./planningWorker/planningJob";
+import { PLANNING_WORK_UNITS } from "./planner/operationBudget";
 import { hashSeed, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
 import { clearsHighways, polygonDistance } from "./roadGeometry";
@@ -176,13 +178,8 @@ function aggregateOverflow(districtId: string, anchor: Vec2, overflow: CityModel
 /** 规划修复补丁的移楼钉子（planPatch.ts::layoutPinsFor）：buildingId → parcelId，只在档位一致时生效。 */
 export type LayoutPins = { scaleTier: number; parcels: ReadonlyMap<string, string> };
 
-export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null, backdrop: BackdropMode = "auto", pins: LayoutPins | null = null): CityLayout {
-  // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
-  const tier = scaleTierFor(model.buildings.length);
-  // plans 缓存键携带海滨配置身份（profile+version）：同 seed 不同配置不得复用旧规划。
-  // 缓存键含参数指纹：同 profile/version 改参数（如 maxCoastalHeight）必须产生
-  // 新规划——曾只带 profile:version，参数变化时复用旧海滨带（审查 #5 复现）。
-  const coastalKey = coastal
+function layoutCoastalKey(coastal: CoastalConfig | null): string {
+  return coastal
     ? `${coastal.profile}:v${coastal.version}:${[
         coastal.preferredAzimuth, coastal.azimuthTolerance, coastal.segmentArc,
         coastal.wetSandWidth, coastal.drySandWidth, coastal.promenadeOffset, coastal.boulevardOffset,
@@ -191,7 +188,36 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
         coastal.minValidRatio, coastal.bayHalfWidth, coastal.bayShift,
       ].join(",")}`
     : "none";
-  const planKey = `${seed}:${tier}:${coastalKey}`;
+}
+function layoutPlanKey(seed: number, tier: number, coastal: CoastalConfig | null): string {
+  return `${seed}:${tier}:${layoutCoastalKey(coastal)}`;
+}
+
+/** Warm the exact layout plan on a local worker before mounting a large city.
+ * Cancellation and worker failures never fall back to UI-thread planning. The
+ * validated worker result shares the same bounded LRU as synchronous fixtures. */
+export async function prepareCityLayout(model: CityModel, seed: number, coastal: CoastalConfig | null,
+  options: { signal: AbortSignal; workerFactory?: () => PlanningWorkerPort }): Promise<void> {
+  if (options.signal.aborted) throw new Error("layout-preparation-cancelled");
+  const tier = scaleTierFor(model.buildings.length), key = layoutPlanKey(seed, tier, coastal);
+  if (plans.has(key)) return;
+  // Existing synchronous planning has no aggregate work cap. Transport accounting
+  // preserves that policy; worker cancellation/heartbeat remains independently bounded.
+  const limits = Object.fromEntries(PLANNING_WORK_UNITS.map(unit => [unit, Number.MAX_SAFE_INTEGER])) as Record<typeof PLANNING_WORK_UNITS[number], number>;
+  const result = await runPlanningJob({ seed, tier, coastal, limits }, options);
+  if (options.signal.aborted || result.status === "cancelled") throw new Error("layout-preparation-cancelled");
+  if (result.status !== "computed") throw new Error(`layout-preparation:${result.reason}`);
+  plans.set(key, result.plan);
+  while (plans.size > CITY_PLAN_CACHE_CONFIG.maxEntries) plans.delete(plans.keys().next().value!);
+}
+
+export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null, backdrop: BackdropMode = "auto", pins: LayoutPins | null = null): CityLayout {
+  // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
+  const tier = scaleTierFor(model.buildings.length);
+  // plans 缓存键携带海滨配置身份（profile+version）：同 seed 不同配置不得复用旧规划。
+  // 缓存键含参数指纹：同 profile/version 改参数（如 maxCoastalHeight）必须产生
+  // 新规划——曾只带 profile:version，参数变化时复用旧海滨带（审查 #5 复现）。
+  const planKey = layoutPlanKey(seed, tier, coastal);
   let plan = plans.get(planKey);
   if (plan) { plans.delete(planKey); plans.set(planKey, plan); }
   else {
@@ -732,7 +758,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
     sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
     aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
-  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings, oceanDrive };
+  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: layoutCoastalKey(coastal), coastalConfig: coastal, contextBuildings, oceanDrive };
 }
 
 /**

@@ -333,13 +333,13 @@ function spawnRoute(edges: readonly PlannerEdge[], start: PlannerEdge, sp: Audit
 }
 
 // ── Execution: every planned case through B's audit, then the release policy on the frozen manifest ──
-export type UnitStatus = "passed" | "blocked" | "inconclusive" | "excluded";
+export type UnitStatus = "passed" | "blocked" | "inconclusive" | "excluded" | "closed";
 export type AuditPlanReport = Readonly<{
   worldRevision: string; manifestHash: string;
   results: readonly PassabilityResult[];
   release: AuditReleaseDecision;
   /** Spec §11.7: "verified X/Y directions, A/B turns, C/D structure links" plus the full denominator. */
-  coverage: Readonly<Record<AuditUnitKind, Readonly<{ candidates: number; excluded: number; passed: number; blocked: number; inconclusive: number }>>>;
+  coverage: Readonly<Record<AuditUnitKind, Readonly<{ candidates: number; excluded: number; passed: number; blocked: number; inconclusive: number; closed: number }>>>;
   summary: string;
 }>;
 /** The case the release policy matches results against: the same id, units, gate, budget and corridor
@@ -359,8 +359,21 @@ function plannedCase(world: PassabilityWorld, r: PlannedRoute): RoadAuditCase {
     policy: { cruiseSpeed: cruise, maxReverseSpeed: 0 }, maxTicks: Math.ceil(((length + 10) / cruise) * 60 * 2 + 600), maxNoProgressTicks: 240 };
 }
 
+/** Canonical full manifest for publication; final-boundary replay may evaluate a
+ * working copy with closed units omitted from its mandatory cases, but callers
+ * publish the original denominator and the boundary proof accounts for closures. */
+export function auditManifestForPlan(world: PassabilityWorld, plan: AuditPlan, key: AuditKey): AuditManifest {
+  if (plan.worldRevision !== world.worldRevision || key.baseSnapshotHash !== world.worldRevision || key.manifestHash !== plan.manifestHash ||
+    key.plannerVersion !== plan.plannerVersion) throw new Error("plan-key-mismatch");
+  return Object.freeze({ key, units: plan.units, exclusions: plan.exclusions,
+    cases: Object.freeze(plan.routes.map((route) => Object.freeze(plannedCase(world, route)))) });
+}
+
 export function executeAuditPlan(world: PassabilityWorld, plan: AuditPlan, keyFor: (worldRevision: string, manifestHash: string) => AuditKey,
   options: PassabilityOptions & Readonly<{ onResult?: (r: PassabilityResult, index: number, total: number) => void; shouldStop?: () => boolean;
+    /** A final boundary producer may mark mandatory units sealed by its verified contour.
+     * These remain in the manifest denominator; their cases are omitted from route replay. */
+    closedUnitIds?: readonly string[];
     /** Run only these cases (diagnostics/sampling); the frozen manifest keeps every case, unrun ones stay pending. */
     only?: (route: PlannedRoute) => boolean }> = {}): AuditPlanReport {
   if (plan.worldRevision !== world.worldRevision) throw new Error("plan-world-mismatch");
@@ -369,27 +382,40 @@ export function executeAuditPlan(world: PassabilityWorld, plan: AuditPlan, keyFo
   // The default controller is D's RoutePilot; its version must be the key's (a different pilot is a different key).
   if (!options.pilot && key.controllerVersion !== ROUTE_PILOT_CONTROLLER_VERSION) throw new Error("plan-key-controller-mismatch");
   const pilot = options.pilot ?? routePilotFactory();
+  const closed = new Set(options.closedUnitIds ?? []);
+  const originallyExcluded = new Set(plan.exclusions.map((item) => item.unitId));
+  if ([...closed].some((id) => !plan.units.some((unit) => unit.id === id) || originallyExcluded.has(id))) throw new Error("invalid-closed-boundary-unit");
   const results: PassabilityResult[] = [];
   for (let i = 0; i < plan.routes.length; i++) {
     if (options.shouldStop?.()) {try{options.evidence?.invalidate();}catch{/* diagnostics only */}break;}
-    if (options.only && !options.only(plan.routes[i])) continue;
+    if (plan.routes[i].units.some((unitId) => closed.has(unitId)) || (options.only && !options.only(plan.routes[i]))) continue;
     const r = auditRoute(world, key, plan.routes[i], { ...options, pilot }); results.push(r); options.onResult?.(r, i, plan.routes.length);
   }
-  const manifest: AuditManifest = { key, units: plan.units, exclusions: plan.exclusions, cases: plan.routes.map((r) => plannedCase(world, r)) };
+  const manifest: AuditManifest = { key, units: plan.units,
+    exclusions: Object.freeze([...plan.exclusions, ...[...closed].sort().map((unitId) => ({ unitId, reason: `closed-by-final-boundary:${key.releaseBoundaryHash ?? "unbound"}` }))]),
+    cases: plan.routes.filter((route) => !route.units.some((unitId) => closed.has(unitId))).map((r) => plannedCase(world, r)) };
   if(!world.isCurrent())try{options.evidence?.invalidate();}catch{/* diagnostics only */}
-  const release = evaluateAuditRelease(manifest, results.flatMap((r) => r.evidence), results.flatMap((r) => r.run ? [r.run] : []));
+  const evaluated = evaluateAuditRelease(manifest, results.flatMap((r) => r.evidence), results.flatMap((r) => r.run ? [r.run] : []));
+  const release: AuditReleaseDecision = closed.size ? Object.freeze({ ...evaluated,
+    candidateCount: plan.units.length,
+    mandatoryCount: plan.units.length - plan.exclusions.length,
+    closedCount: closed.size,
+    units: Object.freeze(evaluated.units.map((unit) => closed.has(unit.unitId)
+      ? Object.freeze({ ...unit, status: "closed" as const, reason: "sealed-by-final-boundary" }) : unit)),
+  }) : evaluated;
   const byUnit = new Map<string, UnitStatus>();
   for (const x of plan.exclusions) byUnit.set(x.unitId, "excluded");
+  for (const unitId of closed) byUnit.set(unitId, "closed");
   for (const r of results) { const route = plan.routes.find((x) => x.id === r.routeId); for (const u of route?.units ?? []) byUnit.set(u, r.verdict); }
   const kinds: AuditUnitKind[] = ["directed-edge", "turn", "structure-transition", "spawn-access", "recovery"];
   const coverage = Object.fromEntries(kinds.map((k) => {
     const us = plan.units.filter((u) => u.kind === k); const st = us.map((u) => byUnit.get(u.id) ?? "inconclusive");
     return [k, Object.freeze({ candidates: us.length, excluded: st.filter((s) => s === "excluded").length, passed: st.filter((s) => s === "passed").length,
-      blocked: st.filter((s) => s === "blocked").length, inconclusive: st.filter((s) => s === "inconclusive").length })];
+      blocked: st.filter((s) => s === "blocked").length, inconclusive: st.filter((s) => s === "inconclusive").length, closed: st.filter((s) => s === "closed").length })];
   })) as AuditPlanReport["coverage"];
   const c = coverage; const mand = (k: AuditUnitKind) => c[k].candidates - c[k].excluded;
   const summary = `已验 ${c["directed-edge"].passed}/${mand("directed-edge")} 个方向、${c.turn.passed}/${mand("turn")} 个转向、${c["structure-transition"].passed}/${mand("structure-transition")} 个结构连接、` +
     `${c["spawn-access"].passed}/${mand("spawn-access")} 个出生可达；候选 ${plan.units.length}，排除 ${plan.exclusions.length}，` +
-    `挡住 ${kinds.reduce((n, k) => n + c[k].blocked, 0)}，未确认 ${kinds.reduce((n, k) => n + c[k].inconclusive, 0)}`;
+    `挡住 ${kinds.reduce((n, k) => n + c[k].blocked, 0)}，边界封闭 ${kinds.reduce((n, k) => n + c[k].closed, 0)}，未确认 ${kinds.reduce((n, k) => n + c[k].inconclusive, 0)}`;
   return Object.freeze({ worldRevision: world.worldRevision, manifestHash: plan.manifestHash, results: Object.freeze(results), release, coverage: Object.freeze(coverage), summary });
 }

@@ -37,7 +37,7 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
     let identities = super::app_harnesses::identities(db.conn(), data_home)?;
     let sql = "SELECT s.session_key, s.harness, MIN(f.event_ts_ms), MAX(f.event_ts_ms),
         SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens),
-        SUM(f.output_tokens), COUNT(*)
+        SUM(f.output_tokens), COUNT(*), s.title, s.title_source
         FROM sessions s JOIN usage_facts f ON f.session_key = s.session_key
         WHERE s.deleted_at_ms IS NULL AND f.deleted_at_ms IS NULL
           AND f.event_ts_ms >= ?1 AND f.event_ts_ms <= ?2
@@ -45,7 +45,8 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
     let mut stmt = db.conn().prepare(sql).map_err(|_| "data_unavailable")?;
     let rows = stmt.query_map(rusqlite::params![from, now, SESSION_CAP as i64], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?))
+            r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
+            r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?))
     }).map_err(|_| "data_unavailable")?;
     let mut sessions = Vec::new();
     // 摘录查询只准备一次（4000 条会话逐条 prepare 是可感知的延迟）。
@@ -58,7 +59,7 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
     // 超过上限时保留最近的 SESSION_CAP 条（SQL 按最近活动倒序 LIMIT），再按创建时间由远到近输出——
     // 城市由内向外生长、回放从最早的会话开始（与旧版分页载入的「旧 → 新」口径一致）。
     ordered.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
-    for (key, harness, first, last, input, output, events) in ordered {
+    for (key, harness, first, last, input, output, events, title, title_source) in ordered {
         let excerpts_rows = excerpts_stmt.query_map([&key], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
         }).map_err(|_| "data_unavailable")?;
@@ -75,7 +76,12 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
             }
         }
         let public_harness = if identities.contains_key(&harness) { harness.as_str() } else { "unknown" };
+        // 标题出库再按契约上限截一次（纵深防御：库里可能有 v32 之前的旁路写入）。
+        // title 在而 title_source 缺 → 仍输出 title、source 记 null（不编造来源）。
+        let bounded_title = title.as_deref().and_then(agent_vitals_domain::contracts::workflow::bound_session_title);
         sessions.push(json!({"id": session_ref(&salt, &format!("app:city:{key}")), "harness": public_harness,
+            "title": bounded_title,
+            "title_source": if bounded_title.is_some() { Value::String(title_source.unwrap_or_default()) } else { Value::Null },
             "first_event_at": timestamp(first)?, "last_event_at": timestamp(last)?, "event_count": events,
             "tokens": {"input": input, "output": output, "total": input.checked_add(output).ok_or("data_unavailable")?},
             "task_excerpts": excerpts}));

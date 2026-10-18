@@ -21,7 +21,7 @@ assert.equal(await port.capture(source), first);
 const world = first.readWorld();
 assert.equal(world.surface.revision, first.revision); assert.equal(world.revision, first.worldRevision);
 assert.equal(world.obstacleCoverage, "structures-only");
-assert.match(first.worldRevision, /^city-world-v1:sha256:[a-f0-9]{64}$/);
+assert.match(first.worldRevision, /^city-world-v2:sha256:[a-f0-9]{64}$/);
 assert.equal(first.checkStructures({ requiredClearance: 1.3, maxSlopeRadians: 0.5 }).snapshotRevision, first.worldRevision);
 assert.equal(first.checkLandings({maxStep:0.1,maxSlopeChange:0.3,aliasTolerance:0.1}).snapshotRevision,first.worldRevision);
 assert.throws(()=>{world.landings[0].seam.a.x+=1;},TypeError);
@@ -41,6 +41,15 @@ const changedSeam=structuredClone(world);changedSeam.landings[0].seam.a.y+=0.1;
 assert.notEqual(await hash(canonicalCityWorldBytes(first.revision,changedSeam)),before,"full seam geometry participates in world identity");
 const invalid = structuredClone(world); invalid.obstacles[0].corners[0].y = NaN;
 assert.throws(() => canonicalCityWorldBytes(first.revision, invalid), /invalid-world-obstacle/);
+
+// Mountability changes the collision world even when every vertex stays fixed.
+for (const obstacle of [world.obstacles.find((o) => o.shape === "box"),
+  { id: "curb-policy", role: "island", shape: "prism", ring: [{x:0,z:0},{x:1,z:0},{x:1,z:1},{x:0,z:1}], yMin: 0, yMax: .22 }]) {
+  assert.ok(obstacle);
+  const bytes = (height) => canonicalCityWorldBytes(first.revision, { ...world, obstacles: [{ ...obstacle, mountableHeight: height }] });
+  assert.notDeepEqual(bytes(0), bytes(.25), "box/prism mountability participates in identity");
+  for (const height of [NaN, Infinity, -1]) assert.throws(() => bytes(height), /mountable-height/);
+}
 
 // A new rendered-source object invalidates earlier leases without requiring a manual clear.
 const replaced = await port.capture({ layout, ground: compileGroundRoadSurface(layout) });
@@ -83,6 +92,15 @@ assert.throws(() => { sceneCapture.readWorld().sceneSolids[0].center.y = 8; }, T
 const originalScene = scene; scene = structuredClone(scene); scene[0].center.y += 1;
 assert.equal(sceneCapture.isCurrent(), false, "displayed scene proxy changes invalidate the frozen world");
 scene = originalScene; assert.equal(sceneCapture.isCurrent(), false, "restoring scene geometry cannot revive an old handle");
+const budgetProxy = { ...scene[0], mountableHeight: .25 };
+assert.notDeepEqual(canonicalCityWorldBytes(first.revision, world, undefined, [budgetProxy]),
+  canonicalCityWorldBytes(first.revision, world, undefined, [{ ...budgetProxy, mountableHeight: 0 }]), "scene proxy policy participates in identity");
+scene = [budgetProxy];
+const policyPort = new CitySurfacePort(hash), policyCapture = await policyPort.capture({ ...source, solids: () => scene });
+assert.equal(policyCapture.status, "ready");
+scene = [{ ...budgetProxy, mountableHeight: .26 }];
+assert.equal(policyCapture.isCurrent(), false, "policy-only source mutation invalidates a lease");
+scene = originalScene;
 scenePort.invalidate(); const restoredScene = await scenePort.capture(sceneSource);
 assert.equal(restoredScene.worldRevision, sceneCapture.worldRevision, "unchanged scene geometry keeps content identity across generations");
 scenePort.invalidate(); scene = structuredClone(scene); scene[0].center.y += 1;

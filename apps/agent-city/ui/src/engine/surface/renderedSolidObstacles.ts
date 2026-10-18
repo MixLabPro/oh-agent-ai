@@ -6,11 +6,12 @@
  * refuse the batch rather than silently dropping buildings. */
 import type { RenderedSolid } from "./renderedSolidTypes";
 import type { StructureObstacle } from "./compileSurface";
+import type { SolidInput } from "../../game/driving/CollisionIndex";
 
 export const RENDERED_OBSTACLE_LIMITS = Object.freeze({ obstacles: 60_000, solids: 20_000 });
 
 export type RenderedObstacleResult =
-  | Readonly<{ status: "ready"; obstacles: readonly StructureObstacle[]; instances: number; skippedDegenerate: number }>
+  | Readonly<{ status: "ready"; obstacles: readonly StructureObstacle[]; solidInputs: readonly SolidInput[]; instances: number; skippedDegenerate: number }>
   | Readonly<{ status: "unavailable"; reason: "rendered-solids-budget" | "invalid-rendered-solid" }>;
 
 type P3 = Readonly<{ x: number; y: number; z: number }>;
@@ -28,6 +29,7 @@ function apply(m: readonly number[] | Float64Array, offset: number, x: number, y
 export function renderedSolidsToObstacles(solids: readonly RenderedSolid[], limits: Readonly<{ obstacles: number; solids: number }> = RENDERED_OBSTACLE_LIMITS): RenderedObstacleResult {
   if (solids.length > limits.solids) return { status: "unavailable", reason: "rendered-solids-budget" };
   const out: StructureObstacle[] = [];
+  const solidInputs: SolidInput[] = [];
   let instances = 0;
   let skippedDegenerate = 0;
   for (const solid of solids) {
@@ -71,11 +73,26 @@ export function renderedSolidsToObstacles(solids: readonly RenderedSolid[], limi
       let cMinY = corners[0].y, cMaxY = corners[0].y;
       for (const corner of corners) { if (corner.y < cMinY) cMinY = corner.y; if (corner.y > cMaxY) cMaxY = corner.y; }
       if (cMaxY - cMinY <= 1e-9) { skippedDegenerate += 1; continue; }
+      // Preserve the captured transform's exact center/half-axis representation
+      // for collision validation. Reconstructing this thin rotated box from
+      // world corners loses enough precision at city-scale coordinates to make
+      // otherwise planar faces appear non-planar to the geometry validator.
+      const offset = instance * 16;
+      const localCenterX = (minX + maxX) / 2, localCenterY = (minY + maxY) / 2, localCenterZ = (minZ + maxZ) / 2;
+      const center = apply(transforms, offset, localCenterX, localCenterY, localCenterZ);
+      const sx = (maxX - minX) / 2, sy = (maxY - minY) / 2, sz = (maxZ - minZ) / 2;
+      const halfAxes = Object.freeze([
+        Object.freeze({ x: transforms[offset] * sx, y: transforms[offset + 1] * sx, z: transforms[offset + 2] * sx }),
+        Object.freeze({ x: transforms[offset + 4] * sy, y: transforms[offset + 5] * sy, z: transforms[offset + 6] * sy }),
+        Object.freeze({ x: transforms[offset + 8] * sz, y: transforms[offset + 9] * sz, z: transforms[offset + 10] * sz }),
+      ]) as unknown as readonly [P3, P3, P3];
+      solidInputs.push(Object.freeze({ id: `${solid.id}#${instance}`, role: `rendered-${solid.role}`, kind: "box",
+        center: Object.freeze(center), halfAxes }));
       // StructureObstacle's role is an opaque reporting label for the collision
       // index; rendered roles are namespaced to stay distinguishable in reports.
       out.push({ id: `${solid.id}#${instance}`, role: `rendered-${solid.role}` as StructureObstacle["role"], shape: "box", corners } as StructureObstacle);
       instances += 1;
     }
   }
-  return Object.freeze({ status: "ready", obstacles: Object.freeze(out), instances, skippedDegenerate });
+  return Object.freeze({ status: "ready", obstacles: Object.freeze(out), solidInputs: Object.freeze(solidInputs), instances, skippedDegenerate });
 }

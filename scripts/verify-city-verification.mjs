@@ -16,7 +16,7 @@ assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
 // 88（驾驶线）+ 视觉风格线 3 个（junction-rings / highway-ramps / world-scale）。计数锁防的是悄悄增减，
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
-assert.equal(manifest.length, 91);
+assert.equal(manifest.length, 102);
 for (const id of ["verify-city-junction-rings", "verify-city-highway-ramps"])
   for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
     .some(stage => stage.id === id));
@@ -64,8 +64,11 @@ for (const id of ["verify-city-world", "verify-city-access-capabilities", "verif
 for (const mode of ["full", "fast", "module"]) assert(selectStages(mode, mode === "module" ? "planning" : undefined)
   .some((stage) => stage.id === "verify-city-radius"));
 assert(manifest.some((s) => s.id === "verify-city-road-report"));
-assert.equal(selectStages("module", "game").length, 15);
+assert.equal(selectStages("module", "game").length, 26);
 assert(selectStages("module", "game").some((stage) => stage.id === "verify-city-shared-runtime"));
+for (const id of ["verify-city-game-scene-lease", "verify-city-game-audio-service", "verify-city-runtime-diagnostics", "verify-city-shared-game-ux", "verify-city-car-session", "verify-city-car-rendered-collision", "verify-city-camera-collision-query", "verify-city-preparation", "verify-city-driving-mountable", "verify-city-driving-bridge-crossing", "verify-city-static-world"]) {
+  assert(selectStages("module", "game").some((stage) => stage.id === id), `${id} must run in the game group`);
+}
 let calls = 0;
 const factory = (seed, tier, config, opts) => ({ seed, tier, config: { ...config }, opts, call: ++calls });
 const c = { margin: 1, version: 2 };

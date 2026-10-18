@@ -18,7 +18,7 @@
 use serde_json::Value;
 
 use crate::contracts::source_identity::fnv1a64_hex;
-use crate::contracts::workflow::{SessionExcerpt, WorkflowEvent};
+use crate::contracts::workflow::{SessionExcerpt, SessionTitle, WorkflowEvent};
 
 /// `source_files.parser_version`。版本 2 增加了 workflow_events 的派生提取；
 /// 即使源文件指纹不变，也必须重放一次，才能把历史源补齐到 workflow authority。
@@ -169,6 +169,10 @@ pub struct ParseOutput {
     pub facts: Vec<Value>,
     pub workflow_events: Vec<WorkflowEvent>,
     pub session_excerpts: Vec<SessionExcerpt>,
+    /// 会话标题（解析产出的那一族：claude-code 的 ai-title 记录）。索引型
+    /// 标题（codex `session_index.jsonl` / DSH `workspace.json`）不走这里——
+    /// 它们与单文件无关，由 sync 的侧车索引趟直接喂标题写入路径。
+    pub session_titles: Vec<SessionTitle>,
     pub new_offset: u64,
 }
 
@@ -305,6 +309,7 @@ mod tests {
                     facts: Vec::new(),
                     workflow_events: Vec::new(),
                     session_excerpts: Vec::new(),
+                    session_titles: Vec::new(),
                     new_offset: 0,
                 })
             }

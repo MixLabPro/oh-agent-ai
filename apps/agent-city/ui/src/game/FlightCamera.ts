@@ -6,7 +6,7 @@
 import * as THREE from "three";
 import type { FlightSimState, FlightParams } from "./FlightSimulation";
 import type { FlightWorld } from "./FlightWorld";
-import { VehicleChaseCamera, type ChaseOrbitState } from "./VehicleChaseCamera";
+import { VehicleChaseCamera, type ChaseCameraSafety, type ChaseOrbitState } from "./VehicleChaseCamera";
 
 export const ZOOM_MIN = 0.55;
 export const ZOOM_MAX = 3.5;
@@ -58,8 +58,9 @@ export class FlightCamera {
     this.core.reset(this.toTarget(sim, params));
   }
 
-  update(dt: number, sim: FlightSimState, params: FlightParams, world: FlightWorld): void {
-    this.core.update(dt, this.toTarget(sim, params), {
+  update(dt: number, sim: FlightSimState, params: FlightParams, world: FlightWorld): ChaseCameraSafety {
+    return this.core.update(dt, this.toTarget(sim, params), {
+      cameraSweep: (from, to, radius) => world.queryCameraSweep(from, to, radius),
       occlusion: (x, y, z) => world.isPointClear(x, y, z, params.planeRadius * 0.7),
       terrain: (x, z) => world.terrainHeight(x, z),
     });

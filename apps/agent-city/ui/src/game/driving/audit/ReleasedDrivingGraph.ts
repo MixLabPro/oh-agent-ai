@@ -7,9 +7,22 @@
 import { sameAuditKey } from "./AuditIdentity";
 import type { AuditKey, AuditManifest, AuditUnitKind } from "./contracts";
 import type { AuditReleaseDecision } from "./AuditReleasePolicy";
+import { CITY_SOLID_COMPILER_VERSION } from "../staticSolidContracts";
 
-export const RELEASED_DRIVING_GRAPH_VERSION = 1;
+export const RELEASED_DRIVING_GRAPH_VERSION = 2;
 export type ReleasedUnitStatus = "passed" | "blocked" | "pending" | "excluded";
+export type ReleasedUnitBoundaryEvidence = Readonly<{
+  version: 1;
+  unitId: string;
+  layerId: string;
+  finalBoundaryHash: string;
+  releasePolicyVersion: number;
+  collisionCompilerVersion: number;
+  collisionQueryVersion: number;
+  finalReplayPassed: boolean;
+  fenceEnforced: boolean;
+  segments: readonly Readonly<{ ax: number; az: number; bx: number; bz: number }>[];
+}>;
 export type ReleasedDrivingUnit = Readonly<{
   unitId: string; kind: AuditUnitKind; status: ReleasedUnitStatus; reason: string;
 }>;
@@ -20,6 +33,13 @@ export type ReleasedUnitGeometry = Readonly<{
   unitId: string;
   waypoints: readonly Readonly<{ x: number; z: number }>[];
   startHeading: number;
+  /** Surface region IDs recorded by the audited corridor (`DrivingState.surfaceId`).
+   * They are not patch IDs; consumers resolve regions and patches in the frozen world. */
+  surfaceRegionIds: readonly string[];
+  /** Final same-policy fence boundary evidence. Missing evidence means unavailable;
+   * halfWidth from an entry gate is not a substitute. */
+  boundaryEvidence?: ReleasedUnitBoundaryEvidence;
+  /** Deprecated diagnostic field. Never use this as route or spawn clearance proof. */
   halfWidth: number;
 }>;
 export type ReleasedDrivingGraph = Readonly<{
@@ -44,6 +64,7 @@ export type PublishedDrivingGraph = Readonly<{
 export function publishDrivingGraph(
   manifest: AuditManifest,
   decision: AuditReleaseDecision,
+  boundaryEvidence: readonly ReleasedUnitBoundaryEvidence[] = [],
 ): { ok: true; graph: ReleasedDrivingGraph } | { ok: false; reason: string } {
   if (manifest.key.releaseBoundaryHash === null) return { ok: false, reason: "final-boundary-replay-required" };
   if (!decision.ready) return { ok: false, reason: decision.reasons[0] ?? "release-not-ready" };
@@ -51,10 +72,26 @@ export function publishDrivingGraph(
     ({ unitId: unit.unitId, kind: manifest.units.find((candidate) => candidate.id === unit.unitId)?.kind ?? "directed-edge", status: unit.status, reason: unit.reason }));
   const counts = { passed: 0, blocked: 0, pending: 0, excluded: 0 } as Record<"passed" | "blocked" | "pending" | "excluded", number>;
   for (const unit of units) counts[unit.status] += 1;
+  const evidenceByUnit = new Map<string, ReleasedUnitBoundaryEvidence>();
+  for (const entry of boundaryEvidence) {
+    if (evidenceByUnit.has(entry.unitId)) return { ok: false, reason: "duplicate-unit-boundary-evidence" };
+    evidenceByUnit.set(entry.unitId, entry);
+  }
+  const geometries = unitGeometry(manifest, units).map((geometry) => {
+    const evidence = evidenceByUnit.get(geometry.unitId);
+    if (!evidence || evidence.version !== 1 || evidence.finalBoundaryHash !== manifest.key.releaseBoundaryHash ||
+      evidence.releasePolicyVersion !== manifest.key.releasePolicyVersion || evidence.collisionQueryVersion !== manifest.key.queryVersion ||
+      evidence.collisionCompilerVersion !== CITY_SOLID_COMPILER_VERSION ||
+      !evidence.finalReplayPassed || !evidence.fenceEnforced || !evidence.layerId || evidence.segments.length === 0 ||
+      evidence.segments.some((segment) => ![segment.ax, segment.az, segment.bx, segment.bz].every(Number.isFinite) ||
+        Math.hypot(segment.bx - segment.ax, segment.bz - segment.az) <= 0)) return geometry;
+    return Object.freeze({ ...geometry, boundaryEvidence: Object.freeze({ ...evidence,
+      segments: Object.freeze(evidence.segments.map((segment) => Object.freeze({ ...segment }))) }) });
+  });
   return { ok: true, graph: Object.freeze({
     graphVersion: RELEASED_DRIVING_GRAPH_VERSION, key: manifest.key, releaseBoundaryHash: manifest.key.releaseBoundaryHash,
     units: Object.freeze(units), counts: Object.freeze(counts),
-    geometry: Object.freeze(unitGeometry(manifest, units)),
+    geometry: Object.freeze(geometries),
   }) };
 }
 
@@ -79,6 +116,7 @@ function unitGeometry(manifest: AuditManifest, units: readonly ReleasedDrivingUn
       unitId: unit.unitId,
       waypoints,
       startHeading: Math.atan2(second.z - first.z, second.x - first.x),
+      surfaceRegionIds: Object.freeze([...new Set(item.corridor.surfaceSequence)]),
       halfWidth: item.gates[0]?.halfWidth ?? 0,
     }));
   }

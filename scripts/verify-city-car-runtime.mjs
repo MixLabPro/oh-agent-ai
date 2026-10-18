@@ -58,10 +58,12 @@ for (const hz of [30, 120]) {
   const f = fixture(); await f.runtime.enter(f.lease, f.adapter); f.runtime.resume();
   f.runtime.setInput({ ...empty, forward: true }); f.host.hook(DRIVING_DT);
   const before = f.adapter.snapshot;
-  f.host.hook(.5); assert.equal(f.runtime.snapshot.phase, "paused");
-  assert.equal(f.adapter.snapshot.x, before.x); assert.equal(f.host.frames.at(-1).state.x, before.x);
-  f.runtime.resume(); f.host.hook(DRIVING_DT);
-  assert.ok(f.adapter.snapshot.speed < before.speed, "long frame clears held acceleration");
+  // 2026-10-18 产品决定（赛车惯例，Ammo stepSimulation 同款）：长帧按 maxSteps 补跑后
+  // 丢弃余量，不再暂停打断——车在这 0.5s 缺口里前进 5 步（maxSteps·dt），会话保持 running。
+  f.host.hook(.5); assert.equal(f.runtime.snapshot.phase, "running");
+  assert.ok(f.adapter.snapshot.x > before.x, "bounded catch-up advances the car");
+  assert.ok(f.adapter.snapshot.x - before.x <= 5 * DRIVING_DT * f.adapter.snapshot.speed + 1e-9, "catch-up bounded by maxSteps");
+  f.host.hook(DRIVING_DT);
   const oldHook = f.host.hook;
   f.host.current = false; oldHook(DRIVING_DT);
   assert.equal(f.runtime.snapshot.phase, "error"); assert.equal(f.runtime.snapshot.reason, "stale-game-world");
@@ -95,7 +97,7 @@ for (const hz of [30, 120]) {
   f.runtime.dispose(); assert.equal(f.runtime.snapshot.phase, "disposed");
   const next = fixture(); assert.equal(await f.runtime.enter(next.lease, next.adapter), false); assert.equal(next.host.releases, 1);
 }
-console.log("Car runtime: 30/60/120 Hz parity, long-frame pause, stale-before/after-step, cancel/reenter, reset and idempotent cleanup passed");
+console.log("Car runtime: 30/60/120 Hz parity, long-frame time-drop (racing convention), stale-before/after-step, cancel/reenter, reset and idempotent cleanup passed");
 {
   const runtime = new GameRuntime();
   for (let cycle = 0; cycle < 20; cycle++) {

@@ -3,92 +3,122 @@
  * through the whitelisted scene proxies so a city with buildings is drivable with
  * conservative collision instead of being refused outright.
  */
-import type { CityDrivingWorldCapture } from "../../engine/CityEngine";
 import type { ReadyCitySurfaceCapture } from "../../engine/surface/citySurfacePort";
+import type * as THREE from "three";
 import { buildSurfaceIndex } from "../../engine/surface/SurfaceIndex";
-import { renderedSolidsToObstacles, RENDERED_OBSTACLE_LIMITS } from "../../engine/surface/renderedSolidObstacles";
+import { compileCitySolidInputs } from "../../engine/surface/compileCitySolidInputs";
 import { buildSurfaceRegions } from "../../engine/surface/surfaceRegions";
 import { initialDrivingState, DRIVING_PHYSICS_VERSION, type DrivingInputState } from "../DrivingSimulation";
 import { DrivingKernel } from "../driving/DrivingKernel";
-import { boxSolidFromCorners, buildVersionedCollisionIndex, type CollisionDimensions, type SolidInput } from "../driving/CollisionIndex";
-import type { StructureObstacle } from "../../engine/surface/compileSurface";
+import type { CollisionDimensions } from "../driving/CollisionIndex";
 import { ContinuousDrivingEnvironment, CONTINUOUS_DRIVING_QUERY_VERSION } from "../driving/ContinuousDrivingEnvironment";
 import { DRIVING_COLLISION_VERSION } from "../driving/DrivingCollision";
 import { GAMEPLAY_FOOTPRINT_PARAMS } from "../driving/surfaceFootprint";
 import { GAMEPLAY_COLLISION_INSET, GAMEPLAY_DRIVING_FOOTPRINT } from "../driving/vehicleFootprint";
+import { createCameraCollisionQuery } from "../driving/cameraCollisionQuery";
 import { CarAdapter, type CarPresentation } from "./CarAdapter";
 import { GameRuntime } from "./GameRuntime";
-import { diagnosticSpawn } from "./diagnosticSpawn";
+import { diagnosticSpawnAsync } from "./diagnosticSpawn";
+import { measurePreparation, preparationCheckpoint, preparationNow, type PreparationMetric } from "./Preparation";
+import { isVerifiedSpawnCredential, type VerifiedSpawnCredential } from "../driving/spawnPoints";
+import type { GameSceneLease, GameScenePort, RuntimeSceneLease } from "./GameScenePort";
+import type { GameSceneSnapshot } from "./GameSceneSnapshot";
+import { MOUNTABLE_POLICY_VERSION } from "../driving/staticSolidContracts";
 
-/** Total world-build budget, distinct from the BVH's 4096 per-query candidates.
- * A 500-session city includes thousands of architectural instances. Retain the
- * converter's bounded world limit without increasing any runtime query budget. */
-const COMBINED_SOLID_LIMIT = RENDERED_OBSTACLE_LIMITS.obstacles;
-
-/** Structures (exact descriptors) + whitelisted scene proxies (buildings/landmarks),
- * capped; overflow is an explicit unavailable, never a silent half-collision. */
 type CityDrivingSnapshot = NonNullable<ReturnType<ReadyCitySurfaceCapture["readWorld"]>>;
-function combinedSolidInputs(world: CityDrivingSnapshot | null, rendered: readonly StructureObstacle[]): readonly SolidInput[] | null {
-  if (!world) return null;
-  if (world.obstacles.length + world.sceneSolids.length + rendered.length > COMBINED_SOLID_LIMIT) return null;
-  const combined: SolidInput[] = [];
-  const append = (obstacle: StructureObstacle) => {
-    if (obstacle.shape === "box") combined.push(boxSolidFromCorners(obstacle.id, obstacle.role, obstacle.corners));
-    else combined.push({ id: obstacle.id, role: obstacle.role, kind: "prism", ring: obstacle.ring, yMin: obstacle.yMin, yMax: obstacle.yMax });
-  };
-  for (const obstacle of world.obstacles) append(obstacle);
-  for (const proxy of world.sceneSolids) combined.push(proxy);
-  for (const obstacle of rendered) append(obstacle);
-  return combined;
-}
 
-export type CityCarHost = Readonly<{ captureDrivingWorld(signal?: AbortSignal): Promise<CityDrivingWorldCapture> }>;
-export type CityCarRequest = Readonly<{
+export type CityCarSceneCapability = Pick<GameSceneLease<unknown, THREE.Object3D>,
+  "token" | "isCurrent" | "attach" | "detach" | "setCamera">;
+type CityCarWorldLease = RuntimeSceneLease & CityCarSceneCapability & Readonly<{ snapshot: GameSceneSnapshot }>;
+export type CityCarHost = Readonly<{ gameScenePort: Pick<GameScenePort<GameSceneSnapshot, THREE.Object3D>, "acquireResult"> }>;
+type CityCarRequestBase = Readonly<{
   x: number; z: number; heading: number; layerId: string;
   /** Explicit calibrated collider parameters; no silent visual-to-solid guess. */
   collider: Readonly<{ dimensions: CollisionDimensions; centerHeight: number; vehicleConfigHash: string }>;
-  present(frame: CarPresentation): void;
+  present(frame: CarPresentation, scene: CityCarSceneCapability): void;
+  onPreparationMetric?(metric: PreparationMetric): void;
+}>;
+export type CityCarRequest = CityCarRequestBase & Readonly<{
+  /** Issued only after full current-world and released-graph spawn validation. */
+  validatedSpawn: VerifiedSpawnCredential;
 }>;
 export type CityCarEntry =
   | Readonly<{ status: "ready"; worldRevision: string; coverage: "structures-only" | "structures-and-scene-proxies" | "structures-and-buildings" | "structures-and-buildings-and-scene-proxies"; adapter: CarAdapter }>
   | Readonly<{ status: "unavailable"; reason: string }>;
 export async function createCityCarSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>, request: CityCarRequest,
   signal?: AbortSignal): Promise<CityCarEntry> {
+  if (!isVerifiedSpawnCredential(request.validatedSpawn)) return Object.freeze({ status: "unavailable", reason: "validated-spawn-required" });
+  if (request.validatedSpawn.x !== request.x || request.validatedSpawn.z !== request.z ||
+    request.validatedSpawn.heading !== request.heading || request.validatedSpawn.layerId !== request.layerId ||
+    request.validatedSpawn.vehicleConfigHash !== request.collider.vehicleConfigHash ||
+    request.validatedSpawn.collider.centerHeight !== request.collider.centerHeight ||
+    request.validatedSpawn.collider.dimensions.halfLength !== request.collider.dimensions.halfLength ||
+    request.validatedSpawn.collider.dimensions.halfWidth !== request.collider.dimensions.halfWidth ||
+    request.validatedSpawn.collider.dimensions.halfHeight !== request.collider.dimensions.halfHeight ||
+    !request.validatedSpawn.isFresh()) {
+    return Object.freeze({ status: "unavailable", reason: "validated-spawn-stale-or-mismatch" });
+  }
   return createSession(host, runtime, request, false, signal);
 }
 /** Diagnostic-only entry. Does not confirm/persist a product spawn or release roads. */
 export async function createCityCarDiagnosticSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>,
-  request: Pick<CityCarRequest, "collider" | "present">, signal?: AbortSignal): Promise<CityCarEntry> {
+  request: Pick<CityCarRequestBase, "collider" | "present" | "onPreparationMetric">, signal?: AbortSignal): Promise<CityCarEntry> {
   return createSession(host, runtime, { ...request, x: 0, z: 0, heading: 0, layerId: "" }, true, signal);
 }
-async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>, request: CityCarRequest,
+async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>, request: CityCarRequestBase,
   diagnostic: boolean, signal?: AbortSignal): Promise<CityCarEntry> {
   const unavailable = (reason: string): CityCarEntry => Object.freeze({ status: "unavailable", reason });
   if (signal?.aborted) return unavailable("cancelled");
-  const capture = await host.captureDrivingWorld(signal);
-  if (capture.status !== "ready") return unavailable(capture.status);
-  let transferred = false;
-  const cancel = () => { if (transferred) runtime.exit(); else capture.release(); };
-  signal?.addEventListener("abort", cancel, { once: true });
+  if (!["idle", "error"].includes(runtime.snapshot.phase)) return unavailable("runtime-busy");
+  runtime.beginPreparation();
+  const acquireSignal = signal ?? new AbortController().signal;
+  let lease: CityCarWorldLease;
   try {
-    if (signal?.aborted || !capture.verifyCurrent()) return unavailable("stale-or-cancelled");
-    const leaseCurrent = capture.isLeaseCurrent;
-    const snapshot = capture.readWorld();
+    await preparationCheckpoint(signal);
+    const started = preparationNow();
+    const acquisition = await host.gameScenePort.acquireResult({ vehicle: "car", activity: "free" }, runtime.snapshot.runId + 1, acquireSignal);
+    if (acquisition.status !== "ready") return unavailable(`scene-${acquisition.status}:${acquisition.reason}`);
+    lease = acquisition.lease;
+    try { request.onPreparationMetric?.({ stage: "world-capture", durationMs: preparationNow() - started }); } catch { /* local diagnostic */ }
+  }
+  catch (error) { return unavailable(error instanceof Error ? error.message : "scene-unavailable"); }
+  const capture = lease.snapshot.drivingWorld;
+  const staticCapture = lease.snapshot.staticWorld;
+  if (!capture || !staticCapture) { lease.release(); return unavailable("driving-world-capability-unavailable"); }
+  let transferred = false;
+  const cancel = () => { if (transferred) runtime.exit(); else lease.release(); };
+  signal?.addEventListener("abort", cancel, { once: true });
+  const runtimeLease: RuntimeSceneLease = {
+    revision: lease.revision,
+    isCurrent: () => lease.isCurrent(),
+    setFrameHook: (callback) => lease.setFrameHook(callback),
+    release: () => { signal?.removeEventListener("abort", cancel); lease.release(); },
+  };
+  try {
+    if (signal?.aborted || !lease.isCurrent() || !capture.verifyCurrent() || !staticCapture.verifyCurrent()) return unavailable("stale-or-cancelled");
+    const leaseCurrent = () => lease.isCurrent() && capture.isLeaseCurrent() && staticCapture.isLeaseCurrent();
+    await preparationCheckpoint(signal, leaseCurrent);
+    const measured = <T>(stage: PreparationMetric["stage"], work: () => T) => measurePreparation(stage, work, request.onPreparationMetric);
+    const snapshot = measured("world-read", () => capture.readWorld());
+    const staticSnapshot = staticCapture.readWorld();
     if (!snapshot || snapshot.revision !== capture.worldRevision || snapshot.surface.revision !== capture.revision) return unavailable("revision-mismatch");
+    if (!staticSnapshot || staticSnapshot.revision !== staticCapture.worldRevision) return unavailable("static-revision-mismatch");
+    if (!diagnostic && (!("validatedSpawn" in request) || !isVerifiedSpawnCredential(request.validatedSpawn) ||
+      request.validatedSpawn.worldRevision !== capture.worldRevision || !request.validatedSpawn.isFresh())) return unavailable("validated-spawn-stale-or-mismatch");
     // Merge exact structural descriptors, whitelisted scene proxies, and
     // conservative per-instance rendered-solid bounds in one fail-closed index.
     if (!request.collider.vehicleConfigHash) return unavailable("invalid-vehicle-config");
-    const surfaceIndex = buildSurfaceIndex(snapshot.surface);
+    await preparationCheckpoint(signal, leaseCurrent);
+    const surfaceIndex = measured("surface-index", () => buildSurfaceIndex(snapshot.surface));
     if (surfaceIndex.status !== "ready") return unavailable(`surface-index:${surfaceIndex.reason}`);
-    const regions = buildSurfaceRegions(snapshot.surface, surfaceIndex);
+    await preparationCheckpoint(signal, leaseCurrent);
+    const regions = measured("surface-regions", () => buildSurfaceRegions(snapshot.surface, surfaceIndex));
     if (regions.status !== "ready") return unavailable(`surface-regions:${regions.reason}`);
-    const rendered = renderedSolidsToObstacles(snapshot.renderedSolids,
-      { obstacles: Math.max(0, COMBINED_SOLID_LIMIT - snapshot.obstacles.length - snapshot.sceneSolids.length), solids: RENDERED_OBSTACLE_LIMITS.solids });
-    if (rendered.status !== "ready") return unavailable(rendered.reason);
-    const solids = combinedSolidInputs(snapshot, rendered.obstacles);
-    if (!solids) return unavailable("scene-solids-over-budget");
-    const collision = buildVersionedCollisionIndex(capture.worldRevision, solids);
-    if (collision.status !== "ready") return unavailable(`collision-index:${collision.reason}`);
+    await preparationCheckpoint(signal, leaseCurrent);
+    const compiledSolids = measured("static-solids", () => compileCitySolidInputs(staticSnapshot, undefined, capture.worldRevision));
+    if (compiledSolids.status !== "ready") return unavailable(compiledSolids.reason);
+    const collisionIndex = compiledSolids.collisionIndex;
+    if (collisionIndex.revision !== capture.worldRevision) return unavailable("collision-index-revision-mismatch");
     // Manual play gets a small horizontal body clearance so conservative scene
     // proxies and curb contacts do not turn a brush into a full stop. Vertical
     // clearance stays exact. Audit environments keep the authored dimensions.
@@ -97,43 +127,43 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
       halfWidth: Math.max(0.1, request.collider.dimensions.halfWidth - GAMEPLAY_COLLISION_INSET),
       halfHeight: request.collider.dimensions.halfHeight,
     });
-    const environment = new ContinuousDrivingEnvironment(regions, {
+    await preparationCheckpoint(signal, leaseCurrent);
+    const environment = measured("collision-world", () => new ContinuousDrivingEnvironment(regions, {
       surfaceRevision: capture.revision, worldRevision: capture.worldRevision, solidRevision: capture.worldRevision,
-      solids: collision.index.solids(), dimensions: gameplayDimensions,
+      solids: collisionIndex.solids(), dimensions: gameplayDimensions,
       centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent,
-    }, GAMEPLAY_DRIVING_FOOTPRINT, GAMEPLAY_FOOTPRINT_PARAMS);
+    }, GAMEPLAY_DRIVING_FOOTPRINT, GAMEPLAY_FOOTPRINT_PARAMS, {}, { boundarySlide: true, mountablePolicy: "gameplay" }));
     if (!diagnostic) {
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return unavailable(`spawn:${point.cause}`);
     }
-    const spawn = (() => {
-      if (diagnostic) return diagnosticSpawn(snapshot.surface, regions, environment);
+    const spawnStarted = preparationNow();
+    const spawn = diagnostic ? await diagnosticSpawnAsync(snapshot.surface, regions, environment, signal, leaseCurrent) : (() => {
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return null;
       const support = environment.place(request.x, request.z, request.heading, point.regionId);
       return support ? { ...initialDrivingState(request.x, request.z, request.heading, point.regionId), ...support } : null;
     })();
+    try { request.onPreparationMetric?.({ stage: "diagnostic-spawn", durationMs: preparationNow() - spawnStarted }); } catch { /* local diagnostic */ }
     if (!spawn) return unavailable(diagnostic ? "no-safe-diagnostic-spawn" : "unsafe-car-spawn");
     const kernel = new DrivingKernel(environment, { baseSnapshotHash: capture.worldRevision,
-      vehicleConfigHash: `${request.collider.vehicleConfigHash}-forgiving-collider-v3`, kernelBuildId: "city-car-continuous-gameplay-v3",
+      vehicleConfigHash: `${request.collider.vehicleConfigHash}-forgiving-collider-v3-mountable-v${MOUNTABLE_POLICY_VERSION}`,
+      kernelBuildId: `city-car-continuous-gameplay-v3-solid-compiler-v${compiledSolids.compilerVersion}-mountable-v${MOUNTABLE_POLICY_VERSION}`,
       physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: DRIVING_COLLISION_VERSION, queryVersion: CONTINUOUS_DRIVING_QUERY_VERSION });
+    // 相机臂从车身出发，车停在桥面板/岛缘等可越实体之上——相机查询必须与会话同用
+    // gameplay 越障策略，否则起始立方体在严格策略下即被判重叠，桥上立刻“无法确认净空”。
+    const cameraSweep = createCameraCollisionQuery(collisionIndex, "gameplay");
     const adapter = new CarAdapter({ revision: capture.worldRevision, kernel, isCurrent: leaseCurrent,
       validateSpawn: (state) => {
         const placed = environment.place(state.x, state.z, state.heading, state.surfaceId);
         return !!placed && (["y", "pitch", "roll"] as const).every((key) => Math.abs(placed[key] - state[key]) <= 1e-6);
-      } }, spawn, request.present);
+      } }, spawn, (frame) => request.present(frame, lease), cameraSweep);
     transferred = true;
-    const entered = await runtime.enter({ revision: capture.worldRevision, isCurrent: leaseCurrent,
-      setFrameHook: capture.setFrameHook, release: () => { signal?.removeEventListener("abort", cancel); capture.release(); } }, adapter);
-    const hasProxies = snapshot.sceneSolids.length > 0;
-    const hasBuildings = rendered.obstacles.length > 0;
-    const coverage = hasBuildings
-      ? (hasProxies ? "structures-and-buildings-and-scene-proxies" : "structures-and-buildings")
-      : (hasProxies ? "structures-and-scene-proxies" : "structures-only");
-    return entered ? Object.freeze({ status: "ready", worldRevision: capture.worldRevision, coverage, adapter }) : unavailable(runtime.snapshot.reason ?? "runtime-refused");
+    const entered = await runtime.enter(runtimeLease, adapter);
+    return entered ? Object.freeze({ status: "ready", worldRevision: capture.worldRevision, coverage: compiledSolids.coverage, adapter }) : unavailable(runtime.snapshot.reason ?? "runtime-refused");
   } catch (error) {
     return unavailable(error instanceof Error ? error.message : "city-car-entry-failed");
   } finally {
-    if (!transferred) { signal?.removeEventListener("abort", cancel); capture.release(); }
+    if (!transferred) { signal?.removeEventListener("abort", cancel); lease.release(); }
   }
 }

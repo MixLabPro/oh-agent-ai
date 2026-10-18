@@ -7,6 +7,9 @@ import { DrivingInput } from "../game/DrivingInput";
 import { CarCamera } from "../game/CarCamera";
 import { FlightCameraControls } from "../game/FlightCameraControls";
 import { DRIVING_DT, initialDrivingState, type DrivingEnvironment } from "../game/DrivingSimulation";
+import { buildCollisionIndex } from "../game/driving/CollisionIndex";
+import { createCameraCollisionQuery } from "../game/driving/cameraCollisionQuery";
+import { CAR_DIMENSIONS } from "../game/carDimensions";
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const stage = element<HTMLElement>("stage");
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -67,23 +70,23 @@ const kernel = new DrivingKernel(environment, {
   physicsVersion: 1, collisionVersion: 1, queryVersion: 1,
 });
 const car = new CarVisuals(); scene.add(car.root);
+// 相机净空与城市会话同源：同一冻结实体索引 + gameplay 可越策略 + 车身中心起点
+// （kiosk/planter 按视觉体量入索引；pad 四面围挡是真实阻挡）。旧点采样遮挡路径已弃用。
+const prism = (id: string, x0: number, x1: number, z0: number, z1: number, y1: number) =>
+  ({ id, role: "prop", kind: "prism" as const, ring: [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }], yMin: 0, yMax: y1 });
+const cameraQuery = createCameraCollisionQuery(buildCollisionIndex([
+  prism("kiosk", 9, 15, -3, 3, 3.0), prism("planter", -8, -2, 12, 15, 1.2),
+  prism("wall-n", -35.5, 35.5, 24, 24.5, 0.6), prism("wall-s", -35.5, 35.5, -24.5, -24, 0.6),
+  prism("wall-w", -35.5, -35, -24.5, 24.5, 0.6), prism("wall-e", 35, 35.5, -24.5, 24.5, 0.6),
+]), "gameplay");
 // CarCamera replaces the manual follow(): shared VehicleChaseCamera core with orbit/zoom.
 const carCam = new CarCamera(camera, false);
 const camControls = new FlightCameraControls({ canvas, camera: () => carCam, isActive: () => !paused });
 camControls.attach();
 const follow = (dt: number, snap = false) => {
-  const target = { x: state.x, y: state.y, z: state.z, heading: state.heading, speed: state.speed, maxSpeed: 13 };
+  const target = { x: state.x, y: state.y, z: state.z, heading: state.heading, speed: state.speed, maxSpeed: 13, sweepLift: CAR_DIMENSIONS.height / 2 };
   if (snap) carCam.reset(target);
-  else carCam.update(dt, target, {
-    occlusion: (x: number, _y: number, z: number) => {
-      // Simplified: check against kiosk/planter bounding boxes only.
-      for (const o of obstacles) {
-        if (x >= o.minX - 0.5 && x <= o.maxX + 0.5 && z >= o.minZ - 0.5 && z <= o.maxZ + 0.5) return false;
-      }
-      return true;
-    },
-    terrain: () => 0,
-  });
+  else carCam.update(dt, target, { cameraSweep: cameraQuery, terrain: () => 0 });
 };
 const reset = () => { input.clear(); state = initialDrivingState(-22, 0); prior = state; accumulator = 0; reason = ""; shakeUntil = 0; follow(0, true); };
 let state = initialDrivingState(-22, 0); let prior = state;

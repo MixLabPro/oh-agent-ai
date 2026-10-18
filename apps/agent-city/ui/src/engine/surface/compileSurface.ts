@@ -30,8 +30,11 @@ const LANDING_ZONE = 3;
 
 type P3 = { x: number; y: number; z: number };
 export type StructureObstacle =
-  | Readonly<{ id: string; role: BoxPart["role"]; shape: "box"; corners: readonly P3[]; surfacePatchId?: string }>
-  | Readonly<{ id: string; role: "island"; shape: "prism"; ring: readonly Vec2[]; yMin: number; yMax: number }>;
+  | Readonly<{ id: string; role: BoxPart["role"]; shape: "box"; corners: readonly P3[]; surfacePatchId?: string; mountableHeight?: number }>
+  | Readonly<{ id: string; role: "island"; shape: "prism"; ring: readonly Vec2[]; yMin: number; yMax: number;
+    /** 可越预算：障碍顶面高出车底 ≤ 此值时不产生法向阻挡，支撑取 max(路面, 顶面)。
+     *  无标注 = blocking。见 docs/CITY_DRIVING_MOUNTABLE_OBSTACLES.md。 */
+    mountableHeight?: number }>;
 export type StructureLanding = Readonly<{
   structureId: string; end: "from" | "to"; layerId: string; x: number; z: number;
   patchId: string;
@@ -52,6 +55,40 @@ export type CitySurfaceCompilation = Readonly<{
   counts: Readonly<{ bridges: number; expresswaySegments: number; flares: number; islands: number; culDeSacs: number }>;
 }>;
 export type CitySurfaceLayout = Pick<CityLayout, "roadEdges" | "extent" | "terrain" | "highways" | "bridges" | "landmarks" | "culDeSacEnds">;
+
+/** Road-compiler-independent static collision descriptors shared by plane and car. */
+export function compileStaticStructureObstacles(layout: CitySurfaceLayout): readonly StructureObstacle[] {
+  const obstacles: StructureObstacle[] = [];
+  for (const island of channelizedGeometry(layout).islands) obstacles.push(Object.freeze({ id: `island:${island.mouth}`, role: "island", shape: "prism",
+    ring: island.ring, yMin: Math.min(...island.ring.map((p) => layout.terrain.height(p.x, p.z) - 0.18)),
+    yMax: Math.max(...island.ring.map((p) => layout.terrain.height(p.x, p.z) + 0.22)), mountableHeight: 0.25 }));
+  for (const edge of renderRoadEdges(layout.roadEdges)) {
+    if (!edge.bridge || edge.points.length !== 2) continue;
+    const source = { kind: "structure" as const, id: `bridge:${edge.id}` };
+    const parts = bridgeDeckParts(edge, layout), decks = parts.filter((p) => p.role === "bridge-deck");
+    decks.forEach((deck, i) => {
+      const corners = boxCorners(deck), topYs = [corners[2].y, corners[3].y, corners[6].y, corners[7].y];
+      const rise = Math.max(...topYs) - Math.min(...topYs), budget = Math.min(0.9, Math.round((rise + 0.3) * 100) / 100);
+      obstacles.push(Object.freeze({ id: decks.length === 1 ? `${source.id}:slab` : `${source.id}:slab:${i}`, role: "bridge-deck", shape: "box",
+        corners: Object.freeze(corners), mountableHeight: budget }));
+    });
+    for (const part of parts) if (part.role === "bridge-railing" || part.role === "bridge-pier")
+      obstacles.push(Object.freeze({ id: `${source.id}:${part.role}:${obstacles.length}`, role: part.role, shape: "box", corners: Object.freeze(boxCorners(part)) }));
+  }
+  for (const bar of trussBars(layout)) {
+    const part = trussBarPart(bar);
+    obstacles.push(Object.freeze({ id: `truss:${obstacles.length}`, role: "truss", shape: "box", corners: Object.freeze(boxCorners(part)) }));
+  }
+  for (const piece of expresswayPieces(layout)) {
+    if (piece.role === "expressway-rail" || piece.role === "expressway-pier") {
+      obstacles.push(Object.freeze({ id: `expressway:${piece.highway}:${piece.role}:${obstacles.length}`, role: piece.role, shape: "box", corners: Object.freeze(boxCorners(piece)) }));
+    } else if (piece.role === "expressway-deck") {
+      const id = `expressway:${piece.highway}:${String(piece.segment).padStart(4, "0")}`;
+      obstacles.push(Object.freeze({ id: `${id}:slab`, role: "expressway-deck", shape: "box", corners: Object.freeze(boxCorners(piece)) }));
+    }
+  }
+  return Object.freeze(obstacles);
+}
 
 /** Upward (SurfaceIndex convention: negative XZ signed area) triangle mesh, welded by Float32 XYZ. */
 function meshOf(triangles: readonly (readonly [P3, P3, P3])[]): { vertices: Float32Array; indices: Uint32Array } {
@@ -82,7 +119,6 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
   const groundSnapshot = buildGroundSurfaceSnapshot(ground);
   const issues: SurfaceCompileIssue[] = groundSnapshot.report.issues.filter((issue) => issue.reason !== "unsupported");
   const patches: SurfacePatch[] = [...groundSnapshot.patches];
-  const obstacles: StructureObstacle[] = [];
   const landings: StructureLanding[] = [];
   const portals: SurfacePortal[] = [];
   /** Portal candidate: `upper`'s loop segment nearest the seam point ↔ `lower`'s outer loop. */
@@ -120,8 +156,6 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     const top = island.ring.map((p) => ({ x: p.x, y: layout.terrain.height(p.x, p.z) + 0.22, z: p.z }));
     const centroid = { x: top.reduce((n, p) => n + p.x, 0) / top.length, y: top.reduce((n, p) => n + p.y, 0) / top.length, z: top.reduce((n, p) => n + p.z, 0) / top.length };
     add(`island:${island.mouth}`, "island", "ground", { kind: "junction", id: `channel:${island.mouth}` }, top.map((p, k) => [p, top[(k + 1) % top.length], centroid] as const));
-    obstacles.push(Object.freeze({ id: `island:${island.mouth}`, role: "island", shape: "prism", ring: island.ring,
-      yMin: Math.min(...island.ring.map((p) => layout.terrain.height(p.x, p.z) - 0.18)), yMax: Math.max(...top.map((p) => p.y)) }));
   }
   // ── Cul-de-sac discs: the cylinder's top cap as the renderer tilts it.
   const discs = culDeSacDiscs(layout);
@@ -179,10 +213,6 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       }
       for (const id of [...ids].sort()) portal(deckPatch, id, seam);
     }
-    // The slab is a solid too: lower-layer traffic must see the real underside,
-    // not just the support top and railings. Link it to its own supporting patch.
-    decks.forEach((deck,i)=>obstacles.push(Object.freeze({ id: decks.length===1?`${source.id}:slab`:`${source.id}:slab:${i}`, role: "bridge-deck", shape: "box", corners: Object.freeze(boxCorners(deck)), surfacePatchId: deckPatches[i]?.id })));
-    for (const p of parts) if (p.role === "bridge-railing" || p.role === "bridge-pier") obstacles.push(Object.freeze({ id: `${source.id}:${p.role}:${obstacles.length}`, role: p.role, shape: "box", corners: Object.freeze(boxCorners(p)) }));
     for (const [end, p, out] of [["from", a, -1], ["to", b, 1]] as const) {
       const section=end==="from"?0:tops.length-1,top=tops[section];
       // The seam is the deck's end edge, 0.25 past the node: compare the ground just outside it with
@@ -197,17 +227,11 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       landings.push(Object.freeze({ structureId: source.id, end, layerId, patchId: deckPatches[section]?.id??`bridge:${edge.id}`, seam, x: p.x, z: p.z, outX: ux * out, outZ: uz * out, deckY, groundY: g, step, status }));
     }
   }
-  for (const bar of trussBars(layout)) {
-    const p = trussBarPart(bar);
-    obstacles.push(Object.freeze({ id: `truss:${obstacles.length}`, role: "truss", shape: "box", corners: Object.freeze(boxCorners(p)) }));
-  }
-
   // ── District expressways: one layer per highway; segment decks are aliased by surfaceRegions.
   let expresswaySegments = 0;
   const pieces = expresswayPieces(layout);
   for (const piece of pieces) {
     if (piece.role === "expressway-rail" || piece.role === "expressway-pier") {
-      obstacles.push(Object.freeze({ id: `expressway:${piece.highway}:${piece.role}:${obstacles.length}`, role: piece.role, shape: "box", corners: Object.freeze(boxCorners(piece)) }));
       continue;
     }
     if (piece.role !== "expressway-deck") continue;
@@ -215,7 +239,6 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     const patchId = `expressway:${piece.highway}:${String(piece.segment).padStart(4, "0")}`;
     add(patchId, Math.abs(piece.rz) > 1e-4 ? "ramp" : "expressway-deck",
       `expressway:${piece.highway}`, { kind: "structure", id: `expressway:${piece.highway}` }, quad(boxTopFace(piece, EXPRESSWAY_DRIVABLE_HALF)));
-    obstacles.push(Object.freeze({ id: `${patchId}:slab`, role: "expressway-deck", shape: "box", corners: Object.freeze(boxCorners(piece)), surfacePatchId: patchId }));
   }
   const patchById = new Map(patches.map((p) => [p.id, p]));
   (layout.highways ?? []).forEach((points, highway) => {
@@ -260,7 +283,7 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     ? [{source:{kind:"structure",id:"cross-layer-portals"},reason:"unsupported"}] : [];
   const publishedSurface: CompiledCitySurface = Object.freeze({...connectedSurface,
     report:Object.freeze({...connectedSurface.report,issues:Object.freeze([...issues,...connectionIssues])})});
-  return Object.freeze({ surface: publishedSurface, ground, obstacles: Object.freeze(obstacles), landings: Object.freeze(landings),
+  return Object.freeze({ surface: publishedSurface, ground, obstacles: compileStaticStructureObstacles(layout), landings: Object.freeze(landings),
     counts: Object.freeze({ bridges, expresswaySegments, flares: channel.flares.length, islands: channel.islands.length, culDeSacs: discs.length }) });
 }
 

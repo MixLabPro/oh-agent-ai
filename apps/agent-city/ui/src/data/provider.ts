@@ -36,8 +36,8 @@ function fixtureProjection(windowDays: 7 | 30 | 90 | 366): CityProjectionV1 {
   const search = typeof location !== "undefined" && typeof URLSearchParams !== "undefined" ? new URLSearchParams(location.search) : null;
   const synthetic = Number(search?.get("fixtureSessions") ?? 0);
   const allSessions: CityProjectionV1["sessions"] = Number.isInteger(synthetic) && synthetic > 0 ? syntheticSessions(Math.min(synthetic, 3000)) : [
-    { id: "fixture-session-001", harness: "codex", first_event_at: "2026-10-02T09:10:00Z", last_event_at: "2026-10-02T09:42:00Z", tokens: { input: 12400, output: 3100, total: 15500 } },
-    { id: "fixture-session-002", harness: "claude_code", first_event_at: "2026-09-28T14:05:00Z", last_event_at: "2026-09-28T14:51:00Z", tokens: { input: 8700, output: 2200, total: 10900 } },
+    { id: "fixture-session-001", harness: "codex", title: "修复菜单栏图标不显示", title_source: "codex_thread_name", first_event_at: "2026-10-02T09:10:00Z", last_event_at: "2026-10-02T09:42:00Z", tokens: { input: 12400, output: 3100, total: 15500 } },
+    { id: "fixture-session-002", harness: "claude_code", title: "重构 surface compiler", title_source: "claude_ai_title", first_event_at: "2026-09-28T14:05:00Z", last_event_at: "2026-09-28T14:51:00Z", tokens: { input: 8700, output: 2200, total: 10900 } },
     { id: "fixture-session-003", harness: "codex", first_event_at: "2026-09-17T07:20:00Z", last_event_at: "2026-09-17T08:02:00Z", tokens: { input: 22100, output: 5400, total: 27500 } },
   ];
   const sessions = allSessions.filter((session) => session.first_event_at >= from);
@@ -84,9 +84,14 @@ function demoCityProjection(windowDays: 7 | 30 | 90 | 366): CityProjectionV1 {
     const durationMinutes = 12 + Math.floor(random() * 110);
     const input = 3000 + Math.floor(random() * 90000);
     const output = 800 + Math.floor(random() * 12000);
+    const harness = harnesses[Math.floor(random() * harnesses.length)];
     sessions.push({
       id: `demo-session-${String(index + 1).padStart(3, "0")}`,
-      harness: harnesses[Math.floor(random() * harnesses.length)],
+      harness,
+      // 每 4 条给 1 条标题（其余保持无标题：验证 fallback 命名路径）。
+      ...(index % 4 === 0
+        ? { title: `演示会话 ${index + 1}：${harness === "codex" ? "rollout 解析" : "evidence 对拍"}`, title_source: harness === "codex" ? ("codex_thread_name" as const) : ("claude_ai_title" as const) }
+        : {}),
       first_event_at: new Date(start).toISOString().replace(/\.\d+Z$/, "Z"),
       last_event_at: new Date(start + durationMinutes * 60000).toISOString().replace(/\.\d+Z$/, "Z"),
       tokens: { input, output, total: input + output },

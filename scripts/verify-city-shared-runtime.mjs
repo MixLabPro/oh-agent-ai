@@ -43,8 +43,9 @@ function fixture(kind, overrides = {}) {
   const f = fixture("plane"), runtime = new GameRuntime();
   runtime.enterSync(f.lease, f.adapter); runtime.resume(); f.state.hook(0.2);
   assert.equal(f.state.steps, 5, "bounded catch-up");
-  assert.equal(runtime.snapshot.phase, "paused", "overload pauses instead of silently skipping simulation time");
-  assert.equal(runtime.snapshot.reason, "long-frame"); runtime.dispose();
+  // 2026-10-18 产品决定（赛车惯例，Ammo stepSimulation(dt, maxSubSteps) 同款）：过载丢弃
+  // 超出 maxSteps 的墙钟并继续，不暂停打断玩家；原 fail-closed 暂停只保留 invalid-delta。
+  assert.equal(runtime.snapshot.phase, "running", "overload drops excess wall-clock and continues"); runtime.dispose();
 }
 
 // Activity transition discards catch-up without forcing a pause (countdown -> race).

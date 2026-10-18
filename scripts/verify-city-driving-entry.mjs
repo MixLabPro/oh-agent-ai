@@ -4,8 +4,22 @@
 // React hook 本身不可 vm 化；守卫驱动与其行为等价的裸编排（同一 createCityCarSession
 // 与 GameRuntime），并断言 hook 所依赖的运行时语义契约。
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { loadCity } from "./city-kit/index.mjs";
 import { makeFixtures } from "./city-kit/surface-region-fixtures.mjs";
+const drivingHook = fs.readFileSync(path.resolve("apps/agent-city/ui/src/game/useCityDriving.ts"), "utf8");
+const uatHook = fs.readFileSync(path.resolve("apps/agent-city/ui/src/game/useCityDrivingUat.ts"), "utf8");
+assert.match(drivingHook, /resolveFormalSpawn\(confirmationStore, currentOptions\.spawnBinding, currentOptions\.spawn\)/,
+  "the real useCityDriving formal path must use the tested confirmation gate");
+assert.match(drivingHook, /createCityCarSession\(host, runtime, \{ \.\.\.request, x: confirmedSpawn!/,
+  "formal session coordinates must come from the confirmed sealed credential");
+assert.match(drivingHook, /diagnostic\s*\?\s*await createCityCarDiagnosticSession[\s\S]*?:\s*await createCityCarSession/,
+  "diagnostic and formal entries remain distinct paths");
+assert.match(uatHook, /confirmationEnabled:\s*false/,
+  "UAT must opt out of confirmation state entirely");
+assert.doesNotMatch(uatHook, /deriveSpawnCandidates|validateSpawnCandidate|confirmSpawn/,
+  "UAT must never derive, validate, or confirm a formal spawn");
 const m = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
   "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
@@ -26,7 +40,9 @@ function hostFixture(overrides = {}) {
     readWorld: () => state.current ? world : null,
     setFrameHook: (hook) => { state.hook = hook; if (hook) state.hooks++; },
     release: () => { if (!state.current) return; state.current = false; state.releases++; state.hook = null; } };
-  return { state, host: { captureDrivingWorld: async () => capture } };
+  const lease = { revision: world.revision, snapshot: { drivingWorld: capture, staticWorld: capture }, isCurrent: () => state.current,
+    setFrameHook: (hook) => { state.hook = hook; if (hook) state.hooks++; }, release: capture.release };
+  return { state, host: { gameScenePort: { acquireResult: async () => ({ status: "ready", lease }) } } };
 }
 const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   collider: { dimensions: { halfLength: 1.4, halfWidth: 0.7, halfHeight: 0.575 }, centerHeight: 0.55, vehicleConfigHash: "city-car-v1" }, present: () => {} };
@@ -34,7 +50,7 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
 // 1) 入场成功：paused 起步（入场暂停）、租约保持、帧钩子已注册。
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
-  const entry = await m.createCityCarSession(f.host, runtime, request);
+  const entry = await m.createCityCarDiagnosticSession(f.host, runtime, request);
   assert.equal(entry.status, "ready", `ready: ${entry.reason}`);
   assert.equal(runtime.snapshot.phase, "paused", "入场即暂停等待用户");
   assert.equal(f.state.hooks, 1, "帧钩子注册一次");
@@ -54,12 +70,13 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   assert.equal(f.state.releases, 1, "退出幂等");
 }
 
-// 2) 出生点缺失（hook 的 spawn=null 路径在会话层的对应面）：不存在的层拒绝入场。
+// 2) Bare coordinates can no longer reach formal admission.
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
   const entry = await m.createCityCarSession(f.host, runtime, { ...request, layerId: "no-such-layer" });
   assert.equal(entry.status, "unavailable");
-  assert.equal(f.state.releases, 1, "失败释放冻结");
+  assert.equal(entry.reason, "validated-spawn-required");
+  assert.equal(f.state.releases, 0, "credential refusal precedes lease acquisition");
   assert.equal(f.state.hooks, 0, "失败不起帧钩子");
   assert.equal(runtime.snapshot.phase, "idle");
 }
@@ -67,7 +84,7 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
 // 3) 世界失效（入场后布局变化）：resume 拒绝、帧推进进入 error、再 exit 仍释放。
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
-  const entry = await m.createCityCarSession(f.host, runtime, request);
+  const entry = await m.createCityCarDiagnosticSession(f.host, runtime, request);
   assert.equal(entry.status, "ready");
   // 失效后租约源不再接受深检但 release 幂等守卫以 state.current 为准：
   // 失效瞬间 lease.release() 仍应执行（cleanup 终态语义），此处断言 error 相位
@@ -161,16 +178,21 @@ if (process.argv.includes("--cities")) {
     const lease = parts.acquireDrivingWorldSource(), port = new kit.CitySurfacePort(), runtime = new kit.GameRuntime();
     let frame = null;
     try {
+      const captureStarted = performance.now();
       const capture = await port.capture(lease.source); assert.equal(capture.status, "ready");
-      const host = { captureDrivingWorld: async () => ({ ...capture, setFrameHook: (next) => { frame = next; },
-        release: () => { lease.release(); port.releaseFrozenSource(lease.source); } }) };
+      if (process.argv.includes("--timings")) console.log(`Prepare ${count}/${seed} capture ${Math.round(performance.now() - captureStarted)}ms`);
+      const frozenCapture = { ...capture };
+      const sceneLease = { revision: capture.worldRevision, snapshot: { drivingWorld: frozenCapture, staticWorld: frozenCapture }, isCurrent: capture.isCurrent,
+        setFrameHook: (next) => { frame = next; }, release: () => { lease.release(); port.releaseFrozenSource(lease.source); } };
+      const host = { gameScenePort: { acquireResult: async () => ({ status: "ready", lease: sceneLease }) } };
       // Weather lighting remains live during a geometry freeze. Light-only
       // visibility changes must not add/remove physical architecture.
       parts.setNightGlow(1); parts.setNightHour(23);
       assert.equal(capture.verifyCurrent(), true, "night lighting must preserve frozen solids");
       parts.setNightGlow(0.05); parts.setNightHour(12);
       assert.equal(capture.verifyCurrent(), true, "day lighting must preserve frozen solids");
-      const entry = await kit.createCityCarDiagnosticSession(host, runtime, request);
+      const entry = await kit.createCityCarDiagnosticSession(host, runtime, { ...request,
+        onPreparationMetric: process.argv.includes("--timings") ? (metric) => console.log(`Prepare ${count}/${seed} ${metric.stage} ${Math.round(metric.durationMs)}ms`) : undefined });
       assert.equal(entry.status, "ready", `${count}/${seed}: ${entry.reason}`);
       assert.equal(runtime.resume(), true); runtime.setInput({ forward: true });
       for (let tick = 0; tick < 120; tick++) frame(1 / 60);

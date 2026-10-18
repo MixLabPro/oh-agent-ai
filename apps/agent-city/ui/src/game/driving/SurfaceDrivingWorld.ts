@@ -12,9 +12,10 @@ import type { SurfaceRegionsBuild } from "../../engine/surface/surfaceRegions";
 import type { DrivingEnvironment, DrivingMotion, DrivingMoveResult, DrivingState } from "../DrivingSimulation";
 import type { KernelStep } from "./DrivingKernel";
 import type { AuditWorldValidator, StepValidation } from "./audit/contracts";
-import { DEFAULT_FOOTPRINT_PARAMS, footprintSupport, validateMotion, type FootprintParams, type VehicleFootprint } from "./surfaceFootprint";
+import { DEFAULT_FOOTPRINT_PARAMS, footprintSupport, mountableQueryOf, validateMotion, type FootprintParams, type VehicleFootprint } from "./surfaceFootprint";
 import { DRIVING_FOOTPRINT } from "./vehicleFootprint";
 import type { CollisionDimensions, CollisionIndex, CollisionPose } from "./CollisionIndex";
+import type { MountablePolicy } from "./staticSolidContracts";
 
 /** Height agreement between a reported state and the independently fitted support. */
 export const SUPPORT_HEIGHT_TOLERANCE = 1e-6;
@@ -43,31 +44,35 @@ function collisionPose(pose: Readonly<{ x: number; z: number; heading: number }>
   return { x:pose.x+(-c*sp*cr+s*sr)*centerHeight, y:support.y+cp*cr*centerHeight,
     z:pose.z+(-s*sp*cr-c*sr)*centerHeight,heading:pose.heading,pitch:support.pitch,roll:support.roll };
 }
-function clearPose(binding: StructureCollisionBinding | CollisionIndex | undefined, pose: Readonly<{ x: number; z: number; heading: number }>, support: Readonly<{ y: number; pitch: number; roll: number }>): boolean {
-  return !isBinding(binding) || binding.index.overlap(collisionPose(pose,support,binding.centerHeight),binding.dimensions).status === "clear";
+function clearPose(binding: StructureCollisionBinding | CollisionIndex | undefined, pose: Readonly<{ x: number; z: number; heading: number }>, support: Readonly<{ y: number; pitch: number; roll: number }>, mountablePolicy:MountablePolicy): boolean {
+  return !isBinding(binding) || binding.index.overlap(collisionPose(pose,support,binding.centerHeight),binding.dimensions,mountablePolicy).status === "clear";
 }
 
 export class SurfaceDrivingEnvironment implements DrivingEnvironment {
+  private readonly mountable: ReturnType<typeof mountableQueryOf>;
   constructor(private readonly regions: SurfaceRegionsBuild,
     private readonly footprint: VehicleFootprint = DRIVING_FOOTPRINT,
     private readonly params: FootprintParams = DEFAULT_FOOTPRINT_PARAMS,
-    private readonly collision?: StructureCollisionBinding | CollisionIndex) {
+    private readonly collision?: StructureCollisionBinding | CollisionIndex,
+    private readonly mountablePolicy:MountablePolicy="disabled") {
     if (regions.status !== "ready") throw new Error("surface-regions-unresolved");
     if (!collisionCurrent(regions,collision)) throw new Error("collision-revision-mismatch-or-stale");
+    if(mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")throw new Error("invalid-surface-driving-policy");
+    this.mountable=mountablePolicy==="gameplay"?mountableQueryOf(collision ? (isBinding(collision)?collision.index.solids():collision.solids()) : []):null;
   }
   move(previous: DrivingState, desired: DrivingMotion): DrivingMoveResult {
     const stopped = (reason: string): DrivingMoveResult => ({ x:previous.x,y:previous.y,z:previous.z,heading:previous.heading,pitch:previous.pitch,roll:previous.roll,surfaceId:previous.surfaceId,blocked:true,reason });
     if (!collisionCurrent(this.regions,this.collision)) return stopped("stale-structure-collision");
-    const result = validateMotion(this.regions, previous, desired, previous.surfaceId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision);
+    const result = validateMotion(this.regions, previous, desired, previous.surfaceId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision,this.mountable??undefined);
     if (!result.ok) {
       return { x: previous.x, y: previous.y, z: previous.z, heading: previous.heading, pitch: previous.pitch, roll: previous.roll,
         surfaceId: previous.surfaceId, blocked: true, reason: `${result.reason}:${result.detail}` };
     }
     const s = result.support;
     if (isBinding(this.collision)) {
-      const start=footprintSupport(this.regions,previous,previous.surfaceId,this.footprint,this.params);
+      const start=footprintSupport(this.regions,previous,previous.surfaceId,this.footprint,this.params,undefined,this.mountable??undefined);
       if (!start.ok || Math.abs(start.y-previous.y)>SUPPORT_HEIGHT_TOLERANCE) return stopped("invalid-start-support");
-      const checked=this.collision.index.sweep(collisionPose(previous,start,this.collision.centerHeight),collisionPose(desired,s,this.collision.centerHeight),this.collision.dimensions);
+      const checked=this.collision.index.sweep(collisionPose(previous,start,this.collision.centerHeight),collisionPose(desired,s,this.collision.centerHeight),this.collision.dimensions,this.mountablePolicy);
       if (checked.status !== "clear") return stopped(`structure-collision:${checked.status}:${checked.reason}`);
       if (!collisionCurrent(this.regions,this.collision)) return stopped("stale-structure-collision");
     }
@@ -83,8 +88,8 @@ export class SurfaceDrivingEnvironment implements DrivingEnvironment {
   place(x: number, z: number, heading: number, regionId: string, y?: number): Readonly<{ y: number; pitch: number; roll: number }> | null {
     if (!collisionCurrent(this.regions,this.collision)) return null;
     const pose={x,z,heading,y};
-    const support = footprintSupport(this.regions, pose, regionId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision);
-    return support.ok && clearPose(this.collision,pose,support) && collisionCurrent(this.regions,this.collision)
+    const support = footprintSupport(this.regions, pose, regionId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision,this.mountable??undefined);
+    return support.ok && clearPose(this.collision,pose,support,this.mountablePolicy) && collisionCurrent(this.regions,this.collision)
       ? Object.freeze({ y: support.y, pitch: support.pitch, roll: support.roll }) : null;
   }
 }
@@ -95,15 +100,19 @@ export class SurfaceWorldValidator implements AuditWorldValidator {
     private readonly corridorProgress: (state: Readonly<DrivingState>) => number,
     private readonly footprint: VehicleFootprint = DRIVING_FOOTPRINT,
     private readonly params: FootprintParams = DEFAULT_FOOTPRINT_PARAMS,
-    private readonly collision?: StructureCollisionBinding | CollisionIndex) {
+    private readonly collision?: StructureCollisionBinding | CollisionIndex,
+    private readonly mountablePolicy:MountablePolicy="disabled") {
     if (regions.status !== "ready") throw new Error("surface-regions-unresolved");
     if (!collisionCurrent(regions,collision)) throw new Error("collision-revision-mismatch-or-stale");
+    if(mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")throw new Error("invalid-surface-driving-policy");
+    this.mountable=mountablePolicy==="gameplay"?mountableQueryOf(collision ? (isBinding(collision)?collision.index.solids():collision.solids()) : []):null;
   }
+  private readonly mountable:ReturnType<typeof mountableQueryOf>;
   validateStart(state: Readonly<DrivingState>): StepValidation {
     if (!collisionCurrent(this.regions,this.collision)) return "simulation-invalid";
-    const support = footprintSupport(this.regions, state, state.surfaceId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision);
+    const support = footprintSupport(this.regions, state, state.surfaceId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision,this.mountable??undefined);
     if (!support.ok) return "route-deviation";
-    return Math.abs(support.y - state.y) <= SUPPORT_HEIGHT_TOLERANCE && clearPose(this.collision,state,support) && collisionCurrent(this.regions,this.collision) ? "valid" : "simulation-invalid";
+    return Math.abs(support.y - state.y) <= SUPPORT_HEIGHT_TOLERANCE && clearPose(this.collision,state,support,this.mountablePolicy) && collisionCurrent(this.regions,this.collision) ? "valid" : "simulation-invalid";
   }
   validate(previous: Readonly<DrivingState>, next: KernelStep): StepValidation {
     const state = next.state;
@@ -114,14 +123,14 @@ export class SurfaceWorldValidator implements AuditWorldValidator {
     if (state.surfaceId !== previous.surfaceId) return "simulation-invalid";
     const moved = state.x !== previous.x || state.z !== previous.z || state.heading !== previous.heading;
     if (next.motion.blocked && moved) return "simulation-invalid";
-    const result = validateMotion(this.regions, previous, state, previous.surfaceId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision);
+    const result = validateMotion(this.regions, previous, state, previous.surfaceId, this.footprint, this.params,isBinding(this.collision) ? undefined : this.collision,this.mountable??undefined);
     // The kernel accepted a motion the independent check rejects: penetration through a curb,
     // island or gap is a simulation defect, never a pass and never "road blocked".
     if (!result.ok) return "simulation-invalid";
     if (isBinding(this.collision)) {
-      const start=footprintSupport(this.regions,previous,previous.surfaceId,this.footprint,this.params);
+      const start=footprintSupport(this.regions,previous,previous.surfaceId,this.footprint,this.params,undefined,this.mountable??undefined);
       if (!start.ok || Math.abs(start.y-previous.y)>SUPPORT_HEIGHT_TOLERANCE) return "simulation-invalid";
-      const checked=this.collision.index.sweep(collisionPose(previous,start,this.collision.centerHeight),collisionPose(state,result.support,this.collision.centerHeight),this.collision.dimensions);
+      const checked=this.collision.index.sweep(collisionPose(previous,start,this.collision.centerHeight),collisionPose(state,result.support,this.collision.centerHeight),this.collision.dimensions,this.mountablePolicy);
       if (checked.status !== "clear" || !collisionCurrent(this.regions,this.collision)) return "simulation-invalid";
     }
     return Math.abs(result.support.y - state.y) <= SUPPORT_HEIGHT_TOLERANCE ? "valid" : "simulation-invalid";

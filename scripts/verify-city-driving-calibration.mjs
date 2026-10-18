@@ -211,8 +211,8 @@ function runTier(label, sim) {
 }
 
 // ── 多档运行：acceleration 档 ×3 + steering return 档 ×3 ──
-// 现行 steeringResponse=8。回正档把 scale 乘在 steeringResponse 上——见文末 finding：
-// 非对称回正无独立参数，此为最接近的可测代理（打舵与回正同比例缩放）。
+// steeringResponse=8 不动；回正档注入 steeringReturnResponse（v3 起的非对称回正参数，
+// 回正速率 = steeringResponse × 该值；打舵速率恒为 steeringResponse）。
 const ACCEL_TIERS = [5.5, 4.0, 3.0];
 const RETURN_TIERS = [1.0, 1.33, 1.5];
 const rows = [];
@@ -222,7 +222,7 @@ for (const accel of ACCEL_TIERS) {
 }
 for (const scale of RETURN_TIERS) {
   const label = `steer-return=${scale.toFixed(2)}`;
-  rows.push([label, runTier(label, loadDriving({ steeringResponse: +(8 * scale).toFixed(4) }))]);
+  rows.push([label, runTier(label, loadDriving({ steeringReturnResponse: scale }))]);
 }
 
 // ── 输出：主行按约定格式；曲线/轨迹为缩进续行 ──
@@ -233,9 +233,8 @@ for (const [label, m] of rows) {
 }
 
 // ── findings（调参决策的硬约束）──
-console.log("finding: stepDriving 转向平滑是对称单一速率——steering 一律向 target 按 steeringResponse 指数逼近，");
-console.log("finding: 松舵回正无独立参数，非对称回正（回正快于打舵）无法经现有输入/参数表达 → asymmetric return requires DRIVING_PARAMS extension（如新增 steeringReturnResponse）。");
-console.log("finding: 故 steer-return 各档把 scale 施加于 steeringResponse 本身（打舵与回正同比例缩放）；稳态转弯半径与该参数无关，档间差异只体现在 settle/return 与组合轨迹瞬态（settle≈return 即对称性的直接证据）。");
+console.log("finding: v3 起 steeringReturnResponse 独立表达非对称回正——回正档只改回正速率，打舵 settle 各档应保持一致（与 v2 的全局缩放代理不同）。");
+console.log("finding: 稳态转弯半径与回正速率无关；档间差异只出现在松舵后的轨迹收束（return 越大，出弯拉直越快）。");
 console.log("finding: DRIVING_PARAMS 为模块级 frozen 且不是 stepDriving 入参；本脚本在 vm 沙箱内旁路 Object.freeze 实现档位覆写，未改动任何现有文件。");
 
 console.log("verify-city-driving-calibration: ok (measurement tool — 档位对比数据见上方 calibration/driving 行)");

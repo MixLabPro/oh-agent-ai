@@ -96,3 +96,17 @@ for (const sessionCount of [0, 1, 90, 500]) {
 }
 
 console.log(`verify-city-game-world: ok (${totalBoxes} obstacle boxes across 12 layouts)`);
+
+// Shared compiled solids feed bounded near-plane sweeps; budget exhaustion is
+// explicit and never reported as clear.
+{
+  const model = modelOf(1), layout = layoutCity(model, null, 811, null, "auto");
+  const solids = ["a", "b"].map((id, index) => ({ id, role: "test-static", kind: "box",
+    center: { x: 10_000 + index * 2, y: 100, z: 10_000 },
+    halfAxes: [{ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 }] }));
+  const world = new FlightWorld({ layout, model, cursorMs: null, staticSolids: solids });
+  const sweep = world.queryCameraSweep({ x: 9_990, y: 100, z: 10_000 }, { x: 10_010, y: 100, z: 10_000 }, 0.5, 1024);
+  assert.equal(sweep.status, "blocked");
+  if (sweep.status === "blocked") assert.ok(sweep.safeFraction >= 0 && sweep.safeFraction < 1);
+  assert.equal(world.queryCameraSweep({ x: 9_990, y: 100, z: 10_000 }, { x: 10_010, y: 100, z: 10_000 }, 0.5, 1).status, "unresolved");
+}

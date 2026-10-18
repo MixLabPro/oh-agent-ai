@@ -46,15 +46,35 @@ try {
       engine.parts.update(1, 10); check(a.isCurrent(), "frame cannot change frozen displayed geometry");
       engine.setTimeCursor(model.windowStartMs, { playing: false }); engine.parts.update(1, 11);
       check(a.isCurrent() && b.isCurrent(), "time jump queues while freeze held"); matchActual(a);
+      // Read-only audit captures cannot claim frames/cameras. Interactive games
+      // acquire the same exclusive tokenized host port, independently of readers.
+      check(!("setFrameHook" in a) && !("setFrameHook" in b), "audit leases are read-only");
       let framesA = 0, framesB = 0;
-      a.setFrameHook(() => framesA++);
-      let refused = false; try { b.setFrameHook(() => framesB++); } catch { refused = true; }
-      check(refused, "second frame owner refused"); engine.updateScene(0.02); check(framesA === 1 && framesB === 0, "single host frame callback");
+      const firstAdmission = await engine.gameScenePort.acquireResult({ vehicle: "car", activity: "free" }, 1, new AbortController().signal);
+      check(firstAdmission.status === "ready", `real car scene lease capture (${firstAdmission.status}${firstAdmission.status === "ready" ? "" : ":" + firstAdmission.reason})`);
+      const firstScene = firstAdmission.lease;
+      leases.push(firstScene);
+      const staticSnapshot = firstScene.snapshot.staticWorld.readWorld();
+      const drivingSnapshot = firstScene.snapshot.drivingWorld.readWorld();
+      check(staticSnapshot && drivingSnapshot && JSON.stringify(staticSnapshot.obstacles) === JSON.stringify(drivingSnapshot.obstacles),
+        "car static and driving snapshots share identical structural descriptors from one freeze");
+      firstScene.setFrameHook(() => framesA++);
+      let refused = false;
+      const refusedAdmission = await engine.gameScenePort.acquireResult({ vehicle: "plane", activity: "practice" }, 2, new AbortController().signal);
+      refused = refusedAdmission.status === "busy";
+      check(refused, "second interactive owner refused"); engine.updateScene(0.02);
+      check(framesA === 1 && framesB === 0, "single host frame callback");
       const afterFrame = captureRenderedSolids(engine.parts.drivingRoots).solids;
-      for (let i=0;i<solids.length;i++) check(afterFrame[i] && same(solids[i].positions,afterFrame[i].positions) && same(solids[i].indices,afterFrame[i].indices) && same(solids[i].transforms,afterFrame[i].transforms), `freeze changed on host frame at ${solids[i].id}, role=${solids[i].role}, name=${engine.parts.drivingRoots[Number(solids[i].id.split(":")[2])]?.object.name}`);
-      a.release(); a.release(); check(!a.isCurrent() && a.readWorld() === null && b.isCurrent(), `individual release idempotent and cannot unfreeze peer: freeze=${engine.parts.drivingFreezeCount},a=${a.isCurrent()},b=${b.isCurrent()}`);
-      b.setFrameHook(() => framesB++); a.setFrameHook(null); engine.updateScene(0.02);
-      check(framesA === 1 && framesB === 1, "old lease cannot clear new frame owner");
+      for (let i=0;i<solids.length;i++) check(afterFrame[i] && same(solids[i].positions,afterFrame[i].positions) && same(solids[i].indices,afterFrame[i].indices) && same(solids[i].transforms,afterFrame[i].transforms), `freeze changed on host frame at ${solids[i].id}`);
+      a.release(); a.release(); check(!a.isCurrent() && a.readWorld() === null && b.isCurrent(), "releasing one reader keeps peers and the active game frozen");
+      firstScene.release();
+      const nextAdmission = await engine.gameScenePort.acquireResult({ vehicle: "plane", activity: "practice" }, 3, new AbortController().signal);
+      check(nextAdmission.status === "ready", `released scene slot admits next plane lease (${nextAdmission.status}${nextAdmission.status === "ready" ? "" : ":" + nextAdmission.reason})`);
+      const nextScene = nextAdmission.lease;
+      leases.push(nextScene); nextScene.setFrameHook(() => framesB++);
+      firstScene.setFrameHook(null); firstScene.release(); engine.updateScene(0.02);
+      check(framesA === 1 && framesB === 1, "old interactive lease cannot clear new frame owner");
+      nextScene.release();
       b.release(); check(engine.parts.drivingFreezeCount === 0 && !b.isCurrent(), "last release restores time changes");
       const atStart = await acquire(); check(atStart.worldRevision !== b.worldRevision, "actual displayed height participates in identity"); matchActual(atStart);
       atStart.release();
@@ -73,17 +93,42 @@ try {
       check((await engine.captureDrivingWorld()).status === "unavailable" && engine.parts.drivingFreezeCount === 0, "instance budget fails closed without retained freeze"); shaft.count = originalCount;
       const old = await acquire(); engine.applyModel(model, true); check(!old.isCurrent(), "rebuild invalidates lease"); old.release();
       const runtime = new GameRuntime();
-      // 旧契约（渲染建筑碰撞不支持 → unavailable-rendered-collision）随三源碰撞合并而过时：
-      // 真实城市现在能进。fail-closed 断言改用仍然成立的无效车辆配置路径。
+      // Formal entry requires a current verified-spawn credential before it reserves the host.
       const invalid = await createCityCarSession(engine, runtime, { x: 0, z: 0, heading: 0, layerId: "ground",
         collider: { dimensions: { halfWidth: 0.9, halfLength: 2, halfHeight: 0.75 }, centerHeight: 0.75, vehicleConfigHash: "" }, present() {} });
-      check(invalid.status === "unavailable" && invalid.reason === "invalid-vehicle-config", "invalid vehicle config fails closed");
-      check(engine.parts.drivingFreezeCount === 0 && engine.drivingWorldFrame === null, "refused entry releases freeze and frame ownership");
-      const entry = await createCityCarDiagnosticSession(engine, runtime, { collider: { dimensions: { halfWidth: 0.9, halfLength: 2, halfHeight: 0.75 }, centerHeight: 0.75, vehicleConfigHash: "synthetic-browser-car" }, present() {} });
+      check(invalid.status === "unavailable" && invalid.reason === "validated-spawn-required", "bare formal coordinates fail closed");
+      check(engine.parts.drivingFreezeCount === 0 && engine.gameFrame === null, "refused entry releases freeze and frame ownership");
+      const beforeCamera = engine.renderCamera.position.clone();
+      const cameraNear = engine.renderCamera.near;
+      const entry = await createCityCarDiagnosticSession(engine, runtime, { collider: { dimensions: { halfWidth: 0.9, halfLength: 2, halfHeight: 0.75 }, centerHeight: 0.75, vehicleConfigHash: "synthetic-browser-car" }, present(frame, scene) {
+          engine.presentDrivingCamera(frame.state, frame.frameSeconds, frame.cameraSweep, scene);
+        } });
       check(entry.status === "ready" && entry.coverage.includes("buildings"), `real city diagnostic session enters with rendered-building collision (got ${entry.status}${entry.status === "unavailable" ? ":" + entry.reason : ":" + entry.coverage})`);
-      check(engine.drivingWorldFrame !== null, "session owns the host frame");
+      check(engine.gameFrame !== null && engine.owner === "game", "session owns the host frame");
+      check(engine.renderCamera.position.distanceTo(beforeCamera) > 1, "actual car camera moved to the diagnostic spawn");
+      check(engine.renderCamera.near < cameraNear, "gameplay near plane calibrated for camera volume");
+      runtime.resume(); runtime.setInput({ forward: true });
+      for (let tick = 0; tick < 60; tick++) engine.updateScene(1 / 60);
+      check([engine.renderCamera.position.x, engine.renderCamera.position.y, engine.renderCamera.position.z].every(Number.isFinite), "real camera sweep remains finite during city motion");
       runtime.dispose();
-      check(engine.parts.drivingFreezeCount === 0 && engine.drivingWorldFrame === null, "runtime disposal releases freeze and frame ownership");
+      check(engine.parts.drivingFreezeCount === 0 && engine.gameFrame === null, "runtime disposal releases freeze and frame ownership");
+      check(engine.renderCamera.near === cameraNear, "release restores the original near plane");
+      const { GameSession } = await import("/src/game/GameSession.ts");
+      const flight = new GameSession(engine, { onState() {}, onExited() {} });
+      const actualStaticSource = engine.parts.staticSource;
+      engine.parts.staticSource = { ...actualStaticSource,
+        ground: { ...actualStaticSource.ground, input: { ...actualStaticSource.ground.input, roadEdges: [] } } };
+      const flying = await flight.enter({ mode: "practice" }, { cityReady: true, cinemaActive: false, filmActive: false, busy: false });
+      check(flying.ok, `actual road-unavailable static flight admission: ${flying.reason ?? "ready"}`);
+      check(flight.sceneLease?.snapshot.staticWorld.readWorld() && !flight.sceneLease.snapshot.drivingWorld,
+        "plane host lease contains road-neutral static capture without a driving capture");
+      for (let tick = 0; tick < 30; tick++) engine.updateScene(1 / 60);
+      check(!!flight.snapshot().telemetry, "actual city flight has live telemetry");
+      flight.exit(); flight.dispose();
+      check(engine.parts.drivingFreezeCount === 0 && engine.gameFrame === null && engine.owner === "orbit", "flight releases shared frame and static pin");
+      const carWithoutRoads = await engine.gameScenePort.acquireResult({ vehicle: "car", activity: "free" }, 10, new AbortController().signal);
+      check(carWithoutRoads.status === "unavailable", "car still requires the road compiler when that capability is unavailable");
+      engine.parts.staticSource = actualStaticSource;
       const fresh = await acquire(); matchActual(fresh); engine.dispose(); check(!fresh.isCurrent(), "dispose invalidates lease"); fresh.release();
       check((await engine.captureDrivingWorld()).status === "unavailable", "disposed world unavailable");
       return { meshes: solids.length, roles: [...roles], instances: solids.reduce((n, s) => n + s.transforms.length / 16, 0) };

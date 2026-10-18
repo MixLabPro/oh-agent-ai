@@ -22,6 +22,10 @@ export type ChaseTarget = Readonly<{
   backOverride?: number;
   /** 运行时覆盖 config.baseHeight。 */
   heightOverride?: number;
+  /** 净空扫掠起点抬升（车 y 常为支撑面高度）：车停在可越实体（桥面板/岛缘）上时，
+   *  近平面包络立方体若从支撑面出发必然与板体重叠，被 fail-closed 判成「无法确认净空」。
+   *  抬到车身高后包络底缘高于板顶，与可越预算无关地必然清空。飞行不设即不变。 */
+  sweepLift?: number;
   /** 运行时覆盖 config.lookAhead。 */
   lookAheadOverride?: number;
 }>;
@@ -58,6 +62,14 @@ export type ChaseCameraConfig = Readonly<{
 
 /** 环绕状态（拖动查看）。yaw/pitch 是相对于默认追尾位的偏移，zoom 乘距离。 */
 export type ChaseOrbitState = { yaw: number; pitch: number; zoom: number };
+export type CameraClearanceResult = Readonly<{ status: "clear" }>
+  | Readonly<{ status: "blocked"; safeFraction: number }>
+  | Readonly<{ status: "unresolved" }>;
+export type CameraClearanceQuery = (from: Readonly<{ x: number; y: number; z: number }>,
+  to: Readonly<{ x: number; y: number; z: number }>, radius: number) => CameraClearanceResult;
+/** "held"：本帧无可认证相机位（瞬态遮挡/查询未决），保持上一认证位并下一帧重试；
+ *  只有 "unresolved"（世界/token 失效，由宿主层判定）才会触发会话暂停。 */
+export type ChaseCameraSafety = "clear" | "shrunk" | "held" | "unresolved";
 
 /** 缩放限制：近裁剪面与模型尺寸共同决定，由壳传入。 */
 export const chaseZoomRange = (min: number, max: number) => ({ min, max });
@@ -76,6 +88,7 @@ export class VehicleChaseCamera {
   private zoom = 1;
   private dragging = false;
   private sinceInteraction = Infinity;
+  private lastSafePosition: THREE.Vector3 | null = null;
 
   /** 仰角限位：下限防钻地，上限防 lookAt 与 up 平行。 */
   readonly elevationRange: Readonly<{ min: number; max: number }>;
@@ -162,7 +175,8 @@ export class VehicleChaseCamera {
   update(dt: number, target: ChaseTarget, queries?: {
     occlusion?: (x: number, y: number, z: number, margin: number) => boolean;
     terrain?: (x: number, z: number) => number;
-  }): void {
+    cameraSweep?: CameraClearanceQuery;
+  }): ChaseCameraSafety {
     if (!this.initialized) this.reset(target);
     this.advanceOrbit(dt);
     this.computeOffset(target);
@@ -172,31 +186,100 @@ export class VehicleChaseCamera {
     let anchorX = target.x + ox;
     let anchorZ = target.z + oz;
     let anchorY = target.y + oy;
-    // 遮挡收缩（queries.occlusion 优先，回退 config.occlusionQuery）
-    const occlusion = queries?.occlusion ?? this.config.occlusionQuery;
-    let shrink = 1;
-    if (occlusion) {
-      for (const sample of [0.35, 0.6, 0.85]) {
-        const sx = target.x + ox * (1 - sample);
-        const sy = target.y + oy * (1 - sample);
-        const sz = target.z + oz * (1 - sample);
-        if (!occlusion(sx, sy, sz, 1)) shrink = Math.min(shrink, sample * 0.8);
-      }
-    }
-    if (shrink < 1) {
-      anchorX = target.x + ox * shrink;
-      anchorZ = target.z + oz * shrink;
-      anchorY = target.y + oy * (0.4 + 0.6 * shrink);
-    }
+    let safety: ChaseCameraSafety = "clear";
+    // Conservative near-plane envelope: a sphere around the near-plane rectangle
+    // also covers the lens-to-plane depth. The host sweep is budgeted and fail-closed.
+    const cameraSweep = queries?.cameraSweep;
+    const near = Math.max(0, this.camera.near);
+    const requestedFov = this.reducedMotion ? this.config.fovBase : this.config.fovBase + this.config.fovSpeedSpan * clamp(target.fovSpeedRatio ?? target.speedRatio, 0, 1);
+    const envelopeFov = Math.max(this.camera.fov, requestedFov);
+    const halfHeight = near * Math.tan(THREE.MathUtils.degToRad(envelopeFov) / 2);
+    const halfWidth = halfHeight * Math.max(0, this.camera.aspect);
+    const cameraRadius = near + Math.hypot(halfWidth, halfHeight) + Math.max(0.05, this.config.groundMargin * 0.1);
     // 贴地保护（queries.terrain 优先，回退 config.terrainHeight）
     const terrain = queries?.terrain ?? this.config.terrainHeight;
     if (terrain) {
       const floor = Math.max(0, terrain(anchorX, anchorZ)) + this.config.groundMargin;
       if (anchorY < floor) anchorY = floor;
     }
+    let hold = false;
+    if (cameraSweep) {
+      // sweepLift：见 ChaseTarget.sweepLift——包络从车身中心出发，而不是从车下的可越实体里出发。
+      const from = { x: target.x, y: target.y + (target.sweepLift ?? 0), z: target.z };
+      // 贴身锚点梯度：臂被挡且收缩重试失败时，先试更紧的机盖位，而不是放弃本帧。
+      // 街边细杆/建筑角在两帧之间进入包络（满速 ~0.4/帧）会让 safeFraction 归零——
+      // 那是瞬态遮挡，1-2 帧内自愈；为此杀掉整个驾驶会话不成比例。
+      const tryAnchor = (fraction: number): boolean => {
+        const cx = target.x + (anchorX - target.x) * fraction, cy = target.y + (anchorY - target.y) * fraction, cz = target.z + (anchorZ - target.z) * fraction;
+        const probe = cameraSweep(from, { x: cx, y: cy, z: cz }, cameraRadius);
+        if (probe.status !== "clear") return false;
+        anchorX = cx; anchorY = cy; anchorZ = cz; return true;
+      };
+      let arm = cameraSweep(from, { x: anchorX, y: anchorY, z: anchorZ }, cameraRadius);
+      if (arm.status === "unresolved") {
+        hold = true;
+      } else if (arm.status === "blocked") {
+        if (!Number.isFinite(arm.safeFraction) || arm.safeFraction <= 0 || arm.safeFraction > 1) {
+          hold = !tryAnchor(0.35) && !tryAnchor(0.15);
+        } else {
+          const fraction = Math.max(0, arm.safeFraction - 0.02);
+          if (!tryAnchor(fraction)) hold = !tryAnchor(0.35) && !tryAnchor(0.15);
+        }
+        if (!hold) safety = "shrunk";
+      }
+    } else {
+      // Point samples remain a visual heuristic for standalone previews. Their
+      // result is never reported as certified clearance, but keep legacy camera
+      // motion available in worlds that do not provide collision geometry.
+      const occlusion = queries?.occlusion ?? this.config.occlusionQuery;
+      let shrink = 1;
+      if (occlusion) {
+        for (const sample of [0.35, 0.6, 0.85]) {
+          const sx = target.x + ox * (1 - sample), sy = target.y + oy * (1 - sample), sz = target.z + oz * (1 - sample);
+          if (!occlusion(sx, sy, sz, 1)) shrink = Math.min(shrink, sample * 0.8);
+        }
+      }
+      if (shrink < 1) {
+        anchorX = target.x + ox * shrink; anchorZ = target.z + oz * shrink; anchorY = target.y + oy * (0.4 + 0.6 * shrink);
+        safety = "shrunk";
+      }
+      safety = "unresolved";
+    }
+    // reset() intentionally has no world query. The first certified arm sweep
+    // establishes the initial camera position instead of trusting that reset
+    // anchor, which may be behind a thin wall or inside an obstacle.
+    if (!this.lastSafePosition) {
+      this.camera.position.set(anchorX, anchorY, anchorZ);
+      this.lastSafePosition = this.camera.position.clone();
+    }
     this.anchor.set(anchorX, anchorY, anchorZ);
     const interacting = this.dragging || this.sinceInteraction < 0.5;
-    this.camera.position.lerp(this.anchor, 1 - Math.exp(-(interacting ? this.config.dragPositionDamping : this.config.positionDamping) * dt));
+    const proposed = this.camera.position.clone().lerp(this.anchor, 1 - Math.exp(-(interacting ? this.config.dragPositionDamping : this.config.positionDamping) * dt));
+    if (hold) {
+      // held：本帧没有任何可认证的相机位（瞬态遮挡/查询未决）。相机保持上一认证位，
+      // 注视点照常跟车，下一帧重试——不作为世界失效上报（unresolved 才会暂停会话）。
+      if (this.lastSafePosition) this.camera.position.copy(this.lastSafePosition);
+      safety = "held";
+    } else if (cameraSweep) {
+      const movement = cameraSweep({ x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z },
+        { x: proposed.x, y: proposed.y, z: proposed.z }, cameraRadius);
+      if (movement.status === "unresolved") {
+        if (this.lastSafePosition) this.camera.position.copy(this.lastSafePosition);
+        safety = "held";
+      } else if (movement.status === "blocked") {
+        if (!Number.isFinite(movement.safeFraction) || movement.safeFraction < 0 || movement.safeFraction > 1) {
+          if (this.lastSafePosition) this.camera.position.copy(this.lastSafePosition);
+          safety = "held";
+        } else {
+          const fraction = Math.max(0, movement.safeFraction - 0.02);
+          if (fraction > 0) this.camera.position.lerp(proposed, fraction);
+          else if (this.lastSafePosition) this.camera.position.copy(this.lastSafePosition);
+          else safety = "held";
+          if (safety !== "held") safety = "shrunk";
+        }
+      } else this.camera.position.copy(proposed);
+    } else this.camera.position.copy(proposed);
+    if (cameraSweep && safety !== "held") this.lastSafePosition = this.camera.position.clone();
     // 注视点：前视距离随 zoom 收缩（拉近到贴脸时看回载具本体）
     const zoomT = clamp((this.zoom - this.zoomRange.min) / (1 - this.zoomRange.min), 0, 1);
     const ahead = (target.lookAheadOverride ?? this.config.lookAhead) * zoomT * Math.max(0, Math.cos(this.yaw));
@@ -205,14 +288,15 @@ export class VehicleChaseCamera {
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this.look);
     // FOV 速度响应
-    const targetFov = this.reducedMotion ? this.config.fovBase : this.config.fovBase + this.config.fovSpeedSpan * clamp(target.fovSpeedRatio ?? target.speedRatio, 0, 1);
-    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
-      this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-(this.config.fovDamping ?? 3) * dt));
+    if (Math.abs(this.camera.fov - requestedFov) > 0.05) {
+      this.camera.fov += (requestedFov - this.camera.fov) * (1 - Math.exp(-(this.config.fovDamping ?? 3) * dt));
       this.camera.updateProjectionMatrix();
     }
+    return safety;
   }
 
   dispose(): void {
     this.initialized = false;
+    this.lastSafePosition = null;
   }
 }

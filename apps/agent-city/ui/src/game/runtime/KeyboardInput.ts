@@ -51,17 +51,21 @@ export class KeyboardInput<Input extends object> {
   private focusTarget(): HTMLElement | null { return this.options.focusTarget?.() ?? null; }
   private readonly focusIn = (event: FocusEvent) => {
     const target = event.target;
+    // HUD controls (range, select, button, checkbox) are ordinary UI focus.
+    // Pull editable text targets out of the canvas-owned gameplay context.
     if (!(target instanceof HTMLElement) || !this.isTextEntryTarget(target)) return;
     event.stopImmediatePropagation();
     target.blur();
     this.focusTarget()?.focus({ preventScroll: true });
   };
   private readonly composition = (event: CompositionEvent) => {
+    if (!this.options.isFocused()) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     this.clear();
   };
   private readonly beforeInput = (event: InputEvent) => {
+    if (!this.options.isFocused()) return;
     if (!event.inputType.startsWith("insert")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -69,17 +73,21 @@ export class KeyboardInput<Input extends object> {
   /** macOS commonly uses Control+Space to switch input sources. Consume it
    * before it can open a text composition path while the game owns focus. */
   private readonly blockInputSourceSwitch = (event: KeyboardEvent) => {
-    if (event.code !== "Space" || !event.ctrlKey) return;
+    if (!this.options.isFocused() || event.code !== "Space" || !event.ctrlKey) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     this.clear();
   };
   private isTextEntryTarget(target: HTMLElement): boolean {
-    return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+    if (target.isContentEditable || target.tagName === "TEXTAREA") return true;
+    if (target.tagName !== "INPUT") return false;
+    const type = (target as HTMLInputElement).type?.toLowerCase() ?? "text";
+    return !["range", "checkbox", "radio", "button", "submit", "reset", "color", "file"].includes(type);
   }
   private readonly down = (event: KeyboardEvent) => {
     const target = event.target;
     if (event.isComposing || event.keyCode === 229) {
+      if (!this.options.isFocused()) return;
       event.preventDefault(); event.stopImmediatePropagation(); this.clear(); return;
     }
     if (event.metaKey || event.ctrlKey || event.altKey ||
