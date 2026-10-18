@@ -57,6 +57,8 @@ export type DrivingSfxTelemetry = Readonly<{
   braking: boolean;
   reversing: boolean;
   rainIntensity?: number;
+  /** VTOL 推进器强度 [0,1]：冷气嘶声层（非 VTOL 会话缺省静音）。 */
+  thruster?: number;
 }>;
 
 type EngineNodes = {
@@ -69,6 +71,7 @@ type EngineNodes = {
   lfo: OscillatorNode;
   lfoDepth: GainNode;
   brakeGain: GainNode;
+  thrusterGain: GainNode;
   noise: AudioBuffer;
   rainGain: GainNode;
 };
@@ -144,6 +147,8 @@ export class DrivingSfx {
     nodes.brakeGain.gain.setTargetAtTime(brakingHard ? 0.22 : 0, t, brakingHard ? 0.03 : 0.08);
 
     nodes.rainGain.gain.setTargetAtTime(clamp01(telemetry.rainIntensity ?? 0) * 0.12, t, 0.5);
+    // VTOL 冷气喷流：高通嘶声层，强度随推进器（快速起音、稍慢收音）。
+    nodes.thrusterGain.gain.setTargetAtTime(clamp01(telemetry.thruster ?? 0) * 0.22, t, (telemetry.thruster ?? 0) > 0 ? 0.03 : 0.12);
 
     // 倒车蜂鸣：800Hz、250ms 开 / 250ms 关；离开倒车即重整。
     if (telemetry.reversing) {
@@ -263,9 +268,16 @@ export class DrivingSfx {
     rain.buffer = noise; rain.loop = true;
     const rainFilter = this.channel!.node(ctx.createBiquadFilter());
     rainFilter.type = "highpass"; rainFilter.frequency.value = 3800;
+    const thrusterSource = this.channel!.source(ctx.createBufferSource());
+    thrusterSource.buffer = noise; thrusterSource.loop = true;
+    const thrusterFilter = this.channel!.node(ctx.createBiquadFilter());
+    thrusterFilter.type = "highpass"; thrusterFilter.frequency.value = 2600; thrusterFilter.Q.value = 0.7;
+    const thrusterGain = this.channel!.node(ctx.createGain()); thrusterGain.gain.value = 0;
+    thrusterSource.connect(thrusterFilter).connect(thrusterGain).connect(master);
+    thrusterSource.start();
     const rainGain = this.channel!.node(ctx.createGain()); rainGain.gain.value = 0;
     rain.connect(rainFilter).connect(rainGain).connect(master); rain.start();
 
-    return { rainGain, master, engineOsc, engineFilter, subOsc, subGain, engineGain, lfo, lfoDepth, brakeGain, noise };
+    return { rainGain, thrusterGain, master, engineOsc, engineFilter, subOsc, subGain, engineGain, lfo, lfoDepth, brakeGain, noise };
   }
 }

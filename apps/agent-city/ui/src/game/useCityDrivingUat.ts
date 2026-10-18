@@ -46,9 +46,12 @@ export function useCityDrivingUat(engine: RefObject<CityEngine | null>, host: Re
         if (phaseRef.current === "running" && sfxEnabledRef.current) sfxRef.current?.collision();
       }
       blockedSeen.current = blocked;
+      // 推进器强度由上升速度驱动：喷焰/嘶声随推进长大、松开收缩（物理直觉，无输入回声字段）。
+      const vtolState = state as typeof state & Readonly<{ verticalSpeed?: number }>;
+      const thruster = Math.max(0, Math.min(1, (vtolState.verticalSpeed ?? 0) / 4));
       if (phaseRef.current === "running") sfxRef.current?.update({ speed: state.speed, maxSpeed: DRIVING_PARAMS.maxForward,
-        braking: state.braking, reversing: state.reversing, rainIntensity: current.environmentState?.rainIntensity ?? 0 });
-      visuals.current.update(state); return current.presentDrivingCamera(state, frameSeconds, cameraSweep, scene);
+        braking: state.braking, reversing: state.reversing, rainIntensity: current.environmentState?.rainIntensity ?? 0, thruster });
+      visuals.current.update({ ...state, thruster }); return current.presentDrivingCamera(state, frameSeconds, cameraSweep, scene);
     },
   });
   const phaseRef = useRef(car.hud.phase);

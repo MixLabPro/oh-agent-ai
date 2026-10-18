@@ -17,6 +17,8 @@ export type CarVisualState = {
   distance: number;
   braking: boolean; reversing: boolean;
   bodyPitch?: number; bodyRoll?: number;
+  /** VTOL 推进器强度 [0,1]（由上升速度驱动）：>0 时渲染底部冷气喷流。 */
+  thruster?: number;
 };
 
 const limit = (n: number, bound: number) => Math.max(-bound, Math.min(bound, Number.isFinite(n) ? n : 0));
@@ -201,6 +203,45 @@ export class CarVisuals {
     if (this.impactLight) {
       this.impactLight.intensity = Math.max(0, this.impactLight.intensity - 0.12);
     }
+    this.updateThruster(limit(state.thruster ?? 0, 1));
+  }
+
+  /** 底部冷气喷流：4 喷口锥焰 + 车底冷光。强度平滑跟随（点按不频闪），
+   *  焰长带每喷口相位差的高频颤动（纯表现层噪声，不参与任何模拟）。 */
+  private updateThruster(target: number): void {
+    const now = typeof performance !== "undefined" ? performance.now() / 1000 : 0;
+    this.thrusterLevel += (target - this.thrusterLevel) * 0.35;
+    const level = this.thrusterLevel;
+    if (level < 0.02) {
+      if (this.thrusterJets) this.thrusterJets.forEach((jet) => { jet.visible = false; });
+      if (this.thrusterLight) this.thrusterLight.intensity = 0;
+      return;
+    }
+    if (!this.thrusterJets) {
+      const jetMaterial = new THREE.MeshBasicMaterial({ color: "#d9f2ff", transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+      this.materials.add(jetMaterial);
+      this.thrusterJets = [[0.72, 0.34], [0.72, -0.34], [-0.72, 0.34], [-0.72, -0.34]].map(([x, z]) => {
+        // 默认锥顶朝 +Y；翻转后尖端向下，scale.y 控制焰长。
+        const jet = new THREE.Mesh(new THREE.ConeGeometry(0.09, 1, 10, 1, true).rotateX(Math.PI), jetMaterial);
+        jet.name = "thrusterJet";
+        jet.position.set(x, 0.3, z);
+        jet.visible = false;
+        this.root.add(jet);
+        return jet;
+      });
+      this.thrusterLight = new THREE.PointLight("#9fd8ff", 0, 6, 2);
+      this.thrusterLight.position.set(0, 0.15, 0);
+      this.root.add(this.thrusterLight);
+    }
+    this.thrusterJets.forEach((jet, index) => {
+      jet.visible = true;
+      const flicker = 0.85 + 0.3 * Math.sin(now * 47 + index * 2.1);
+      const length = (0.45 + level * 1.05) * flicker;
+      jet.scale.set(0.8 + level * 0.5, length, 0.8 + level * 0.5);
+      (jet.material as THREE.MeshBasicMaterial).opacity = 0.35 + level * 0.55;
+    });
+    this.thrusterLight!.intensity = level * 5;
   }
 
   /** Collision feedback: brief warm light pulse from the impact point. */
@@ -214,6 +255,9 @@ export class CarVisuals {
   }
 
   private impactLight: THREE.PointLight | null = null;
+  private thrusterJets: THREE.Mesh[] | null = null;
+  private thrusterLight: THREE.PointLight | null = null;
+  private thrusterLevel = 0;
 
   dispose(): void {
     if (this.disposed) return;
