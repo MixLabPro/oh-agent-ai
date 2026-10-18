@@ -119,16 +119,27 @@ export function stepVtolDriving(previous: VtolDrivingState, input: VtolInputStat
   };
   const moved = world.moveAir(previous, desired);
   const outSpeed = moved.blocked ? speed * (moved.speedFraction ?? 0) : speed;
+  // 接地语义按下沉速度分档（landingSinkMax 是真实执行的门槛，不是装饰）：
+  // · 软接地（|vs| ≤ 门槛）：正常落地回地面体制；
+  // · 重砸（|vs| > 门槛）：不接地——以 35% 撞击速度弹起（悬架压缩回弹的街机近似），
+  //   连续弹跳逐次衰减直到低于门槛才真正落地。
+  // 触物/悬停地板时负下沉速度钳 0：靠碰撞停在屋顶上时重力不得积累 −8 的
+  // 隐形下沉速度（否则从屋顶边缘飞出的瞬间暴坠）。
+  // 触物/悬停地板时负下沉速度钳 0：只认「法线朝上」的支撑性接触（屋顶/板顶从下方托住）。
+  // 侧向接触（贴墙下滑）不是支撑——重力照常生效，车沿墙面下滑；否则会把车粘在墙上。
+  const supporting = moved.contacts?.some((contact) => contact.normal.y > 0.5) === true;
+  const hardLanding = moved.landed && verticalSpeed < -p.landingSinkMax;
   let vertical = verticalSpeed;
-  if (moved.landed) vertical = 0;
-  else if (moved.floor || moved.blocked) vertical = Math.max(0, vertical);
+  if (moved.landed && !hardLanding) vertical = 0;
+  else if (hardLanding) vertical = -verticalSpeed * 0.35;
+  else if (moved.floor || moved.blocked || (moved.contact === true && supporting)) vertical = Math.max(0, vertical);
   return {
     ...previous, x: moved.x, z: moved.z, y: moved.y, heading: moved.heading,
     pitch: moved.pitch, roll: moved.roll, surfaceId: moved.surfaceId,
-    speed: moved.landed ? Math.max(0, outSpeed) : outSpeed, steering,
+    speed: moved.landed && !hardLanding ? Math.max(0, outSpeed) : outSpeed, steering,
     distance: previous.distance + (moved.travelledDistance ?? 0),
-    braking: moved.blocked || moved.contact === true || moved.landed,
+    braking: moved.blocked || moved.contact === true || (moved.landed && !hardLanding),
     reversing: !moved.blocked && outSpeed < 0,
-    verticalSpeed: vertical, boost, airborne: !moved.landed,
+    verticalSpeed: vertical, boost, airborne: !(moved.landed && !hardLanding),
   };
 }

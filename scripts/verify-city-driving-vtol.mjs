@@ -89,7 +89,8 @@ const boostAfterTakeoff = state.boost;
   }
   assert.ok(maxSpeed > k.VTOL_PARAMS.airMaxForward * 0.9, `air speed approaches cap (${maxSpeed.toFixed(2)})`);
   const sinkFrom = air.y;
-  for (let tick = 0; tick < 200; tick += 1) air = k.stepVtolDriving(air, { ...fwd, thruster: false }, env);
+  // 弹道过冲：捕获点可能仍在上升段——跑足时长（含重砸弹跳衰减与最终落地）再比较。
+  for (let tick = 0; tick < 600; tick += 1) air = k.stepVtolDriving(air, { ...fwd, thruster: false }, env);
   assert.ok(air.y < sinkFrom, `gravity sinks without thrust (${air.y.toFixed(2)} < ${sinkFrom.toFixed(2)})`);
 }
 
@@ -164,6 +165,32 @@ const boostAfterTakeoff = state.boost;
   // 车顶（y+centerHeight+halfHeight ≈ y+1.15）到板底 3：约 y≈1.8 处接触
   assert.ok(lifted.y < 1.95, `trimmed below the slab underside (y=${lifted.y.toFixed(2)})`);
   assert.ok(lifted.y > 1.0, `still lifts partway (y=${lifted.y.toFixed(2)})`);
+  // 屋顶悬停：靠碰撞停在板顶（3.5）时，重力不得积累隐形下沉速度——
+  // 从边缘飞出的瞬间不允许暴坠（物理审查 #1）。
+  let roof = { ...k.initialVtolState(0, 0, 0, regionId), y: 5, airborne: true, verticalSpeed: 0, boost: 1 };
+  for (let tick = 0; tick < 240; tick += 1) roof = k.stepVtolDriving(roof, idle, env);
+  assert.ok(roof.y > 3.4, `rests on the slab top via collision (y=${roof.y.toFixed(2)})`);
+  assert.ok(roof.verticalSpeed >= -0.01, `contact clamps sink accumulation (vs=${roof.verticalSpeed.toFixed(2)})`);
+  assert.equal(roof.airborne, true, "slab top is not landable (no support region)");
+}
+
+// ── 4b) 重砸着陆弹起：高于 landingSinkMax 的下沉不接地，按 35% 回弹并逐次衰减，
+//        最终低于门槛才真正落地（物理审查 #2）──
+{
+  let drop = { ...k.initialVtolState(-20, 0, 0, regionId), y: 7, airborne: true, verticalSpeed: 0, boost: 1 };
+  let bounces = 0;
+  let landedTick = -1;
+  let sawRebound = false;
+  for (let tick = 0; tick < 900; tick += 1) {
+    const before = drop.airborne;
+    drop = k.stepVtolDriving(drop, idle, env);
+    if (before && !drop.airborne) { landedTick = tick; break; }
+    if (drop.y < 0.5 && drop.verticalSpeed > 0.05 && tick > 30) { sawRebound = true; bounces += 1; }
+  }
+  assert.ok(sawRebound, "hard slam bounces (positive rebound observed)");
+  assert.ok(bounces >= 1, `bounce counted near ground (${bounces})`);
+  assert.ok(landedTick >= 0, `eventually settles onto the road (tick ${landedTick})`);
+  assert.ok(Number.isFinite(drop.y) && Math.abs(drop.y) < 0.05, `settled at support (y=${drop.y.toFixed(3)})`);
 }
 
 // ── 8) 审计不变式：stepDriving 忽略 thruster，默认路径逐位不变 ──
