@@ -10,7 +10,7 @@ import type { AuditReleaseDecision } from "./AuditReleasePolicy";
 import { CITY_SOLID_COMPILER_VERSION } from "../staticSolidContracts";
 
 export const RELEASED_DRIVING_GRAPH_VERSION = 2;
-export type ReleasedUnitStatus = "passed" | "blocked" | "pending" | "excluded";
+export type ReleasedUnitStatus = "passed" | "blocked" | "pending" | "excluded" | "closed";
 export type ReleasedUnitBoundaryEvidence = Readonly<{
   version: 1;
   unitId: string;
@@ -44,7 +44,7 @@ export type ReleasedUnitGeometry = Readonly<{
 }>;
 export type ReleasedDrivingGraph = Readonly<{
   graphVersion: number; key: AuditKey; releaseBoundaryHash: string;
-  units: readonly ReleasedDrivingUnit[]; counts: Readonly<Record<"passed" | "blocked" | "pending" | "excluded", number>>;
+  units: readonly ReleasedDrivingUnit[]; counts: Readonly<Record<"passed" | "blocked" | "pending" | "excluded" | "closed", number>>;
   /** Centerline geometry for passed units that have exactly one audited case. */
   geometry: readonly ReleasedUnitGeometry[];
 }>;
@@ -70,7 +70,7 @@ export function publishDrivingGraph(
   if (!decision.ready) return { ok: false, reason: decision.reasons[0] ?? "release-not-ready" };
   const units = decision.units.map<ReleasedDrivingUnit>((unit) =>
     ({ unitId: unit.unitId, kind: manifest.units.find((candidate) => candidate.id === unit.unitId)?.kind ?? "directed-edge", status: unit.status, reason: unit.reason }));
-  const counts = { passed: 0, blocked: 0, pending: 0, excluded: 0 } as Record<"passed" | "blocked" | "pending" | "excluded", number>;
+  const counts = { passed: 0, blocked: 0, pending: 0, excluded: 0, closed: 0 } as Record<"passed" | "blocked" | "pending" | "excluded" | "closed", number>;
   for (const unit of units) counts[unit.status] += 1;
   const evidenceByUnit = new Map<string, ReleasedUnitBoundaryEvidence>();
   for (const entry of boundaryEvidence) {
