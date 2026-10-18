@@ -22,6 +22,12 @@ const CEILING_MARGIN = 40;
 const CEILING_FALLBACK = 120;
 const WATER_LEVEL = 0.2;
 
+export type VtolEnvironmentOptions = Readonly<{
+  /** 无支撑落点（人行道/草地/装饰面）的悬停地板高度；缺省仅海平面。
+   *  由会话从全种类面片网格取高度传入——否则车会沉进比海面高的地形里。 */
+  floorAt?: (x: number, z: number) => number;
+}>;
+
 export class VtolDrivingEnvironment {
   private readonly inner: ContinuousDrivingEnvironment;
   private readonly regions: SurfaceRegionsBuild;
@@ -32,10 +38,11 @@ export class VtolDrivingEnvironment {
   private readonly gameplay: VtolEnvironmentPolicy;
   private readonly mountable: MountableQuery | null;
   private readonly ceiling: number;
+  private readonly floorAt: ((x: number, z: number) => number) | null;
 
   constructor(regions: SurfaceRegionsBuild, binding: ContinuousWorldBinding,
     footprint: VehicleFootprint = DRIVING_FOOTPRINT, params: FootprintParams = DEFAULT_FOOTPRINT_PARAMS,
-    motionParams: ContinuousMotionParams = {}, gameplay: VtolEnvironmentPolicy = {}) {
+    motionParams: ContinuousMotionParams = {}, gameplay: VtolEnvironmentPolicy = {}, options: VtolEnvironmentOptions = {}) {
     this.inner = new ContinuousDrivingEnvironment(regions, binding, footprint, params, motionParams,
       { boundarySlide: gameplay.boundarySlide ?? false, mountablePolicy: gameplay.mountablePolicy ?? "disabled" });
     this.regions = regions; this.binding = binding; this.footprint = footprint;
@@ -43,6 +50,11 @@ export class VtolDrivingEnvironment {
     this.mountable = (gameplay.mountablePolicy ?? "disabled") === "gameplay" ? mountableQueryOf(binding.solids) : null;
     const top = binding.solids.reduce((max, solid) => Math.max(max, solid.maxY), 0);
     this.ceiling = Math.max(CEILING_FALLBACK, top + CEILING_MARGIN);
+    this.floorAt = options.floorAt ?? null;
+  }
+  /** 无支撑落点的悬停地板：外部面片高度（若有）与海平面取高。 */
+  private floorLevel(x: number, z: number): number {
+    return this.floorAt ? Math.max(WATER_LEVEL, this.floorAt(x, z)) : WATER_LEVEL;
   }
 
   /** 地面水平段：与连续环境完全一致（含支撑/可越/边界滑动语义）。 */
@@ -90,9 +102,13 @@ export class VtolDrivingEnvironment {
         return this.airPoseResult(previous, { ...pose, y: support }, resolved, "landing-unsupported", false, true);
       }
     }
-    // 悬停地板：无支撑（水面/屋顶上方）且试图沉到海面以下 → 钳在海面。
+    // 悬停地板：无支撑（水面/无面片区域）且试图沉到表面以下 → 钳在局部表面高度
+    //（外部 floorAt 来自全种类面片网格——人行道/草地等非道路面；缺省海平面）。
     const floorSupport = this.supportHeight(pose.x, pose.z, previous.surfaceId);
-    if (floorSupport === null && pose.y < WATER_LEVEL) return this.airPoseResult(previous, { ...pose, y: WATER_LEVEL }, resolved, "hover-floor", false, true);
+    if (floorSupport === null && pose.y < this.floorLevel(pose.x, pose.z)) {
+      const clamped = this.floorLevel(pose.x, pose.z);
+      return this.airPoseResult(previous, { ...pose, y: clamped }, resolved, "hover-floor", false, true);
+    }
     if (ceilingHit) return this.airPoseResult(previous, pose, resolved, "ceiling", false, true);
     return this.airPoseResult(previous, pose, resolved, resolved.contacts.length ? "contact" : null, resolved.contacts.length > 0, false);
   }

@@ -133,13 +133,22 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
     });
     await preparationCheckpoint(signal, leaseCurrent);
     const vtol = request.vtol === true;
+    // 无支撑落点的悬停地板：全种类面片网格高度（人行道/岛缘/装饰面都算），
+    // 否则非道路地面比海面高时，下降的车会沉进地里（用户实测非道路降落问题）。
+    const ALL_SURFACE_KINDS = ["carriageway", "junction", "bridge-deck", "ramp", "expressway-deck", "sidewalk", "island", "decor"] as const;
+    const vtolFloorAt = (x: number, z: number): number => {
+      const query = surfaceIndex.query({ x, z, layerId: "ground", kinds: ALL_SURFACE_KINDS });
+      if (query.status === "hit") return query.hit.point.y;
+      if (query.status === "ambiguous") return Math.max(...query.candidates.map((candidate) => candidate.point.y));
+      return 0;
+    };
     // VTOL 与默认会话共用同一冻结世界事实与 gameplay 策略；VTOL 环境在地面段
     // 完全委托连续环境，仅追加垂直离地/空中移动两条查询。
     const environment = measured("collision-world", () => vtol ? new VtolDrivingEnvironment(regions, {
       surfaceRevision: capture.revision, worldRevision: capture.worldRevision, solidRevision: capture.worldRevision,
       solids: collisionIndex.solids(), dimensions: gameplayDimensions,
       centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent,
-    }, GAMEPLAY_DRIVING_FOOTPRINT, GAMEPLAY_FOOTPRINT_PARAMS, {}, { boundarySlide: true, mountablePolicy: "gameplay" })
+    }, GAMEPLAY_DRIVING_FOOTPRINT, GAMEPLAY_FOOTPRINT_PARAMS, {}, { boundarySlide: true, mountablePolicy: "gameplay" }, { floorAt: vtolFloorAt })
       : new ContinuousDrivingEnvironment(regions, {
       surfaceRevision: capture.revision, worldRevision: capture.worldRevision, solidRevision: capture.worldRevision,
       solids: collisionIndex.solids(), dimensions: gameplayDimensions,

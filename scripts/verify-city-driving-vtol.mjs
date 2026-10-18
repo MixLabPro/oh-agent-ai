@@ -31,7 +31,10 @@ const { grid, patch, regionsOf } = makeFixtures(k);
 // 路 [-30,30]×[-6,6]；x>30 无面片（水面语义）。高墙 x∈[24,25]（y 0..9，空中也挡）。
 // 低板 x∈[-6,6], z∈[-2,2], y∈[3,3.5]（模拟桥面板底面，压制垂直离地）。
 const road = patch("road", "carriageway", grid(-30, -6, 30, 6, 60, 12));
-const { regions } = regionsOf([road], undefined);
+// 人行道面片（0.4 高，x 35..45）：足迹不可落地（blocked），但面片网格有高度——
+// 悬停地板必须取面片高度，而不是海平面（否则车沉进地里）。
+const sidewalk = patch("sidewalk:1", "sidewalk", grid(35, -4, 45, 4, 20, 8, () => 0.4));
+const { regions } = regionsOf([road, sidewalk], undefined);
 assert.equal(regions.status, "ready");
 const regionId = regions.classify(-20, 0, "ground").regionId;
 
@@ -44,8 +47,15 @@ const d = k.CAR_DIMENSIONS;
 const dims = { halfLength: d.length / 2 - k.GAMEPLAY_COLLISION_INSET, halfWidth: d.width / 2 - k.GAMEPLAY_COLLISION_INSET, halfHeight: d.height / 2 };
 const binding = { surfaceRevision: regions.revision, worldRevision: "vtol-fixture", solidRevision: "vtol-fixture",
   solids: index.solids(), dimensions: dims, centerHeight: dims.halfHeight, isCurrent: () => true };
+const surfaceIndex = k.buildSurfaceIndex({ revision: regions.revision, patches: [road, sidewalk] });
+const floorAt = (x, z) => {
+  const q = surfaceIndex.query({ x, z, layerId: "ground", kinds: ["carriageway", "junction", "bridge-deck", "ramp", "expressway-deck", "sidewalk", "island", "decor"] });
+  if (q.status === "hit") return q.hit.point.y;
+  if (q.status === "ambiguous") return Math.max(...q.candidates.map((c) => c.point.y));
+  return 0;
+};
 const env = new k.VtolDrivingEnvironment(regions, binding, k.GAMEPLAY_DRIVING_FOOTPRINT, k.GAMEPLAY_FOOTPRINT_PARAMS, {},
-  { boundarySlide: true, mountablePolicy: "gameplay" });
+  { boundarySlide: true, mountablePolicy: "gameplay" }, { floorAt });
 
 const thrust = { forward: false, backward: false, left: false, right: false, thruster: true };
 const idle = { forward: false, backward: false, left: false, right: false };
@@ -124,13 +134,19 @@ const boostAfterTakeoff = state.boost;
   }
 }
 
-// ── 2) 悬停地板：无支撑（x>30）→ 钳在海面、保持空中 ──
+// ── 2) 悬停地板：无支撑区域不坠落 ──
 {
-  let air = { ...k.initialVtolState(40, 0, 0, regionId), y: 2, airborne: true, verticalSpeed: 0, boost: 1 };
+  // 面片网格之外（真水面语义，x=60 无任何面片）→ 钳在海面 0.2
+  let air = { ...k.initialVtolState(60, 0, 0, regionId), y: 2, airborne: true, verticalSpeed: 0, boost: 1 };
   for (let tick = 0; tick < 240; tick += 1) air = k.stepVtolDriving(air, idle, env);
   assert.ok(air.airborne, "no landing over water");
   assert.ok(Math.abs(air.y - 0.2) < 0.05, `hovers at water level (y=${air.y.toFixed(3)})`);
   assert.ok(air.verticalSpeed >= -1e-9, "hover floor stops the sink");
+  // 人行道（0.4 高，足迹不可落地）→ 悬停在其表面高度，不沉进地里
+  let over = { ...k.initialVtolState(40, 0, 0, regionId), y: 2, airborne: true, verticalSpeed: 0, boost: 1 };
+  for (let tick = 0; tick < 240; tick += 1) over = k.stepVtolDriving(over, idle, env);
+  assert.ok(over.airborne, "sidewalk is not landable");
+  assert.ok(Math.abs(over.y - 0.4) < 0.05, `hovers at sidewalk surface, not below ground (y=${over.y.toFixed(3)})`);
 }
 
 // ── 3) 天花板：爬升钳在 max(最高实体+40, 120) ──
