@@ -172,4 +172,17 @@ const boostAfterTakeoff = state.boost;
   assert.ok(true, "kernel steps never throw under VTOL states at full air speed");
 }
 
-console.log(`VTOL driving (physics v${k.VTOL_PHYSICS_VERSION}): takeoff boost-drain/liftoff, air wall stop (strict), road landing + boost regen, water hover floor, ceiling clamp, overhead-slab lift trim, kernel-guard-compatible air steps, and stepDriving thruster invariance passed.`);
+// ── 附加：诊断出生路径——出生状态不带 VTOL 字段（仅 DrivingState）也不得产生 NaN，
+//   且能正常起飞（用户实测「Boost NaN」回归锁）──
+{
+  const bare = k.initialDrivingState(-20, 0, 0, regionId);
+  assert.equal(bare.boost, undefined, "fixture precondition: bare spawn has no vtol fields");
+  let s = k.stepVtolDriving(bare, thrust, env);
+  assert.ok(Number.isFinite(s.boost) && s.boost >= 0.99, `bare-spawn boost heals to finite (${s.boost})`);
+  assert.ok(Number.isFinite(s.verticalSpeed) && Number.isFinite(s.y), "bare-spawn vertical fields finite");
+  let ticks = 0;
+  while (!s.airborne && ticks < 240) { s = k.stepVtolDriving(s, thrust, env); ticks += 1; }
+  assert.ok(s.airborne, `bare (diagnostic) spawn can take off (${ticks} ticks)`);
+}
+
+console.log(`VTOL driving (physics v${k.VTOL_PHYSICS_VERSION}): takeoff boost-drain/liftoff, air wall stop (strict), road landing + driving boost regen, water hover floor, ceiling clamp, overhead-slab lift trim, kernel-guard-compatible air steps, bare diagnostic spawn (no NaN), and stepDriving thruster invariance passed.`);

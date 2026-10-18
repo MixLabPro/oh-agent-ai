@@ -150,12 +150,15 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
       if (point.status !== "drivable") return unavailable(`spawn:${point.cause}`);
     }
     const spawnStarted = preparationNow();
-    const spawn = diagnostic ? await diagnosticSpawnAsync(snapshot.surface, regions, environment, signal, leaseCurrent) : (() => {
+    const rawSpawn = diagnostic ? await diagnosticSpawnAsync(snapshot.surface, regions, environment, signal, leaseCurrent) : (() => {
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return null;
       const support = environment.place(request.x, request.z, request.heading, point.regionId);
       return support ? { ...(vtol ? initialVtolState(request.x, request.z, request.heading, point.regionId) : initialDrivingState(request.x, request.z, request.heading, point.regionId)), ...support } : null;
     })();
+    // 诊断出生只构造 DrivingState：VTOL 会话在此补齐三字段（boost/airborne/verticalSpeed），
+    // 否则 undefined 进入物理算术变成 NaN（HUD「Boost NaN」）。
+    const spawn = vtol && rawSpawn ? { ...rawSpawn, airborne: false, verticalSpeed: 0, boost: 1 } : rawSpawn;
     try { request.onPreparationMetric?.({ stage: "diagnostic-spawn", durationMs: preparationNow() - spawnStarted }); } catch { /* local diagnostic */ }
     if (!spawn) return unavailable(diagnostic ? "no-safe-diagnostic-spawn" : "unsafe-car-spawn");
     // VTOL 步进注入：prev/input 的收窄转换只发生在这一个调用点（内核守卫对两种体制同界）。

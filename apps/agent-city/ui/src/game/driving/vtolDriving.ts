@@ -53,6 +53,14 @@ export function initialVtolState(x: number, z: number, heading: number, regionId
 
 export function stepVtolDriving(previous: VtolDrivingState, input: VtolInputState, world: VtolWorld): VtolDrivingState {
   const p = VTOL_PARAMS;
+  // 出生源可能不带 VTOL 字段（诊断出生只构造 DrivingState）：入口一次性治愈，
+  // undefined 参与算术会变成 NaN 并永久污染（用户实测 HUD「Boost NaN」的根因）。
+  previous = {
+    ...previous,
+    airborne: previous.airborne === true,
+    verticalSpeed: Number.isFinite(previous.verticalSpeed) ? previous.verticalSpeed : 0,
+    boost: Number.isFinite(previous.boost) ? previous.boost : 1,
+  };
   if (!previous.airborne) {
     // ── 地面段：水平完全复用现有物理；推进器只管垂直通道与助推剂 ──
     const grounded = stepDriving(previous, input, world);

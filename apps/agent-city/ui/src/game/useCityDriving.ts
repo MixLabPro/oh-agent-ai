@@ -107,7 +107,7 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     const request = { collider: CITY_CAR_COLLIDER, vtol: currentOptions.vtol === true, onPreparationMetric: runtime.recordPreparation.bind(runtime), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
       const s = frame.state;
       latest.current = { ...latest.current, speed: Math.abs(frame.state.speed), blocked: frame.blocked, reason: frame.reason,
-        altitude: typeof s.boost === "number" ? s.y : null, boost: typeof s.boost === "number" ? s.boost : null,
+        altitude: Number.isFinite(s.boost) ? s.y : null, boost: Number.isFinite(s.boost) ? s.boost : null,
         gear: s.airborne === true ? "FLY" : frame.state.reversing ? "R" : frame.state.braking ? "B" : frame.state.speed > 0 ? "D" : "N" };
       const cameraSafety = optionsRef.current.present(frame.state, frame.blocked, frame.reason, frame.frameSeconds, frame.cameraSweep, scene);
       if (cameraSafety) runtime.noteCameraSafety(cameraSafety);
