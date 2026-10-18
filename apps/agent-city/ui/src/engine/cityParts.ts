@@ -43,6 +43,7 @@ import { groundRoadTopAt } from "./surface/structureCompiler";
 import { buildInfrastructure, buildCulDeSacBulbs, buildJunctionIslands, buildChannelizedJunctions, buildDistrictExpressways, buildHighwayRamps, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
+import { clearCarStreetLamps, updateCarStreetLamps } from "./render/drivingStreetLights";
 import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
 
 export type CityStaticSceneSource = Readonly<{ layout: CityLayout; rendered: RenderedSolidSource; solids: readonly SolidInput[];
@@ -905,6 +906,17 @@ export class CityParts {
   private yachtIndices: number[] = [];
 
   setNightGlow(selfLit: number): void { setNightGlow(this as unknown as NightHost, selfLit); }
+
+  /** N5 开车模式解析街灯：由 CityEngine 的游戏相机帧驱动（presentDrivingCamera），
+   *  取相机最近 16 盏灯写共享 uniform；夜量随昼夜 tick 的 nightGlow 走。 */
+  updateDrivingStreetLamps(camX: number, camZ: number): void {
+    const plan = this.nightLights?.plan;
+    if (!plan) return;
+    updateCarStreetLamps(plan, camX, camZ, nightFactor(this.nightGlow));
+  }
+
+  /** 退出开车模式：解析灯清零、贴纸光斑恢复（非开车模式两处都回到从前面貌）。 */
+  clearDrivingStreetLamps(): void { clearCarStreetLamps(); }
 
   /** theme 基线 + 夜晚抬升的合成值（theme 切换后由昼夜 tick 重新应用）。 */
   applySelfLit(themeBase: number): void { applySelfLit(this as unknown as NightHost, themeBase); }

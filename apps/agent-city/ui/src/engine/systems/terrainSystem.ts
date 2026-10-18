@@ -10,6 +10,7 @@ import { MIAMI_COASTAL } from "../citySeaside";
 import { activeTheme, skyYawOf } from "../cityTheme";
 import { makeCityTexture } from "../cityTextures";
 import { LIGHT_BUDGET, useOfZone } from "../cityLightBudget";
+import { CAR_STREET_LIGHT_GLSL, carLampsAdd, carStreetLightUniforms } from "../render/drivingStreetLights";
 import { createRenderCanvas } from "../renderCanvas";
 
 /** terrainSystem 用到的 CityParts 成员（调用方以 `this as unknown as TerrainHost` 传入）。 */
@@ -119,13 +120,16 @@ export function installGroundDetail(host: TerrainHost, material: THREE.MeshLambe
   }
   host.terrainUniforms = uniforms;
   material.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
+    Object.assign(shader.uniforms, uniforms, carStreetLightUniforms());
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vCityWorld;")
-      .replace("#include <project_vertex>", "#include <project_vertex>\nvCityWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+      .replace("#include <common>", "#include <common>\nvarying vec3 vCityWorld;\nvarying vec3 vCityWNormal;")
+      .replace("#include <project_vertex>", "#include <project_vertex>\nvCityWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvCityWNormal = normalize(mat3(modelMatrix) * objectNormal);");
     const samplers = ["Asphalt", "Concrete", "Sand", "Mud", "Grass"].map((n) => `uniform sampler2D u${n}C; uniform sampler2D u${n}N; uniform vec3 u${n}Mean;`).join("\n");
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\nuniform float uNightDim;\nuniform sampler2D uSpill;\nuniform float uSpillGain;\nuniform float uExtent;\n${samplers}`)
+      .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nvarying vec3 vCityWNormal;\nuniform float uDetail;\nuniform float uNightDim;\nuniform sampler2D uSpill;\nuniform float uSpillGain;\nuniform float uExtent;\n${samplers}\n${CAR_STREET_LIGHT_GLSL}`)
+      // N5 开车模式解析街灯：光池按光度学分布在受光面上求值（几何法线——掠射角下扰动法线
+      // 会让 N·L 摆动数倍，光池变噪点场）。uCarLampCount = 0 时注入块早退，其他模式零行为。
+      .replace("#include <lights_fragment_end>", `#include <lights_fragment_end>\n${carLampsAdd("vCityWorld", "vCityWNormal")}`)
       // N1/N3：夜里地面主题色压暗；楼的窗光外溢（uSpill）只加在地面上，亮度随亮灯率。
       .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>\ndiffuseColor.rgb *= mix(1.0, ${LIGHT_BUDGET.ambient.groundDim.toFixed(2)}, uNightDim);\nif (uSpillGain > 0.001) { vec2 suv = vCityWorld.xz / uExtent + 0.5; totalEmissiveRadiance += texture2D(uSpill, suv).rgb * uSpillGain; }`)
       .replace("#include <map_fragment>", `#include <map_fragment>

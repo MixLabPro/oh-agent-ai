@@ -39,6 +39,7 @@ assert(!/uniforms\.uSelfLit\.value = themeBase;/.test(parts), "walls must dim at
 assert(!/setColorAt\(roofCount, new THREE\.Color\(palette\.accent\)\.multiplyScalar\(3\.2\)\)/.test(parts), "roof neon must be gated to tall/hotel via the budget");
 for (const magic of ["night * 3.2", "night * 0.9", "night * 2.4", "night * 2.6"]) assert(!parts.includes(magic), `hand-tuned lamp multiplier ${magic} bypasses LIGHT_BUDGET`);
 assert(parts.includes("LIGHT_BUDGET.street.head") && parts.includes("LIGHT_BUDGET.neon.bridge"), "night lights read the budget");
+assert(parts.includes("LIGHT_BUDGET.street.analyticCd"), "driving-mode analytic street lamps read the budget (N5)");
 assert(eng.includes("LIGHT_BUDGET.ambient.exposureCut"), "night exposure comes from the budget");
 assert(/setNightHour\(hour\)/.test(eng), "engine feeds the local hour to the window-rate curve");
 assert(/"#38e8ff"[\s\S]{0,200}bridgeSaturation/.test(parts), "bridge neon is desaturated through the budget");

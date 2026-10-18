@@ -20,6 +20,7 @@
 import * as THREE from "three";
 import type { CityLayout } from "../cityLayout";
 import { LIGHT_BUDGET } from "../cityLightBudget";
+import { CAR_STREET_LIGHT_GLSL, carLampsAdd, carStreetLightUniforms } from "../render/drivingStreetLights";
 import { compileGroundRoadSurface, assertGroundRoadSurfaceMatches, ZEBRA_HALF, type CompiledGroundRoadSurface } from "../surface/groundRoadCompiler";
 export { roadSurfaceGeometry, runEndMarkings, roadLayerOf, roadMarkingKindOf, ROAD_SURFACE_LIFT, ZEBRA_HALF } from "../surface/groundRoadCompiler";
 
@@ -46,28 +47,30 @@ function installRoadShader(host: RoadSurfaceHost, material: THREE.MeshLambertMat
     for (const name of ["uDetail", "uNightDim", "uSpill", "uSpillGain", "uExtent", "uAsphaltC", "uAsphaltN", "uAsphaltMean", "uConcreteC", "uConcreteN", "uConcreteMean"]) {
       shader.uniforms[name] = shared[name] ?? { value: name === "uDetail" || name === "uNightDim" || name === "uSpillGain" ? 0 : name === "uExtent" ? 1 : name.endsWith("Mean") ? new THREE.Vector3(0.5, 0.5, 0.5) : null };
     }
-    Object.assign(shader.uniforms, own);
+    Object.assign(shader.uniforms, own, carStreetLightUniforms());
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", `#include <common>
-attribute vec4 aRoadRun; varying vec4 vRoadRun; varying vec3 vRoadWorld;
+attribute vec4 aRoadRun; varying vec4 vRoadRun; varying vec3 vRoadWorld; varying vec3 vRoadWNormal;
 #ifndef ROAD_BASE
 attribute vec2 aRoadUV; attribute vec4 aRoadEnds; attribute vec4 aRoadEdges; attribute vec2 aRoadZebra;
 varying vec2 vRoadUV; varying vec4 vRoadEnds; varying vec4 vRoadEdges; varying vec2 vRoadZebra;
 #endif`)
       .replace("#include <project_vertex>", `#include <project_vertex>
 vRoadRun = aRoadRun; vRoadWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
+vRoadWNormal = normalize(mat3(modelMatrix) * objectNormal);
 #ifndef ROAD_BASE
 vRoadUV = aRoadUV; vRoadEnds = aRoadEnds; vRoadEdges = aRoadEdges; vRoadZebra = aRoadZebra;
 #endif`);
     shader.fragmentShader = shader.fragmentShader
       .replace("#include <common>", `#include <common>
-varying vec4 vRoadRun; varying vec3 vRoadWorld;
+varying vec4 vRoadRun; varying vec3 vRoadWorld; varying vec3 vRoadWNormal;
 #ifndef ROAD_BASE
 varying vec2 vRoadUV; varying vec4 vRoadEnds; varying vec4 vRoadEdges; varying vec2 vRoadZebra;
 #endif
 uniform float uDetail; uniform float uNightDim; uniform sampler2D uSpill; uniform float uSpillGain; uniform float uExtent;
 uniform sampler2D uAsphaltC; uniform sampler2D uAsphaltN; uniform vec3 uAsphaltMean; uniform vec3 uMarkWhite; uniform vec3 uMarkYellow;
 uniform sampler2D uConcreteC; uniform sampler2D uConcreteN; uniform vec3 uConcreteMean;
+${CAR_STREET_LIGHT_GLSL}
 // 抗锯齿基元：全部用 fwidth 做一个像素宽的过渡，任何缩放下线宽都是真实世界宽度。
 float roadLine(float d, float hw) { float fw = max(fwidth(d), 1e-4); return 1.0 - smoothstep(hw - fw, hw + fw, abs(d)); }
 float roadRange(float x, float a, float b) { float fw = max(fwidth(x), 1e-4); return smoothstep(a - fw, a + fw, x) * (1.0 - smoothstep(b - fw, b + fw, x)); }
@@ -118,7 +121,10 @@ float roadDash(float u, float period, float duty) { float x = u / period; float 
       // 夜间与地面同口径：主题色压暗 + 楼窗光外溢（与 terrainSystem 同一组 uniform）。
       .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>
 diffuseColor.rgb *= mix(1.0, ${LIGHT_BUDGET.ambient.groundDim.toFixed(2)}, uNightDim);
-if (uSpillGain > 0.001) { vec2 suv = vRoadWorld.xz / uExtent + 0.5; totalEmissiveRadiance += texture2D(uSpill, suv).rgb * uSpillGain; }`);
+if (uSpillGain > 0.001) { vec2 suv = vRoadWorld.xz / uExtent + 0.5; totalEmissiveRadiance += texture2D(uSpill, suv).rgb * uSpillGain; }`)
+      // N5 开车模式解析街灯：路面是光池的主要受光面，与地形共用同一组 uniform 对象。
+      .replace("#include <lights_fragment_end>", `#include <lights_fragment_end>
+${carLampsAdd("vRoadWorld", "vRoadWNormal")}`);
   };
   material.customProgramCacheKey = () => cacheKey;
 }

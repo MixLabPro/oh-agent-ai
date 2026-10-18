@@ -292,6 +292,8 @@ export class CityEngine {
     setAmbientCarsVisible: (token, visible) => { if (this.gameSceneToken !== token) throw new Error("stale-game-scene"); this.writeAmbientCarsVisible(visible); },
     onReleased: (token) => {
       if (this.gameSceneToken !== token) return;
+      // Restore decal pools when leaving driving mode; no analytic lights leak into flight/orbit.
+      this.parts?.clearDrivingStreetLamps();
       this.drivingControls?.detach(); this.drivingControls = null;
       this.drivingCamera?.dispose(); this.drivingCamera = null;
       this.drivingCameraScratch = null; this.drivingCameraInitialized = false; this.drivingShakeUntil = 0;
@@ -1285,6 +1287,8 @@ export class CityEngine {
     const targetPoint = camera.position.clone().addScaledVector(direction, 10);
     sceneLease.setCamera({ position: camera.position.toArray() as [number, number, number],
       target: targetPoint.toArray() as [number, number, number], up: camera.up.toArray() as [number, number, number], fov: camera.fov });
+    // N5: update the nearest analytic street lamps from the final leased camera pose.
+    this.parts?.updateDrivingStreetLamps(camera.position.x, camera.position.z);
     return safety;
   }
 

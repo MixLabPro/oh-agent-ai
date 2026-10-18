@@ -4,6 +4,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
+import { CAR_STREET_LIGHT_GLSL, carLampsAdd, carStreetLightUniforms } from "../engine/render/drivingStreetLights";
 import { CAR_DIMENSIONS } from "./carDimensions";
 export { CAR_DIMENSIONS } from "./carDimensions";
 
@@ -87,6 +88,17 @@ export class CarVisuals {
     this.root.add(this.bodyPivot);
     const material = (options: THREE.MeshStandardMaterialParameters) => {
       const result = new THREE.MeshStandardMaterial(options);
+      // N5 开车模式解析街灯：车身也受路灯照（车顶/引擎盖接住头顶的暖光，低角度相机下
+      // 可信度增益最大）。uCarLampCount = 0（非开车模式 / 白天）时注入块早退，零行为。
+      result.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, carStreetLightUniforms());
+        shader.vertexShader = shader.vertexShader
+          .replace("#include <common>", "#include <common>\nvarying vec3 vCarWPos;\nvarying vec3 vCarWNormal;")
+          .replace("#include <project_vertex>", "#include <project_vertex>\nvCarWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvCarWNormal = normalize(mat3(modelMatrix) * objectNormal);");
+        shader.fragmentShader = shader.fragmentShader
+          .replace("#include <common>", `#include <common>\nvarying vec3 vCarWPos;\nvarying vec3 vCarWNormal;\n${CAR_STREET_LIGHT_GLSL}`)
+          .replace("#include <lights_fragment_end>", `#include <lights_fragment_end>\n${carLampsAdd("vCarWPos", "vCarWNormal")}`);
+      };
       this.materials.add(result); return result;
     };
     const paint = material({ color, roughness: 0.38, metalness: 0.22, flatShading: true });
