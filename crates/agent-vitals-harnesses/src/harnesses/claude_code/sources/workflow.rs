@@ -403,7 +403,7 @@ pub fn claude_file_to_workflow_events(
                 .or_else(|| r.value.get("title").and_then(Value::as_str))
         });
     let session_titles = raw_title
-        .and_then(agent_vitals_domain::contracts::workflow::bound_session_title)
+        .and_then(agent_vitals_domain::enrichment::bound_session_title)
         .map(|title| vec![SessionTitle {
             native_session_id: native_session_id.to_string(),
             title,

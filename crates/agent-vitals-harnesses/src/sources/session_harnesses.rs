@@ -136,7 +136,8 @@ fn workbuddy_session_sources(roots: &HarnessRoots<'_>, _native_id: &str) -> Vec<
 /// `payload.session_id`（与 facts 的 native_session_id 同源，见
 /// `codex/sources/mod.rs::parse_session_index` 的实测注释）。
 fn codex_title_index(roots: &HarnessRoots<'_>) -> Vec<agent_vitals_domain::contracts::workflow::SessionTitle> {
-    use agent_vitals_domain::contracts::workflow::{SessionTitle, bound_session_title};
+    use agent_vitals_domain::contracts::workflow::SessionTitle;
+    use agent_vitals_domain::enrichment::bound_session_title;
     crate::codex_session::read_session_index(roots.user_home)
         .into_iter()
         .filter_map(|(sid, raw)| {
@@ -154,7 +155,8 @@ fn codex_title_index(roots: &HarnessRoots<'_>) -> Vec<agent_vitals_domain::contr
 /// [`SessionTitle`]（值取 title；path 不是标题）。根未知（DSH_HOME 与 HOME
 /// 都没有）→ 空集，不报错。
 fn dsh_title_index(roots: &HarnessRoots<'_>) -> Vec<agent_vitals_domain::contracts::workflow::SessionTitle> {
-    use agent_vitals_domain::contracts::workflow::{SessionTitle, bound_session_title};
+    use agent_vitals_domain::contracts::workflow::SessionTitle;
+    use agent_vitals_domain::enrichment::bound_session_title;
     let Some(dsh_home) = roots.dsh_home else { return Vec::new() };
     crate::dsh_sources::discovery::read_workspace_index(dsh_home)
         .by_session

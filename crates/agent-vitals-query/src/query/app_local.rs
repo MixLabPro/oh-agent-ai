@@ -78,7 +78,7 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
         let public_harness = if identities.contains_key(&harness) { harness.as_str() } else { "unknown" };
         // 标题出库再按契约上限截一次（纵深防御：库里可能有 v32 之前的旁路写入）。
         // title 在而 title_source 缺 → 仍输出 title、source 记 null（不编造来源）。
-        let bounded_title = title.as_deref().and_then(agent_vitals_domain::contracts::workflow::bound_session_title);
+        let bounded_title = title.as_deref().and_then(agent_vitals_domain::enrichment::bound_session_title);
         sessions.push(json!({"id": session_ref(&salt, &format!("app:city:{key}")), "harness": public_harness,
             "title": bounded_title,
             "title_source": if bounded_title.is_some() { Value::String(title_source.unwrap_or_default()) } else { Value::Null },

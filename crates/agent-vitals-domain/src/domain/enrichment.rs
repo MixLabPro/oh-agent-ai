@@ -227,6 +227,33 @@ pub fn scrub_text(text: &str) -> ScrubOutcome {
     ScrubOutcome { text: current, scrubbed }
 }
 
+/// Session display titles use the same scrub-before-truncate rule as excerpts.
+/// Kept in the enrichment layer so the contracts vocabulary module stays dependency-free.
+pub fn bound_session_title(raw: &str) -> Option<String> {
+    let text = scrub_text(raw).text;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(256).collect())
+}
+
+#[cfg(test)]
+mod session_title_tests {
+    use super::bound_session_title;
+
+    #[test]
+    fn session_title_is_scrubbed_trimmed_and_bounded_by_unicode_chars() {
+        assert_eq!(bound_session_title("  会话标题  ").as_deref(), Some("会话标题"));
+        assert_eq!(bound_session_title("   "), None);
+        let long = bound_session_title(&"长".repeat(300)).unwrap();
+        assert_eq!(long.chars().count(), 256);
+        let scrubbed = bound_session_title("部署用了 sk-abcdefghij0123456789 别外传").unwrap();
+        assert_ne!(scrubbed, "部署用了 sk-abcdefghij0123456789 别外传");
+        assert!(scrubbed.contains("部署用了"));
+    }
+}
+
 // ────────────────────────── 错误码分类 ──────────────────────────
 
 /// `error_code` 语法 `家族:细节`（家族 ∈ http/jsonrpc/tool/harness）→ 闭集分类。

@@ -247,25 +247,9 @@ impl SessionTitle {
     }
 }
 
-/// 标题取材的公共整形：`scrub_text` 脱敏（标题可能含路径/密钥形状的串——
-/// codex thread_name 是用户手输的）再按 [`SESSION_TITLE_MAX_CHARS`] 字符
-/// 截断（与 `make_excerpt` 的 scrub 先于截断同序）。整形后为空 → None
-/// （不产行，同摘录纪律）。
-pub fn bound_session_title(raw: &str) -> Option<String> {
-    let scrubbed = crate::domain::enrichment::scrub_text(raw);
-    let text = scrubbed.text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    if text.chars().count() <= SESSION_TITLE_MAX_CHARS {
-        return Some(text.to_string());
-    }
-    Some(text.chars().take(SESSION_TITLE_MAX_CHARS).collect())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{SessionExcerpt, SessionTitle, WorkflowEvent, bound_session_title};
+    use super::{SessionExcerpt, SessionTitle, WorkflowEvent};
 
     fn base_event() -> WorkflowEvent {
         WorkflowEvent {
@@ -417,18 +401,4 @@ mod tests {
         assert!(bad_source.validate().is_err());
     }
 
-    #[test]
-    fn bound_session_title_scrubs_then_truncates() {
-        assert_eq!(bound_session_title("  会话标题  ").as_deref(), Some("会话标题"));
-        // 空白整形后为空 → 不产行
-        assert_eq!(bound_session_title("   "), None);
-        // 超长按字符截断到上限
-        let long = bound_session_title(&"长".repeat(300)).unwrap();
-        assert_eq!(long.chars().count(), 256);
-        // scrub 命中：凭据形状被替换后仍然有值（不因脱敏丢标题）——路径形状
-        // 不在 scrub 集（摘录同款边界：有界 + 凭据脱敏，不扩到路径）。
-        let scrubbed = bound_session_title("部署用了 sk-abcdefghij0123456789 别外传").unwrap();
-        assert_ne!(scrubbed, "部署用了 sk-abcdefghij0123456789 别外传");
-        assert!(scrubbed.contains("部署用了"), "非敏感前后文保留");
-    }
 }
