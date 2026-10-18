@@ -123,7 +123,17 @@ function canonical(layout: CityLayout, obstacles: readonly StructureObstacle[], 
   }
   if (pointCount > 250_000) throw new Error("static-geometry-point-budget");
   if (identityChars > 2 * 1024 * 1024) throw new Error("static-identity-budget");
-  const layoutFacts = stableLayoutValue(layout);
+  // Static collision geometry is encoded separately below. Planner diagnostics,
+  // road render buffers and placement ledgers are neither flight capabilities nor
+  // static facts: hashing the full layout duplicates transient data and can push
+  // valid rendered cities over the fixed metadata budget.
+  const layoutFacts = stableLayoutValue({
+    seed: layout.seed, scaleTier: layout.scaleTier, biome: layout.biome,
+    extent: layout.extent, islandRadius: layout.islandRadius,
+    boundsRadius: layout.boundsRadius, urbanBounds: layout.urbanBounds,
+    coastalConfig: layout.coastalConfig, terrain: layout.terrain,
+    seaMountains: layout.seaMountains, decorMountains: layout.decorMountains,
+  });
   const extent = layout.extent;
   if (!Number.isFinite(extent) || extent <= 0) throw new Error("invalid-static-terrain-extent");
   const terrainSamples: number[] = [];
@@ -140,7 +150,7 @@ function canonical(layout: CityLayout, obstacles: readonly StructureObstacle[], 
   }
   const mountableFacts = [...obstacles.map((obstacle) => [obstacle.id, obstacle.mountableHeight ?? null] as const),
     ...scene.map((solid) => [solid.id, solid.mountableHeight ?? null] as const)].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  const layoutHeader = new TextEncoder().encode(JSON.stringify(["city-static-v2", CITY_SOLID_COMPILER_VERSION, layoutFacts, terrainSamples, mountableFacts]));
+  const layoutHeader = new TextEncoder().encode(JSON.stringify(["city-static-v3", CITY_SOLID_COMPILER_VERSION, layoutFacts, terrainSamples, mountableFacts]));
   if (layoutHeader.length > STATIC_LAYOUT_MAX_BYTES) throw new Error("static-layout-byte-budget");
   const structure = canonicalCityWorldBytes("road-neutral-static", { obstacles, landings: [], counts: { bridges: 0,
     expresswaySegments: 0, flares: 0, islands: 0, culDeSacs: 0 } }, rendered, scene);
@@ -171,7 +181,7 @@ export class CityStaticWorldPort {
       if (signal?.aborted) { release(); return Object.freeze({ status: "cancelled" }); }
       if (!active || !source.isCurrent() || !source.verifyCurrent()) { release(); return Object.freeze({ status: "stale" }); }
       if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("invalid-static-world-digest");
-      const worldRevision = `city-static-v2:sha256:${digest}`;
+      const worldRevision = `city-static-v3:sha256:${digest}`;
       const isLeaseCurrent = () => active && source.isCurrent();
       const verifyCurrent = () => active && source.isCurrent() && source.verifyCurrent();
       const coverage = obstacles.length > 0

@@ -45,6 +45,14 @@ const source = (cityLayout, solids = []) => ({ layout: cityLayout,
   assert.equal(stable.status, "ready");
   assert.equal(stable.worldRevision, initialRevision, "map insertion order has stable canonical identity");
   stable.release();
+
+  const diagnosticHeavy = layout();
+  diagnosticHeavy.plannerDiagnostics = { probes: "x".repeat(8 * 1024 * 1024) };
+  const withoutTransientDiagnostics = await port.capture(source(diagnosticHeavy), () => {});
+  assert.equal(withoutTransientDiagnostics.status, "ready", "transient planner diagnostics do not consume the static metadata budget");
+  assert.equal(withoutTransientDiagnostics.worldRevision, initialRevision, "non-static planner diagnostics do not change the world revision");
+  assert.match(withoutTransientDiagnostics.worldRevision, /^city-static-v3:/, "the narrowed canonical contract gets a new revision version");
+  withoutTransientDiagnostics.release();
 }
 
 // A delayed digest cancellation releases the one shared source freeze and cannot publish late.
