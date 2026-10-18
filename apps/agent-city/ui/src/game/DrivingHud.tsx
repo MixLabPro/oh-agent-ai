@@ -29,7 +29,7 @@ export type DrivingHudActions = Readonly<{
 const DRIVING_CONTROLS: readonly GameControlRow[] = [
   { keys: "W / ↑", description: "加速" }, { keys: "S / ↓", description: "刹车；停车后倒车" },
   { keys: "A / D / ← / →", description: "左右转向" }, { keys: "Esc", description: "暂停 / 继续" },
-  { keys: "Space", description: "（飞行车模式）长按喷升起空 · 助推耗尽或松开下坠" },
+  { keys: "Space", description: "（飞行车模式）长按喷升起空 · 松开下坠；助推耗尽后落地行驶即回充" },
   { keys: "拖动 / 滚轮", description: "环绕汽车 / 拉近拉远（双击复位）" },
 ];
 

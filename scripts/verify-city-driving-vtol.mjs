@@ -111,6 +111,17 @@ const boostAfterTakeoff = state.boost;
   for (let tick = 0; tick < 120; tick += 1) air = k.stepVtolDriving(air, idle, env);
   assert.ok(air.boost > boost0, "boost regenerates when grounded and slow");
   assert.equal(air.airborne, false);
+  // 行驶中也回充（四成速率）——助推耗尽后开车跑一段必须能再飞（用户实测反馈）
+  {
+    let drive = { ...air, boost: 0 };
+    for (let tick = 0; tick < 240; tick += 1) drive = k.stepVtolDriving(drive, fwd, env);
+    assert.ok(Math.abs(drive.speed) > k.VTOL_PARAMS.boostRegenMaxSpeed, `test drives above regen-speed threshold (${drive.speed.toFixed(1)})`);
+    assert.ok(drive.boost > k.VTOL_PARAMS.minBoostToLift, `driving regenerates boost past lift threshold (${drive.boost.toFixed(3)})`);
+    // 助推过阈值后按 Space 必须能再起升
+    let ticks = 0;
+    while (!drive.airborne && ticks < 240) { drive = k.stepVtolDriving(drive, thrust, env); ticks += 1; }
+    assert.ok(drive.airborne, `can take off again after driving regen (${ticks} ticks)`);
+  }
 }
 
 // ── 2) 悬停地板：无支撑（x>30）→ 钳在海面、保持空中 ──

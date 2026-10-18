@@ -57,7 +57,10 @@ export function stepVtolDriving(previous: VtolDrivingState, input: VtolInputStat
     // ── 地面段：水平完全复用现有物理；推进器只管垂直通道与助推剂 ──
     const grounded = stepDriving(previous, input, world);
     let boost = previous.boost;
-    if (Math.abs(grounded.speed) < p.boostRegenMaxSpeed) boost = Math.min(1, boost + (p.boostRegen * DRIVING_DT) / p.boostCapacity);
+    // 助推接地即回充：低速全速回、行驶中四成回。冷气瓶由车轮发电补气——
+    // 「必须停稳才能再飞」只添困惑不添玩法（2026-10-18 用户实测 Space 失效反馈）。
+    const regenRate = Math.abs(grounded.speed) < p.boostRegenMaxSpeed ? p.boostRegen : p.boostRegen * 0.4;
+    boost = Math.min(1, boost + (regenRate * DRIVING_DT) / p.boostCapacity);
     const thrusting = input.thruster === true && boost > p.minBoostToLift;
     let verticalSpeed = previous.verticalSpeed;
     if (thrusting) {
