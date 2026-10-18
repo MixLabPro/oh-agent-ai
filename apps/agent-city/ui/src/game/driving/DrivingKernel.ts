@@ -11,9 +11,13 @@ export type KernelIdentity = Readonly<{
   baseSnapshotHash: string; vehicleConfigHash: string; kernelBuildId: string;
   physicsVersion: number; collisionVersion: number; queryVersion: number;
 }>;
+/** 可注入的步进函数（默认 stepDriving）。VTOL 会话注入 stepVtolDriving：地面段
+ * 行为与默认完全一致（含下方 thruster 透传被 stepDriving 忽略的不变式）。 */
+export type KernelStepFn = (previous: DrivingState, input: DrivingInputState, world: DrivingEnvironment) => DrivingState;
+
 export class DrivingKernel {
   readonly identity: KernelIdentity;
-  constructor(private readonly world: DrivingEnvironment, identity: KernelIdentity) {
+  constructor(private readonly world: DrivingEnvironment, identity: KernelIdentity, private readonly stepFn: KernelStepFn = stepDriving) {
     this.identity = Object.freeze({ ...identity });
   }
   step(previous: Readonly<DrivingState>, input: Readonly<DrivingInputState>): KernelStep {
@@ -22,10 +26,12 @@ export class DrivingKernel {
     let details: Pick<DrivingMoveResult,"trajectory"|"contacts"|"contact"|"queryStatus"> = {};
     // Pass copies to the existing mutable adapter contract. Neither a pilot nor
     // an environment may mutate a live state held by the runner/runtime.
-    const state = stepDriving({ ...previous }, {
+    const state = this.stepFn({ ...previous } as DrivingState, {
       forward: input.forward === true, backward: input.backward === true,
       left: input.left === true, right: input.right === true,
-    }, { move: (before, desired) => {
+      // VTOL 推进器位透传：默认物理（stepDriving）只读四个布尔位，多余字段被忽略（有不变式断言）。
+      ...( "thruster" in input ? { thruster: (input as Readonly<{ thruster?: boolean }>).thruster === true } : {}),
+    } as DrivingInputState, { move: (before, desired) => {
       const result = this.world.move({ ...before }, { ...desired });
       details={};
       if(result.trajectory&&result.trajectory.length>2048)throw new Error("motion-trajectory-budget");

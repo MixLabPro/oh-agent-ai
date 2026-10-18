@@ -19,10 +19,12 @@ export const CITY_CAR_COLLIDER: Readonly<{ dimensions: CollisionDimensions; cent
 export type DrivingHudSnapshot = Readonly<{
   phase: "idle" | "preparing" | "paused" | "running" | "error";
   reason: string | null; speed: number; blocked: boolean; coverage: string | null;
-  /** 档位（演练场同口径）：R 倒车 / B 制动 / D 前进 / N 静止。 */
-  gear: "D" | "R" | "B" | "N";
+  /** 档位（演练场同口径）：R 倒车 / B 制动 / D 前进 / N 静止；FLY 为 VTOL 空中体制。 */
+  gear: "D" | "R" | "B" | "N" | "FLY";
+  /** VTOL 会话：高度（=state.y）与助推余量 [0,1]；默认会话为 null。 */
+  altitude: number | null; boost: number | null;
 }>;
-const IDLE_HUD: DrivingHudSnapshot = Object.freeze({ phase: "idle", reason: null, speed: 0, blocked: false, coverage: null, gear: "N" });
+const IDLE_HUD: DrivingHudSnapshot = Object.freeze({ phase: "idle", reason: null, speed: 0, blocked: false, coverage: null, gear: "N", altitude: null, boost: null });
 export type DrivingPresentation = (state: Readonly<DrivingState>, blocked: boolean, reason: string | null, frameSeconds: number,
   cameraSweep: CameraClearanceQuery, scene: CityCarSceneCapability) => ChaseCameraSafety | void;
 
@@ -34,6 +36,8 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
   spawnBinding?: SpawnConfirmationBinding | null;
   /** Diagnostic-only callers opt out so UAT never creates confirmation state. */
   confirmationEnabled?: boolean;
+  /** VTOL 推进器会话（Space 喷升；仅游玩，审计/正式校验路径不变）。 */
+  vtol?: boolean;
   cinemaActive: () => boolean; gameActive: () => boolean; busy: () => boolean;
 }>) {
   const [hud, setHud] = useState<DrivingHudSnapshot>(IDLE_HUD);
@@ -41,7 +45,7 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
   const runtimeRef = useRef<GameRuntime<DrivingInputState> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const preparing = useRef(false);
-  const latest = useRef({ speed: 0, blocked: false, reason: null as string | null, coverage: null as string | null, gear: "N" as DrivingHudSnapshot["gear"] });
+  const latest = useRef({ speed: 0, blocked: false, reason: null as string | null, coverage: null as string | null, gear: "N" as DrivingHudSnapshot["gear"], altitude: null as number | null, boost: null as number | null });
   const optionsRef = useRef(options); optionsRef.current = options;
   const confirmationRef = useRef<SpawnConfirmationStore | null>(null);
   if (!confirmationRef.current) confirmationRef.current = new SpawnConfirmationStore();
@@ -98,11 +102,13 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     const abort = new AbortController(); abortRef.current = abort;
     const runtime = new GameRuntime<DrivingInputState>({ dt: DRIVING_DT, emptyInput: () => ({ ...EMPTY_DRIVING_INPUT }) }); runtimeRef.current = runtime;
     preparing.current = true;
-    latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N" };
+    latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N", altitude: null, boost: null };
     setEntryError(null); setHud({ ...IDLE_HUD, phase: "preparing" });
-    const request = { collider: CITY_CAR_COLLIDER, onPreparationMetric: runtime.recordPreparation.bind(runtime), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
+    const request = { collider: CITY_CAR_COLLIDER, vtol: currentOptions.vtol === true, onPreparationMetric: runtime.recordPreparation.bind(runtime), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
+      const s = frame.state;
       latest.current = { ...latest.current, speed: Math.abs(frame.state.speed), blocked: frame.blocked, reason: frame.reason,
-        gear: frame.state.reversing ? "R" : frame.state.braking ? "B" : frame.state.speed > 0 ? "D" : "N" };
+        altitude: typeof s.boost === "number" ? s.y : null, boost: typeof s.boost === "number" ? s.boost : null,
+        gear: s.airborne === true ? "FLY" : frame.state.reversing ? "R" : frame.state.braking ? "B" : frame.state.speed > 0 ? "D" : "N" };
       const cameraSafety = optionsRef.current.present(frame.state, frame.blocked, frame.reason, frame.frameSeconds, frame.cameraSweep, scene);
       if (cameraSafety) runtime.noteCameraSafety(cameraSafety);
       if (cameraSafety === "unresolved") runtime.pause("camera-safety");
@@ -130,7 +136,7 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     abortRef.current?.abort(); abortRef.current = null;
     preparing.current = false;
     runtimeRef.current?.dispose(); runtimeRef.current = null;
-    latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N" }; publish();
+    latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N", altitude: null, boost: null }; publish();
   }, [publish]);
   const pause = useCallback((reason = "user-paused") => { runtimeRef.current?.pause(reason); publish(); }, [publish]);
   const resume = useCallback(() => { runtimeRef.current?.resume(); publish(); }, [publish]);

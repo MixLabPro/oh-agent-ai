@@ -17,7 +17,8 @@ export type DrivingHudModel = Readonly<{
   hud: Readonly<{
     phase: "idle" | "preparing" | "paused" | "running" | "error";
     reason: string | null; speed: number; blocked: boolean; coverage: string | null;
-    gear: "D" | "R" | "B" | "N";
+    gear: "D" | "R" | "B" | "N" | "FLY";
+    altitude: number | null; boost: number | null;
   }>;
   diagnostics: RuntimeDiagnosticSnapshot | null;
 }>;
@@ -27,7 +28,8 @@ export type DrivingHudActions = Readonly<{
 
 const DRIVING_CONTROLS: readonly GameControlRow[] = [
   { keys: "W / ↑", description: "加速" }, { keys: "S / ↓", description: "刹车；停车后倒车" },
-  { keys: "A / D / ← / →", description: "左右转向" }, { keys: "Esc / Space", description: "暂停 / 继续" },
+  { keys: "A / D / ← / →", description: "左右转向" }, { keys: "Esc", description: "暂停 / 继续" },
+  { keys: "Space", description: "（飞行车模式）长按喷升起空 · 助推耗尽或松开下坠" },
   { keys: "拖动 / 滚轮", description: "环绕汽车 / 拉近拉远（双击复位）" },
 ];
 
@@ -45,7 +47,11 @@ export function DrivingHud({ model, actions, locale, sound }: {
     ? `${t("暂不能开始驾驶")} · ${model.entryError.slice("暂不能开始驾驶：".length)}`
     : t(model.entryError ?? "入口错误");
   const speedKmh = (Math.abs(hud.speed) * METERS_PER_UNIT * 3.6).toFixed(1);
-  const gearLabel = hud.gear === "R" ? t("倒车") : hud.gear === "B" ? t("制动") : hud.gear === "D" ? t("前进") : t("静止");
+  const gearLabel = hud.gear === "R" ? t("倒车") : hud.gear === "B" ? t("制动") : hud.gear === "D" ? t("前进") : hud.gear === "FLY" ? t("飞行") : t("静止");
+  const vtolTelemetry = hud.boost !== null
+    ? <><span aria-hidden="true">·</span><span>{t("高度")}</span><strong>{(hud.altitude ?? 0).toFixed(1)}</strong><small>m</small>
+        <span aria-hidden="true">·</span><span>{t("助推")}</span><strong>{Math.round(hud.boost * 100)}</strong><small>%</small></>
+    : null;
   const runtimeDiagnostics = model.diagnostics;
   const sceneError = hud.reason && ["stale-game-world", "stale-car-world", "world-invalidated", "world-revision-mismatch"].includes(hud.reason)
     ? "场景已更新，请重新进入" : hud.reason ?? "场景已更新，请重新进入";
@@ -79,7 +85,7 @@ export function DrivingHud({ model, actions, locale, sound }: {
   return <GameHudShell title={title}
     status={blocked ? <div className="city-game-chip city-game-status" data-tone="warn">{blocked}</div> : undefined}
     telemetry={<TelemetryChip label={t("当前速度")} value={`${speedKmh} km/h, ${gearLabel}`} className="city-game-car-telemetry">
-      <><span>{t("速度")}</span><strong>{speedKmh}</strong><small>km/h</small><span aria-hidden="true">·</span><strong>{gearLabel}</strong></>
+      <><span>{t("速度")}</span><strong>{speedKmh}</strong><small>km/h</small><span aria-hidden="true">·</span><strong>{gearLabel}</strong>{vtolTelemetry}</>
     </TelemetryChip>}
     sound={soundDisclosure}
     help={help} panel={hud.phase === "paused" && (helpOpen || soundOpen) ? null : panel}

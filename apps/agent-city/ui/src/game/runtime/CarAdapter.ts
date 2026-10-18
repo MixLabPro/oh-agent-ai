@@ -7,6 +7,10 @@ import type { DrivingInputState, DrivingState } from "../DrivingSimulation";
 import type { VehicleAdapter } from "./GameScenePort";
 import type { CameraClearanceQuery } from "../VehicleChaseCamera";
 
+/** VTOL 会话在 DrivingState 之上追加的三字段（默认会话不存在，呈现层按可选消费）。 */
+export type CarVtolFields = Readonly<{ airborne: boolean; verticalSpeed: number; boost: number }>;
+export type CarPresentationState = Readonly<DrivingState & Partial<CarVtolFields>>;
+
 export type CarWorldBinding = Readonly<{
   revision: string;
   kernel: DrivingKernel;
@@ -16,7 +20,7 @@ export type CarWorldBinding = Readonly<{
 }>;
 export type CarPresentation = Readonly<{
   revision: string;
-  state: Readonly<DrivingState>;
+  state: CarPresentationState;
   blocked: boolean;
   reason: string | null;
   frameSeconds: number;
@@ -65,13 +69,16 @@ export class CarAdapter implements VehicleAdapter<DrivingInputState> {
     // transition provides an explicitly validated presentation trajectory.
     const t = this.previous.surfaceId !== this.state.surfaceId ? 1 :
       Math.max(0, Math.min(1, Number.isFinite(alpha) ? alpha : 1));
-    const state = { ...this.state };
-    for (const key of ["x", "y", "z", "heading", "pitch", "roll", "steering", "distance"] as const) {
-      state[key] = this.previous[key] + (this.state[key] - this.previous[key]) * t;
+    const state: Record<string, unknown> = { ...this.state };
+    // VTOL 数值字段（verticalSpeed/boost）仅在两端都存在时插值；默认会话跳过。
+    const previousVtol = this.previous as CarPresentationState;
+    for (const key of ["x", "y", "z", "heading", "pitch", "roll", "steering", "distance", "verticalSpeed", "boost"] as const) {
+      const prev = previousVtol[key], next = state[key];
+      if (typeof prev === "number" && typeof next === "number") state[key] = prev + (next - prev) * t;
     }
     const delta = this.state.heading - this.previous.heading;
     state.heading = this.previous.heading + Math.atan2(Math.sin(delta), Math.cos(delta)) * t;
-    this.render(Object.freeze({ revision: this.revision, state: Object.freeze(state), blocked: this.blocked, reason: this.reason, frameSeconds,
+    this.render(Object.freeze({ revision: this.revision, state: Object.freeze(state) as CarPresentationState, blocked: this.blocked, reason: this.reason, frameSeconds,
       cameraSweep: this.cameraSweep }));
   }
   reset(): void {

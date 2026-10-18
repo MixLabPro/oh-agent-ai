@@ -9,7 +9,9 @@ import { buildSurfaceIndex } from "../../engine/surface/SurfaceIndex";
 import { compileCitySolidInputs } from "../../engine/surface/compileCitySolidInputs";
 import { buildSurfaceRegions } from "../../engine/surface/surfaceRegions";
 import { initialDrivingState, DRIVING_PHYSICS_VERSION, type DrivingInputState } from "../DrivingSimulation";
-import { DrivingKernel } from "../driving/DrivingKernel";
+import { DrivingKernel, type KernelStepFn } from "../driving/DrivingKernel";
+import { initialVtolState, stepVtolDriving, VTOL_PHYSICS_VERSION, type VtolDrivingState, type VtolInputState, type VtolWorld } from "../driving/vtolDriving";
+import { VtolDrivingEnvironment } from "../driving/VtolDrivingEnvironment";
 import type { CollisionDimensions } from "../driving/CollisionIndex";
 import { ContinuousDrivingEnvironment, CONTINUOUS_DRIVING_QUERY_VERSION } from "../driving/ContinuousDrivingEnvironment";
 import { DRIVING_COLLISION_VERSION } from "../driving/DrivingCollision";
@@ -37,6 +39,8 @@ type CityCarRequestBase = Readonly<{
   collider: Readonly<{ dimensions: CollisionDimensions; centerHeight: number; vehicleConfigHash: string }>;
   present(frame: CarPresentation, scene: CityCarSceneCapability): void;
   onPreparationMetric?(metric: PreparationMetric): void;
+  /** VTOL 推进器会话（玩法专属）：地面段与默认完全一致，注入空中体制物理。 */
+  vtol?: boolean;
 }>;
 export type CityCarRequest = CityCarRequestBase & Readonly<{
   /** Issued only after full current-world and released-graph spawn validation. */
@@ -128,7 +132,15 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
       halfHeight: request.collider.dimensions.halfHeight,
     });
     await preparationCheckpoint(signal, leaseCurrent);
-    const environment = measured("collision-world", () => new ContinuousDrivingEnvironment(regions, {
+    const vtol = request.vtol === true;
+    // VTOL 与默认会话共用同一冻结世界事实与 gameplay 策略；VTOL 环境在地面段
+    // 完全委托连续环境，仅追加垂直离地/空中移动两条查询。
+    const environment = measured("collision-world", () => vtol ? new VtolDrivingEnvironment(regions, {
+      surfaceRevision: capture.revision, worldRevision: capture.worldRevision, solidRevision: capture.worldRevision,
+      solids: collisionIndex.solids(), dimensions: gameplayDimensions,
+      centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent,
+    }, GAMEPLAY_DRIVING_FOOTPRINT, GAMEPLAY_FOOTPRINT_PARAMS, {}, { boundarySlide: true, mountablePolicy: "gameplay" })
+      : new ContinuousDrivingEnvironment(regions, {
       surfaceRevision: capture.revision, worldRevision: capture.worldRevision, solidRevision: capture.worldRevision,
       solids: collisionIndex.solids(), dimensions: gameplayDimensions,
       centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent,
@@ -142,14 +154,17 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return null;
       const support = environment.place(request.x, request.z, request.heading, point.regionId);
-      return support ? { ...initialDrivingState(request.x, request.z, request.heading, point.regionId), ...support } : null;
+      return support ? { ...(vtol ? initialVtolState(request.x, request.z, request.heading, point.regionId) : initialDrivingState(request.x, request.z, request.heading, point.regionId)), ...support } : null;
     })();
     try { request.onPreparationMetric?.({ stage: "diagnostic-spawn", durationMs: preparationNow() - spawnStarted }); } catch { /* local diagnostic */ }
     if (!spawn) return unavailable(diagnostic ? "no-safe-diagnostic-spawn" : "unsafe-car-spawn");
+    // VTOL 步进注入：prev/input 的收窄转换只发生在这一个调用点（内核守卫对两种体制同界）。
+    const vtolStep: KernelStepFn | null = vtol ? (previous, input, world) =>
+      stepVtolDriving(previous as VtolDrivingState, input as VtolInputState, world as unknown as VtolWorld) : null;
     const kernel = new DrivingKernel(environment, { baseSnapshotHash: capture.worldRevision,
-      vehicleConfigHash: `${request.collider.vehicleConfigHash}-forgiving-collider-v3-mountable-v${MOUNTABLE_POLICY_VERSION}`,
-      kernelBuildId: `city-car-continuous-gameplay-v3-solid-compiler-v${compiledSolids.compilerVersion}-mountable-v${MOUNTABLE_POLICY_VERSION}`,
-      physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: DRIVING_COLLISION_VERSION, queryVersion: CONTINUOUS_DRIVING_QUERY_VERSION });
+      vehicleConfigHash: `${request.collider.vehicleConfigHash}-forgiving-collider-v3-mountable-v${MOUNTABLE_POLICY_VERSION}${vtol ? "-vtol" : ""}`,
+      kernelBuildId: `city-car-continuous-gameplay-v3-solid-compiler-v${compiledSolids.compilerVersion}-mountable-v${MOUNTABLE_POLICY_VERSION}${vtol ? `-vtol-v${VTOL_PHYSICS_VERSION}` : ""}`,
+      physicsVersion: DRIVING_PHYSICS_VERSION, collisionVersion: DRIVING_COLLISION_VERSION, queryVersion: CONTINUOUS_DRIVING_QUERY_VERSION }, vtolStep ?? undefined);
     // 相机臂从车身出发，车停在桥面板/岛缘等可越实体之上——相机查询必须与会话同用
     // gameplay 越障策略，否则起始立方体在严格策略下即被判重叠，桥上立刻“无法确认净空”。
     const cameraSweep = createCameraCollisionQuery(collisionIndex, "gameplay");
