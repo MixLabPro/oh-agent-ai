@@ -9,11 +9,12 @@ export const LIGHT_BUDGET = {
   /** 路灯：灯头亮度 / 地面光斑 / 高架灯带；光斑与灯头按道路等级分档（见 lampTier）。 */
   street: {
     head: 3.2, pool: 0.9, strip: 2.4,
-    /** 开车模式解析街灯（N5）：tier-1 灯的天底坎德拉（场景单位）。换算链沿 night-street 的
-     * 光度学推导——真实 100W 高压钠灯天底 ~3300cd，按本场景太阳（主题 sunIntensity 2.4 ≈ 黄昏
-     * 115lux 量级）与夜量压暗后的可读光池反推到 ~24cd；与贴纸光斑（pool 0.9）在 40–70m 交叉带
-     * 互补切换，量级对不齐时优先校这一项。 */
-    analyticCd: 24,
+    /** 开车模式解析街灯（N5）：tier-1 灯的天底坎德拉（场景单位）。标定锚点是被它在
+     * 交叉带里替换掉的贴纸光斑：贴纸给帧缓存直接加 ~0.9×night 的辐亮度；解析光要走
+     * E×albedo/π——灯下 8m、蝙蝠翼峰值 2.4、沥青反照率 ~0.08 时，cd ≈ 0.9×64×π/(0.08×2.4)
+     * ≈ 900 才与贴纸等亮（真实光度学换算只够黄昏天光下的 24cd，那是 night-street 的场景，
+     * 不是纯夜的这里）。量级再对不齐时优先校这一项。 */
+    analyticCd: 900,
     /** 钠灯启辉 warm-up 色度端点（峰值通道归一）：起辉暗红粉 → 工作橙。灯与灯在颜色上的
      * 不一致比亮度不一致更显「刚开灯」，见 lampWarmChroma。 */
     warmStrike: [1.0, 0.3, 0.36],
@@ -105,7 +106,7 @@ export function budgetProblems(): string[] {
   if (LIGHT_BUDGET.neon.bridgeSaturation > 0.7) problems.push("bridge neon too saturated");
   if (LIGHT_BUDGET.ambient.exposureCut < 0.1) problems.push("night exposure cut too small");
   const { analyticCd, warmStrike, warmWorking, warmthFloor } = LIGHT_BUDGET.street;
-  if (analyticCd < 8 || analyticCd > 80) problems.push("analytic street cd outside readable band");
+  if (analyticCd < 100 || analyticCd > 4000) problems.push("analytic street cd outside readable band");
   if (Math.max(...warmStrike) !== 1 || Math.max(...warmWorking) !== 1) problems.push("warm-up chroma peaks must be 1");
   if (warmthFloor <= 0.2 || warmthFloor >= 0.6) problems.push("warmth floor leaves pools too dark or too uniform");
   const floor = lampWarmth(3.7);
