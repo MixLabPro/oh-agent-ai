@@ -194,8 +194,8 @@ function fakeEngine() {
   const lastSafePose = engine.pose;
   session.world.queryCameraSweep = () => ({ status: "unresolved" });
   engine.frame(1 / 60);
-  assert.equal(session.controller.snapshot.paused?.reason, "camera-safety", "unresolved camera query visibly pauses flight");
-  assert.equal(engine.pose, lastSafePose, "unresolved camera query does not write the reset or unsafe scratch pose");
+  assert.equal(session.controller.snapshot.phase, "practice", "an unresolved visual-camera query does not stop vehicle simulation");
+  assert.deepEqual(engine.pose.position, lastSafePose.position, "unresolved camera query holds the last certified camera position");
   session.exit();
   assert.ok((await session.enter({ mode: "practice" }, host)).ok, "退出后可再次进入");
   assert.ok(session.snapshot().telemetry);
