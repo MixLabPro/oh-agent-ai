@@ -26,12 +26,10 @@ export class DrivingKernel {
     let details: Pick<DrivingMoveResult,"trajectory"|"contacts"|"contact"|"queryStatus"> = {};
     // Pass copies to the existing mutable adapter contract. Neither a pilot nor
     // an environment may mutate a live state held by the runner/runtime.
-    const state = this.stepFn({ ...previous } as DrivingState, {
-      forward: input.forward === true, backward: input.backward === true,
-      left: input.left === true, right: input.right === true,
-      // VTOL 推进器位透传：默认物理（stepDriving）只读四个布尔位，多余字段被忽略（有不变式断言）。
-      ...( "thruster" in input ? { thruster: (input as Readonly<{ thruster?: boolean }>).thruster === true } : {}),
-    } as DrivingInputState, { move: (before, desired) => {
+    // 步进函数拿到的是「move 被记账包装、其余成员经原型链直通真实环境」的代理——
+    // 注入的 VTOL 物理（lift/moveAir/supportHeight）与默认物理在同一世界对象上可用。
+    const proxiedWorld = Object.create(this.world) as DrivingEnvironment;
+    proxiedWorld.move = (before, desired) => {
       const result = this.world.move({ ...before }, { ...desired });
       details={};
       if(result.trajectory&&result.trajectory.length>2048)throw new Error("motion-trajectory-budget");
@@ -41,7 +39,13 @@ export class DrivingKernel {
       if(result.queryStatus!==undefined)details.queryStatus=result.queryStatus;
       blocked = result.blocked; reason = result.reason ?? null;
       return { ...result };
-    } });
+    };
+    const state = this.stepFn({ ...previous } as DrivingState, {
+      forward: input.forward === true, backward: input.backward === true,
+      left: input.left === true, right: input.right === true,
+      // VTOL 推进器位透传：默认物理（stepDriving）只读四个布尔位，多余字段被忽略（有不变式断言）。
+      ...( "thruster" in input ? { thruster: (input as Readonly<{ thruster?: boolean }>).thruster === true } : {}),
+    } as DrivingInputState, proxiedWorld);
     if (!validDrivingState(state)) throw new Error("invalid-driving-state");
     const maxStep = Math.max(DRIVING_PARAMS.maxForward, DRIVING_PARAMS.maxReverse) * DRIVING_DT + 1e-6;
     if (Math.hypot(state.x - previous.x, state.z - previous.z) > maxStep) {

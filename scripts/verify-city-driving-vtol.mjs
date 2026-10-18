@@ -160,16 +160,31 @@ const boostAfterTakeoff = state.boost;
   assert.deepEqual(a, b, "thruster field must not change stepDriving behavior");
 }
 
-// ── 附加：DrivingKernel 全速飞行步进守卫不触发（用户路径经内核）──
+// ── 附加：DrivingKernel 全链（用户路径：内核包装世界 + 注入 VTOL 步进）──
+//   内核给步进函数的世界必须保留 lift/moveAir/supportHeight（原型链直通），
+//   否则第一次按 Space 即「world.lift is not a function」杀掉场景（用户实测回归锁）。
 {
+  const vtolStep = (previous, input, world) => k.stepVtolDriving(previous, input, world);
   const kernel = new k.DrivingKernel(env, { baseSnapshotHash: "vtol", vehicleConfigHash: "vtol", kernelBuildId: "vtol-verify",
-    physicsVersion: 0, collisionVersion: 0, queryVersion: 0 });
-  let air = { ...k.initialVtolState(-20, 0, 0, regionId), y: 5, airborne: true, verticalSpeed: 0, boost: 1 };
-  for (let tick = 0; tick < 900; tick += 1) {
-    const step = kernel.step(air, { ...fwd, thruster: tick < 30 });
-    air = { ...step.state, airborne: step.state.airborne ?? air.airborne, verticalSpeed: step.state.verticalSpeed ?? 0, boost: step.state.boost ?? 1 };
+    physicsVersion: 0, collisionVersion: 0, queryVersion: 0 }, vtolStep);
+  // 诊断出生（裸 DrivingState）经内核按 Space 起飞——正是真实 UAT 路径
+  let s = { ...k.initialDrivingState(-20, 0, 0, regionId) };
+  let tookOff = false;
+  for (let tick = 0; tick < 240 && !tookOff; tick += 1) {
+    const step = kernel.step(s, { ...thrust });
+    s = { ...step.state };
+    tookOff = s.airborne === true;
   }
-  assert.ok(true, "kernel steps never throw under VTOL states at full air speed");
+  assert.ok(tookOff, "kernel-injected VTOL physics takes off from a bare diagnostic spawn (world.lift reachable)");
+  assert.ok(Number.isFinite(s.boost), "kernel path keeps boost finite");
+  // 空中巡航 + 下降落地也经内核（moveAir 可达）
+  let landed = false;
+  for (let tick = 0; tick < 600 && !landed; tick += 1) {
+    const step = kernel.step(s, { forward: false, backward: false, left: false, right: false, thruster: false });
+    s = { ...step.state };
+    landed = s.airborne === false;
+  }
+  assert.ok(landed, "kernel-injected VTOL physics lands through moveAir (descent from kernel takeoff)");
 }
 
 // ── 附加：诊断出生路径——出生状态不带 VTOL 字段（仅 DrivingState）也不得产生 NaN，
