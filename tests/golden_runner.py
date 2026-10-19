@@ -357,10 +357,10 @@ def _run_plugin_case(root: Path, name: str):
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, (dict, list)):
-            target.write_text(_json.dumps(content, ensure_ascii=False, indent=2) + "\n",
-                              encoding="utf-8")
+            payload = (_json.dumps(content, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         else:
-            target.write_text(content, encoding="utf-8")
+            payload = content.encode("utf-8") if isinstance(content, str) else content
+        target.write_bytes(payload)
     root_s = str(root).replace("\\", "/")
     args = [a.replace("{root}", root_s) for a in case["args"]]
     env = isolated_home_env(root)
