@@ -230,9 +230,11 @@ if (process.argv.includes("--cities")) {
     // the span itself (must pass), and approach → approach along the axis (counted; a straight pilot
     // cannot follow an angled approach, and a local landing conflict is reported, not hidden).
     const env = new kit.SurfaceDrivingEnvironment(regions); const kernel = new kit.DrivingKernel(env, key);
-    const run = (from, ux, uz, s0, s1) => {
+    // 起点按它所在的层分类：跨度用例从桥面上起步，必须问桥面层。structure: "deck" 的桥面是独立层，
+    // 离开落地点几米后 ground 层上根本没有面——旧代码一律问 ground，7/2 的桥面整段可驶，却报 start:no-surface。
+    const run = (from, ux, uz, s0, s1, layerId = "ground") => {
       const heading = Math.atan2(uz, ux); const sx = from.x + ux * s0, sz = from.z + uz * s0;
-      const start = regions.classify(sx, sz, "ground"); if (start.status !== "drivable") return `start:${start.cause}`;
+      const start = regions.classify(sx, sz, layerId); if (start.status !== "drivable") return `start:${start.cause}`;
       const placed = env.place(sx, sz, heading, start.regionId); if (!placed) return "start:footprint";
       let s = { ...kit.initialDrivingState(sx, sz, heading, start.regionId), ...placed };
       const validator = new kit.SurfaceWorldValidator(regions, kit.polylineProgress([{ x: sx, z: sz }, { x: from.x + ux * s1, z: from.z + uz * s1 }]));
@@ -253,7 +255,7 @@ if (process.argv.includes("--cities")) {
       totals.crossable++;
       const [from, to] = ends.map((x) => x.landing); const ux = -from.outX, uz = -from.outZ; const len = Math.hypot(to.x - from.x, to.z - from.z);
       const reach = 1.4 + 0.25 + 0.2; // half car length + deck overhang + margin
-      assert.equal(run(from, ux, uz, reach + 1, len - reach - 1), "ok", `seed ${seed} tier ${tier} ${id}: the open span itself is drivable`);
+      assert.equal(run(from, ux, uz, reach + 1, len - reach - 1, from.layerId), "ok", `seed ${seed} tier ${tier} ${id}: the open span itself is drivable`);
       const full = run(from, ux, uz, -1.5, len + reach);
       if (full === "ok") totals.crossings++; else failures.push(`${seed}/${tier} ${id.slice(0, 28)} ${full}`);
     }
