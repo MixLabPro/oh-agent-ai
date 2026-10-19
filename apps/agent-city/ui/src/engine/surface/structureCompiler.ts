@@ -363,10 +363,40 @@ export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"
       const sideX = Math.sin(yaw);
       const sideZ = Math.cos(yaw);
       for (const offset of [-3.6, 0, 3.6]) push(part(mx + sideX * offset, top, mz + sideZ * offset, slant, 0.05, 0.3, "#c6c6bb", "expressway-lane-line", yaw, pitch, "YZX"), index);
-      for (const offset of [-5.1, 5.1]) push(part(mx + sideX * offset, top, mz + sideZ * offset, slant, 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index);
+      for (const offset of [-5.1, 5.1]) for (const [t0, t1] of rampRailRuns(layout, a, b, ya, yb, sideX * offset, sideZ * offset, length)) {
+        const tm = (t0 + t1) / 2;
+        push(part(a.x + (b.x - a.x) * tm + sideX * offset, ya + (yb - ya) * tm + EXPRESSWAY_DECK_THICKNESS, a.z + (b.z - a.z) * tm + sideZ * offset,
+          slant * (t1 - t0), 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index);
+      }
     }
   });
   return pieces;
+}
+/** A ramp rail lower than this above the terrain is a solid on whatever ground road it lies on. */
+export const RAMP_RAIL_HEADROOM = 2.6;
+/** 匝道落地端护栏退让（2026-10-19）：匝道在地面路中间落地，0/65537 的最后一段（8.24→10.2）与 12 宽的南北向
+ * 宿主路垂直相交，侧护栏（y 1.24–1.80）横躺在宿主路车道里，沿路行驶的车撞上（0/2026 同形）。占路诊断跳过
+ * expressway-rail，所以没报。护栏只在「XZ 落在地面车道内且离地低于 RAMP_RAIL_HEADROOM」的样本处断开；
+ * 高架跨过地面路处离地高，照常保留。没有被剪的护栏返回 [[0, 1]]，与旧几何逐字节相同。 */
+function rampRailRuns(layout: Partial<Pick<CityLayout, "roadEdges">> & Pick<CityLayout, "terrain">, a: Vec2, b: Vec2, ya: number, yb: number,
+  ox: number, oz: number, length: number): Array<[number, number]> {
+  if (!Array.isArray(layout.roadEdges)) return [[0, 1]];
+  const n = Math.max(1, Math.ceil(length / 0.5));
+  const blocked: boolean[] = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, x = a.x + (b.x - a.x) * t + ox, z = a.z + (b.z - a.z) * t + oz;
+    blocked.push(ya + (yb - ya) * t + EXPRESSWAY_DECK_THICKNESS < layout.terrain.height(x, z) + RAMP_RAIL_HEADROOM &&
+      groundRoadClearance(layout.roadEdges, x, z) < RAILING_ROAD_CLEARANCE);
+  }
+  if (!blocked.some(Boolean)) return [[0, 1]];
+  const runs: Array<[number, number]> = [];
+  for (let i = 0; i <= n; i++) {
+    if (blocked[i]) continue;
+    let j = i; while (j + 1 <= n && !blocked[j + 1]) j++;
+    if ((j - i) / n * length >= 0.3) runs.push([i / n, j / n]);
+    i = j;
+  }
+  return runs;
 }
 /** Rail inner face from the expressway centreline (rails 0.3 wide at ±5.1). */
 export const EXPRESSWAY_DRIVABLE_HALF = 5.1 - 0.15;

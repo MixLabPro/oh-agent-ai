@@ -17,7 +17,7 @@ import type { AuditKey, AuditManifest, AuditUnit, AuditUnitKind, RoadAuditCase }
 import { ROUTE_PILOT_CONTROLLER_VERSION, routePilotFactory } from "./RoutePilot";
 import { auditRoute, type PassabilityOptions, type PassabilityResult, type PassabilityRoute, type PassabilityWorld } from "./RoadPassabilityAudit";
 
-export const ROAD_AUDIT_PLANNER_VERSION = 1;
+export const ROAD_AUDIT_PLANNER_VERSION = 2; // 2: routes start/exit on the deck layer their end points lie on
 
 type P = Readonly<{ x: number; z: number }>;
 export type PlannerEdge = Readonly<{ id: string; from: string; to: string; width: number; points: readonly P[]; bridge?: boolean; structure?: string }>;
@@ -104,10 +104,27 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
   const units: AuditUnit[] = []; const exclusions: { unitId: string; reason: string }[] = []; const routes: PlannedRoute[] = [];
   const unit = (id: string, kind: AuditUnitKind) => units.push(Object.freeze({ id, kind }));
   const exclude = (id: string, kind: AuditUnitKind, reason: string) => { unit(id, kind); exclusions.push(Object.freeze({ unitId: id, reason })); };
-  const route = (id: string, kind: AuditUnitKind, path: readonly P[], halfWidth: number, extra: Partial<PassabilityRoute> = {}) => {
-    unit(id, kind); routes.push(Object.freeze({ id, kind, units: Object.freeze([id]), path: Object.freeze(dedupe(path).map((p) => Object.freeze({ x: p.x, z: p.z }))), halfWidth, ...extra }));
-  };
   const edges = [...input.roadEdges].filter((e) => e.points.length >= 2).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  // 起止层：路线没有显式给层时，按它首/末点所在的边取——落在有自己层的桥面上就从桥面层起步/出门。
+  // 曾一律按 ground：0/42 的出生点在一座独立成层的长桥中点，起步就 start:no-surface（桥面上的方向/转向用例同理）。
+  const deckLayers = new Map(input.landings.filter((l) => l.structureId.startsWith("bridge:")).map((l) => [l.structureId.slice(7), l.layerId] as const));
+  const layerAt = (p: P): string => {
+    let best: PlannerEdge | null = null, bd = Infinity;
+    for (const e of edges) for (let i = 1; i < e.points.length; i++) {
+      const a = e.points[i - 1], b = e.points[i], dx = b.x - a.x, dz = b.z - a.z, ll = dx * dx + dz * dz;
+      const u = ll ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / ll)) : 0;
+      const d = Math.hypot(p.x - a.x - dx * u, p.z - a.z - dz * u);
+      if (d < bd - 1e-9) { bd = d; best = e; }
+    }
+    return (best && deckLayers.get(best.id)) ?? "ground";
+  };
+  const route = (id: string, kind: AuditUnitKind, path: readonly P[], halfWidth: number, extra: Partial<PassabilityRoute> = {}) => {
+    const pts = dedupe(path);
+    const layers: { startLayer?: string; exitLayer?: string } = {};
+    if (extra.startLayer === undefined && pts.length) { const l = layerAt(pts[0]); if (l !== "ground") layers.startLayer = l; }
+    if (extra.exitLayer === undefined && pts.length) { const l = layerAt(pts[pts.length - 1]); if (l !== "ground") layers.exitLayer = l; }
+    unit(id, kind); routes.push(Object.freeze({ id, kind, units: Object.freeze([id]), path: Object.freeze(pts.map((p) => Object.freeze({ x: p.x, z: p.z }))), halfWidth, ...layers, ...extra }));
+  };
 
   // Road network edges are short segments chained through degree-2 nodes (in real cities 230 of 264 nodes).
   // A degree-2 node is a continuation, not a junction: the audited road is the maximal chain between
