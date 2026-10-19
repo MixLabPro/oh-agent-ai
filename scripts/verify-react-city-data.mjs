@@ -37,7 +37,14 @@ for (const windowDays of [7, 30, 90, 366]) {
   assert(Array.isArray(projection.harnesses));
   assert.equal(projection.window.days, windowDays);
   assert.equal(projection.status, "ready");
-  assert(projection.sessions.every((session) => !("title" in session) && !("path" in session) && !("prompt" in session)));
+  assert(projection.sessions.every((session) => {
+    // City may show the scrubbed, bounded session title and its provenance as the
+    // building label. Paths and raw prompts stay outside this projection.
+    const titleIsSafe = typeof session.title !== "string" ||
+      (Array.from(session.title).length <= 256 &&
+        (session.title_source == null || ["codex_thread_name", "claude_ai_title", "dsh_workspace_title"].includes(session.title_source)));
+    return !("path" in session) && !("prompt" in session) && titleIsSafe;
+  }));
   assert(projection.findings.every((finding) => ["critical", "warning", "info"].includes(finding.severity)));
   assert.equal(projection.coverage.total, projection.sessions.length);
 }
