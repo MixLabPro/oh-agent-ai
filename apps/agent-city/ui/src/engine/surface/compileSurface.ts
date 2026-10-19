@@ -16,7 +16,7 @@ import { buildLandingPortals, DEFAULT_LANDING_PORTAL_OPTIONS } from "./landingPo
 import { extractMeshBoundaries } from "./meshBoundaries";
 import { buildSurfaceIndex } from "./SurfaceIndex";
 import {
-  boxCorners, boxTopFace, bridgeDeckParts, bridgeDrivableHalf, channelizedGeometry, culDeSacDiscs, culDeSacTopCap,
+  boxCorners, boxPoint, boxTopFace, bridgeDeckParts, bridgeDrivableHalf, channelizedGeometry, culDeSacDiscs, culDeSacTopCap,
   EXPRESSWAY_DRIVABLE_HALF, expresswayPieces, FLARE_LIFT, flareTriangles, trussBarPart, trussBars, type BoxPart,
 } from "./structureCompiler";
 import { conformMesh, terrainFit } from "./terrainClip";
@@ -24,7 +24,7 @@ import type { SurfaceRegionsBuild } from "./surfaceRegions";
 import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch, SurfacePortal } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 10;
+export const CITY_SURFACE_GEOMETRY_VERSION = 11;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
 const LANDING_ZONE = 3;
 
@@ -238,15 +238,38 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
   // ── District expressways: one layer per highway; segment decks are aliased by surfaceRegions.
   let expresswaySegments = 0;
   const pieces = expresswayPieces(layout);
-  for (const piece of pieces) {
-    if (piece.role === "expressway-rail" || piece.role === "expressway-pier") {
-      continue;
-    }
-    if (piece.role !== "expressway-deck") continue;
-    expresswaySegments++;
-    const patchId = `expressway:${piece.highway}:${String(piece.segment).padStart(4, "0")}`;
-    add(patchId, Math.abs(piece.rz) > 1e-4 ? "ramp" : "expressway-deck",
-      `expressway:${piece.highway}`, { kind: "structure", id: `expressway:${piece.highway}` }, quad(boxTopFace(piece, EXPRESSWAY_DRIVABLE_HALF)));
+  // 驾驶面是一条首尾相接的带（2026-10-19）：曾直接取每块桥面板的顶面，而板长 slant + 0.5（为渲染补缝，两头各伸 0.25），
+  // 弯道内侧相邻两块的重叠楔里按各自坡度算高，差到 0.16 > aliasTolerance，surfaceRegions 判 height-conflict，
+  // 匝道在落地后约 9 处断成两个区域（0/1、0/2026、500/42 等的结构连接用例 topology-disconnected）。
+  // 现内部顶点取两块板顶在真实分段端点的中线点、斜接（mitre）横向，相邻面片共用同一条接缝；整条匝道的两个端边
+  // 仍是首/末块板的完整顶面端边——落地接缝（seamOf）与门户候选不变。渲染与碰撞的板块不变。
+  const deckByHighway = new Map<number, typeof pieces>();
+  for (const piece of pieces) if (piece.role === "expressway-deck") deckByHighway.set(piece.highway, [...(deckByHighway.get(piece.highway) ?? []), piece]);
+  for (const [highway, deck] of [...deckByHighway].sort((a, b) => a[0] - b[0])) {
+    deck.sort((x, y) => x.segment - y.segment);
+    const tops = deck.map((piece) => boxTopFace(piece, EXPRESSWAY_DRIVABLE_HALF));
+    // Centre of the top face at the piece's true segment end (the slab overhangs 0.25 past it).
+    const endAt = (i: number, sign: number) => { const piece = deck[i]; const f = sign * Math.max(0, (piece.sx - 0.5) / 2) / piece.sx; return boxPoint(piece, f, 1, 0); };
+    const sideOf = (i: number) => { const t = tops[i]; const sx = t[3].x - t[0].x, sz = t[3].z - t[0].z; const l = Math.hypot(sx, sz) || 1; return { x: sx / l, z: sz / l }; };
+    // Seam at the vertex shared by pieces i−1 and i: [−side point, +side point].
+    const seamAt = (i: number): [P3, P3] | null => {
+      const a = endAt(i - 1, 1), b = endAt(i, -1); const c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+      const s0 = sideOf(i - 1), s1 = sideOf(i); let mx = s0.x + s1.x, mz = s0.z + s1.z; const ml = Math.hypot(mx, mz);
+      if (ml < 1e-9) return null; mx /= ml; mz /= ml;
+      const cos = mx * s0.x + mz * s0.z; if (cos < 0.5) return null; // sharper than 120°: keep the slab tops there
+      const w = EXPRESSWAY_DRIVABLE_HALF / cos;
+      return [{ x: c.x - mx * w, y: c.y, z: c.z - mz * w }, { x: c.x + mx * w, y: c.y, z: c.z + mz * w }];
+    };
+    const seams = deck.map((_, i) => (i === 0 ? null : seamAt(i)));
+    deck.forEach((piece, i) => {
+      expresswaySegments++;
+      const t = tops[i]; const start = seams[i], end = i + 1 < deck.length ? seams[i + 1] : null;
+      // boxTopFace order: [start −side, end −side, end +side, start +side].
+      const face = [start ? start[0] : t[0], end ? end[0] : t[1], end ? end[1] : t[2], start ? start[1] : t[3]];
+      const patchId = `expressway:${highway}:${String(piece.segment).padStart(4, "0")}`;
+      add(patchId, Math.abs(piece.rz) > 1e-4 ? "ramp" : "expressway-deck",
+        `expressway:${highway}`, { kind: "structure", id: `expressway:${highway}` }, quad(face));
+    });
   }
   const patchById = new Map(patches.map((p) => [p.id, p]));
   (layout.highways ?? []).forEach((points, highway) => {
