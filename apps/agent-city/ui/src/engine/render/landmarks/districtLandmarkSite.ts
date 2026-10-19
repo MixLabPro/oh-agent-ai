@@ -102,9 +102,12 @@ export function buildDistrictLandmarkSite(site: LandmarkSite, districtId: string
   box(doorW + 0.5, doorH + 0.4, 0.12, cu, PLINTH, front + 0.04, lambert("#2d343b"));                  // 门框
   box(doorW, doorH, 0.14, cu, PLINTH, front + 0.1, lambert("#ffd89a", neon ? 1.2 : 0.55), false);     // 门扇：暖光（白天也读得出是入口）
   const canopyW = m(12), canopyD = m(6);
-  box(canopyW, 0.3, canopyD, cu, PLINTH + m(5.6), front + canopyD / 2, white);                         // 雨棚
-  for (const side of [-1, 1]) box(0.3, m(5.6), 0.3, cu + side * (canopyW / 2 - 0.4), PLINTH, front + canopyD - 0.4, white);
-  box(canopyW * 0.7, 0.16, m(2.4), cu, 0, front + m(2.4) / 2 + 0.2, stone);                           // 台阶
+  // Canopy and steps stand in the yard: only when the site has room for them (never past the site front).
+  if (front + canopyD <= rect.v1 + 1e-9) {
+    box(canopyW, 0.3, canopyD, cu, PLINTH + m(5.6), front + canopyD / 2, white);                         // 雨棚
+    for (const side of [-1, 1]) box(0.3, m(5.6), 0.3, cu + side * (canopyW / 2 - 0.4), PLINTH, front + canopyD - 0.4, white);
+    box(canopyW * 0.7, 0.16, m(2.4), cu, 0, front + m(2.4) / 2 + 0.2, stone);                           // 台阶
+  }
 
   // ── 广场与步道：门前铺石材，一条步道通到街区前沿 ──
   const yardEnd = rect.v1;
@@ -167,7 +170,10 @@ export function buildDistrictLandmarkSite(site: LandmarkSite, districtId: string
 
   // ── 绿化：前沿行道树（棕榈与阔叶交替）、步道两侧矮绿篱、裙楼两侧与背后的树 ──
   const trees: Array<{ x: number; z: number; palm: boolean; height: number }> = [];
+  // Trees only inside the site and outside the podium (a thin or fallback site has no yard for them).
+  const insidePodium = (x: number, z: number) => Math.abs(x - cu) < podium.w / 2 + 1 && Math.abs(z - podium.cv) < podium.d / 2 + 1;
   const plant = (x: number, z: number, key: string) => {
+    if (x < rect.u0 || x > rect.u1 || z < rect.v0 || z > rect.v1 || insidePodium(x, z)) return;
     const palm = rnd(`kind:${key}`) < 0.5;
     const range = palm ? REAL.palm : REAL.broadleafTree;
     trees.push({ x, z, palm, height: m(range.min + rnd(`h:${key}`) * (range.max - range.min)) });
@@ -176,7 +182,7 @@ export function buildDistrictLandmarkSite(site: LandmarkSite, districtId: string
   for (let x = rect.u0 + m(4), k = 0; x < rect.u1 - m(2); x += m(10), k += 1) if (Math.abs(x - cu) > PATH_WIDTH) plant(x, treeZ, `front:${k}`);
   for (const [i, side] of [-1, 1].entries()) {
     const edge = side < 0 ? rect.u0 + m(3) : rect.u1 - m(3);
-    for (let z = rect.v0 + m(4), k = 0; z < podium.cv + podium.d / 2; z += m(10), k += 1) plant(edge, z, `side:${i}:${k}`);
+    for (let z = rect.v0 + m(4), k = 0; z < Math.min(rect.v1, podium.cv + podium.d / 2); z += m(10), k += 1) plant(edge, z, `side:${i}:${k}`);
     box(m(1.6), m(1.4), Math.max(0.5, yardEnd - pathStart - m(4)), cu + side * (PATH_WIDTH / 2 + m(1)), 0, (pathStart + yardEnd) / 2, lambert("#2f6b3f"), false); // 步道两侧绿篱
   }
   if (trees.length) {

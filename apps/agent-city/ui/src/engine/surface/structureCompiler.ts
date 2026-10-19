@@ -11,6 +11,7 @@ import { renderRoadEdges } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
 import { EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, expresswayDeckHeights } from "./structureProfiles";
 import { terrainSurfaceHeight } from "./terrainSampling";
+import { groundRoadClearance } from "./roadClearance";
 
 /** Road surface lift (same constant as groundRoadCompiler.ROAD_SURFACE_LIFT; kept here to avoid a cycle). */
 const ROAD_LIFT = 0.04;
@@ -162,7 +163,12 @@ function bridgeDeckSectionParts(edge: RoadEdge, layout: BridgeLayoutInput, profi
     const t = distance / length;
     const px = a.x + (b.x - a.x) * t; const pz = a.z + (b.z - a.z) * t;
     const bed = layout.terrain.height(px, pz);
-    parts.push(part(px, bed, pz, 1.6, Math.max(0.1, profile.at(t) - 0.35 - bed), edge.width - 0.6, "#a9aaa0", "bridge-pier", yaw));
+    // The pier top is flat but the slab is rolled to the (interpolated) bank lean: on the low side the slab
+    // underside drops by lean × half-width. A centreline top poked through the deck on rolled/split bridges
+    // (7/1: 1.58 above the carriageway — road obstruction guard).
+    const lean = Number.isFinite(profile.leanFrom) && Number.isFinite(profile.leanTo) ? profile.leanFrom + (profile.leanTo - profile.leanFrom) * t : profile.crossSlope;
+    const drop = Math.max(Math.abs(lean), Math.abs(profile.crossSlope)) * (edge.width - 0.6) / 2;
+    parts.push(part(px, bed, pz, 1.6, Math.max(0.1, profile.at(t) - 0.35 - drop - bed), edge.width - 0.6, "#a9aaa0", "bridge-pier", yaw));
   }
   return parts;
 }
@@ -269,8 +275,11 @@ function expresswaySupport(layout: ExpresswayLayout, points: Vec2[], heights: nu
     })) continue;
     return support;
   }
-  // Keep a physical support if no road-free station exists; audits must still expose it.
-  return fallback;
+  // No road-free station: no support here (the span runs on to the next pier). A fallback support stood
+  // on a road under a low ramp — its 1.0-high crossbeam blocked every car (0/42, 90/42); the deck itself
+  // left room to drive under. Kept as a reference for diagnostics only.
+  void fallback;
+  return [];
 }
 /** District expressways: piers, then per segment deck + lane lines + rails (buildDistrictExpressways order).
  * Segments shorter than 6 are not drawn — and therefore not driveable. */
@@ -339,15 +348,33 @@ export function trussBars(layout: Pick<CityLayout, "landmarks" | "bridges" | "te
     const deckAt = (t: number) => profile.at(t / len);
     // Keep the low truss members inside the span: bank junction fans can cross
     // behind a side girder even though the bridge centreline itself is clear.
-    const setback = Math.min(8, len / 4), trussLength = len - 2 * setback;
+    // The truss planes stand OUTSIDE the deck slab: a wide bridge's drivable deck (width/2 − 0.3) reached past
+    // the fixed ±6.6, so the bottom chord lay across the carriageway 0.2 above it (road obstruction guard).
+    const deckEdge = renderRoadEdges(layout.roadEdges ?? []).find((e) => e.bridge && e.points.length === 2 &&
+      ((Math.hypot(e.points[0].x - bridge.from.x, e.points[0].z - bridge.from.z) < 0.01 && Math.hypot(e.points[1].x - bridge.to.x, e.points[1].z - bridge.to.z) < 0.01) ||
+       (Math.hypot(e.points[1].x - bridge.from.x, e.points[1].z - bridge.from.z) < 0.01 && Math.hypot(e.points[0].x - bridge.to.x, e.points[0].z - bridge.to.z) < 0.01)));
+    const lateral = Math.max(6.6, (deckEdge?.width ?? 0) / 2 + 0.6);
+    // Per-end setback: at least min(8, len/4), then walked inward until both truss lines are clear of every
+    // ground carriageway — a bank approach road leaving the bridgehead diagonally still ran under the low
+    // members 8 into the span (0/2026). Capped at len/3 per end (the truss always keeps its middle third).
+    const base = Math.min(8, len / 4);
+    const lineClear = (t: number) => [-1, 1].every((side) => groundRoadClearance(layout.roadEdges,
+      bridge.from.x + ux * t + nx * side * lateral, bridge.from.z + uz * t + nz * side * lateral) >= TRUSS_ROAD_CLEARANCE);
+    const endSetback = (fromEnd: boolean) => {
+      let sb = base;
+      while (sb < len / 3 && !lineClear(fromEnd ? sb : len - sb)) sb += 0.5;
+      return Math.min(sb, len / 3);
+    };
+    const sFrom = endSetback(true), sTo = endSetback(false);
+    const setback = sFrom, trussLength = len - sFrom - sTo, centre = sFrom + trussLength / 2;
     const H = 7; const panels = Math.max(4, Math.round(trussLength / 9)); const step = trussLength / panels;
     for (const side of [-1, 1]) {
-      const ox = nx * side * 6.6; const oz = nz * side * 6.6;
+      const ox = nx * side * lateral; const oz = nz * side * lateral;
       const at = (t: number) => ({ x: bridge.from.x + ux * t + ox, z: bridge.from.z + uz * t + oz });
-      const mid = at(len / 2);
+      const mid = at(centre);
       const chordLength = trussLength / Math.cos(profile.pitch);
-      bars.push([mid.x, deckAt(len / 2) + H, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);          // 上弦
-      bars.push([mid.x, deckAt(len / 2) + 0.2, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);        // 下弦
+      bars.push([mid.x, deckAt(centre) + H, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);          // 上弦
+      bars.push([mid.x, deckAt(centre) + 0.2, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);        // 下弦
       for (let i = 0; i <= panels; i += 1) {
         const station = setback + i * step, p = at(station);
         bars.push([p.x, deckAt(station), p.z, 0.45, H, yaw, 0, 1]);                 // 竖杆
@@ -360,11 +387,13 @@ export function trussBars(layout: Pick<CityLayout, "landmarks" | "bridges" | "te
     // 顶部横撑（每两格一根），让桁架从远处读成「穿式」而不是两片护栏。
     for (let i = 0; i <= panels; i += 2) {
       const t = setback + i * step; const x = bridge.from.x + ux * t; const z = bridge.from.z + uz * t;
-      bars.push([x, deckAt(t) + H, z, 13.2, 0.5, yaw + Math.PI / 2, 0, 0]);
+      bars.push([x, deckAt(t) + H, z, 2 * lateral, 0.5, yaw + Math.PI / 2, 0, 0]);
     }
   }
   return bars;
 }
+/** Clearance the truss lines keep from any ground carriageway (bar half-width 0.3 + body margin). */
+export const TRUSS_ROAD_CLEARANCE = 1.0;
 /** A truss bar as the BOX instance the renderer composes (YXZ, horizontal bars centred on y). */
 export function trussBarPart([x, y, z, a, b, rotY, tilt, vertical]: [number, number, number, number, number, number, number, number]): BoxPart {
   return vertical ? part(x, y, z, a, b, a, "#a8322a", "truss", rotY, tilt, "YXZ") : part(x, y - b / 2, z, a, b, b, "#a8322a", "truss", rotY, tilt, "YXZ");

@@ -41,7 +41,14 @@ export type LandmarkSite = {
 const DEFAULT_RECT = 13; // 找不到地块时的保底半宽：与旧的 26 单位见方保留量一致
 
 /** 地标局部系下街区所有地块的包围盒，并按朝路方向转到正则系。找不到所属地块返回保底场地。 */
-export function landmarkSite(landmark: { x: number; z: number; yaw: number; parcelId: string }, parcels: readonly Placed[], height: number): LandmarkSite {
+/** Clearance the site keeps from any real ground carriageway (forecourt, podium, gate posts, trees). */
+export const LANDMARK_ROAD_CLEARANCE = 1.0;
+/** `roadClearance(x, z)`: world distance to the nearest real carriageway edge. When given, the site
+ * rectangle is pulled in from any side that would reach onto a road — the parcel-corner bounding box of a
+ * rotated or irregular block overhangs the street (rendered scenes: podiums, forecourt plinths, gate posts
+ * and trees stood on 18 road spots). Never below the 17-unit skirt that placement already validated. */
+export function landmarkSite(landmark: { x: number; z: number; yaw: number; parcelId: string }, parcels: readonly Placed[], height: number,
+  roadClearance?: (x: number, z: number) => number): LandmarkSite {
   const own = parcels.find((p) => p.id === landmark.parcelId);
   const cos = Math.cos(landmark.yaw), sin = Math.sin(landmark.yaw);
   const toLocal = (wx: number, wz: number) => { const dx = wx - landmark.x, dz = wz - landmark.z; return { u: dx * cos - dz * sin, v: dx * sin + dz * cos }; };
@@ -72,12 +79,40 @@ export function landmarkSite(landmark: { x: number; z: number; yaw: number; parc
   const m = LANDMARK_EDGE_MARGIN;
   const rect = { u0: Math.min(...canon.map((q) => q.a)) + m, u1: Math.max(...canon.map((q) => q.a)) - m,
     v0: Math.min(...canon.map((q) => q.b)) + m, v1: Math.max(...canon.map((q) => q.b)) - m };
+  if (roadClearance) {
+    // Canonical (a, b) → landmark local (u, v) → world (inverse rotations of toLocal and of `turn`).
+    const world = (a: number, b: number) => { const u = a * ct + b * st, v = -a * st + b * ct; return { x: landmark.x + u * cos + v * sin, z: landmark.z - u * sin + v * cos }; };
+    const clearAt = (a: number, b: number) => { const w = world(a, b); return roadClearance(w.x, w.z) >= LANDMARK_ROAD_CLEARANCE; };
+    const half = DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtWidth / 2;
+    const sideClear = (side: "u0" | "u1" | "v0" | "v1") => {
+      const along = side[0] === "u" ? [rect.v0, rect.v1] : [rect.u0, rect.u1];
+      for (let t = along[0]; t <= along[1] + 1e-9; t += Math.min(1, (along[1] - along[0]) || 1)) {
+        if (!(side[0] === "u" ? clearAt(rect[side], t) : clearAt(t, rect[side]))) return false;
+      }
+      return true;
+    };
+    for (let guard = 0; guard < 200; guard++) {
+      let moved = false;
+      if (rect.u0 < -half && !sideClear("u0")) { rect.u0 = Math.min(-half, rect.u0 + 0.5); moved = true; }
+      if (rect.u1 > half && !sideClear("u1")) { rect.u1 = Math.max(half, rect.u1 - 0.5); moved = true; }
+      if (rect.v0 < -half && !sideClear("v0")) { rect.v0 = Math.min(-half, rect.v0 + 0.5); moved = true; }
+      if (rect.v1 > half && !sideClear("v1")) { rect.v1 = Math.max(half, rect.v1 - 0.5); moved = true; }
+      if (!moved) break;
+    }
+  }
   const roomW = rect.u1 - rect.u0, roomD = rect.v1 - rect.v0;
   const skirt = DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtWidth;
   const wanted = Math.max(1, height / (LANDMARK_SLENDER * LANDMARK_SHAFT_BASE));
   const grow = Math.max(1, Math.min(wanted, (PODIUM_MAX_SHARE * Math.min(roomW, roomD)) / skirt));
   const w = skirt * grow, d = DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth * grow;
   // 裙楼靠街区里侧（-z），前面留前院；左右居中。
+  // The podium must lie INSIDE the site: a thin block (5 deep) used to get the 17-deep minimum podium anchored
+  // at its back edge, so the podium, canopy and side trees overran it onto the street. When it cannot fit,
+  // the site is the placement-validated skirt itself (checked against real road/sidewalk triangles) with no yard.
+  if (w > roomW + 1e-9 || d > roomD + 1e-9) {
+    const hw = skirt / 2, hd = DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth / 2;
+    return { turn, rect: { u0: -hw, u1: hw, v0: -hd, v1: hd }, grow: 1, podium: { cu: 0, cv: 0, w: skirt, d: hd * 2 }, yardDepth: 0 };
+  }
   const podium = { cu: (rect.u0 + rect.u1) / 2, cv: rect.v0 + d / 2, w, d };
   return { turn, rect, grow, podium, yardDepth: Math.max(0, rect.v1 - (podium.cv + d / 2)) };
 }

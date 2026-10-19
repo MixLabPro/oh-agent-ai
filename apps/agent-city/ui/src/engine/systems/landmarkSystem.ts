@@ -13,6 +13,7 @@ import type { LandmarkHost } from "../models/landmarkContext";
 import { createMaterialFactory } from "../render/landmarkMaterials";
 import type { NightLights } from "../render/types";
 import { DISTRICT_LANDMARK_RENDER_GEOMETRY } from "../models/layoutPlacementGeometry";
+import { groundRoadClearance } from "../surface/roadClearance";
 import { landmarkSite } from "../models/districtLandmarkFootprint";
 import { buildDistrictLandmarkSite } from "../render/landmarks/districtLandmarkSite";
 import { m, REAL } from "../worldScale";
@@ -101,7 +102,7 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
     const h = host.districtLandmarkHeight(spot.districtId);
     // 地基随楼高放大（按会话楼「高楼加宽」的策略），只在地标已预留的整块街区里放大；街区里其余部分做前院（停车场、绿化）。
     const parcels = host.layout.blocks.flatMap((block) => block.parcels);
-    const site = landmarkSite(spot, parcels, h);
+    const site = landmarkSite(spot, parcels, h, (x, z) => groundRoadClearance(host.layout.roadEdges, x, z));
     const grow = site.grow;
     const day = createRenderCanvas(); day.width = 64; day.height = 64;
     const dctx = day.getContext("2d");
