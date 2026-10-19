@@ -509,7 +509,7 @@ mod tests {
         let sc = &out[1]["result"]["structuredContent"];
         assert_eq!(out[1]["result"]["isError"], false);
         assert_eq!(sc["schema_version"], "1");
-        assert_eq!(sc["timezone"], "Asia/Shanghai");
+        assert_eq!(sc["timezone"], agent_vitals_runtime::clock::statistics_timezone_name());
         assert_eq!(sc["authority_state"], "candidate");
         assert_eq!(sc["data"]["facts"], 0);
         // content 文本块与 structuredContent 同源（spec §6.4）。

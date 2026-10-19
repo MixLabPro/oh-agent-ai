@@ -5732,7 +5732,8 @@ mod codex_sql_tests {
             1,
         )
         .unwrap();
-        // 1788393601000 ms = 2026-09-03T00:00:01Z → 北京 2026-09-03T08。
+        // The default statistics timezone follows the host, so assert the fact
+        // appears in an hour bucket without assuming the test runner is in Beijing.
         seed_codex_fact(&db, "c1", 1_788_393_601_000, 800_000);
         drop(db);
 
@@ -5740,9 +5741,10 @@ mod codex_sql_tests {
         assert!(note.is_none(), "库已建且可开 → 无提示");
         assert_eq!(merged["unaccounted"], json!([]));
         assert_eq!(merged["plan"], json!({}));
+        let hours = merged["by_hour_model"].as_object().unwrap();
         assert!(
-            merged["by_hour_model"]["2026-09-03T08"]["gpt-5.6-sol"].is_object(),
-            "北京小时桶应含 seed 的模型：{}",
+            hours.values().any(|hour| hour["gpt-5.6-sol"].is_object()),
+            "statistics-timezone hour bucket should include the seeded model: {}",
             merged["by_hour_model"]
         );
         // 走真实报告路径：total_cost_usd 为正、per_model 有 sol、unaccounted 空、

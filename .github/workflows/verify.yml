@@ -62,6 +62,10 @@ jobs:
   python:
     name: Python 套件
     runs-on: ubuntu-latest
+    env:
+      # Broad compatibility tests use the product's explicit Asia/Shanghai
+      # fixture timezone; focused timezone tests still exercise other zones.
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -78,6 +82,8 @@ jobs:
   rust:
     name: Rust 单元测试
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
     # 没有 Cargo.toml 的分支（比如纯 Python 的 main）整个 job 跳过，
     # 在 checks 页面显示为灰色 Skipped —— 不是绿色 Success。
     needs: probe
@@ -97,6 +103,8 @@ jobs:
   differential:
     name: 双实现差分
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
     needs: probe
     if: needs.probe.outputs.has_cargo == 'yes'
     steps:
@@ -177,6 +185,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+      - name: Set deterministic test timezone
+        run: tzutil /s "China Standard Time"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
