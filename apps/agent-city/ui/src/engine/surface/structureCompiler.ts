@@ -299,7 +299,9 @@ export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"
       const a = points[index - 1];
       const b = points[index];
       const length = Math.hypot(b.x - a.x, b.z - a.z);
-      if (length < 6) continue;
+      // Exit curves contain valid short segments; omitting them opens holes in
+      // both the rendered deck and its shared collision/support geometry.
+      if (length < 1e-3) continue;
       const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
       const mx = (a.x + b.x) / 2;
       const mz = (a.z + b.z) / 2;

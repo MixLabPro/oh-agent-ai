@@ -2,12 +2,13 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 // 原生加载同一生产函数；避免 vm 沙箱把完整规划放慢约八倍。
-const { THREE, createCityPlan, clearsHighways, SegmentIndex, segmentDistance, buildSkeleton, emptyNetwork, buildInfrastructure, buildDistrictExpressways, EXPRESSWAY_DECK_THICKNESS } = await loadCity({
+const { THREE, createCityPlan, clearsHighways, SegmentIndex, segmentDistance, buildSkeleton, emptyNetwork, buildInfrastructure, buildDistrictExpressways, expresswayRun, EXPRESSWAY_DECK_THICKNESS } = await loadCity({
   "pkg:three": ["* as THREE"],
   "engine/cityPlan.ts": ["createCityPlan", "clearsHighways", "SegmentIndex", "segmentDistance"],
   "engine/planner/skeleton.ts": ["buildSkeleton"],
   "engine/planner/network.ts": ["emptyNetwork"],
   "engine/systems/roadSystem.ts": ["buildInfrastructure", "buildDistrictExpressways"],
+  "engine/surface/structureCompiler.ts": ["expresswayRun"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_THICKNESS"],
 });
 class Harness {
@@ -40,10 +41,12 @@ assert(harness.mesh.count > 12, "bridge includes edge lines and dashed center ma
     mesh.getMatrixAt(i, matrix); matrix.decompose(position, rotation, scale);
     if (Math.abs(scale.y - EXPRESSWAY_DECK_THICKNESS) < 1e-5) decks.push(position.clone());
   }
-  assert.equal(decks.length, points.length - 1, "every nonzero segment, including consecutive short exit arcs, has a bridge deck");
-  for (let i = 1; i < points.length; i += 1) {
-    assert.ok(Math.abs(decks[i - 1].x - (points[i - 1].x + points[i].x) / 2) < 1e-5);
-    assert.ok(Math.abs(decks[i - 1].z - (points[i - 1].z + points[i].z) / 2) < 1e-5);
+  const sampled = expresswayRun(short.layout, points).points;
+  assert.ok(sampled.length > points.length, "long ramp segments are resampled");
+  assert.equal(decks.length, sampled.length - 1, "every resampled segment, including consecutive short exit arcs, has a bridge deck");
+  for (let i = 1; i < sampled.length; i += 1) {
+    assert.ok(Math.abs(decks[i - 1].x - (sampled[i - 1].x + sampled[i].x) / 2) < 1e-5);
+    assert.ok(Math.abs(decks[i - 1].z - (sampled[i - 1].z + sampled[i].z) / 2) < 1e-5);
   }
   for (const disposable of short.disposables) disposable.dispose();
 }
