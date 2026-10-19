@@ -118,6 +118,13 @@ if (process.argv.includes("--cities")) {
       const k = full.counts;
       console.log(`Audit planner: ${scene}: manifest ${full.units.length} units (edges ${k["directed-edge"].units}, turns ${k.turn.units}, structures ${k["structure-transition"].units}, spawns ${k["spawn-access"].units}; excluded ${full.exclusions.length}), ran ${report.results.length} cases in ${((Date.now() - t) / 1000).toFixed(0)}s → ${report.summary}.`);
       const bad = report.results.filter((r) => r.verdict !== "passed");
+      // PLANNER_REPORT_DIR：把全部未通过用例（不只前 12 条）写成本地 JSON，供逐条复核；不上传。
+      if (process.env.PLANNER_REPORT_DIR) {
+        const { mkdirSync, writeFileSync } = await import("node:fs");
+        mkdirSync(process.env.PLANNER_REPORT_DIR, { recursive: true });
+        writeFileSync(`${process.env.PLANNER_REPORT_DIR}/${scene.replace("/", "-")}.json`, JSON.stringify({ scene, worldRevision: snap.revision, summary: report.summary,
+          notPassed: bad.map((r) => ({ routeId: r.routeId, kind: full.routes.find((x) => x.id === r.routeId)?.kind, verdict: r.verdict, cause: r.cause, detail: r.detail, witness: r.witness })) }, null, 1));
+      }
       for (const r of bad.slice(0, 12)) console.log(`  ${r.routeId} ${r.verdict}:${r.cause} ${r.detail}`);
       assert.ok(report.results.every((r) => r.verdict !== "blocked" || r.witness), "blocked always carries a witness");
     } finally { lease.release(); }
