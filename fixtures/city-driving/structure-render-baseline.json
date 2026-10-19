@@ -469,5 +469,81 @@
         "buildInfrastructure": "e1c3b3e04cba07414036fef1b8e83952c84234ab075d52261e3e5c9f97660171"
       }
     }
+  },
+  "planRefresh": {
+    "geometryVersion": 10,
+    "reason": "Re-recorded on main 42fb1225 + road-solid clearance (geometry 10). Plans changed at ad697cfa (junction rings, highway interchange planning: 8 → 2 expressway runs in this corpus), which moved cul-de-sacs, channelised junctions, expressways and their supports; on top of that, bridge piers follow the rolled deck, expressway supports are dropped where no road-free station exists, and truss chords set back until they clear ground roads by 1.0. Behavioural checks pass on the same run: every connected span driven end to end, 11/12 approach crossings, 4/4 ramps up and down. Earlier layers retained.",
+    "plans": {
+      "1/1": {
+        "buildInfrastructure": "ee3c50142c547b660f8dc58ae99738d3534358a18b184e9886e58f3c5c6d6982",
+        "buildTrussBridges": "cbbf2663cc5202abe97c1e0e332d52abc896972d05223b3050d1dd39d0dcbf59",
+        "buildCulDeSacBulbs": "1856fc71c3b436ac153f87578d93d7f622f6d8a9546a7d5564a9cd4f4dd596ac",
+        "buildChannelizedJunctions": "169713bf8b730f0f1de21589ab297977fe51fb68dace390013cd82d364a868f5"
+      },
+      "1/2": {
+        "buildInfrastructure": "ee3c50142c547b660f8dc58ae99738d3534358a18b184e9886e58f3c5c6d6982"
+      },
+      "1/3": {
+        "buildInfrastructure": "bb64f30dac3be40e1e505519dfd21143adb16971252c33e3c67b3b12f4bea986"
+      },
+      "7/1": {
+        "buildInfrastructure": "fcd30f5c0b41394c815f0254eaa73d8dfdf83c9dbcd1487411ee7dedaa1b3eff"
+      },
+      "7/2": {
+        "buildInfrastructure": "9f64ace10e3ab635725e37268dd8f9519c4a61432feb305d3e33abca1e6292cf",
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "buildTrussBridges": "4cba8e353bb2930f06ca5a5a14c72d88607865f296157910dd90a81638c6d59d",
+        "buildChannelizedJunctions": "2bf7ae70eb3e07ed14dd578bad46229a46f93309ec8cf000ed0cf1a3d2a8bc75"
+      },
+      "7/3": {
+        "buildInfrastructure": "9e0e18c8ef9965d1887891cda7001eed8e374a0ac625eb68b297731247de7a76",
+        "buildTrussBridges": "bf235dc807557afee5ac7bb6863af723151d7b844afa2b78800b6384f2f39ce2"
+      },
+      "42/1": {
+        "buildInfrastructure": "da472afe4bb1d9eb6717477ad4c29bb853035e42fbaf66b6f8a94e2f8715610e",
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "buildTrussBridges": "dd2a3649e9ab10151efb147df6e1c72af5f5fcfaab387d8a5762d4e7823ee8da",
+        "buildChannelizedJunctions": "cefc2693fe3d18b84e18d39e6a9bc0aead813883da6b2fc0a69b11fdef65bd3c"
+      },
+      "42/2": {
+        "buildInfrastructure": "d1bf5cfc5ddf2b0446ae6d2427d4d088031091aa7c86ef9a99a41c016e5ec972",
+        "buildDistrictExpressways": "8cbc291bb322a28be32998b963071cc73f43d10ddebfb3f810e106ead8f33fae",
+        "buildTrussBridges": "0f04388f80fa23a7c9b715fced2b8f222d1e28a858fc81bcc9a2ee1eac8cfa52",
+        "buildCulDeSacBulbs": "f7985b92475b072a801b58606a7ff3aa3328bf0dee5ee2321255021e0b8a7ea7",
+        "buildChannelizedJunctions": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "42/3": {
+        "buildInfrastructure": "48023b585f2a8554f7f53b8658c008b5eead98d2263a0de86aefe419c0566484",
+        "buildDistrictExpressways": "40d46e70adbdc6ce17b78c76f09ea88cd8b4ebc729dce820f2770bbcf291ebe0",
+        "buildTrussBridges": "ad10864a3d3f5b36b138a2e932e82e2ecbe94fb1d665fbedad53f3c75fcb073e"
+      },
+      "2026/1": {
+        "buildInfrastructure": "58a70dd95296ca2b33e4ecd15490100f905162164614584267a24156e09ff205",
+        "buildTrussBridges": "dc8b5ee3e9b87570c331299488c22c640a9ff9ce7c6ec3fe28c542798192d67d",
+        "buildChannelizedJunctions": "51cf0b1281f735258f7faa6ecf94e5a510540b094a77c516c4f1b6368e57cf47"
+      },
+      "2026/2": {
+        "buildInfrastructure": "7fb4feb7b9899aefd8c99f846f6267b4f3685d9d3b14efa7b7b9c7ad0bdedddb"
+      },
+      "2026/3": {
+        "buildInfrastructure": "080e9cf2b4670b47bcbee5350d5567e0d1ada57631a670bff64c316b58236c46",
+        "buildChannelizedJunctions": "506385c62fbe25344814976c39913946976f45f243cdc1ab2199bc5e5c12daee"
+      },
+      "65537/1": {
+        "buildInfrastructure": "13b7ce28b4639aff1d2fa7d4b44fd49607e80b7f8d686b95ff2da85187e734b2",
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "buildCulDeSacBulbs": "e4984ee7d2070129e88f32b0b1fe59d63d99c247579964fa2ba00cc644a8c792",
+        "buildChannelizedJunctions": "97247eadd05c90ae38a0bbbaa5273e22e785779e9a9e4fbb64b714165a3a8eab"
+      },
+      "65537/2": {
+        "buildInfrastructure": "6858e234a28ff007e835f5389cab6767be9e3abfab83ab3046596357a1ca3eed",
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "65537/3": {
+        "buildInfrastructure": "c1514f5e06e646bb9b4db6a72eb8015250fba4403754f914dcd4c8bf6da925fd",
+        "buildDistrictExpressways": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "buildCulDeSacBulbs": "b29359e3070ac8e252ef5feb9bd8fa7d53f13c5da9ea270fc764f58681e8b29a"
+      }
+    }
   }
 }
