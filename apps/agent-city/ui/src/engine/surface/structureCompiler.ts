@@ -96,9 +96,48 @@ export function bridgeDeckProfile(layout: BridgeLayoutInput, from: Vec2, to: Vec
 export function bridgeDeckParts(edge: RoadEdge, layout: BridgeLayoutInput): BoxPart[] {
   const [a,b]=edge.points,profile=bridgeDeckProfile(layout,a,b,edge.width);
   const change=Math.abs(profile.leanTo-profile.leanFrom)*edge.width;
-  const parts: BoxPart[] = change<=0.08 ? bridgeDeckSectionParts(edge,layout,profile) : bridgeDeckSplitParts(edge,layout,profile);
+  const parts: BoxPart[] = trimLandedRailings(edge, layout, change<=0.08 ? bridgeDeckSectionParts(edge,layout,profile) : bridgeDeckSplitParts(edge,layout,profile));
   appendDeadEndBarriers(edge, layout, parts, profile);
   return parts;
+}
+
+/** Railing centreline must stay this far outside every ground carriageway (railings are 0.3 wide). */
+export const RAILING_ROAD_CLEARANCE = 0.2;
+/** 落地端护栏退让（2026-10-19）：护栏铺满整个桥面（还随桥面板外伸 0.25），而桥头节点上的地面路从桥端直接分出——
+ * 0/7 的 115.26:-210.98/409.02:-210.98 桥头有一条 12 宽、96.5° 折返的引道，它的车道盖住了 +z 侧护栏最后约 6，
+ * 出生路线在这里转弯时车身扫上护栏（continuous-collision:prefix:solid）。占路诊断按角色跳过 bridge-railing，
+ * 所以一直没报。现按与道路编译器相同的地面路面（渲染边 + 路口扇面，groundRoadClearance）逐侧从落地端向内
+ * 0.5 一步退，直到护栏线离路面 ≥ RAILING_ROAD_CLEARANCE，最多退到 1/3 跨。只看落地端：桥下穿过的地面路
+ * 在 XZ 上也「相交」，不能因此剪掉跨中护栏。 */
+function trimLandedRailings(edge: RoadEdge, layout: BridgeLayoutInput, parts: BoxPart[]): BoxPart[] {
+  const [a, b] = edge.points;
+  const len = Math.hypot(b.x - a.x, b.z - a.z);
+  if (!(len > 0) || !Array.isArray(layout.roadEdges)) return parts;
+  const ux = (b.x - a.x) / len, uz = (b.z - a.z) / len, nx = -uz, nz = ux;
+  const lateral = edge.width / 2 - 0.15;
+  const clear = (s: number, side: number) => groundRoadClearance(layout.roadEdges, a.x + ux * s + nx * side * lateral, a.z + uz * s + nz * side * lateral) >= RAILING_ROAD_CLEARANCE;
+  const setback = (fromA: boolean, side: number) => {
+    if (!landsOnRoad(layout, fromA ? a : b)) return 0;
+    let sb = 0; while (sb < len / 3 && !clear(fromA ? sb : len - sb, side)) sb += 0.5;
+    return Math.min(sb, len / 3);
+  };
+  const range = new Map([-1, 1].map((side) => [side, [setback(true, side), len - setback(false, side)]] as const));
+  const out: BoxPart[] = [];
+  for (const p of parts) {
+    if (p.role !== "bridge-railing") { out.push(p); continue; }
+    const e0 = boxPoint(p, -0.5, 0, 0), e1 = boxPoint(p, 0.5, 0, 0);
+    const s0 = (e0.x - a.x) * ux + (e0.z - a.z) * uz, s1 = (e1.x - a.x) * ux + (e1.z - a.z) * uz;
+    const side = ((p.x - a.x) * nx + (p.z - a.z) * nz) >= 0 ? 1 : -1;
+    const [lo, hi] = range.get(side)!;
+    if (Math.min(s0, s1) >= lo && Math.max(s0, s1) <= hi) { out.push(p); continue; }
+    // Local fraction along the part's own axis for an along-span distance (e0 ↔ −0.5, e1 ↔ +0.5).
+    const frac = (s: number) => -0.5 + (s - s0) / (s1 - s0);
+    const f0 = Math.max(-0.5, Math.min(frac(lo), frac(hi))), f1 = Math.min(0.5, Math.max(frac(lo), frac(hi)));
+    if ((f1 - f0) * p.sx < 0.3) continue;
+    const c = boxPoint(p, (f0 + f1) / 2, 0, 0);
+    out.push(part(c.x, c.y, c.z, p.sx * (f1 - f0), p.sy, p.sz, p.color, p.role, p.ry, p.rz, p.order, p.rx));
+  }
+  return out;
 }
 
 /** A rigid slab cannot meet opposite bank leans. Short overlapping slabs

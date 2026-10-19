@@ -114,7 +114,9 @@ if (process.argv.includes("--cities")) {
       const full = kit.planRoadAudit({ worldRevision: snap.revision, roadEdges: lease.source.layout.roadEdges, landings: snap.landings });
       const plan = full; const stride = limit ? Math.ceil(full.routes.length / limit) : 1;
       const t = Date.now();
-      const report = kit.executeAuditPlan(world, plan, keyFor, { only: (r) => full.routes.indexOf(r) % stride === 0 });
+      // PLANNER_KINDS=spawn-access,turn：只跑这几类单元（诊断用；分母照旧是完整清单）。
+      const kinds = process.env.PLANNER_KINDS ? new Set(process.env.PLANNER_KINDS.split(",")) : null;
+      const report = kit.executeAuditPlan(world, plan, keyFor, { only: (r) => full.routes.indexOf(r) % stride === 0 && (!kinds || kinds.has(r.kind)) });
       const k = full.counts;
       console.log(`Audit planner: ${scene}: manifest ${full.units.length} units (edges ${k["directed-edge"].units}, turns ${k.turn.units}, structures ${k["structure-transition"].units}, spawns ${k["spawn-access"].units}; excluded ${full.exclusions.length}), ran ${report.results.length} cases in ${((Date.now() - t) / 1000).toFixed(0)}s → ${report.summary}.`);
       const bad = report.results.filter((r) => r.verdict !== "passed");

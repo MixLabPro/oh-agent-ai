@@ -1,6 +1,6 @@
 {
  "380/day": {
-  "all": "5c410723fd36e7c2",
+  "all": "aee0b04ed4754f34",
   "sections": {
    "city-beach": "1:1a3fbe0c3ae6",
    "city-beach-furniture": "3:aabd8546bcee",
@@ -17,7 +17,7 @@
    "city-garden-rocks": "1:9667859a89c6",
    "city-garden-roofs": "1:c621c94e711f",
    "city-garden-trees": "1:ad0a024d2e13",
-   "city-infrastructure-decorative": "1:01e0c93b6e63",
+   "city-infrastructure-decorative": "1:0e07c5adb6cc",
    "city-junction-island-bed": "1:a5b44c309034",
    "city-junction-island-curb": "1:f7393f9885b6",
    "city-junction-island-lawn": "1:ee4c47dd70ea",
@@ -29,7 +29,7 @@
    "city-landmark-islet-mansion": "523:ddd68cb90e01",
    "city-landmark-lighthouse": "40:43b3233866e8",
    "city-landmark-sail-opera": "26:708a25ac37e6",
-   "city-landmark-suspension-bridge": "78:9b94646ed6fe",
+   "city-landmark-suspension-bridge": "92:4485b500a993",
    "city-landmark-truss-bridge": "1:36b7a8bf8d33",
    "city-landmark-tv-tower": "12:4a9d109f2d61",
    "city-landmark-twisting-deco-tower": "1:75adc907ce5a",
@@ -68,7 +68,7 @@
   }
  },
  "380/night": {
-  "all": "d50714aea84880bc",
+  "all": "e6c3bb2a6f1b0314",
   "sections": {
    "city-beach": "1:1a3fbe0c3ae6",
    "city-beach-furniture": "3:aabd8546bcee",
@@ -85,7 +85,7 @@
    "city-garden-rocks": "1:9667859a89c6",
    "city-garden-roofs": "1:c621c94e711f",
    "city-garden-trees": "1:ad0a024d2e13",
-   "city-infrastructure-decorative": "1:01e0c93b6e63",
+   "city-infrastructure-decorative": "1:0e07c5adb6cc",
    "city-junction-island-bed": "1:a5b44c309034",
    "city-junction-island-curb": "1:f7393f9885b6",
    "city-junction-island-lawn": "1:ee4c47dd70ea",
@@ -97,7 +97,7 @@
    "city-landmark-islet-mansion": "523:ddd68cb90e01",
    "city-landmark-lighthouse": "40:43b3233866e8",
    "city-landmark-sail-opera": "26:708a25ac37e6",
-   "city-landmark-suspension-bridge": "78:ec9da230b226",
+   "city-landmark-suspension-bridge": "92:ed1ff64f6537",
    "city-landmark-truss-bridge": "1:36b7a8bf8d33",
    "city-landmark-tv-tower": "12:4a9d109f2d61",
    "city-landmark-twisting-deco-tower": "1:3cb8122eb3bb",
@@ -136,7 +136,7 @@
   }
  },
  "1600/day": {
-  "all": "f21efe3d62ac42a4",
+  "all": "60f2aa69e6246959",
   "sections": {
    "city-beach": "1:246abc292867",
    "city-beach-furniture": "3:0ea665d894cd",
@@ -155,7 +155,7 @@
    "city-garden-roofs": "1:131db3edc18b",
    "city-garden-trees": "1:cc2bcd2d3ca7",
    "city-highway-ramps": "1:0de858d31cdf",
-   "city-infrastructure-decorative": "1:abfe2a81d36b",
+   "city-infrastructure-decorative": "1:f74994c361b2",
    "city-junction-island-bed": "1:c76d668938a2",
    "city-junction-island-curb": "1:173501941d12",
    "city-junction-island-lawn": "1:3298aaf65ed8",
@@ -168,7 +168,7 @@
    "city-landmark-islet-mansion": "1496:579efa80cdce",
    "city-landmark-lighthouse": "40:f552442c2dd0",
    "city-landmark-sail-opera": "26:015917506cee",
-   "city-landmark-suspension-bridge": "26:77093c9366f4",
+   "city-landmark-suspension-bridge": "40:63663419104b",
    "city-landmark-truss-bridge": "1:2667d699c047",
    "city-landmark-tv-tower": "12:7ff1cd52e5f9",
    "city-landmark-twisting-deco-tower": "1:45de99af4ca3",
@@ -207,7 +207,7 @@
   }
  },
  "1600/night": {
-  "all": "0f3a0a47eb01e238",
+  "all": "dd3c26c1a7277f4f",
   "sections": {
    "city-beach": "1:246abc292867",
    "city-beach-furniture": "3:0ea665d894cd",
@@ -226,7 +226,7 @@
    "city-garden-roofs": "1:131db3edc18b",
    "city-garden-trees": "1:cc2bcd2d3ca7",
    "city-highway-ramps": "1:0de858d31cdf",
-   "city-infrastructure-decorative": "1:abfe2a81d36b",
+   "city-infrastructure-decorative": "1:f74994c361b2",
    "city-junction-island-bed": "1:c76d668938a2",
    "city-junction-island-curb": "1:173501941d12",
    "city-junction-island-lawn": "1:3298aaf65ed8",
@@ -239,7 +239,7 @@
    "city-landmark-islet-mansion": "1496:579efa80cdce",
    "city-landmark-lighthouse": "40:f552442c2dd0",
    "city-landmark-sail-opera": "26:015917506cee",
-   "city-landmark-suspension-bridge": "26:53e3cf2e706b",
+   "city-landmark-suspension-bridge": "40:4fc0f71067c8",
    "city-landmark-truss-bridge": "1:2667d699c047",
    "city-landmark-tv-tower": "12:7ff1cd52e5f9",
    "city-landmark-twisting-deco-tower": "1:80e5c7b5a3a4",
