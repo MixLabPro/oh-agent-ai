@@ -1294,7 +1294,7 @@ impl SessionAgg {
 /// 导致订阅声明一生效，会话列表与峰值小时下钻整段空掉（mcp_smoke Q04：峰值小时
 /// 13.8M tokens、构成会话 0 个，2026-09-17）。钱归谁由 `session_billing_buckets`
 /// 的 billing_mode 表达，不靠隐藏会话。
-const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, harness,
+const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, harness,
             MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
             SUM(uncached_input_tokens), SUM(cache_read_tokens),
             SUM(cache_write_tokens), SUM(output_tokens),
@@ -1311,7 +1311,7 @@ const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, harness,
        AND (?4 < 0 OR (CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', printf('%+d hours', (?5 / ?6))) AS INTEGER) = ?4))
        AND (?7 IS NULL OR COALESCE(model_id, '<unknown>') = ?7)
        AND (?8 IS NULL OR COALESCE(provider_id, '<unknown>') = ?8)
-       GROUP BY session_key");
+       GROUP BY session_key";
 
 /// 窗口内的会话聚合，跨 wired 执行环境合并。`hour` = 北京小时过滤（`None` = 不过滤）；
 /// `min_tokens` = HAVING 门槛；按 `total` 降序 + `session_key` 升序稳定排序，
