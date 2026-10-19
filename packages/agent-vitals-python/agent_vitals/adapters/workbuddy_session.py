@@ -29,6 +29,8 @@ import time
 
 from pathlib import Path
 
+from ..paths import user_home
+
 # epoch 秒（2000-01-01 起）的合法性下界。spec §6.2 rule 3 的窗口 =
 # [2000-01-01T00:00:00Z, now+24h]。
 _WB_TS_MIN_SECS = 946684800
@@ -39,7 +41,7 @@ def workbuddy_root(home=None):
     fixture root，根就是 `<root>/.workbuddy/`）。Rust 由 main.rs 解析
     `HOME`/`USERPROFILE` 传入同一路径。"""
     if home is None:
-        home = Path.home()
+        home = user_home()
     return Path(home) / ".workbuddy"
 
 

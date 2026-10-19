@@ -2869,7 +2869,9 @@ class TestPeakSlotWeekday(unittest.TestCase):
         for year in (1969, 1960, 1900):
             dt = datetime.datetime(year, 3, 1)
             ms = int((dt - datetime.datetime(1970, 1, 1)).total_seconds()) * 1000 - BJ * 1000
-            ref = datetime.datetime.utcfromtimestamp(ms / 1000 + BJ).weekday()
+            ref = (datetime.datetime(1970, 1, 1) + datetime.timedelta(
+                milliseconds=ms + BJ * 1000
+            )).weekday()
             self.assertEqual(_beijing_weekday(ms), ref, "%d 年算错" % year)
 
 
@@ -3185,8 +3187,8 @@ class TestCodexSessionRoots(unittest.TestCase):
             arch = home / ".codex" / "archived_sessions"
             live.mkdir(parents=True)
             arch.mkdir(parents=True)
-            (live / "rollout-a.jsonl").write_text("{}\n", encoding="utf-8")
-            (live / "rollout-b.jsonl").write_text("{}\n", encoding="utf-8")
+            (live / "rollout-a.jsonl").write_bytes(b"{}\n")
+            (live / "rollout-b.jsonl").write_bytes(b"{}\n")
             (arch / "rollout-c.jsonl").write_text("abc", encoding="utf-8")
 
             report = codex_session_roots_report(home=home)
@@ -3212,7 +3214,7 @@ class TestCodexSessionRoots(unittest.TestCase):
             home = Path(tmp)
             live = home / ".codex" / "sessions"
             live.mkdir(parents=True)
-            (live / "rollout-a.jsonl").write_text("{}\n", encoding="utf-8")
+            (live / "rollout-a.jsonl").write_bytes(b"{}\n")
 
             report = codex_session_roots_report(home=home)
             self.assertEqual(report["roots"][0]["exists"], True)

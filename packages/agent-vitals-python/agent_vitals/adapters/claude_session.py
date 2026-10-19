@@ -23,6 +23,8 @@ import json
 
 from pathlib import Path
 
+from ..paths import user_home
+
 
 def _lines(text):
     """Rust `str::lines()` 语义的镜像：`\\n` 与 `\\r\\n` 是行终结符、孤立 `\\r`
@@ -84,7 +86,7 @@ def claude_project_files(home=None):
     报错）。`home` 默认 `Path.home()`（尊重 `HOME`，测试用 `isolated_home_env`
     注入）。Rust 由 main.rs 解析 `HOME`/`USERPROFILE` 传入同一路径。"""
     if home is None:
-        home = Path.home()
+        home = user_home()
     home = Path(home)
     root = home / ".claude" / "projects"
     files = []
@@ -170,7 +172,7 @@ def claude_session_roots_report(home=None):
     file_count → total_bytes）。键序是字节一致的一部分，不能重排。
     mirror `claude_session.rs::claude_session_roots_report`。"""
     if home is None:
-        home = Path.home()
+        home = user_home()
     home = Path(home)
     root = home / ".claude" / "projects"
     exists = root.is_dir()

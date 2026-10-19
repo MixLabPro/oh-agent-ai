@@ -39,6 +39,8 @@ import math
 
 from pathlib import Path
 
+from ..paths import user_home
+
 from agent_vitals.adapters import workbuddy_session, workbuddy_traces
 from agent_vitals.agent import canonical_audit, harness_capability, workbuddy_evidence
 
@@ -79,7 +81,7 @@ def workbuddy_session_list(home=None):
     独苗会话（db 无行）不进列表（列表是索引不是账本；单会话深挖仍可按 id 审）。
     `home` 默认 `Path.home()`——尊重 `HOME`（测试用 isolated_home_env 注入）。"""
     if home is None:
-        home = Path.home()
+        home = user_home()
     root = workbuddy_session.workbuddy_root(home)
     db_sessions, db_usage = workbuddy_session.read_workbuddy_db(root)
     sessions = []

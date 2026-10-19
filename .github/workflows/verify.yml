@@ -183,6 +183,7 @@ jobs:
       # Python 3.9 on Windows otherwise decodes subprocess output with the
       # active ANSI code page, while the CLI deliberately emits UTF-8.
       PYTHONUTF8: "1"
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
       - name: Set deterministic test timezone
@@ -191,7 +192,7 @@ jobs:
         with:
           python-version: "3.9"
       - name: Install optional test dependencies
-        run: pip install hypothesis zstandard
+        run: pip install hypothesis zstandard tzdata
       - name: 全套测试
         run: python -m unittest discover tests -v
       - name: golden 比对（Windows）

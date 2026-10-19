@@ -17,6 +17,10 @@ def _directory(path):
 
 
 def _sync(path):
+    if os.name == 'nt' and path.is_dir():
+        # Windows cannot open directory handles with os.open; files are still
+        # fsynced before immutable publication.
+        return
     fd = os.open(str(path), os.O_RDONLY)
     try:
         os.fsync(fd)

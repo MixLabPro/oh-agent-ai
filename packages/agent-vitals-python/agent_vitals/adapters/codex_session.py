@@ -31,6 +31,7 @@ corruption"）。解析器只负责「把 JSONL 逐行读进来 + 抽出 provena
 import json
 from pathlib import Path
 
+from ..paths import user_home
 from ..util import split_lines
 
 
@@ -191,7 +192,7 @@ def codex_session_roots_report(home=None):
     file_count → total_bytes；外层 harness → roots。
     """
     if home is None:
-        home = Path.home()
+        home = user_home()
     home = Path(home)
     roots = []
     for kind, rel in CODEX_SESSION_ROOTS:
@@ -224,7 +225,7 @@ def codex_rollout_files(home=None):
     绝不报错）。`home` 默认 `Path.home()`（尊重 `HOME`，测试用 `isolated_home_env`
     注入）。"""
     if home is None:
-        home = Path.home()
+        home = user_home()
     home = Path(home)
     files = []
     for _kind, rel in CODEX_SESSION_ROOTS:
@@ -278,7 +279,7 @@ def read_session_index(home=None):
     `HOME`/`USERPROFILE` 传入同一路径。
     """
     if home is None:
-        home = Path.home()
+        home = user_home()
     home = Path(home)
     path = home / ".codex" / "session_index.jsonl"
     try:
