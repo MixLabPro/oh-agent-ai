@@ -8,7 +8,7 @@ Product overview: [repository README](../../README.md). Public website: <https:/
 
 “Your agents built it. Now explore it.” The City is an explorable visualization of supported local Agent history, with usage/cost/session analysis as a complementary desktop view. It is not a productivity score or a promise of automatic cost savings.
 
-The production City source includes free-flight practice and ring challenges; driving implementation and validation are ongoing. **This landing's `presentation=landing` currently hides the game entry points.** Do not advertise the web demo as playable flying/driving until its entry controls, input help, pause/exit, fixture permissions and browser acceptance are implemented and checked. Free exploration is the current marketing description; a complete open-world game is not a release guarantee.
+The production City source includes free-flight practice, ring challenges, free driving, and a jet-roadster VTOL mode. Landing copy distinguishes those implemented desktop modes from the browser-only building exploration and activity replay. Road validation and public desktop release checks are still ongoing. **This landing's `presentation=landing` currently hides the game entry points.** Do not advertise the web demo as playable flying/driving until its entry controls, input help, pause/exit, fixture permissions and browser acceptance are implemented and checked. Free exploration is the current marketing description; a complete open-world game is not a release guarantee.
 
 ## Preview
 
@@ -18,13 +18,13 @@ From this directory:
 python3 -m http.server 5180 --bind 127.0.0.1
 ```
 
-Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. The page is a static site; the interactive City requires HTTP serving. Opening `index.html` as a local file still offers product images and text, but cannot start the embedded application.
+Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. The page is a static site; the interactive City requires HTTP serving. Opening `index.html` as a local file still offers product images and text. It now explicitly explains that the interactive City needs HTTP, disables its launch button, and avoids a failed iframe fetch or startup timeout.
 
 ## Page and data
 
-Hero with the production City frontend → data mapping → usage/cost/session illustrations → local privacy → FAQ → release status.
+Hero with the production City frontend → three desktop exploration modes (plane, driving, jet roadster) → data mapping → usage/cost/session illustrations → local privacy → FAQ → platform release status and public source links.
 
-- The hero embeds the frontend built from `apps/agent-city/ui`. New fallback/building images and the share preview are captured from this frontend running mock sessions; no personal records are involved. Provenance is in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
+- The hero embeds the frontend built from `apps/agent-city/ui`. Static fallback/building images use existing English product captures with synthetic sessions; their sample counts are separate from the interactive fixture. The share preview is also a mock-data capture. No personal records are involved. Provenance is in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
 - The visible desktop/tablet hero (over 600 CSS px) starts the real City frontend automatically, unless reduced motion or data saving is requested. Narrow phone views retain explicit entry. `city-host.js` serves deterministic synthetic `city:v2` projections through the production SDK's instance-scoped, same-origin message transport. Default 30 days contains 2000 mock sessions; 7 days contains 469. The frontend render cap is 4000, so this dataset does not trigger overflow aggregation; this does not change the native data projection's 500-session cap. No local authority, harness logs, generic IPC or SQL access is available.
 - First usable toolbar publication confirms renderer readiness. A failed startup, unavailable renderer, missing build or 20-second startup timeout leaves the product preview and an explicit retry. Clicking Close removes the iframe. Hidden/offscreen views receive suspend messages.
 - City settings enable keyboard session selection. The sample can show its bounded session fields; host full-session navigation is disabled for fixtures. The production component's `presentation=landing` mode hides game, export and seed controls, and avoids audio warmup. Synthetic seed state stays in memory. No native package install, raw-log access or file-save command is offered by this host.
@@ -51,7 +51,7 @@ The builder replaces the generated `city3d/` directory from the current producti
 node tools/verify-landing.mjs
 ```
 
-Checks cover actual translation keys, local assets, anchor targets, truthful sample/cost labels, script syntax, and a simulated host exercising the v2 contract, deterministic windows, origin/method rejection, readiness, timeout, stale responses, retry and teardown. This command is a local implementation check, **not** permission to publish and not a substitute for browser interaction or public-download verification.
+Checks cover actual translation keys, local assets and deployment staging, anchor targets, truthful sample/cost/release labels, three-way exploration selection, file-preview handling, script syntax, and a simulated host exercising the v2 contract, deterministic windows, origin/method rejection, readiness, timeout, stale responses, retry and teardown. This command is a local implementation check, **not** permission to publish and not a substitute for browser interaction or public-download verification.
 
 The former `--allow-missing-shots` workflow belongs to the previous diagnostics-first design. Current evidence and pending work are tracked in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
 
@@ -62,3 +62,7 @@ Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository
 The repository `https://github.com/MixLabPro/oh-agent-ai` was verified public on 2026-10-19 and the FAQ links to it in both locales. The GitHub Releases page is empty, so desktop downloads remain unavailable. Before changing that release state, verify downloadable assets, supported architectures and system requirements, signing and notarization; then update both locales and the verifier's release-state assertion. Domain availability does not mean the desktop release is ready.
 
 Canonical and social metadata point to `https://ohagent.ai/`. The domain was accessed successfully during the 2026-10-16 browser review. Cloudflare Pages project: `oh-agent-landing`; production alias: `oh-agent-landing.pages.dev`. Review deployment changes separately from local preview work; this README update does not deploy anything.
+
+## 2026-10-19 content update
+
+The jet roadster is the default conceptual exploration preview. Its copy matches the implemented hold-to-climb/release-to-descend behavior; ground driving and plane play have separate descriptions. Routes remain labeled as illustrations, not gameplay capture. The release section now provides verified repository/Release-page links and explicitly pending macOS, Windows and Linux installer states. There are no installer asset links. `deploy.sh` now includes `exploration.css`, which was referenced by the page but previously omitted from staging. See [brand-spec.md](brand-spec.md) for the preserved visual system and update boundaries.

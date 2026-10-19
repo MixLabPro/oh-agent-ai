@@ -154,6 +154,12 @@
       stop.disabled = false;
     }).catch(() => { if (generation === attempt) fail(); });
   }
+  if (location.protocol === 'file:') {
+    state('local-file', t('city.localFile'));
+    launch.textContent = t('city.localFile.button');
+    launch.disabled = true;
+    return;
+  }
   launch.addEventListener('click', mount);
   window.addEventListener('av:explore-city', mount);
   window.addEventListener('message', onMessage);

@@ -14,7 +14,7 @@ node tools/verify-landing.mjs
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
-cp index.html styles.css app.js i18n.js city-host.js robots.txt sitemap.xml 404.html "$STAGE"/
+cp index.html styles.css exploration.css app.js i18n.js city-host.js robots.txt sitemap.xml 404.html "$STAGE"/
 rsync -a --exclude=".DS_Store" --exclude="shots/" assets/ "$STAGE"/assets/
 rsync -a --exclude=".DS_Store" city3d/ "$STAGE"/city3d/
 

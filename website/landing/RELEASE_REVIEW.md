@@ -37,6 +37,14 @@ The user confirmed **Oh Agent** as the product name. This revision supersedes th
 - Browser verification: Chinese automatic startup reached ready and showed 360 sessions. Keyboard selection opened a real mock building showing 1,029,413 tokens and 81 events. English branding and the 7-day window (84 sessions) were checked. Both languages passed the final narrow-view check at the browser's reported 400 CSS px width, with no document overflow; no iframe existed before entry. Manual entry reached ready with 360 sessions, and Close removed the iframe. Local host regression verifies 84/360 sessions, automatic desktop start, explicit reduced-motion entry and the existing origin/request/lifecycle boundaries.
 - `npm --prefix apps/agent-city/ui run typecheck`, production City build, `node website/landing/tools/verify-landing.mjs`, and whitespace checks passed for this revision. Final responsive screenshots are under `docs/assets/oh-agent-2026-10-16/`.
 
+## Screenshot language correction (2026-10-19)
+
+- The English landing previously referenced `city-preview-live.jpg` and `city-building-live.jpg`, which showed Chinese text baked into the screenshots. The static fallbacks now use the existing English product captures `assets/city-workspace.jpg` and `assets/city-building.jpg`.
+- Both captures use synthetic demonstration data. The 374-session workspace and 42-event building detail are historical samples, not the interactive landing fixture's counts.
+- The interactive City itself remains bilingual and follows the page language; only its no-JavaScript/loading poster and the explanatory building screenshot are fixed English captures.
+- Acceptance requested on 2026-10-19: the landing verifier, shell syntax and whitespace checks passed after the image-reference update. Browser observation of the existing `file://` tab was explicitly denied by the browser security policy. Browser layout and live interaction acceptance remain pending; no push is justified by these automated checks alone.
+- Manual acceptance completed by the user on 2026-10-19: after refreshing the local page and checking the English screenshots, exploration selector and layout, the user reported “页面显示和交互正常”. This closes the visual/interaction check through user observation; no agent-controlled browser acceptance is claimed.
+
 Repository/deployment paths remain compatible with the existing project. This landing rename does not change native application identifiers, register a domain or publish the site. The public download blocker and remaining launch checks below still apply.
 
 ## Historical initial preview review
@@ -105,3 +113,14 @@ Stored under `docs/assets/landing-city-first-2026-10-16/`:
 - [ ] Test actual WebGL-disabled/context-loss and reduced-motion environments. Host-level renderer failure is covered by simulation; CSS reduced-motion rules and static-first behavior are implemented, not a full browser emulation check.
 - [ ] Add release-matched analysis screenshots if the illustration cards are replaced with product proof. Validate exports before adding the optional photo/film showcase.
 - [ ] Publish only after the release and deployment checks above. This refactor did not deploy or upload anything.
+
+
+## 2026-10-19 — Public source, jet roadster and release-state update
+
+- Preserved the Oh Agent identity, dark-green/mint palette, real mock-data City imagery, existing section anchors, same-origin assets, privacy and cost-basis disclosures.
+- Split desktop exploration into plane, ground driving and jet-roadster VTOL previews. The default is the jet roadster. Corrected the previous ambiguous Space-toggle description to hold-to-climb/release-to-descend, matching `vtolDriving.ts`. The scene remains labeled as conceptual routes over a real mock-data City capture, not recorded gameplay. Desktop gameplay is not enabled in the web host.
+- Replaced the stale promise to provide source links later with public GitHub source and Release-page links. The GitHub Releases list was checked on 2026-10-19 and remained empty. Platform statuses describe Apple Silicon local testing and Windows/Linux build validation without advertising installers or final support.
+- A local-file preview now explains why the interactive City cannot start and makes no unsupported iframe request. HTTP-hosted City behavior, origin/method boundaries and fixtures are unchanged.
+- Fixed a deployment defect: `exploration.css` was loaded by `index.html` but omitted by `deploy.sh`. The landing verifier now checks that all active top-level scripts and stylesheets are included in staging.
+- Validation: `node website/landing/tools/verify-landing.mjs`, `bash -n website/landing/deploy.sh`, and `git diff --check` passed. Existing synthetic host checks and English/Chinese checks pass, including all three selector states and the file-preview state. Responsive CSS uses three columns on desktop and stacked selectors/platform rows on narrow screens.
+- Browser observation of the user's `file://` tab was blocked by browser URL policy; no new rendered/browser acceptance is claimed. The earlier 2026-10-16 screenshots above remain historical evidence. This update has not deployed the site or published a desktop release.

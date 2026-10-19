@@ -16,14 +16,21 @@ assert.match(explorationCss, /prefers-reduced-motion/);
 assert.match(html, /id="play"/);
 assert.match(html, /DRIVING · FREE DRIVE AVAILABLE IN DESKTOP CITY/);
 assert.match(html, /not recorded gameplay/);
-assert.match(html, /Flight and driving are available in desktop City/);
-assert.match(html, /retro open-top car with jet boost/);
+assert.match(html, /Flight, driving, and jet-roadster modes are implemented in desktop City/);
+assert.match(html, /A retro open-top car with jet boost/);
+assert.match(html, /hold Space to climb and release to descend/);
+assert.match(html, /data-exploration-panel="vtol"/);
 assert.match(read('i18n.js'), /桌面版已开放自由驾驶/);
 assert.match(html, /MixLabPro\/oh-agent-ai/, 'The source FAQ must name the relocated repository');
 assert.match(html, /public source repository is/);
 assert.match(html, /desktop installer is not published yet/);
 assert.match(read('i18n.js'), /'faq\.8\.before': '项目代码采用 MIT 许可。公开源码仓库位于 '/, 'The Chinese FAQ must link to the public repository');
 const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1].split('?')[0]);
+const stylesheets = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g)].map((m) => m[1].split('?')[0]);
+const stagedFiles = read('deploy.sh').match(/^cp (.+) "\$STAGE"\/$/m)?.[1].split(/\s+/) || [];
+for (const asset of [...scripts, ...stylesheets]) {
+  assert.ok(stagedFiles.includes(asset), `Deployment omits active asset: ${asset}`);
+}
 for (const name of scripts) {
   assert.ok(!/^https?:/.test(name), 'Scripts must be same-origin');
   new vm.Script(read(name), { filename: name });
@@ -40,15 +47,22 @@ assert.match(html, /<span>Oh Agent<small/);
 assert.doesNotMatch(html, /Agent Vitals/);
 assert.doesNotMatch(read('i18n.js'), /Agent Vitals/);
 assert.match(html, /An estimate, not a bill/);
-assert.match(html, /Public download is being prepared/);
+assert.match(html, /Open source\. Desktop release in preparation/);
+assert.match(html, /No desktop installer is published yet/);
+assert.match(html, /Signing and clean-machine desktop checks are pending/);
+assert.doesNotMatch(html, /Download and source links will appear/);
 assert.match(html, /A private Mac app for your Claude Code and Codex history/);
 assert.match(html, /data-i18n="nav.download">Release status/);
-assert.match(html, /Mac app is not available to download here yet/);
+assert.match(html, /The source is public and MIT licensed/);
 assert.match(css, /city-window:not\(\[data-city-state="ready"\]\):not\(\[data-city-state="updating"\]\) \.city-actions/);
 assert.ok(html.indexOf('id="city"') < html.indexOf('id="insights"'));
 assert.ok(!html.includes('data-ascii'), 'No obsolete primary animation dependency');
 const publicLinks = [...html.matchAll(/<a[^>]+href="(https?:[^"]+)"/g)].map((match) => match[1]);
-assert.deepEqual(publicLinks, ['https://github.com/MixLabPro/oh-agent-ai'], 'Only the verified public source link may leave the landing page');
+const allowedLinks = new Set(['https://github.com/MixLabPro/oh-agent-ai', 'https://github.com/MixLabPro/oh-agent-ai/releases']);
+assert.ok(publicLinks.length >= 2);
+for (const link of publicLinks) assert.ok(allowedLinks.has(link), `Unverified public link: ${link}`);
+assert.ok(publicLinks.includes('https://github.com/MixLabPro/oh-agent-ai/releases'));
+assert.doesNotMatch(html, /href="[^"]*\.(?:dmg|exe|deb|AppImage|zip)"/, 'No installer link until assets are published');
 for (const [, anchor] of html.matchAll(/href="#([\w-]+)"/g)) assert.ok(html.includes(`id="${anchor}"`), `Missing anchor ${anchor}`);
 assert.doesNotMatch(html, /health score|framework-agnostic|burning money|saves you/i);
 
@@ -76,10 +90,10 @@ translated('en');
 translated('zh');
 // The promotional selector changes only the illustrated preview, never game state.
 {
-  const world = { dataset: { exploration: 'flight' } };
-  const buttons = ['flight', 'drive'].map((mode) => ({ dataset: { explorationMode: mode }, attrs: {},
+  const world = { dataset: { exploration: 'vtol' } };
+  const buttons = ['flight', 'drive', 'vtol'].map((mode) => ({ dataset: { explorationMode: mode }, attrs: {},
     addEventListener(type, listener) { this[type] = listener; }, setAttribute(key, value) { this.attrs[key] = value; } }));
-  const panels = ['flight', 'drive'].map((mode) => ({ dataset: { explorationPanel: mode }, hidden: mode !== 'flight' }));
+  const panels = ['flight', 'drive', 'vtol'].map((mode) => ({ dataset: { explorationPanel: mode }, hidden: mode !== 'vtol' }));
   vm.runInNewContext(read('app.js'), { document: { querySelector: () => world,
     querySelectorAll: (selector) => selector === '[data-exploration-mode]' ? buttons : selector === '[data-exploration-panel]' ? panels : [] } });
   buttons[1].click();
@@ -91,10 +105,16 @@ translated('zh');
   assert.equal(world.dataset.exploration, 'flight');
   assert.equal(buttons[1].attrs['aria-pressed'], 'false');
   assert.equal(panels[0].hidden, false);
+  buttons[2].click();
+  assert.equal(world.dataset.exploration, 'vtol');
+  assert.equal(buttons[2].attrs['aria-pressed'], 'true');
+  assert.equal(panels[2].hidden, false);
+  assert.equal(panels.filter((panel) => !panel.hidden).length, 1);
+  assert.equal(buttons.filter((button) => button.attrs['aria-pressed'] === 'true').length, 1);
 }
 console.log('Content, assets, anchors, bilingual copy, privacy and cost basis: PASS');
 
-function host({ desktop = false, reduced = false } = {}) {
+function host({ desktop = false, reduced = false, protocol = 'http:' } = {}) {
   class Element {
     constructor() { this.dataset = {}; this.listeners = {}; this.disabled = true; this.value = '30'; this.sent = []; this.contentWindow = { postMessage: (m) => this.sent.push(m) }; }
     addEventListener(type, listener) { this.listeners[type] = listener; }
@@ -115,7 +135,7 @@ function host({ desktop = false, reduced = false } = {}) {
   const window = { __avLandingLang: { lang: 'en', t: (key) => key }, addEventListener: (name, handler) => { events[name] = handler; } };
   const document = { hidden: false, querySelector: (key) => elements[key], getElementById: (key) => elements[key],
     createElement: () => (created = new Element()), addEventListener: (name, handler) => { events[name] = handler; } };
-  const context = { document, window, location: { origin: 'http://localhost' },
+  const context = { document, window, location: { origin: 'http://localhost', protocol },
     matchMedia: (query) => ({ matches: query.includes('min-width') ? desktop : reduced }),
     fetch: (url, opts) => { requested++; assert.equal(url, 'city3d/index.html'); assert.equal(opts.credentials, 'omit'); return fetchResult; },
     setTimeout: (f) => { timers.set(++timeId, f); return timeId; }, clearTimeout: (id) => timers.delete(id),
@@ -190,5 +210,10 @@ const desktop = host({ desktop: true });
 assert.equal(desktop.requested(), 1, 'Desktop hero starts the production City frontend automatically');
 const reduced = host({ desktop: true, reduced: true });
 assert.equal(reduced.requested(), 0, 'Reduced motion retains explicit entry');
+const localFile = host({ desktop: true, protocol: 'file:' });
+assert.equal(localFile.requested(), 0, 'File previews must not start an unsupported iframe request');
+assert.equal(localFile.elements['.city-window'].dataset.cityState, 'local-file');
+assert.equal(localFile.elements['city-launch'].disabled, true);
+assert.equal(localFile.elements['city-status'].textContent, 'city.localFile');
 console.log(`City host: PASS (v2 fixture ${seven.sessions.length}/${thirty.sessions.length} sessions, origin/method checks, explicit readiness, teardown, timeout, stale response, retry, missing build)`);
 console.log('verify-landing: PASS (local implementation checks; public release remains pending)');

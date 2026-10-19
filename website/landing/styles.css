@@ -996,6 +996,66 @@ p {
   line-height: 1.8;
 }
 
+.release-platforms {
+  display: grid;
+  grid-template-columns: repeat(3,minmax(0,1fr));
+  border-block: 1px solid var(--line);
+  margin: 30px 0;
+  text-align: left;
+}
+
+.release-platforms li {
+  min-width: 0;
+  padding: 24px;
+}
+
+.release-platforms li+li {
+  border-left: 1px solid var(--line);
+}
+
+.platform-index {
+  font: 11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;
+  color: var(--muted);
+  letter-spacing: .08em;
+}
+
+.release-platforms h3 {
+  margin: 12px 0;
+  font-size: 24px;
+}
+
+.release-platforms strong {
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.release-platforms p {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.8;
+  text-wrap: pretty;
+}
+
+.release-actions {
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.release-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+@media(max-width:700px) {
+  .release-platforms { grid-template-columns: 1fr; }
+  .release-platforms li { padding: 22px 8px; }
+  .release-platforms li+li { border-left: 0; border-top: 1px solid var(--line); }
+  .release-actions { flex-direction: column; align-items: stretch; }
+}
+
 .download-inner>p.footnote {
   font-size: 11px;
   max-width: 540px;

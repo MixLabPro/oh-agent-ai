@@ -9,7 +9,7 @@
   const panels = document.querySelectorAll('[data-exploration-panel]');
   modes.forEach((button) => button.addEventListener('click', () => {
     const mode = button.dataset.explorationMode;
-    if (!world || !['flight', 'drive'].includes(mode)) return;
+    if (!world || !['flight', 'drive', 'vtol'].includes(mode)) return;
     world.dataset.exploration = mode;
     modes.forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
     panels.forEach((panel) => { panel.hidden = panel.dataset.explorationPanel !== mode; });
