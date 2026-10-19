@@ -251,8 +251,46 @@ export function expresswayRun(layout: ExpresswayLayout, run: ReadonlyArray<{ x: 
     points.push({ x: b.x, z: b.z });
     along += length;
   }
-  const heights = points.length ? expresswayDeckHeights(points, (x, z) => layout.terrain.height(x, z), (x, z) => groundRoadTopAt(layout as BridgeLayoutInput, x, z)) : [];
+  const hold = closed || points.length < 2 ? { from: 0, to: 0 } : { from: rampHold(layout, points), to: rampHold(layout, [...points].reverse()) };
+  const heights = points.length ? expresswayDeckHeights(points, (x, z) => layout.terrain.height(x, z), (x, z) => groundRoadTopAt(layout as BridgeLayoutInput, x, z), hold) : [];
   return { points, heights };
+}
+
+/** Longest flush stretch a ramp end may hold at road height before it starts to climb. */
+export const EXPRESSWAY_RAMP_HOLD_MAX = 24;
+/** 匝道分岔贴路段（2026-10-19）：0/42 的高架 0 从路口 50.63:-73.24 起步，与 5 宽路成约 25° 分出，
+ * 按 ease 剖面头 8 就比路面高 0.12–0.2（> aliasTolerance）。车沿路走被支撑抬上桥面（取较高面），到分岔处桥面
+ * 侧边是 closed，挡住——出生路线 pilot-failed。现量出从落地端起、桥面侧边（±可驶半宽）仍压在一条「中线不在其上」
+ * 的地面路里的最远沿程，在这段内桥面保持路面高度（与路面差 ≤ aliasTolerance，侧边按区域规则开放），过了才爬升。
+ * 沿宿主路落地的匝道中线与侧边在同一条路上，hold = 0，不受影响。上限 EXPRESSWAY_RAMP_HOLD_MAX，爬升坡度
+ * 最多从 1.5·Δh/90 变到 1.5·Δh/66。 */
+function rampHold(layout: ExpresswayLayout, points: readonly Vec2[]): number {
+  if (!Array.isArray(layout.roadEdges)) return 0;
+  const roads = renderRoadEdges(layout.roadEdges).filter((e) => !e.bridge && e.structure !== "deck");
+  const inside = (x: number, z: number) => {
+    const ids = new Set<string>();
+    for (const e of roads) for (let i = 1; i < e.points.length; i++) {
+      const a = e.points[i - 1], b = e.points[i], dx = b.x - a.x, dz = b.z - a.z, ll = dx * dx + dz * dz;
+      const t = ll === 0 ? 0 : Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / ll));
+      if (Math.hypot(x - a.x - dx * t, z - a.z - dz * t) <= e.width / 2) { ids.add(e.id); break; }
+    }
+    return ids;
+  };
+  let hold = 0, along = 0;
+  for (let i = 1; i < points.length && along < EXPRESSWAY_RAMP_HOLD_MAX; i++) {
+    const a = points[i - 1], b = points[i], length = Math.hypot(b.x - a.x, b.z - a.z);
+    if (length < 1e-6) continue;
+    const ux = (b.x - a.x) / length, uz = (b.z - a.z) / length;
+    for (let s = 0; s <= length && along + s <= EXPRESSWAY_RAMP_HOLD_MAX; s += 0.5) {
+      const cx = a.x + ux * s, cz = a.z + uz * s; const centre = inside(cx, cz);
+      for (const side of [-1, 1]) {
+        const hits = inside(cx - uz * side * EXPRESSWAY_DRIVABLE_HALF, cz + ux * side * EXPRESSWAY_DRIVABLE_HALF);
+        if ([...hits].some((id) => !centre.has(id))) hold = along + s;
+      }
+    }
+    along += length;
+  }
+  return hold;
 }
 
 export type ExpresswayPiece = BoxPart & Readonly<{ highway: number; segment: number }>;

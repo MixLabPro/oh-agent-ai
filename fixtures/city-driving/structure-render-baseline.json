@@ -472,7 +472,7 @@
   },
   "planRefresh": {
     "geometryVersion": 10,
-    "reason": "Re-recorded on main 42fb1225 + road-solid clearance (geometry 10). Plans changed at ad697cfa (junction rings, highway interchange planning: 8 → 2 expressway runs in this corpus), which moved cul-de-sacs, channelised junctions, expressways and their supports; on top of that, bridge piers follow the rolled deck, expressway supports are dropped where no road-free station exists, and truss chords set back until they clear ground roads by 1.0. Behavioural checks pass on the same run: every connected span driven end to end, 11/12 approach crossings, 4/4 ramps up and down. Earlier layers retained. 2026-10-19 (later): bridge railings set back from landed ends until clear of ground roads by 0.2, and expressway ramp rails cut where they lie low inside a ground carriageway (spawn routes in 0/7, 0/2026, 0/65537 were stopped by them); behavioural checks unchanged on the same run.",
+    "reason": "Re-recorded on main 42fb1225 + road-solid clearance (geometry 10). Plans changed at ad697cfa (junction rings, highway interchange planning: 8 → 2 expressway runs in this corpus), which moved cul-de-sacs, channelised junctions, expressways and their supports; on top of that, bridge piers follow the rolled deck, expressway supports are dropped where no road-free station exists, and truss chords set back until they clear ground roads by 1.0. Behavioural checks pass on the same run: every connected span driven end to end, 11/12 approach crossings, 4/4 ramps up and down. Earlier layers retained. 2026-10-19 (later): bridge railings set back from landed ends until clear of ground roads by 0.2, and expressway ramp rails cut where they lie low inside a ground carriageway (spawn routes in 0/7, 0/2026, 0/65537 were stopped by them); behavioural checks unchanged on the same run. Later: a ramp that diverges from a road it lies on holds flush (+0.05) at road height until its side edges clear that road (capped at 24), so its side edge stays open; 42/2 and 42/3 expressways changed, behavioural checks unchanged.",
     "plans": {
       "1/1": {
         "buildInfrastructure": "02c7f65a8cd3dae0f4f3a378cc92ab56f9c5e96a4df0846ca00fb42ed9275cd9",
@@ -507,14 +507,14 @@
       },
       "42/2": {
         "buildInfrastructure": "03e0e36fb51c13ceea76841609a3c12272b70ad69dcbaea851a2d4c2c5e82274",
-        "buildDistrictExpressways": "9917f62f5f3140b8d5bec80d3520577c3010ef15db46b3c77c7a0f87fbfc0c16",
+        "buildDistrictExpressways": "1cf3285eeac352a30a99fc77f82a8cc23d42b649fccda99b1164d1fd7c9060da",
         "buildTrussBridges": "0f04388f80fa23a7c9b715fced2b8f222d1e28a858fc81bcc9a2ee1eac8cfa52",
         "buildCulDeSacBulbs": "f7985b92475b072a801b58606a7ff3aa3328bf0dee5ee2321255021e0b8a7ea7",
         "buildChannelizedJunctions": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "42/3": {
         "buildInfrastructure": "5a9b75bb1083682c3fa3a6a037152c1bb1b78f0b78a2679ea4fca8a3930f5454",
-        "buildDistrictExpressways": "fd2ed20e3e34c2d6ef4dfd0d49a6f810aa8aac58004d060600f804f6d5703611",
+        "buildDistrictExpressways": "74cc75b39ea01b45631084234b2a66456c72efbe13618ab90febbf6ecd1eccb2",
         "buildTrussBridges": "ad10864a3d3f5b36b138a2e932e82e2ecbe94fb1d665fbedad53f3c75fcb073e"
       },
       "2026/1": {

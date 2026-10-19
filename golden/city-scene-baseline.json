@@ -136,7 +136,7 @@
   }
  },
  "1600/day": {
-  "all": "207a65fddd7a1ba6",
+  "all": "2a310bd139876536",
   "sections": {
    "city-beach": "1:246abc292867",
    "city-beach-furniture": "3:0ea665d894cd",
@@ -148,7 +148,7 @@
    "city-civic-glow": "1:a4b9d9550834",
    "city-culdesac-bulb-disc": "1:e5918c3a477a",
    "city-culdesac-bulb-rim": "1:26b346f65809",
-   "city-district-expressways": "1:5e0ecbd64521",
+   "city-district-expressways": "1:b84272528a74",
    "city-flags": "1:e79843c98134",
    "city-garden-boxes": "1:faa9252abdc2",
    "city-garden-rocks": "1:890fda31a612",
@@ -200,14 +200,14 @@
    "district-landmark-cars": "3:c5c453e96efb",
    "district-landmark-site": "65:73e81bcb11ec",
    "district-tower": "28:39ab1ba3a150",
-   "unnamed:Mesh": "41:7287edcdc8c4",
+   "unnamed:Mesh": "41:37b98676e851",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:2ec417e542a6",
    "villa-campanile": "15:8f28e74c923b"
   }
  },
  "1600/night": {
-  "all": "5909c85ef9cc387f",
+  "all": "23ec004fb2b347c9",
   "sections": {
    "city-beach": "1:246abc292867",
    "city-beach-furniture": "3:0ea665d894cd",
@@ -219,7 +219,7 @@
    "city-civic-glow": "1:79edf28e7665",
    "city-culdesac-bulb-disc": "1:e5918c3a477a",
    "city-culdesac-bulb-rim": "1:26b346f65809",
-   "city-district-expressways": "1:5e0ecbd64521",
+   "city-district-expressways": "1:b84272528a74",
    "city-flags": "1:e79843c98134",
    "city-garden-boxes": "1:faa9252abdc2",
    "city-garden-rocks": "1:890fda31a612",
@@ -271,7 +271,7 @@
    "district-landmark-cars": "3:c5c453e96efb",
    "district-landmark-site": "65:2405c568062a",
    "district-tower": "28:ad7e26c0646a",
-   "unnamed:Mesh": "41:820dceeae22b",
+   "unnamed:Mesh": "41:9c98e3ae97c2",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:2ec417e542a6",
    "villa-campanile": "15:8f28e74c923b"
