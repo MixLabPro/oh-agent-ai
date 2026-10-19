@@ -452,8 +452,8 @@ fn run_pipeline(
 
     let ordinal_of = |eid: &EventId| event_ordinal.get(eid.as_str()).copied().unwrap_or(u64::MAX);
     diagnostics.sort_by(|a, b| {
-        let oa = a.event_id.as_ref().map(&ordinal_of).unwrap_or(u64::MAX);
-        let ob = b.event_id.as_ref().map(&ordinal_of).unwrap_or(u64::MAX);
+        let oa = a.event_id.as_ref().map(ordinal_of).unwrap_or(u64::MAX);
+        let ob = b.event_id.as_ref().map(ordinal_of).unwrap_or(u64::MAX);
         oa.cmp(&ob).then_with(|| a.code.cmp(&b.code))
     });
 

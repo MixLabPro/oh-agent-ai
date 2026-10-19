@@ -34,12 +34,11 @@ VERIFY_SCRIPTS = [
     # 工作台总览 KPI 行 / 双轨账 / 决策卡 + 速览层混币折算（Overview.fx）+
     # 预算卡 source:"sql" 兜底判定。同理由接进这条测试：verify 脚本没人跑 = 不存在。
     REPO / "scripts" / "verify-workbench-kpi-decide.mjs",
-    # v0.10.0 Traces 渲染壳：真实 workbench.js × 真实 timeline.js × 真实 CLI
-    # DTO 的完整渲染路径 + namespace 前端拦截 + 几何唯一份 grep。同理由。
-    REPO / "scripts" / "verify-workbench-traces.mjs",
     # v1.0 数据源页：独立状态契约、执行环境注册表驱动、恢复动作。
     REPO / "scripts" / "verify-workbench-sources.mjs",
 ]
+TRACE_VERIFY = REPO / "scripts" / "verify-workbench-traces.mjs"
+RELEASE_CLI = REPO / "target" / "release" / "agent-vitals"
 
 _has_node = shutil.which("node") is not None
 
@@ -56,6 +55,13 @@ class CodexSessionTemplateJsTests(unittest.TestCase):
             )
             # check=True 已保证退出码 0；断言末尾哨兵，失败时输出里能直接看到是哪条断言挂。
             self.assertIn("通过。", out.stdout, f"{script.name} 未通过")
+
+    @unittest.skipUnless(RELEASE_CLI.is_file(), "requires release CLI; run in the Rust differential job")
+    def test_workbench_trace_verifier_passes_with_real_cli(self):
+        out = subprocess.run(
+            ["node", str(TRACE_VERIFY)], capture_output=True, text=True, check=True,
+        )
+        self.assertIn("全部通过。", out.stdout)
 
 
 if __name__ == "__main__":

@@ -72,7 +72,7 @@ jobs:
         with:
           python-version: "3.9" # 仓库声明支持 3.8+，按下限跑
       - name: 安装 hypothesis（属性测试的可选依赖）
-        run: pip install hypothesis
+        run: pip install hypothesis zstandard
       - name: 全套测试
         run: python -m unittest discover tests -v
       - name: golden 比对（Python 实现）
@@ -136,7 +136,7 @@ jobs:
           # 相对路径在那里解析不到（本地一直用 $PWD/... 所以没撞上）。
           AGENT_VITALS_BIN: ${{ github.workspace }}/target/release/agent-vitals
         run: |
-          pip install hypothesis
+          pip install hypothesis zstandard
           python -m unittest discover tests
 
       # 假宿主：验运行时适配器的**成功路径**。
@@ -190,6 +190,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
+      - name: Install optional test dependencies
+        run: pip install hypothesis zstandard
       - name: 全套测试
         run: python -m unittest discover tests -v
       - name: golden 比对（Windows）
