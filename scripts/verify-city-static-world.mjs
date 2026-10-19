@@ -51,8 +51,15 @@ const source = (cityLayout, solids = []) => ({ layout: cityLayout,
   const withoutTransientDiagnostics = await port.capture(source(diagnosticHeavy), () => {});
   assert.equal(withoutTransientDiagnostics.status, "ready", "transient planner diagnostics do not consume the static metadata budget");
   assert.equal(withoutTransientDiagnostics.worldRevision, initialRevision, "non-static planner diagnostics do not change the world revision");
-  assert.match(withoutTransientDiagnostics.worldRevision, /^city-static-v3:/, "the narrowed canonical contract gets a new revision version");
+  assert.match(withoutTransientDiagnostics.worldRevision, /^city-static-v4:/, "the narrowed canonical contract gets a new revision version");
   withoutTransientDiagnostics.release();
+
+  const renderHeavy = layout();
+  renderHeavy.coastalConfig = { unusedRendererPayload: "x".repeat(9 * 1024 * 1024) };
+  const collisionIdentityOnly = await port.capture(source(renderHeavy), () => {});
+  assert.equal(collisionIdentityOnly.status, "ready", "large render/planner descriptors do not consume the static collision header budget");
+  assert.equal(collisionIdentityOnly.worldRevision, initialRevision, "non-collision layout payload does not change the collision-world revision");
+  collisionIdentityOnly.release();
 }
 
 // A delayed digest cancellation releases the one shared source freeze and cannot publish late.

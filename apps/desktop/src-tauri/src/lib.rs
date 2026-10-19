@@ -2297,6 +2297,7 @@ fn show_workbench(app: &AppHandle) {
     // 证实那些失败的真根因是 get_webview_window 多 webview 门槛 + tao show 在
     // wedge 态静默无效（均已修复），与图标切换无关，故恢复双向。tao 自带 1s
     // 防抖防快速开关产生幽灵图标。
+    #[cfg(target_os = "macos")]
     let _ = app.set_dock_visibility(true);
     // 诊断 2026-10-09「开 City 后关窗，二次唤起失败」：窗口在 CGWindowList 里存在
     // 但 onScreen=false——记录 NSApp 层 hidden 与 show/focus 的真实返回值定位卡点。
@@ -5733,6 +5734,7 @@ pub fn run() {
                     let _ = window.hide();
                     // 关窗 = 撤 Dock 图标（用户理想形态：无窗口时回到纯菜单栏，
                     // 经菜单栏唤起）。真根因（webview 门槛/wedge）已修，双向安全。
+                    #[cfg(target_os = "macos")]
                     let _ = window.app_handle().set_dock_visibility(false);
                 }
             }
@@ -5917,6 +5919,7 @@ pub fn run() {
             // skipTaskbar/visible:false 只藏窗口，藏不住进程的 Dock 图标。
             // 2026-10-09 起：首次唤起工作台时 Dock 图标单向出现（会话内不隐藏，
             // 点图标走 Reopen 重开）；逆向 Transform 会间歇性卡死再唤起，不做。
+            #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),

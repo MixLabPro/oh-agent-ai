@@ -91,21 +91,22 @@ export class VtolDrivingEnvironment {
     // 落地：下降中且终点支撑有效 → gameplay 足迹校验（可越融合与地面一致）。
     const descending = pose.y < previous.y - 1e-9;
     if (descending) {
-      const support = this.supportHeight(pose.x, pose.z, previous.surfaceId);
-      if (support !== null && pose.y <= support + 0.02) {
-        const check = footprintSupport(this.regions, { x: pose.x, z: pose.z, heading: pose.heading }, previous.surfaceId,
-          this.footprint, this.params, undefined, this.mountable ?? undefined);
-        if (check.ok) return this.airPoseResult(previous,
-          { x: pose.x, y: check.y, z: pose.z, heading: pose.heading, pitch: check.pitch, roll: check.roll, surfaceId: check.regionId },
+      const support = this.landingSupport(pose.x, pose.z, pose.heading, previous.y, pose.y);
+      if (support !== null) {
+        return this.airPoseResult(previous,
+          { x: pose.x, y: support.y, z: pose.z, heading: pose.heading, pitch: support.pitch, roll: support.roll, surfaceId: support.regionId },
           resolved, "landed", resolved.contacts.length > 0, false, true);
+      }
+      const oldSupport = this.supportHeight(pose.x, pose.z, previous.surfaceId);
+      if (oldSupport !== null && pose.y <= oldSupport + 0.02) {
         // 支撑存在但足迹无效（路缘外沿等）：落到支撑高、保持空中（悬停地板语义）。
-        return this.airPoseResult(previous, { ...pose, y: support }, resolved, "landing-unsupported", false, true);
+        return this.airPoseResult(previous, { ...pose, y: oldSupport }, resolved, "landing-unsupported", false, true);
       }
     }
     // 悬停地板：无支撑（水面/无面片区域）且试图沉到表面以下 → 钳在局部表面高度
     //（外部 floorAt 来自全种类面片网格——人行道/草地等非道路面；缺省海平面）。
-    const floorSupport = this.supportHeight(pose.x, pose.z, previous.surfaceId);
-    if (floorSupport === null && pose.y < this.floorLevel(pose.x, pose.z)) {
+    const floorSupport = this.hasDrivableSurface(pose.x, pose.z);
+    if (!floorSupport && pose.y < this.floorLevel(pose.x, pose.z)) {
       const clamped = this.floorLevel(pose.x, pose.z);
       return this.airPoseResult(previous, { ...pose, y: clamped }, resolved, "hover-floor", false, true);
     }
@@ -115,9 +116,38 @@ export class VtolDrivingEnvironment {
 
   /** 支撑面高度（中心探测；无支撑返回 null——水面/屋顶/边界外）。 */
   supportHeight(x: number, z: number, regionId: string): number | null {
-    if (!this.current()) return null;
+    if (this.regions.status !== "ready" || !this.current()) return null;
     const check = footprintSupport(this.regions, { x, z, heading: 0 }, regionId, this.footprint, this.params, undefined, this.mountable ?? undefined);
     return check.ok ? check.y : null;
+  }
+
+  /** Find a real road support below the descending vehicle, including disconnected road regions. */
+  private landingSupport(x: number, z: number, heading: number, fromY: number, toY: number):
+    Readonly<{ y: number; pitch: number; roll: number; regionId: string }> | null {
+    if (this.regions.status !== "ready" || !this.current()) return null;
+    const layerIds = [...new Set(this.regions.regions.flatMap((region) => region.layerIds))].sort();
+    const candidates = new Map<string, { y: number; regionId: string }>();
+    for (const layerId of layerIds) {
+      const point = this.regions.classify(x, z, layerId);
+      if (point.status !== "drivable" || point.y > fromY + 0.02 || point.y < toY - 0.02) continue;
+      const key = `${point.regionId}:${point.layerId}`;
+      const old = candidates.get(key);
+      if (!old || point.y > old.y) candidates.set(key, { y: point.y, regionId: point.regionId });
+    }
+    const ordered = [...candidates.values()].sort((a, b) => b.y - a.y || a.regionId.localeCompare(b.regionId));
+    for (const candidate of ordered) {
+      const check = footprintSupport(this.regions, { x, y: candidate.y, z, heading }, candidate.regionId,
+        this.footprint, this.params, undefined, this.mountable ?? undefined);
+      if (check.ok && check.y <= fromY + 0.02 && check.y >= toY - 0.02) return check;
+    }
+    return null;
+  }
+
+  private hasDrivableSurface(x: number, z: number): boolean {
+    if (this.regions.status !== "ready" || !this.current()) return false;
+    const layerIds = new Set(this.regions.regions.flatMap((region) => region.layerIds));
+    for (const layerId of layerIds) if (this.regions.classify(x, z, layerId).status === "drivable") return true;
+    return false;
   }
 
   private current(): boolean {

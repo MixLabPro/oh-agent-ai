@@ -1,6 +1,7 @@
 import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { runPlanningJob, type PlanningWorkerPort } from "./planningWorker/planningJob";
+import type { PlanningWorkSnapshot } from "./planner/operationBudget";
 import { PLANNING_WORK_UNITS } from "./planner/operationBudget";
 import { hashSeed, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
@@ -197,14 +198,15 @@ function layoutPlanKey(seed: number, tier: number, coastal: CoastalConfig | null
  * Cancellation and worker failures never fall back to UI-thread planning. The
  * validated worker result shares the same bounded LRU as synchronous fixtures. */
 export async function prepareCityLayout(model: CityModel, seed: number, coastal: CoastalConfig | null,
-  options: { signal: AbortSignal; workerFactory?: () => PlanningWorkerPort }): Promise<void> {
+  options: { signal: AbortSignal; workerFactory?: () => PlanningWorkerPort; onPlanningProgress?: (snapshot: PlanningWorkSnapshot) => void }): Promise<void> {
   if (options.signal.aborted) throw new Error("layout-preparation-cancelled");
   const tier = scaleTierFor(model.buildings.length), key = layoutPlanKey(seed, tier, coastal);
   if (plans.has(key)) return;
   // Existing synchronous planning has no aggregate work cap. Transport accounting
   // preserves that policy; worker cancellation/heartbeat remains independently bounded.
   const limits = Object.fromEntries(PLANNING_WORK_UNITS.map(unit => [unit, Number.MAX_SAFE_INTEGER])) as Record<typeof PLANNING_WORK_UNITS[number], number>;
-  const result = await runPlanningJob({ seed, tier, coastal, limits }, options);
+  const { onPlanningProgress, ...workerOptions } = options;
+  const result = await runPlanningJob({ seed, tier, coastal, limits }, { ...workerOptions, onProgress: onPlanningProgress });
   if (options.signal.aborted || result.status === "cancelled") throw new Error("layout-preparation-cancelled");
   if (result.status !== "computed") throw new Error(`layout-preparation:${result.reason}`);
   plans.set(key, result.plan);

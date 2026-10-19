@@ -8,12 +8,16 @@ import { GameSoundPanel } from "./ui/GameSoundPanel";
 import { TelemetryChip } from "./ui/TelemetryChip";
 import type { GameSoundCapabilities } from "./ui/GameSoundPanel";
 import type { RuntimeDiagnosticSnapshot } from "./runtime/RuntimeDiagnostics";
+import type { PreparationProgress } from "./runtime/Preparation";
+import type { DrivingEvent } from "./runtime/DrivingEventLog";
 import "./game.css";
 
 export type DrivingHudModel = Readonly<{
   active: boolean;
   entryError: string | null;
   initialPaused: boolean;
+  preparationProgress: PreparationProgress | null;
+  events: readonly DrivingEvent[];
   hud: Readonly<{
     phase: "idle" | "preparing" | "paused" | "running" | "error";
     reason: string | null; speed: number; blocked: boolean; coverage: string | null;
@@ -58,21 +62,30 @@ export function DrivingHud({ model, actions, locale, sound }: {
   let panel = null;
   if (closeError) panel = <GameSessionPanel locale={locale} title="暂不能开始驾驶" description={entryDescription} role="alertdialog"
     actions={[{ label: "关闭", onAction: actions.clearEntryError }]} />;
-  else if (hud.phase === "preparing") panel = <GameSessionPanel locale={locale} title="正在准备驾驶场景…"
-    description={t("出生点未确认 · 本次仅用于驾驶诊断")}
-    actions={[{ label: "取消准备", tone: "danger", onAction: actions.exit }]} />;
+  else if (hud.phase === "preparing") {
+    const progress = model.preparationProgress;
+    const stageLabels: Record<PreparationProgress["stage"], string> = {
+      "world-capture": "读取城市场景", "world-read": "冻结道路与场景数据", "surface-index": "建立路面索引",
+      "surface-regions": "分析道路连通区域", "static-solids": "整理建筑与障碍物", "collision-world": "准备碰撞世界", "diagnostic-spawn": "寻找安全出生点",
+    };
+    const detail = progress?.stage === "diagnostic-spawn" && progress.completedCandidates !== undefined
+      ? `已检查 ${progress.completedCandidates} / ${progress.candidateLimit ?? 512} 个候选位置` : t("正在寻找支撑有效、前后通畅的道路位置");
+    panel = <GameSessionPanel locale={locale} title={progress ? `${stageLabels[progress.stage]}…` : "正在准备驾驶场景…"}
+      description={detail} children={<div className="city-preparation-track" role="progressbar" aria-label={t(progress ? stageLabels[progress.stage] : "正在准备驾驶场景")}><span /></div>}
+      actions={[{ label: "取消准备", tone: "danger", onAction: actions.exit }]} />;
+  }
   else if (hud.phase === "error") panel = <GameSessionPanel locale={locale} title="场景已失效" description={t(sceneError)} role="alertdialog"
-    actions={[{ label: "退出试驾", tone: "danger", onAction: actions.exit}]} />;
+    actions={[{ label: "退出驾驶", tone: "danger", onAction: actions.exit}]} />;
   else if (hud.phase === "paused") panel = <GameSessionPanel locale={locale}
     title={hud.reason === "camera-safety" ? "相机安全检查已暂停驾驶" : hud.reason === "long-frame" ? "帧间隔过长，已暂停" : model.initialPaused ? "准备就绪" : "已暂停"}
-    description={hud.reason === "camera-safety" ? t("相机安全检查无法确认，驾驶已暂停。") : model.initialPaused ? t("出生点候选未确认 · 本次仅用于驾驶诊断") : hud.reason === "long-frame" ? t("帧间隔恢复后，可显式继续驾驶") : undefined}
+    description={hud.reason === "camera-safety" ? t("相机安全检查无法确认，驾驶已暂停。") : model.initialPaused ? t("出生点已通过本地支撑与净空检查；城市道路尚未完成全量认证。") : hud.reason === "long-frame" ? t("帧间隔恢复后，可显式继续驾驶") : undefined}
     children={<><GameControlsHelp locale={locale} rows={DRIVING_CONTROLS} className="city-game-panel-help" />
       {sound && <GameSoundPanel locale={locale} sound={sound} />}</>}
-    actions={[{ label: model.initialPaused ? "开始驾驶" : "继续", onAction: actions.resume }, { label: "退出试驾", tone: "danger", onAction: actions.exit}]} />;
+    actions={[{ label: model.initialPaused ? "开始驾驶" : "继续", onAction: actions.resume }, { label: "退出驾驶", tone: "danger", onAction: actions.exit}]} />;
 
   const title = <>
     <div className="city-game-chip"><strong>{t("自由驾驶")}</strong></div>
-    <div className="city-game-chip city-game-uat-mark" aria-label={t("UAT 诊断模式")}>{t("UAT 诊断")}</div>
+    <div className="city-game-chip city-game-uat-mark" aria-label={t("城市道路尚未完成全量认证")}>{t("道路认证中")}</div>
     {hud.phase === "running" && <button className="city-game-compact-action" type="button" onClick={() => { openUi(); actions.pause(); }}>{t("暂停")}</button>}
   </>;
   const blocked = hud.blocked ? t("前方有障碍") : hud.reason === "long-frame" ? t("帧间隔过长，已自动暂停") : undefined;
@@ -104,6 +117,17 @@ export function DrivingHud({ model, actions, locale, sound }: {
       {runtimeDiagnostics?.preparationMs && <dl aria-label={t("准备阶段耗时")}>
         {Object.entries(runtimeDiagnostics.preparationMs).map(([stage, duration]) => <div key={stage}><dt>{stage}</dt><dd>{duration?.toFixed(1)} ms</dd></div>)}
       </dl>}
+      <details className="city-driving-local-audit" aria-label={t("本地故障记录")}>
+        <summary>{t("本地故障记录")} · {model.events.length}</summary>
+        <p>{t("仅保存在当前驾驶会话内存，不写入磁盘或上传。")}</p>
+        {model.events.length === 0 ? <p>{t("暂无碰撞或运行故障。")}</p> : <ol>
+          {[...model.events].reverse().map((event) => <li key={event.id}>
+            <strong>{t(event.kind)}</strong> · {event.reason ?? t("未提供原因")}<br />
+            <small>XYZ ({event.x.toFixed(1)}, {event.y.toFixed(1)}, {event.z.toFixed(1)})
+              {event.obstacleIds.length ? ` · ${t("障碍物")} ${event.obstacleIds.join(", ")}` : ""}</small>
+          </li>)}
+        </ol>}
+      </details>
     </details>}
   />;
 }

@@ -229,18 +229,18 @@ counted as top-level installed Skills.
 ## Install
 
 ```bash
-git clone https://github.com/MixLabPro/agent-vitals ~/.claude/skills/agent-vitals
+git clone https://github.com/MixLabPro/oh-agent-ai ~/.claude/skills/agent-vitals
 ```
 
 Install the same directory at the harness's root instead when using another runtime:
 
 ```bash
 # Codex / Hermes / WorkBuddy
-git clone https://github.com/MixLabPro/agent-vitals ~/.codex/skills/agent-vitals
-git clone https://github.com/MixLabPro/agent-vitals ~/.hermes/skills/agent-vitals
-git clone https://github.com/MixLabPro/agent-vitals ~/.workbuddy/skills/agent-vitals
+git clone https://github.com/MixLabPro/oh-agent-ai ~/.codex/skills/agent-vitals
+git clone https://github.com/MixLabPro/oh-agent-ai ~/.hermes/skills/agent-vitals
+git clone https://github.com/MixLabPro/oh-agent-ai ~/.workbuddy/skills/agent-vitals
 # OpenClaw (managed local root)
-git clone https://github.com/MixLabPro/agent-vitals ~/.openclaw/skills/agent-vitals
+git clone https://github.com/MixLabPro/oh-agent-ai ~/.openclaw/skills/agent-vitals
 ```
 
 Then ask your agent to run a skill health check, or invoke `/agent-vitals`.
@@ -716,7 +716,7 @@ DeepSeek Harness 以 profile bundle 形式分发（`dsh/`，发布为 `dsh-agent
 ## 安装
 
 ```bash
-git clone https://github.com/MixLabPro/agent-vitals ~/.claude/skills/agent-vitals
+git clone https://github.com/MixLabPro/oh-agent-ai ~/.claude/skills/agent-vitals
 ```
 
 然后让 Agent 做一次 skill 体检，或直接 `/agent-vitals`。

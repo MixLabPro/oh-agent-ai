@@ -81,33 +81,6 @@ function immutableCopy<T>(value: T, seen = new WeakMap<object, unknown>()): T {
   return Object.freeze(copy) as T;
 }
 
-/** Stable JSON projection for plain layout facts; terrain functions are represented by sampled values. */
-function stableLayoutValue(value: unknown, seen = new WeakSet<object>(), budget = { nodes: 0 }): unknown {
-  if (++budget.nodes > 1_000_000) throw new Error("static-layout-node-budget");
-  if (value === undefined) return undefined;
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("invalid-static-layout-number"); return Object.is(value, -0) ? 0 : value; }
-  if (typeof value === "function") return undefined;
-  if (typeof value !== "object") throw new Error("invalid-static-layout-value");
-  if (seen.has(value)) throw new Error("cyclic-static-layout");
-  seen.add(value);
-  let result: unknown;
-  if (Array.isArray(value)) result = value.map((entry) => stableLayoutValue(entry, seen, budget));
-  else if (value instanceof Map) result = [...value.entries()].map(([key, entry]) => [stableLayoutValue(key, seen, budget), stableLayoutValue(entry, seen, budget)])
-    .sort((a, b) => JSON.stringify(a[0]).localeCompare(JSON.stringify(b[0])));
-  else if (value instanceof Set) result = [...value].map((entry) => stableLayoutValue(entry, seen, budget)).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-  else if (ArrayBuffer.isView(value)) result = Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-  else {
-    const object: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      const entry = stableLayoutValue((value as Record<string, unknown>)[key], seen, budget);
-      if (entry !== undefined) object[key] = entry;
-    }
-    result = object;
-  }
-  seen.delete(value); return result;
-}
-
 function canonical(layout: CityLayout, obstacles: readonly StructureObstacle[], rendered: readonly RenderedSolid[], scene: readonly SolidInput[]): Uint8Array {
   if (obstacles.length + scene.length > CITY_SOLID_BUILD_BUDGET) throw new Error("static-solids-budget");
   let pointCount = 0, identityChars = 0;
@@ -123,17 +96,12 @@ function canonical(layout: CityLayout, obstacles: readonly StructureObstacle[], 
   }
   if (pointCount > 250_000) throw new Error("static-geometry-point-budget");
   if (identityChars > 2 * 1024 * 1024) throw new Error("static-identity-budget");
-  // Static collision geometry is encoded separately below. Planner diagnostics,
-  // road render buffers and placement ledgers are neither flight capabilities nor
-  // static facts: hashing the full layout duplicates transient data and can push
-  // valid rendered cities over the fixed metadata budget.
-  const layoutFacts = stableLayoutValue({
-    seed: layout.seed, scaleTier: layout.scaleTier, biome: layout.biome,
-    extent: layout.extent, islandRadius: layout.islandRadius,
-    boundsRadius: layout.boundsRadius, urbanBounds: layout.urbanBounds,
-    coastalConfig: layout.coastalConfig, terrain: layout.terrain,
-    seaMountains: layout.seaMountains, decorMountains: layout.decorMountains,
-  });
+  // This revision identifies the captured collision world, not every planner or
+  // renderer detail in CityLayout. Keep only the stable city/terrain identity
+  // here; collision geometry (including mountableHeight) is encoded exactly once
+  // in `structure` below. Serializing the full layout duplicated large arrays
+  // and repeated solid IDs, making valid large cities fail the 8 MiB header cap.
+  const layoutFacts = [layout.seed, layout.scaleTier, layout.biome, layout.extent, layout.islandRadius];
   const extent = layout.extent;
   if (!Number.isFinite(extent) || extent <= 0) throw new Error("invalid-static-terrain-extent");
   const terrainSamples: number[] = [];
@@ -148,9 +116,8 @@ function canonical(layout: CityLayout, obstacles: readonly StructureObstacle[], 
     if (!Number.isFinite(y)) throw new Error("invalid-static-mountain-terrain");
     terrainSamples.push(y);
   }
-  const mountableFacts = [...obstacles.map((obstacle) => [obstacle.id, obstacle.mountableHeight ?? null] as const),
-    ...scene.map((solid) => [solid.id, solid.mountableHeight ?? null] as const)].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  const layoutHeader = new TextEncoder().encode(JSON.stringify(["city-static-v3", CITY_SOLID_COMPILER_VERSION, layoutFacts, terrainSamples, mountableFacts]));
+  if (![layout.seed, layout.scaleTier, layout.islandRadius].every(Number.isFinite) || typeof layout.biome !== "string") throw new Error("invalid-static-layout-identity");
+  const layoutHeader = new TextEncoder().encode(JSON.stringify(["city-static-v4", CITY_SOLID_COMPILER_VERSION, layoutFacts, terrainSamples]));
   if (layoutHeader.length > STATIC_LAYOUT_MAX_BYTES) throw new Error("static-layout-byte-budget");
   const structure = canonicalCityWorldBytes("road-neutral-static", { obstacles, landings: [], counts: { bridges: 0,
     expresswaySegments: 0, flares: 0, islands: 0, culDeSacs: 0 } }, rendered, scene);
@@ -181,7 +148,7 @@ export class CityStaticWorldPort {
       if (signal?.aborted) { release(); return Object.freeze({ status: "cancelled" }); }
       if (!active || !source.isCurrent() || !source.verifyCurrent()) { release(); return Object.freeze({ status: "stale" }); }
       if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("invalid-static-world-digest");
-      const worldRevision = `city-static-v3:sha256:${digest}`;
+      const worldRevision = `city-static-v4:sha256:${digest}`;
       const isLeaseCurrent = () => active && source.isCurrent();
       const verifyCurrent = () => active && source.isCurrent() && source.verifyCurrent();
       const coverage = obstacles.length > 0

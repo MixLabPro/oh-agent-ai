@@ -11,16 +11,17 @@ type SpawnEnvironment = Pick<DrivingEnvironment, "move"> & Readonly<{
   place(x: number, z: number, heading: number, regionId: string, y?: number): Readonly<{ y: number; pitch: number; roll: number }> | null;
   moveAsync?(start: DrivingState, desired: DrivingMotion, checkpoint: () => Promise<void>): Promise<DrivingMoveResult>;
 }>;
-type SpawnStep = Readonly<{ start: DrivingState; desired: DrivingMotion }> | null;
+type SpawnStep = Readonly<{ kind: "candidate" }> | Readonly<{ kind: "move"; start: DrivingState; desired: DrivingMotion }>;
 
 // A short 2.5-unit probe accepts intersection noses between splitter islands.
 // Require a useful run-up both ways so the diagnostic car starts somewhere it
 // can actually pull away from, not merely somewhere its stationary body fits.
 const SPAWN_PROBE_DISTANCE = 6;
+const DIAGNOSTIC_SPAWN_CANDIDATE_LIMIT = 512;
 
 function* diagnosticSpawnSteps(surface: CompiledCitySurface, regions: Extract<SurfaceRegionsBuild, { status: "ready" }>,
   environment: SpawnEnvironment): Generator<SpawnStep, DrivingState | null, DrivingMoveResult | undefined> {
-  let budget = 512;
+  let budget = DIAGNOSTIC_SPAWN_CANDIDATE_LIMIT;
   let forwardOnly: DrivingState | null = null;
 
   function* hasShortClearance(start: DrivingState, direction: "forward" | "backward"): Generator<SpawnStep, boolean, DrivingMoveResult | undefined> {
@@ -28,13 +29,14 @@ function* diagnosticSpawnSteps(surface: CompiledCitySurface, regions: Extract<Su
     const desired = { x: start.x + Math.cos(start.heading) * SPAWN_PROBE_DISTANCE * sign,
       z: start.z + Math.sin(start.heading) * SPAWN_PROBE_DISTANCE * sign, heading: start.heading,
       travelBudget: SPAWN_PROBE_DISTANCE };
-    const moved = yield { start, desired };
+    const moved = yield { kind: "move", start, desired };
     if (!moved) throw new Error("missing-spawn-probe-result");
     return !moved.blocked && Math.hypot(moved.x - start.x, moved.z - start.z) >= SPAWN_PROBE_DISTANCE * 0.95;
   }
 
   const tryPose = (x: number, z: number, heading: number, layerId: string): DrivingState | null => {
-    if (--budget < 0) return null;
+    if (budget <= 0) return null;
+    budget -= 1;
     const point = regions.classify(x, z, layerId);
     if (point.status !== "drivable") return null;
     const support = environment.place(x, z, heading, point.regionId);
@@ -75,7 +77,8 @@ function* diagnosticSpawnSteps(surface: CompiledCitySurface, regions: Extract<Su
     })];
     for (const [x, z] of positions) {
       for (const angle of [heading, heading + Math.PI]) {
-        yield null;
+        if (budget <= 0) return forwardOnly;
+        yield { kind: "candidate" };
         const state = tryPose(x, z, angle, patch.layerId);
         if (!state) { if (budget <= 0) return forwardOnly; continue; }
         if (!(yield* hasShortClearance(state, "forward"))) continue;
@@ -93,14 +96,19 @@ export function diagnosticSpawn(surface: CompiledCitySurface, regions: Extract<S
   environment: SpawnEnvironment): DrivingState | null {
   const steps = diagnosticSpawnSteps(surface, regions, environment);
   let next = steps.next();
-  while (!next.done) next = steps.next(next.value ? environment.move(next.value.start, next.value.desired) : undefined);
+  while (!next.done) {
+    const step = next.value;
+    next = steps.next(step.kind === "move" ? environment.move(step.start, step.desired) : undefined);
+  }
   return next.value;
 }
 
 /** Real interactive entry yields between candidates without changing the search. */
 export async function diagnosticSpawnAsync(surface: CompiledCitySurface, regions: Extract<SurfaceRegionsBuild, { status: "ready" }>,
-  environment: SpawnEnvironment, signal?: AbortSignal, isCurrent: () => boolean = () => true): Promise<DrivingState | null> {
+  environment: SpawnEnvironment, signal?: AbortSignal, isCurrent: () => boolean = () => true,
+  onCandidateProgress?: (completedCandidates: number, candidateLimit: number) => void): Promise<DrivingState | null> {
   const steps = diagnosticSpawnSteps(surface, regions, environment);
+  let completedCandidates = 0;
   let deadline = preparationNow() + 8;
   const checkpoint = async () => {
     if (signal?.aborted) throw new Error("cancelled");
@@ -113,11 +121,25 @@ export async function diagnosticSpawnAsync(surface: CompiledCitySurface, regions
   let next = steps.next();
   while (!next.done) {
     await checkpoint();
-    const job = next.value;
-    const moved = !job ? undefined : environment.moveAsync
-      ? await environment.moveAsync(job.start, job.desired, checkpoint)
-      : environment.move(job.start, job.desired);
+    const step = next.value;
+    if (step.kind === "candidate") {
+      // Resume the generator first: that is when it actually classifies and
+      // validates this candidate. Reporting before resumption counted a pose
+      // the search had not examined yet (and could report one past its budget).
+      next = steps.next();
+      completedCandidates++;
+      if (completedCandidates % 8 === 0) reportProgress();
+      continue;
+    }
+    const moved = environment.moveAsync
+      ? await environment.moveAsync(step.start, step.desired, checkpoint)
+      : environment.move(step.start, step.desired);
     next = steps.next(moved);
   }
+  if (completedCandidates % 8 !== 0) reportProgress();
   return next.value;
+
+  function reportProgress() {
+    try { onCandidateProgress?.(completedCandidates, DIAGNOSTIC_SPAWN_CANDIDATE_LIMIT); } catch { /* progress is observational only */ }
+  }
 }

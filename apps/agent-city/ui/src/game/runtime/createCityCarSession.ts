@@ -21,7 +21,7 @@ import { createCameraCollisionQuery } from "../driving/cameraCollisionQuery";
 import { CarAdapter, type CarPresentation } from "./CarAdapter";
 import { GameRuntime } from "./GameRuntime";
 import { diagnosticSpawnAsync } from "./diagnosticSpawn";
-import { measurePreparation, preparationCheckpoint, preparationNow, type PreparationMetric } from "./Preparation";
+import { measurePreparation, preparationCheckpoint, preparationNow, type PreparationMetric, type PreparationProgress } from "./Preparation";
 import { isVerifiedSpawnCredential, type VerifiedSpawnCredential } from "../driving/spawnPoints";
 import type { GameSceneLease, GameScenePort, RuntimeSceneLease } from "./GameScenePort";
 import type { GameSceneSnapshot } from "./GameSceneSnapshot";
@@ -39,6 +39,7 @@ type CityCarRequestBase = Readonly<{
   collider: Readonly<{ dimensions: CollisionDimensions; centerHeight: number; vehicleConfigHash: string }>;
   present(frame: CarPresentation, scene: CityCarSceneCapability): void;
   onPreparationMetric?(metric: PreparationMetric): void;
+  onPreparationProgress?(progress: PreparationProgress): void;
   /** VTOL 推进器会话（玩法专属）：地面段与默认完全一致，注入空中体制物理。 */
   vtol?: boolean;
 }>;
@@ -62,28 +63,40 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
     !request.validatedSpawn.isFresh()) {
     return Object.freeze({ status: "unavailable", reason: "validated-spawn-stale-or-mismatch" });
   }
-  return createSession(host, runtime, request, false, signal);
+  return createSession(host, runtime, request, "validated", signal);
 }
-/** Diagnostic-only entry. Does not confirm/persist a product spawn or release roads. */
+/** Ordinary free-drive entry. Finds a safe, locally clear spawn in the current
+ * frozen city. It does not certify/release road connectivity for the whole city. */
+export async function createCityCarFreeDriveSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>,
+  request: Pick<CityCarRequestBase, "collider" | "present" | "onPreparationMetric" | "onPreparationProgress">, signal?: AbortSignal): Promise<CityCarEntry> {
+  return createSession(host, runtime, { ...request, x: 0, z: 0, heading: 0, layerId: "" }, "free-drive", signal);
+}
+/** Development diagnostic entry. Kept separate from player free drive and
+ * never writes confirmation state or road-release evidence. */
 export async function createCityCarDiagnosticSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>,
-  request: Pick<CityCarRequestBase, "collider" | "present" | "onPreparationMetric">, signal?: AbortSignal): Promise<CityCarEntry> {
-  return createSession(host, runtime, { ...request, x: 0, z: 0, heading: 0, layerId: "" }, true, signal);
+  request: Pick<CityCarRequestBase, "collider" | "present" | "onPreparationMetric" | "onPreparationProgress">, signal?: AbortSignal): Promise<CityCarEntry> {
+  return createSession(host, runtime, { ...request, x: 0, z: 0, heading: 0, layerId: "" }, "diagnostic", signal);
 }
 async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>, request: CityCarRequestBase,
-  diagnostic: boolean, signal?: AbortSignal): Promise<CityCarEntry> {
+  mode: "validated" | "free-drive" | "diagnostic", signal?: AbortSignal): Promise<CityCarEntry> {
   const unavailable = (reason: string): CityCarEntry => Object.freeze({ status: "unavailable", reason });
   if (signal?.aborted) return unavailable("cancelled");
   if (!["idle", "error"].includes(runtime.snapshot.phase)) return unavailable("runtime-busy");
   runtime.beginPreparation();
+  const progress = (stage: PreparationProgress["stage"], state: PreparationProgress["state"], extra: Omit<PreparationProgress, "stage" | "state"> = {}) => {
+    try { request.onPreparationProgress?.(Object.freeze({ stage, state, ...extra })); } catch { /* local presentation only */ }
+  };
   const acquireSignal = signal ?? new AbortController().signal;
   let lease: CityCarWorldLease;
   try {
+    progress("world-capture", "started");
     await preparationCheckpoint(signal);
     const started = preparationNow();
     const acquisition = await host.gameScenePort.acquireResult({ vehicle: "car", activity: "free" }, runtime.snapshot.runId + 1, acquireSignal);
     if (acquisition.status !== "ready") return unavailable(`scene-${acquisition.status}:${acquisition.reason}`);
     lease = acquisition.lease;
     try { request.onPreparationMetric?.({ stage: "world-capture", durationMs: preparationNow() - started }); } catch { /* local diagnostic */ }
+    progress("world-capture", "completed");
   }
   catch (error) { return unavailable(error instanceof Error ? error.message : "scene-unavailable"); }
   const capture = lease.snapshot.drivingWorld;
@@ -102,24 +115,30 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
     if (signal?.aborted || !lease.isCurrent() || !capture.verifyCurrent() || !staticCapture.verifyCurrent()) return unavailable("stale-or-cancelled");
     const leaseCurrent = () => lease.isCurrent() && capture.isLeaseCurrent() && staticCapture.isLeaseCurrent();
     await preparationCheckpoint(signal, leaseCurrent);
-    const measured = <T>(stage: PreparationMetric["stage"], work: () => T) => measurePreparation(stage, work, request.onPreparationMetric);
-    const snapshot = measured("world-read", () => capture.readWorld());
-    const staticSnapshot = staticCapture.readWorld();
+    const measured = async <T>(stage: PreparationMetric["stage"], work: () => T): Promise<T> => {
+      progress(stage, "started");
+      await preparationCheckpoint(signal, leaseCurrent);
+      const result = measurePreparation(stage, work, request.onPreparationMetric);
+      progress(stage, "completed");
+      return result;
+    };
+    const worldRead = await measured("world-read", () => ({ snapshot: capture.readWorld(), staticSnapshot: staticCapture.readWorld() }));
+    const { snapshot, staticSnapshot } = worldRead;
     if (!snapshot || snapshot.revision !== capture.worldRevision || snapshot.surface.revision !== capture.revision) return unavailable("revision-mismatch");
     if (!staticSnapshot || staticSnapshot.revision !== staticCapture.worldRevision) return unavailable("static-revision-mismatch");
-    if (!diagnostic && (!("validatedSpawn" in request) || !isVerifiedSpawnCredential(request.validatedSpawn) ||
+    if (mode === "validated" && (!("validatedSpawn" in request) || !isVerifiedSpawnCredential(request.validatedSpawn) ||
       request.validatedSpawn.worldRevision !== capture.worldRevision || !request.validatedSpawn.isFresh())) return unavailable("validated-spawn-stale-or-mismatch");
     // Merge exact structural descriptors, whitelisted scene proxies, and
     // conservative per-instance rendered-solid bounds in one fail-closed index.
     if (!request.collider.vehicleConfigHash) return unavailable("invalid-vehicle-config");
     await preparationCheckpoint(signal, leaseCurrent);
-    const surfaceIndex = measured("surface-index", () => buildSurfaceIndex(snapshot.surface));
+    const surfaceIndex = await measured("surface-index", () => buildSurfaceIndex(snapshot.surface));
     if (surfaceIndex.status !== "ready") return unavailable(`surface-index:${surfaceIndex.reason}`);
     await preparationCheckpoint(signal, leaseCurrent);
-    const regions = measured("surface-regions", () => buildSurfaceRegions(snapshot.surface, surfaceIndex));
+    const regions = await measured("surface-regions", () => buildSurfaceRegions(snapshot.surface, surfaceIndex));
     if (regions.status !== "ready") return unavailable(`surface-regions:${regions.reason}`);
     await preparationCheckpoint(signal, leaseCurrent);
-    const compiledSolids = measured("static-solids", () => compileCitySolidInputs(staticSnapshot, undefined, capture.worldRevision));
+    const compiledSolids = await measured("static-solids", () => compileCitySolidInputs(staticSnapshot, undefined, capture.worldRevision));
     if (compiledSolids.status !== "ready") return unavailable(compiledSolids.reason);
     const collisionIndex = compiledSolids.collisionIndex;
     if (collisionIndex.revision !== capture.worldRevision) return unavailable("collision-index-revision-mismatch");
@@ -138,13 +157,14 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
     const ALL_SURFACE_KINDS = ["carriageway", "junction", "bridge-deck", "ramp", "expressway-deck", "sidewalk", "island", "decor"] as const;
     const vtolFloorAt = (x: number, z: number): number => {
       const query = surfaceIndex.query({ x, z, layerId: "ground", kinds: ALL_SURFACE_KINDS });
-      if (query.status === "hit") return query.hit.point.y;
-      if (query.status === "ambiguous") return Math.max(...query.candidates.map((candidate) => candidate.point.y));
-      return 0;
+      const surfaceHeight = query.status === "hit" ? query.hit.point.y :
+        query.status === "ambiguous" ? Math.max(...query.candidates.map((candidate) => candidate.point.y)) : 0;
+      const terrainHeight = staticSnapshot.layout.terrain.height(x, z);
+      return Math.max(surfaceHeight, Number.isFinite(terrainHeight) ? terrainHeight : 0);
     };
     // VTOL 与默认会话共用同一冻结世界事实与 gameplay 策略；VTOL 环境在地面段
     // 完全委托连续环境，仅追加垂直离地/空中移动两条查询。
-    const environment = measured("collision-world", () => vtol ? new VtolDrivingEnvironment(regions, {
+    const environment = await measured("collision-world", () => vtol ? new VtolDrivingEnvironment(regions, {
       surfaceRevision: capture.revision, worldRevision: capture.worldRevision, solidRevision: capture.worldRevision,
       solids: collisionIndex.solids(), dimensions: gameplayDimensions,
       centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent,
@@ -154,12 +174,14 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
       solids: collisionIndex.solids(), dimensions: gameplayDimensions,
       centerHeight: request.collider.centerHeight, isCurrent: leaseCurrent,
     }, GAMEPLAY_DRIVING_FOOTPRINT, GAMEPLAY_FOOTPRINT_PARAMS, {}, { boundarySlide: true, mountablePolicy: "gameplay" }));
-    if (!diagnostic) {
+    if (mode === "validated") {
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return unavailable(`spawn:${point.cause}`);
     }
     const spawnStarted = preparationNow();
-    const rawSpawn = diagnostic ? await diagnosticSpawnAsync(snapshot.surface, regions, environment, signal, leaseCurrent) : (() => {
+    progress("diagnostic-spawn", "started");
+    const rawSpawn = mode !== "validated" ? await diagnosticSpawnAsync(snapshot.surface, regions, environment, signal, leaseCurrent,
+      (completedCandidates, candidateLimit) => progress("diagnostic-spawn", "started", { completedCandidates, candidateLimit })) : (() => {
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return null;
       const support = environment.place(request.x, request.z, request.heading, point.regionId);
@@ -169,7 +191,8 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
     // 否则 undefined 进入物理算术变成 NaN（HUD「Boost NaN」）。
     const spawn = vtol && rawSpawn ? { ...rawSpawn, airborne: false, verticalSpeed: 0, boost: 1 } : rawSpawn;
     try { request.onPreparationMetric?.({ stage: "diagnostic-spawn", durationMs: preparationNow() - spawnStarted }); } catch { /* local diagnostic */ }
-    if (!spawn) return unavailable(diagnostic ? "no-safe-diagnostic-spawn" : "unsafe-car-spawn");
+    progress("diagnostic-spawn", "completed");
+    if (!spawn) return unavailable(mode === "diagnostic" ? "no-safe-diagnostic-spawn" : mode === "free-drive" ? "no-safe-free-drive-spawn" : "unsafe-car-spawn");
     // VTOL 步进注入：prev/input 的收窄转换只发生在这一个调用点（内核守卫对两种体制同界）。
     const vtolStep: KernelStepFn | null = vtol ? (previous, input, world) =>
       stepVtolDriving(previous as VtolDrivingState, input as VtolInputState, world as unknown as VtolWorld) : null;

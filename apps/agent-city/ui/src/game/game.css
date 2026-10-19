@@ -50,6 +50,11 @@
 .city-game-diagnostics dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; max-height: 25vh; overflow: auto; margin: 6px 0; font-size: 11px; }
 .city-game-diagnostics dt { font-weight: 600; color: var(--city-text); }
 .city-game-diagnostics dd { margin: 0; color: var(--city-muted); font-variant-numeric: tabular-nums; }
+.city-driving-local-audit { max-width: min(360px, 82vw); color: var(--city-muted); font-size: 11px; }
+.city-driving-local-audit summary { min-height: 32px; cursor: pointer; color: var(--city-text); }
+.city-driving-local-audit ol { display: grid; gap: 8px; max-height: 26vh; overflow: auto; margin: 6px 0; padding-left: 20px; }
+.city-driving-local-audit li { overflow-wrap: anywhere; }
+.city-driving-local-audit small { color: var(--city-muted); font-size: 10px; }
 .city-game-countdown { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; font-weight: 700; color: #eaf6ff; text-shadow: 0 2px 24px #0a2033cc; pointer-events: none; }
 
 @media (max-width: 520px) {

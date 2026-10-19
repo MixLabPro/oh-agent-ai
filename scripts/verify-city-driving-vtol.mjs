@@ -31,10 +31,11 @@ const { grid, patch, regionsOf } = makeFixtures(k);
 // 路 [-30,30]×[-6,6]；x>30 无面片（水面语义）。高墙 x∈[24,25]（y 0..9，空中也挡）。
 // 低板 x∈[-6,6], z∈[-2,2], y∈[3,3.5]（模拟桥面板底面，压制垂直离地）。
 const road = patch("road", "carriageway", grid(-30, -6, 30, 6, 60, 12));
+const remoteRoad = patch("road:remote", "carriageway", grid(70, -6, 90, 6, 20, 12));
 // 人行道面片（0.4 高，x 35..45）：足迹不可落地（blocked），但面片网格有高度——
 // 悬停地板必须取面片高度，而不是海平面（否则车沉进地里）。
 const sidewalk = patch("sidewalk:1", "sidewalk", grid(35, -4, 45, 4, 20, 8, () => 0.4));
-const { regions } = regionsOf([road, sidewalk], undefined);
+const { regions } = regionsOf([road, remoteRoad, sidewalk], undefined);
 assert.equal(regions.status, "ready");
 const regionId = regions.classify(-20, 0, "ground").regionId;
 
@@ -47,7 +48,7 @@ const d = k.CAR_DIMENSIONS;
 const dims = { halfLength: d.length / 2 - k.GAMEPLAY_COLLISION_INSET, halfWidth: d.width / 2 - k.GAMEPLAY_COLLISION_INSET, halfHeight: d.height / 2 };
 const binding = { surfaceRevision: regions.revision, worldRevision: "vtol-fixture", solidRevision: "vtol-fixture",
   solids: index.solids(), dimensions: dims, centerHeight: dims.halfHeight, isCurrent: () => true };
-const surfaceIndex = k.buildSurfaceIndex({ revision: regions.revision, patches: [road, sidewalk] });
+const surfaceIndex = k.buildSurfaceIndex({ revision: regions.revision, patches: [road, remoteRoad, sidewalk] });
 const floorAt = (x, z) => {
   const q = surfaceIndex.query({ x, z, layerId: "ground", kinds: ["carriageway", "junction", "bridge-deck", "ramp", "expressway-deck", "sidewalk", "island", "decor"] });
   if (q.status === "hit") return q.hit.point.y;
@@ -56,6 +57,7 @@ const floorAt = (x, z) => {
 };
 const env = new k.VtolDrivingEnvironment(regions, binding, k.GAMEPLAY_DRIVING_FOOTPRINT, k.GAMEPLAY_FOOTPRINT_PARAMS, {},
   { boundarySlide: true, mountablePolicy: "gameplay" }, { floorAt });
+const remoteRegionId = regions.classify(80, 0, "ground").regionId;
 
 const thrust = { forward: false, backward: false, left: false, right: false, thruster: true };
 const idle = { forward: false, backward: false, left: false, right: false };
@@ -135,6 +137,18 @@ const boostAfterTakeoff = state.boost;
   }
 }
 
+// ── 6b) 空中可落到出生道路以外的独立连通路段，surfaceId 随落地点更新 ──
+{
+  let air = { ...k.initialVtolState(80, 0, 0, regionId), y: 0.1, airborne: true, verticalSpeed: -1, boost: 0.5 };
+  let landed = false;
+  for (let tick = 0; tick < 30; tick += 1) {
+    air = k.stepVtolDriving(air, idle, env);
+    if (!air.airborne) { landed = true; break; }
+  }
+  assert.ok(landed, "must land on a disconnected drivable region");
+  assert.equal(air.surfaceId, remoteRegionId, "landing switches the vehicle to the supporting road region");
+}
+
 // ── 2) 悬停地板：无支撑区域不坠落 ──
 {
   // 面片网格之外（真水面语义，x=60 无任何面片）→ 钳在海面 0.2
@@ -148,6 +162,12 @@ const boostAfterTakeoff = state.boost;
   for (let tick = 0; tick < 240; tick += 1) over = k.stepVtolDriving(over, idle, env);
   assert.ok(over.airborne, "sidewalk is not landable");
   assert.ok(Math.abs(over.y - 0.4) < 0.05, `hovers at sidewalk surface, not below ground (y=${over.y.toFixed(3)})`);
+  // 自然地形高度来自 frozen CityLayout sampler，不能回退到海平面。
+  const hillEnv = new k.VtolDrivingEnvironment(regions, binding, k.GAMEPLAY_DRIVING_FOOTPRINT, k.GAMEPLAY_FOOTPRINT_PARAMS, {},
+    { boundarySlide: true, mountablePolicy: "gameplay" }, { floorAt: (x) => x > 50 ? 3.5 : floorAt(x, 0) });
+  let hill = { ...k.initialVtolState(60, 0, 0, regionId), y: 5, airborne: true, verticalSpeed: 0, boost: 1 };
+  for (let tick = 0; tick < 240; tick += 1) hill = k.stepVtolDriving(hill, idle, hillEnv);
+  assert.ok(Math.abs(hill.y - 3.5) < 0.05, `hovers at natural terrain height (y=${hill.y.toFixed(3)})`);
 }
 
 // ── 3) 天花板：爬升钳在 max(最高实体+40, 120) ──
@@ -220,6 +240,19 @@ const boostAfterTakeoff = state.boost;
   }
   assert.ok(tookOff, "kernel-injected VTOL physics takes off from a bare diagnostic spawn (world.lift reachable)");
   assert.ok(Number.isFinite(s.boost), "kernel path keeps boost finite");
+  // Air contact metadata is captured by the same kernel motion ledger as ground contacts.
+  const contactWorld = Object.create(env);
+  contactWorld.moveAir = (before, desired) => Object.freeze({ ...before, x: desired.x, y: desired.y, z: desired.z,
+    heading: desired.heading, blocked: false, reason: "contact", travelledDistance: 0, speedFraction: 1,
+    trajectory: Object.freeze([{ ...before }]), contacts: Object.freeze([{ obstacleId: "air-wall", worldRevision: "vtol-fixture",
+      time: 0.5, timeUpper: 0.5, normal: Object.freeze({ x: -1, y: 0, z: 0 }), kind: "solid" }]),
+    contact: true, landed: false, floor: false, queryStatus: "resolved" });
+  const contactKernel = new k.DrivingKernel(contactWorld, { baseSnapshotHash: "vtol", vehicleConfigHash: "vtol", kernelBuildId: "vtol-contact-verify",
+    physicsVersion: 0, collisionVersion: 0, queryVersion: 0 }, vtolStep);
+  const airborne = { ...k.initialVtolState(0, 0, 0, regionId), y: 5, airborne: true, verticalSpeed: 0, boost: 1 };
+  const contactResult = contactKernel.step(airborne, { forward: false, backward: false, left: false, right: false, thruster: false });
+  assert.equal(contactResult.motion.contact, true, "kernel reports airborne contact state");
+  assert.equal(contactResult.motion.contacts?.[0]?.obstacleId, "air-wall", "kernel preserves airborne contact evidence");
   // 空中巡航 + 下降落地也经内核（moveAir 可达）
   let landed = false;
   for (let tick = 0; tick < 600 && !landed; tick += 1) {
@@ -243,4 +276,4 @@ const boostAfterTakeoff = state.boost;
   assert.ok(s.airborne, `bare (diagnostic) spawn can take off (${ticks} ticks)`);
 }
 
-console.log(`VTOL driving (physics v${k.VTOL_PHYSICS_VERSION}): takeoff boost-drain/liftoff, air wall stop (strict), road landing + driving boost regen, water hover floor, ceiling clamp, overhead-slab lift trim, kernel-guard-compatible air steps, bare diagnostic spawn (no NaN), and stepDriving thruster invariance passed.`);
+console.log(`VTOL driving (physics v${k.VTOL_PHYSICS_VERSION}): takeoff, strict air collision, disconnected-road landing, terrain/water/sidewalk hover floors, landing region handoff, ceiling and slab limits, kernel air-contact evidence, boost regen, and stepDriving invariance passed.`);

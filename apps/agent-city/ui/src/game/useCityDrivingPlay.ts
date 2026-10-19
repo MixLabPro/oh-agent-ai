@@ -1,10 +1,10 @@
-/** Development-only UI ownership. Diagnostic entry cannot persist/confirm spawns. */
+/** Player-facing free-drive UI. The session chooses a safe local spawn, while
+ * road-wide audit/release evidence remains a separate system. */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { CityEngine } from "../engine/CityEngine";
 import { CarVisuals } from "./CarVisuals";
 import { useCityDriving } from "./useCityDriving";
 import { DRIVING_PARAMS, EMPTY_DRIVING_INPUT, type DrivingInputState } from "./DrivingSimulation";
-import type { VtolInputState } from "./driving/vtolDriving";
 import { KeyboardInput } from "./runtime/KeyboardInput";
 import type { InputInterrupt } from "./runtime/KeyboardInput";
 import { DrivingSfx } from "./driving/DrivingSfx";
@@ -12,30 +12,25 @@ import type { CityCarSceneCapability } from "./runtime/createCityCarSession";
 import type { CameraClearanceQuery } from "./VehicleChaseCamera";
 import { closeOpenGameDisclosure } from "./ui/closeOpenDisclosure";
 
-declare const __CITY_GAME_UAT__: boolean;
-export const CITY_DRIVING_UAT = typeof __CITY_GAME_UAT__ !== "undefined" && __CITY_GAME_UAT__;
-
-export function useCityDrivingUat(engine: RefObject<CityEngine | null>, host: Readonly<{
+export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: Readonly<{
   cinemaActive(): boolean; gameActive(): boolean; busy(): boolean;
 }>) {
   const visuals = useRef<CarVisuals | null>(null);
   const visualScene = useRef<CityCarSceneCapability | null>(null);
-  const inputSource = useRef<KeyboardInput<VtolInputState> | null>(null);
+  const inputSource = useRef<KeyboardInput<DrivingInputState> | null>(null);
   const blockedSeen = useRef(false);
   const sfxRef = useRef<DrivingSfx | null>(null);
   const [soundVolume, setSoundVolumeState] = useState(0.7);
   const [sfxEnabled, setSfxEnabled] = useState(true);
   const [soundAvailable, setSoundAvailable] = useState(false);
   const [initialPaused, setInitialPaused] = useState(false);
-  // ?vtol=1 开启飞行车会话（Space=推进器）；默认纯驾驶。暂停统一由 Esc / HUD 按钮承担。
-  const vtolEnabled = typeof window !== "undefined" && typeof location !== "undefined" && new URLSearchParams(location.search).get("vtol") === "1";
   const removeVisuals = useCallback(() => {
     const currentVisuals = visuals.current;
     if (currentVisuals) visualScene.current?.detach([currentVisuals.root]);
     currentVisuals?.dispose(); visuals.current = null; visualScene.current = null; blockedSeen.current = false;
   }, []);
   const car = useCityDriving(engine, {
-    ...host, spawn: null, confirmationEnabled: false, vtol: vtolEnabled,
+    ...host, spawn: null, confirmationEnabled: false,
     present: (state, blocked, _reason, frameSeconds, cameraSweep: CameraClearanceQuery, scene: CityCarSceneCapability) => {
       const current = engine.current;
       if (!current) return;
@@ -64,10 +59,9 @@ export function useCityDrivingUat(engine: RefObject<CityEngine | null>, host: Re
     if (canvas instanceof HTMLElement) canvas.focus({ preventScroll: true });
   }, [engine]);
   const enter = useCallback(() => {
-    if (!CITY_DRIVING_UAT) return;
     setInitialPaused(false);
-    void car.enterDiagnostic().then((ready) => { if (ready) { setInitialPaused(true); focusCanvas(); } });
-  }, [car.enterDiagnostic, focusCanvas]);
+    void car.enterFreeDrive().then((ready) => { if (ready) { setInitialPaused(true); focusCanvas(); } });
+  }, [car.enterFreeDrive, focusCanvas]);
   const resume = useCallback(() => {
     inputSource.current?.clear();
     if (!sfxRef.current) sfxRef.current = new DrivingSfx();
@@ -88,9 +82,9 @@ export function useCityDrivingUat(engine: RefObject<CityEngine | null>, host: Re
   useEffect(() => removeVisuals, [removeVisuals]);
   useEffect(() => {
     if (!active) return;
-    const source = new KeyboardInput<VtolInputState>({
-      keys: { KeyW: "forward", ArrowUp: "forward", KeyS: "backward", ArrowDown: "backward", KeyA: "left", ArrowLeft: "left", KeyD: "right", ArrowRight: "right", ...(vtolEnabled ? { Space: "thruster" } : {}) },
-      emptyInput: () => ({ ...EMPTY_DRIVING_INPUT, thruster: false }), capture: true,
+    const source = new KeyboardInput<DrivingInputState>({
+      keys: { KeyW: "forward", ArrowUp: "forward", KeyS: "backward", ArrowDown: "backward", KeyA: "left", ArrowLeft: "left", KeyD: "right", ArrowRight: "right" },
+      emptyInput: () => ({ ...EMPTY_DRIVING_INPUT }), capture: true,
       focusTarget: () => {
         const target = engine.current?.domCanvas;
         return target instanceof HTMLElement ? target : null;
@@ -112,8 +106,7 @@ export function useCityDrivingUat(engine: RefObject<CityEngine | null>, host: Re
           else if (phaseRef.current === "paused") resume();
           return true;
         }
-        // VTOL 会话中 Space 是推进器（进 keys 映射）；非 VTOL 保留 Space=暂停/继续。
-        if (!vtolEnabled && event.code === "Space" && !(event.target instanceof HTMLElement && event.target.closest("button, summary, input, select, [role='dialog']"))) {
+        if (event.code === "Space" && !(event.target instanceof HTMLElement && event.target.closest("button, summary, input, select, [role='dialog']"))) {
           event.preventDefault(); event.stopImmediatePropagation(); if (!event.repeat) { source.clear(); if (phaseRef.current === "running") pause(); else if (phaseRef.current === "paused") resume(); } return true;
         }
         return false;

@@ -13,12 +13,13 @@ import { supportsBackgroundFilm } from "./export/filmJob";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { replayStartMs } from "./replayRange";
 import { useCityGame } from "./game/useCityGame";
-import { CITY_DRIVING_UAT, useCityDrivingUat } from "./game/useCityDrivingUat";
+import { useCityDrivingPlay } from "./game/useCityDrivingPlay";
 import { DrivingHud } from "./game/DrivingHud";
+import type { PlanningWorkSnapshot } from "./engine/planner/operationBudget";
 
 const windowOptions = [7, 30, 90, 366] as const;
-declare const __CITY_GAME_UAT__: boolean;
 type WindowDays = (typeof windowOptions)[number];
+type CityLoadState = Readonly<{ stage: "data" | "model" | "planning" | "mounting" | "rendering"; work: number | null }>;
 
 function projectionStatusLabel(data: CityProjectionV1): string {
   if (data.status === "ready") return data.source === "local"
@@ -46,12 +47,13 @@ export function CityApp() {
   const [sceneUnavailable, setSceneUnavailable] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
   const [firstModelFrame, setFirstModelFrame] = useState(false);
+  const [cityLoad, setCityLoad] = useState<CityLoadState>({ stage: "data", work: null });
   const [quality, setQuality] = useState<EngineQualityMode>("auto");
   const [labels, setLabels] = useState(true);
   const [cinema, setCinema] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const experience = useCityExperience(engineRef, projection);
-  // 游戏模式（G1）：开发开关下从城市设置进入；未验收不默认开放（§11 G1 交付）。
+  // 飞机与汽车共用宿主运行时；当前城市的自由驾驶从工具栏进入。
   // 必须先于引擎创建 effect 声明——卸载清理时先退出游戏（归还相机）再销毁引擎。
   const labelsRef = useRef(labels);
   labelsRef.current = labels;
@@ -71,7 +73,7 @@ export function CityApp() {
     requestRefresh: () => setRefresh((value) => value + 1),
     locale: () => (language === "en" ? "en" : "zh-Hans"),
   });
-  const driving = useCityDrivingUat(engineRef, {
+  const driving = useCityDrivingPlay(engineRef, {
     cinemaActive: () => cinemaRef.current,
     gameActive: () => game.active,
     busy: () => busyRef.current || filmRef.current || planRepairActive.current,
@@ -96,6 +98,7 @@ export function CityApp() {
       if (!active) return;
       setProjection(data);
       setDataLoaded(true);
+      setCityLoad({ stage: "model", work: null });
       setStatus(projectionStatusLabel(data));
     }).catch(() => {
       if (!active) return;
@@ -132,6 +135,7 @@ export function CityApp() {
     const engine = engineRef.current;
     const from = Date.parse(projection.window.from);
     const to = Date.parse(projection.window.to);
+    setCityLoad({ stage: "model", work: null });
     const rows: CitySessionRow[] = projection.sessions.map((session) => ({
       session_ref: session.id,
       harness: session.harness,
@@ -170,16 +174,26 @@ export function CityApp() {
     });
     experience.modelRef.current = model;
     experience.setModel(model);
+    setCityLoad({ stage: "planning", work: null });
     const signature = JSON.stringify([projection.window, projection.harnesses, projection.sessions, projection.findings]);
     if (signature !== fingerprint.current) {
-      void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal }).then(() => {
+      setFirstModelFrame(false);
+      void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal,
+        onPlanningProgress: (snapshot: PlanningWorkSnapshot) => {
+          const work = Object.values(snapshot.consumed).reduce((sum, value) => sum + value, 0);
+          setCityLoad({ stage: "planning", work });
+        } }).then(() => {
         if (preparation.signal.aborted || engineRef.current !== engine) return;
+        setCityLoad({ stage: "mounting", work: null });
         engine.applyModel(model, appliedWindow.current === projection.window.days);
+        setCityLoad({ stage: "rendering", work: null });
+        // applyModel synchronously renders the first frame for this model before returning.
+        setFirstModelFrame(true);
         appliedWindow.current = projection.window.days;
         fingerprint.current = signature;
         experience.refreshSelection();
       }).catch(() => {
-        if (!preparation.signal.aborted) setSceneUnavailable(true);
+        if (!preparation.signal.aborted) { setSceneUnavailable(true); setCityLoad({ stage: "data", work: null }); }
       });
     }
     experience.refreshSelection();
@@ -194,6 +208,7 @@ export function CityApp() {
 
   const dataAvailable = projection !== null && projection.status !== "unavailable";
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
+  const cityLoading = dataLoaded && dataAvailable && projection?.status !== "empty" && !sceneUnavailable && !firstModelFrame;
   const toolbarReady = true; // UI/command channel ready; scene actions stay disabled until the first model frame.
   const tools: Tool[] = [
     // 时间范围、显示标签移入城市设置（用户：这两个应放设置里）；画质同样在设置里。city.window / city.labels 命令仍保留给宿主与自动化。
@@ -209,8 +224,8 @@ export function CityApp() {
     // 修复城市入口放在「更多工具」里（用户：不要悬浮在画面上）。进入后的编辑面板仍在页面内；
     // 上限 9→10 见 host 校验器（plugin_host.rs::valid_tools）。
     { id: "repair", commandId: "city.repair", label: planRepair.state.active ? "退出修复" : "修复城市", kind: "button" as const, enabled: planRepair.state.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film) },
-    ...(CITY_DRIVING_UAT ? [{ id: "car", commandId: "city.car", label: driving.active ? "退出试驾" : "试驾汽车 · UAT", kind: "button" as const,
-      enabled: driving.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film && !planRepair.state.active) }] : []),
+    { id: "car", commandId: "city.car", label: driving.active ? "退出驾驶" : "驾车", kind: "button" as const,
+      enabled: driving.active || (sceneReady && !cinema && !game.active && !experience.busy && !experience.film && !planRepair.state.active) },
   ].map((tool) => ({ ...tool, enabled: tool.id === "car" ? tool.enabled : tool.enabled && !driving.active })).map((tool: { id: string; label: string; options?: Array<{ value: string; label: string }> }) => ({ ...tool, placement: tool.id === "cinema" || tool.id === "game" || tool.id === "car" || tool.id === "film" && experience.film ? "primary" : "overflow", label: cityText(tool.label, language), options: tool.options?.map((option) => ({ ...option, label: cityText(option.label, language) })) })) as Tool[];
   const execute = (commandId: string, value?: string) => {
     const engine = engineRef.current;
@@ -238,7 +253,6 @@ export function CityApp() {
         if (planRepair.state.active) planRepair.exit(); else planRepair.enter();
         break;
       case "city.car":
-        if (!CITY_DRIVING_UAT) throw new Error("command_unavailable");
         if (driving.active) driving.exit(); else { experience.setOptions(false); experience.clearSelection(); driving.enter(); }
         break;
       case "city.game":
@@ -262,6 +276,15 @@ export function CityApp() {
   return cityView((
     <section className="city-app" aria-label="Agent City">
       <canvas className="city-canvas" ref={canvasRef} aria-label="Agent City 三维城市" style={{ visibility: sceneMessage && !game.active ? "hidden" : "visible" }} />
+      {cityLoading && <div className="city-loading" role="status" aria-live="polite">
+        <div className="city-loading-card"><div className="city-loading-mark" aria-hidden="true"><span /><span /><span /><i /></div>
+          <p className="city-loading-kicker">AGENT CITY</p>
+          <h2>{cityLoad.stage === "model" ? "整理城市数据" : cityLoad.stage === "planning" ? "规划道路与街区" : cityLoad.stage === "mounting" ? "装配城市" : "等待城市首帧"}</h2>
+          <p>{cityLoad.stage === "model" ? "正在组织会话与建筑数据" : cityLoad.stage === "planning" ? cityLoad.work === null ? "正在计算道路、地形与街区" : `规划器已完成 ${cityLoad.work.toLocaleString()} 项工作单元` : cityLoad.stage === "mounting" ? "正在创建三维场景对象" : "城市即将就绪"}</p>
+          <div className="city-loading-track" aria-hidden="true"><span /></div>
+          <small>{cityLoad.stage === "planning" && cityLoad.work !== null ? "显示规划器实际完成的工作量，不代表百分比" : "复杂城市需要一些时间，请稍候"}</small>
+        </div>
+      </div>}
       {sceneMessage && !game.active && <p className="city-scene-message" role="status">{sceneMessage}</p>}
       {!embedded() && <header className="city-header">
         <div className="city-local-toolbar">{tools.map((tool) => tool.kind === "select"
@@ -271,11 +294,11 @@ export function CityApp() {
       <div hidden={driving.active}><CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} planRepair={planRepair}
         windowDays={windowDays} windowOptions={windowOptions} onWindowDays={(days) => setWindowDays(days as WindowDays)} labels={labels} onLabels={(next) => { engineRef.current?.setLabelsVisible(next); setLabels(next); }}
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} /></div>
-      {CITY_DRIVING_UAT && <DrivingHud model={{ active: driving.active, entryError: driving.entryError,
-        initialPaused: driving.initialPaused, hud: driving.hud, diagnostics: driving.diagnostics() }}
+      <DrivingHud model={{ active: driving.active, entryError: driving.entryError,
+        initialPaused: driving.initialPaused, hud: driving.hud, preparationProgress: driving.preparationProgress, events: driving.events, diagnostics: driving.diagnostics() }}
         actions={{ clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,
           resume: driving.resume, openUiContext: driving.openUiContext }}
-        locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />}
+        locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />
     </section>
   ), language);
 }

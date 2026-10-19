@@ -2,6 +2,24 @@
 .city-app { position: relative; flex: 1; min-height: 0; width: 100%; height: 100%; overflow: hidden; border-radius: 0; color: #edf3fc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: radial-gradient(ellipse at 50% 54%, #16283d 0, #0a1321 47%, #080e18 100%); }
 .city-app .city-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .city-app .city-canvas:focus-visible { outline: 2px solid #a2d6ff; outline-offset: -3px; }
+.city-loading { position: absolute; inset: 0; z-index: 8; display: grid; place-items: center; padding: 24px; background: linear-gradient(180deg, rgba(5, 12, 22, .24), rgba(5, 12, 22, .62)); backdrop-filter: blur(3px); }
+.city-loading-card { width: min(390px, 100%); padding: 28px 30px 24px; border: 1px solid #8ca9c545; border-radius: 18px; background: rgba(10, 23, 39, .9); box-shadow: 0 24px 80px #0008; text-align: center; animation: city-loading-enter 360ms ease-out both; }
+.city-loading-mark { position: relative; width: 76px; height: 58px; margin: 0 auto 15px; display: flex; justify-content: center; align-items: end; gap: 5px; border-bottom: 2px solid #e4bd72; }
+.city-loading-mark span { width: 13px; border: 1px solid #91c2df9c; background: linear-gradient(180deg, #547b9a, #213a56); transform-origin: bottom; animation: city-building-rise 1.8s ease-in-out infinite alternate; }
+.city-loading-mark span:nth-child(1) { height: 25px; animation-delay: -.4s; }.city-loading-mark span:nth-child(2) { height: 43px; animation-delay: -.9s; }.city-loading-mark span:nth-child(3) { height: 32px; animation-delay: -.2s; }
+.city-loading-mark i { position: absolute; bottom: -2px; left: 8px; width: 9px; height: 3px; border-radius: 8px; background: #ffe29e; box-shadow: 0 0 13px 4px #f6ce7480; animation: city-road-light 2.8s linear infinite; }
+.city-loading-kicker { margin: 0 0 6px; color: #e9c77f; font-size: 10px; font-weight: 750; letter-spacing: .2em; }
+.city-loading-card h2 { margin: 0; color: #f1f6fc; font-size: 20px; font-weight: 620; }
+.city-loading-card > p:not(.city-loading-kicker) { min-height: 20px; margin: 9px 0 17px; color: #b7c7da; font-size: 12px; }
+.city-loading-track, .city-preparation-track { position: relative; overflow: hidden; height: 4px; border-radius: 5px; background: #35485f; }
+.city-loading-track span, .city-preparation-track span { position: absolute; inset: 0 auto 0 -35%; width: 35%; border-radius: inherit; background: linear-gradient(90deg, transparent, #f0c977, #a7def2, transparent); animation: city-loading-sweep 1.5s ease-in-out infinite; }
+.city-loading-card small { display: block; margin-top: 12px; color: #879ab1; font-size: 10px; }
+.city-preparation-track { width: min(280px, 100%); margin: 16px auto 2px; }
+@keyframes city-loading-sweep { to { transform: translateX(390%); } }
+@keyframes city-building-rise { from { transform: scaleY(.76); opacity: .62; } to { transform: scaleY(1); opacity: 1; } }
+@keyframes city-road-light { to { left: calc(100% - 16px); } }
+@keyframes city-loading-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .city-loading-card, .city-loading-mark span, .city-loading-mark i, .city-loading-track span, .city-preparation-track span { animation-duration: 8s; } }
 .city-detail-panel .city-camera-help { font-size: 12px; line-height: 1.5; }
 .city-app .city-scene-message { position: absolute; inset: 45% 36px auto; margin: 0; text-align: center; color: #aebdd0; font-size: 13px; }
 .city-app .city-header { position: absolute; top: 30px; left: 36px; right: 36px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; }

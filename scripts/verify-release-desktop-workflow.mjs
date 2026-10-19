@@ -27,6 +27,8 @@ const checks = [
   ["notarization validation", "xcrun stapler validate"],
   ["artifact checksums", "shasum -a 256 *.zip *.dmg *.exe *.deb *.AppImage > SHA256SUMS"],
   ["existing tag only", "gh release create \"$RELEASE_TAG\" --verify-tag"],
+  ["beta tags publish as prereleases", 'if [[ "$version" == *-* ]]; then\n            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes --prerelease'],
+  ["stable tags stay releases", 'gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes\n          fi'],
   ["publish ref matches tag", "ref: ${{ inputs.release_tag || github.ref }}"],
   ["pinned Node runtime", "node-version: 20"],
 ];

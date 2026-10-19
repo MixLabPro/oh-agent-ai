@@ -220,5 +220,10 @@ jobs:
             cp "$file" release/
           done
           (cd release && shasum -a 256 *.zip *.dmg *.exe *.deb *.AppImage > SHA256SUMS)
-          gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
+          version="${RELEASE_TAG#app-v}"
+          if [[ "$version" == *-* ]]; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes --prerelease
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
           gh release upload "$RELEASE_TAG" release/*

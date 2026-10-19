@@ -1,6 +1,6 @@
 /** Shared version identities for deterministic static-solid compilation. Keep this a leaf. */
-// v4: descriptor/索引全链透传 mountableHeight，桥面板顶唇边按可越预算处理（v3: 并行批次）。
-export const CITY_SOLID_COMPILER_VERSION = 4;
+// v5: descriptor/索引全链透传 mountableHeight；桥面与高架板顶唇边按有界预算处理。
+export const CITY_SOLID_COMPILER_VERSION = 5;
 export const CITY_SOLID_QUERY_CANDIDATE_BUDGET = 4096;
 /** Mountable-solid traversal is a caller policy, never an implicit property of geometry. */
 export const MOUNTABLE_POLICY_VERSION = 1;

@@ -1,5 +1,10 @@
 # City-first landing implementation review
 
+## Repository relocation (2026-10-19)
+
+- Verified that `MixLabPro/oh-agent-ai` is now public and updated the English and Chinese FAQ to link to the source repository. The GitHub Releases page is still empty; the FAQ keeps the desktop installer marked as unpublished.
+- Added landing regression assertions for the public source link and unpublished installer status. This is a source change only; it does not deploy the site.
+
 ## Post-domain UX polish (2026-10-16)
 
 - Clarified the bilingual hero: a private Mac app for Claude Code/Codex history. Preserved the brand headline; changed ambiguous app CTAs to release status and rewrote insight headlines as user questions. Download remains explicitly unavailable: no invented release, signup service or source link.

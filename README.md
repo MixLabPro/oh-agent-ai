@@ -7,7 +7,7 @@ an explorable city — and helps you understand the activity and token usage beh
 
 **Your agents built it. Now explore it.**
 
-[Explore the demo](https://ohagent.ai/) · [中文](#中文) ·
+[Explore the demo](https://ohagent.ai/) · [Source repository](https://github.com/MixLabPro/oh-agent-ai) · [中文](#中文) ·
 [Desktop development](apps/desktop/src-tauri/README.md) · [MIT license](LICENSE)
 
 ## What is Oh Agent?
@@ -35,7 +35,7 @@ does not prove wasted work.
 | Desktop app | Tauri workbench and built-in City plugin. Local builds are available to developers; a local build is not a signed public release. |
 | Flying | Free practice and ring-challenge entry points exist in City settings outside the landing presentation. Version and scene readiness affect availability. |
 | Driving | Implementation and validation in progress; not promised as a generally available desktop or website feature. |
-| Website gameplay | The landing presentation hides game, export and seed controls. The public mock demo does **not** currently offer flying or driving entry points. |
+| Website gameplay | The landing presentation hides game, export and seed controls. The public mock demo does **not** offer flying or driving entry points. Desktop City includes flying and free-drive modes; public installers are still being prepared. |
 
 As of 2026-10-16, the landing page shows a release-preparation state, not an
 available public download. Only describe a package as signed, notarized or
@@ -146,7 +146,9 @@ preserves earlier explanations; its old matrices are not current support guarant
 - **探索你的 Agent 城市：** 会话变成数据建筑，工具组成街区，Token 规模影响楼高。
 - **回放工作节奏：** 查看已加载时间范围内的活动，点选建筑了解对应会话。
 - **看懂用量与费用：** 订阅费、名义估算与真实支出分开呈现，未知金额不当作零。
-- **让历史更好玩：** City 已有自由飞行练习、穿环挑战入口；驾车还在开发验收中。
+- **让历史更好玩：** 桌面 City 已提供自由飞行、穿环挑战和自由驾驶；公开安装包仍在发布准备中。
+
+源代码与开发历史见 [GitHub 仓库](https://github.com/MixLabPro/oh-agent-ai)。
 
 **官网演示不等于桌面全部功能。** [ohagent.ai](https://ohagent.ai/?lang=zh)
 使用真实 City 前端和 2000 条模拟会话，不读取你的日志。目前落地页隐藏了游戏入口，

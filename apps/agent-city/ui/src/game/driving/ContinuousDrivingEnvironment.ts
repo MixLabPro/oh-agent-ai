@@ -153,7 +153,11 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
     if(!this.current())return stopped("stale-world",true);
     const requested=roadBudget;
     const moved=distance>1e-10||pose.heading!==previous.heading;
-    return {...pose,blocked:!moved,reason:contact?"contact":moved?undefined:"support-stop",travelledDistance:distance,
+    // An idle vehicle legitimately produces no displacement. Only report a
+    // support stop when the simulation had a movement budget to spend; otherwise
+    // the gameplay HUD would claim an obstacle at every stationary spawn.
+    const blocked=!moved&&requested>1e-10;
+    return {...pose,blocked,reason:contact?"contact":blocked?"support-stop":undefined,travelledDistance:distance,
       speedFraction:requested>0?Math.min(retained,distance/requested):retained,contact,contacts:Object.freeze(contacts),queryStatus:"resolved",trajectory:Object.freeze(trajectory.map(p=>Object.freeze({...p})))};
   }
   /** B can call this on every submitted piece instead of trusting a trace label. */

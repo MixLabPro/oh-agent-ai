@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { CityEngine } from "../engine/CityEngine";
 import { EMPTY_DRIVING_INPUT, DRIVING_DT, type DrivingState, type DrivingInputState } from "./DrivingSimulation";
 import { GameRuntime } from "./runtime/GameRuntime";
-import { createCityCarSession, createCityCarDiagnosticSession, type CityCarSceneCapability } from "./runtime/createCityCarSession";
+import { createCityCarSession, createCityCarDiagnosticSession, createCityCarFreeDriveSession, type CityCarSceneCapability } from "./runtime/createCityCarSession";
 import type { CollisionDimensions } from "./driving/CollisionIndex";
 import type { CarPresentation } from "./runtime/CarAdapter";
 import type { CameraClearanceQuery, ChaseCameraSafety } from "./VehicleChaseCamera";
 import type { RuntimeDiagnosticSnapshot } from "./runtime/RuntimeDiagnostics";
+import { DrivingEventLog, type DrivingEvent } from "./runtime/DrivingEventLog";
+import type { PreparationProgress } from "./runtime/Preparation";
 import type { VerifiedSpawnCredential } from "./driving/spawnPoints";
 import { resolveFormalSpawn, SpawnConfirmationStore, type SpawnCandidateChoice, type SpawnConfirmationBinding, type SpawnConfirmationSnapshot } from "./driving/SpawnConfirmation";
 
@@ -42,6 +44,10 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
 }>) {
   const [hud, setHud] = useState<DrivingHudSnapshot>(IDLE_HUD);
   const [entryError, setEntryError] = useState<string | null>(null);
+  const [preparationProgress, setPreparationProgress] = useState<PreparationProgress | null>(null);
+  const [events, setEvents] = useState<readonly DrivingEvent[]>(Object.freeze([]));
+  const eventLog = useRef<DrivingEventLog | null>(null);
+  if (!eventLog.current) eventLog.current = new DrivingEventLog();
   const runtimeRef = useRef<GameRuntime<DrivingInputState> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const preparing = useRef(false);
@@ -86,15 +92,15 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     return () => window.clearInterval(timer);
   }, [hud.phase, publish]);
 
-  const start = useCallback(async (diagnostic: boolean): Promise<boolean> => {
+  const start = useCallback(async (mode: "formal" | "free-drive" | "diagnostic"): Promise<boolean> => {
     const host = engine.current;
     if (!host || runtimeRef.current) return false;
     if (optionsRef.current.cinemaActive() || optionsRef.current.gameActive() || optionsRef.current.busy()) {
       setEntryError("互斥状态（航拍/游戏/忙碌）中不可驾驶。"); return false;
     }
     const currentOptions = optionsRef.current;
-    const authorization = diagnostic ? null : resolveFormalSpawn(confirmationStore, currentOptions.spawnBinding, currentOptions.spawn);
-    if (!diagnostic && !authorization?.ok) {
+    const authorization = mode === "formal" ? resolveFormalSpawn(confirmationStore, currentOptions.spawnBinding, currentOptions.spawn) : null;
+    if (mode === "formal" && !authorization?.ok) {
       setEntryError(authorization?.reason === "released-graph-or-spawn-unavailable"
         ? "正式道路图尚不可用，暂不能开始驾驶。" : "驾驶出生点尚未完成当前场景确认，暂不能开始。"); return false;
     }
@@ -102,24 +108,41 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     const abort = new AbortController(); abortRef.current = abort;
     const runtime = new GameRuntime<DrivingInputState>({ dt: DRIVING_DT, emptyInput: () => ({ ...EMPTY_DRIVING_INPUT }) }); runtimeRef.current = runtime;
     preparing.current = true;
+    setPreparationProgress({ stage: "world-capture", state: "started" });
+    eventLog.current!.clear(); setEvents(Object.freeze([]));
     latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N", altitude: null, boost: null };
     setEntryError(null); setHud({ ...IDLE_HUD, phase: "preparing" });
-    const request = { collider: CITY_CAR_COLLIDER, vtol: currentOptions.vtol === true, onPreparationMetric: runtime.recordPreparation.bind(runtime), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
+    const request = { collider: CITY_CAR_COLLIDER, vtol: currentOptions.vtol === true, onPreparationMetric: runtime.recordPreparation.bind(runtime),
+      onPreparationProgress: (value: PreparationProgress) => setPreparationProgress(value), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
       const s = frame.state;
       latest.current = { ...latest.current, speed: Math.abs(frame.state.speed), blocked: frame.blocked, reason: frame.reason,
         altitude: Number.isFinite(s.boost) ? (s.y ?? null) : null, boost: Number.isFinite(s.boost) ? (s.boost ?? null) : null,
         gear: s.airborne === true ? "FLY" : frame.state.reversing ? "R" : frame.state.braking ? "B" : frame.state.speed > 0 ? "D" : "N" };
+      const kind = frame.queryStatus === "unresolved" ? "unresolved" : frame.reason === "contact" ? "contact" : frame.blocked ? "blocked" : null;
+      if (kind) {
+        const event = eventLog.current!.record({ atMs: typeof performance !== "undefined" ? performance.now() : Date.now(), kind,
+          x: s.x, y: s.y, z: s.z, reason: frame.reason, obstacleIds: frame.contactIds });
+        if (event) setEvents(eventLog.current!.snapshot());
+      }
       const cameraSafety = optionsRef.current.present(frame.state, frame.blocked, frame.reason, frame.frameSeconds, frame.cameraSweep, scene);
-      if (cameraSafety) runtime.noteCameraSafety(cameraSafety);
+      if (cameraSafety) {
+        runtime.noteCameraSafety(cameraSafety);
+        if (cameraSafety === "unresolved") {
+          const event = eventLog.current!.record({ atMs: typeof performance !== "undefined" ? performance.now() : Date.now(), kind: "camera-safety",
+            x: s.x, y: s.y, z: s.z, reason: "camera-clearance-unresolved", obstacleIds: [] });
+          if (event) setEvents(eventLog.current!.snapshot());
+        }
+      }
       if (cameraSafety === "unresolved") runtime.pause("camera-safety");
     } };
     try {
-      const entry = diagnostic
-        ? await createCityCarDiagnosticSession(host, runtime, request, abort.signal)
+      const entry = mode === "diagnostic" ? await createCityCarDiagnosticSession(host, runtime, request, abort.signal)
+        : mode === "free-drive" ? await createCityCarFreeDriveSession(host, runtime, request, abort.signal)
         : await createCityCarSession(host, runtime, { ...request, x: confirmedSpawn!.x, z: confirmedSpawn!.z, heading: confirmedSpawn!.heading,
           layerId: confirmedSpawn!.layerId, validatedSpawn: confirmedSpawn! }, abort.signal);
       if (abort.signal.aborted || runtimeRef.current !== runtime || !alive.current) { runtime.dispose(); return false; }
       preparing.current = false;
+      setPreparationProgress(null);
       if (entry.status !== "ready") {
         runtime.dispose(); runtimeRef.current = null;
         setEntryError(`暂不能开始驾驶：${entry.reason}`); publish(); return false;
@@ -127,14 +150,14 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
       latest.current.coverage = entry.coverage; publish(); return true;
     } catch (error) {
       runtime.dispose();
-      if (runtimeRef.current === runtime) { runtimeRef.current = null; preparing.current = false; }
+      if (runtimeRef.current === runtime) { runtimeRef.current = null; preparing.current = false; setPreparationProgress(null); }
       if (alive.current && !abort.signal.aborted) { setEntryError(`暂不能开始驾驶：${error instanceof Error ? error.message : "city-driving-entry-failed"}`); publish(); }
       return false;
     }
   }, [confirmationStore, engine, publish]);
   const exit = useCallback(() => {
     abortRef.current?.abort(); abortRef.current = null;
-    preparing.current = false;
+    preparing.current = false; setPreparationProgress(null);
     runtimeRef.current?.dispose(); runtimeRef.current = null;
     latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N", altitude: null, boost: null }; publish();
   }, [publish]);
@@ -150,7 +173,7 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
   const cancelSpawn = useCallback(() => { if (optionsRef.current.confirmationEnabled !== false) confirmationStore.cancel(); }, [confirmationStore]);
   const invalidateSpawn = useCallback((reason?: string) => { if (optionsRef.current.confirmationEnabled !== false) confirmationStore.invalidate(reason); }, [confirmationStore]);
   const diagnostics = useCallback((): RuntimeDiagnosticSnapshot | null => runtimeRef.current?.diagnostics ?? null, []);
-  return { hud, entryError, clearEntryError: () => setEntryError(null), spawnConfirmation,
+  return { hud, entryError, preparationProgress, events, clearEntryError: () => setEntryError(null), spawnConfirmation,
     deriveSpawnCandidates, validateSpawnCandidate, confirmSpawn, cancelSpawn, invalidateSpawn,
-    enter: () => start(false), enterDiagnostic: () => start(true), exit, pause, resume, toggle, setInput, diagnostics, physicsStep: DRIVING_DT };
+    enter: () => start("formal"), enterFreeDrive: () => start("free-drive"), enterDiagnostic: () => start("diagnostic"), exit, pause, resume, toggle, setInput, diagnostics, physicsStep: DRIVING_DT };
 }

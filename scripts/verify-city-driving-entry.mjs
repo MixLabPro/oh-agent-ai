@@ -9,17 +9,19 @@ import path from "node:path";
 import { loadCity } from "./city-kit/index.mjs";
 import { makeFixtures } from "./city-kit/surface-region-fixtures.mjs";
 const drivingHook = fs.readFileSync(path.resolve("apps/agent-city/ui/src/game/useCityDriving.ts"), "utf8");
-const uatHook = fs.readFileSync(path.resolve("apps/agent-city/ui/src/game/useCityDrivingUat.ts"), "utf8");
+const playHook = fs.readFileSync(path.resolve("apps/agent-city/ui/src/game/useCityDrivingPlay.ts"), "utf8");
+const cityApp = fs.readFileSync(path.resolve("apps/agent-city/ui/src/CityApp.tsx"), "utf8");
 assert.match(drivingHook, /resolveFormalSpawn\(confirmationStore, currentOptions\.spawnBinding, currentOptions\.spawn\)/,
   "the real useCityDriving formal path must use the tested confirmation gate");
 assert.match(drivingHook, /createCityCarSession\(host, runtime, \{ \.\.\.request, x: confirmedSpawn!/,
   "formal session coordinates must come from the confirmed sealed credential");
-assert.match(drivingHook, /diagnostic\s*\?\s*await createCityCarDiagnosticSession[\s\S]*?:\s*await createCityCarSession/,
-  "diagnostic and formal entries remain distinct paths");
-assert.match(uatHook, /confirmationEnabled:\s*false/,
-  "UAT must opt out of confirmation state entirely");
-assert.doesNotMatch(uatHook, /deriveSpawnCandidates|validateSpawnCandidate|confirmSpawn/,
-  "UAT must never derive, validate, or confirm a formal spawn");
+assert.match(drivingHook, /mode === "free-drive" \? await createCityCarFreeDriveSession/,
+  "the player entry must use the bounded free-drive spawn path");
+assert.match(playHook, /enterFreeDrive\(\)/, "the normal City driving control enters free drive");
+assert.doesNotMatch(playHook, /enterDiagnostic|UAT/, "the player-facing control is independent of the diagnostic build flag");
+assert.match(cityApp, /\{ id: "car", commandId: "city\.car", label: driving\.active \? "退出驾驶" : "驾车"/,
+  "the normal City toolbar exposes driving without a UAT flag");
+assert.doesNotMatch(cityApp, /CITY_DRIVING_UAT|useCityDrivingUat/, "ordinary builds do not gate driving on UAT");
 const m = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
   "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
@@ -27,11 +29,13 @@ const m = await loadCity({
   "game/driving/CollisionIndex.ts": ["buildVersionedCollisionIndex"],
   "game/driving/SurfaceDrivingWorld.ts": ["SurfaceDrivingEnvironment", "createStructureCollisionBinding"],
   "game/runtime/diagnosticSpawn.ts": ["diagnosticSpawn"],
-  "game/runtime/createCityCarSession.ts": ["createCityCarSession", "createCityCarDiagnosticSession"],
+  "game/runtime/createCityCarSession.ts": ["createCityCarSession", "createCityCarDiagnosticSession", "createCityCarFreeDriveSession"],
   "game/runtime/GameRuntime.ts": ["GameRuntime"],
 });
 const { patch, grid, snapshot } = makeFixtures(m);
 const surface = snapshot([patch("pad", "carriageway", grid(-30, -8, 30, 8, 10, 4))]);
+const request = { x: 0, z: 0, heading: 0, layerId: "ground",
+  collider: { dimensions: { halfLength: 1.4, halfWidth: 0.7, halfHeight: 0.575 }, centerHeight: 0.55, vehicleConfigHash: "city-car-v1" }, present: () => {} };
 function hostFixture(overrides = {}) {
   const state = { releases: 0, hooks: 0, current: true, hook: null };
   const world = { revision: "world-fixture", surface, obstacles: [], renderedSolids: [], sceneSolids: [], landings: [], counts: {}, obstacleCoverage: "structures-only", ...overrides };
@@ -44,9 +48,16 @@ function hostFixture(overrides = {}) {
     setFrameHook: (hook) => { state.hook = hook; if (hook) state.hooks++; }, release: capture.release };
   return { state, host: { gameScenePort: { acquireResult: async () => ({ status: "ready", lease }) } } };
 }
-const request = { x: 0, z: 0, heading: 0, layerId: "ground",
-  collider: { dimensions: { halfLength: 1.4, halfWidth: 0.7, halfHeight: 0.575 }, centerHeight: 0.55, vehicleConfigHash: "city-car-v1" }, present: () => {} };
 
+// Player entry uses the safe local spawn search and ordinary runtime lifecycle.
+{
+  const f = hostFixture(); const runtime = new m.GameRuntime();
+  const entry = await m.createCityCarFreeDriveSession(f.host, runtime, request);
+  assert.equal(entry.status, "ready", `normal free drive enters: ${entry.reason}`);
+  assert.equal(runtime.snapshot.phase, "paused", "free drive waits for the user's explicit start");
+  assert.ok(Number.isFinite(entry.adapter.snapshot.x), "safe spawn is derived from the current compiled road surface");
+  runtime.exit(); assert.equal(f.state.releases, 1);
+}
 // 1) 入场成功：paused 起步（入场暂停）、租约保持、帧钩子已注册。
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
@@ -103,7 +114,7 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
 // 4) Diagnostic selection shares the same frozen world and full-body collision.
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();
-  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request);
+  const result = await m.createCityCarFreeDriveSession(f.host, runtime, request);
   assert.equal(result.status, "ready");
   assert.equal(runtime.snapshot.phase, "paused");
   assert.ok(Number.isFinite(result.adapter.snapshot.x));
@@ -113,9 +124,9 @@ const request = { x: 0, z: 0, heading: 0, layerId: "ground",
   const wall = { id: "blocking-all-spawns", role: "building", kind: "box", center: { x: 0, y: 1, z: 0 },
     halfAxes: [{ x: 100, y: 0, z: 0 }, { x: 0, y: 3, z: 0 }, { x: 0, y: 0, z: 100 }] };
   const f = hostFixture({ sceneSolids: [wall] }); const runtime = new m.GameRuntime();
-  const result = await m.createCityCarDiagnosticSession(f.host, runtime, request);
+  const result = await m.createCityCarFreeDriveSession(f.host, runtime, request);
   assert.equal(result.status, "unavailable");
-  assert.equal(result.reason, "no-safe-diagnostic-spawn");
+  assert.equal(result.reason, "no-safe-free-drive-spawn");
   assert.equal(f.state.hooks, 0); assert.equal(f.state.releases, 1);
 }
 // 5) Diagnostic spawn must face clear road. A wall blocks the first candidate's
@@ -172,7 +183,7 @@ console.log("Driving entry: paused start, resume/pause/exit, stale-world paths, 
 if (process.argv.includes("--cities")) {
   const { sceneKit, buildParts } = await import("./city-kit/scene-parts.mjs");
   const kit = await sceneKit({ "engine/surface/citySurfacePort.ts": ["CitySurfacePort"],
-    "game/runtime/createCityCarSession.ts": ["createCityCarDiagnosticSession"], "game/runtime/GameRuntime.ts": ["GameRuntime"] });
+    "game/runtime/createCityCarSession.ts": ["createCityCarDiagnosticSession", "createCityCarFreeDriveSession"], "game/runtime/GameRuntime.ts": ["GameRuntime"] });
   for (const [count, seed] of [[0, 1], [90, 42], [500, 7]]) {
     const { parts } = buildParts(kit, count, seed);
     const lease = parts.acquireDrivingWorldSource(), port = new kit.CitySurfacePort(), runtime = new kit.GameRuntime();

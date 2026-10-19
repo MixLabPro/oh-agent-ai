@@ -25,14 +25,14 @@ Object.assign(engine, {
   lowFpsWindows: 0, highFpsWindows: 0, lastTierChangeAt: 0, upgradeAfter: 0,
 });
 engine.renderFrame();
-assert.deepEqual(calls, [["reset", 800, 600, 1], ["draw"]], "resize must be followed by drawing in the SAME call");
+assert.deepEqual(calls, [["reset", 800, 600, 1.25], ["draw"]], "resize must be followed by drawing in the SAME call");
 calls.length = 0;
 engine.renderFrame();
 assert.deepEqual(calls, [["draw"]], "unchanged dimensions must not reset buffers");
 parent.clientWidth = 900;
 calls.length = 0;
 engine.renderFrame();
-assert.deepEqual(calls, [["reset", 900, 600, 1], ["draw"]]);
+assert.deepEqual(calls, [["reset", 900, 600, 1.25], ["draw"]]);
 calls.length = 0;
 engine.applyQualityLevel(2);
 assert.deepEqual(calls, [], "quality decisions cannot clear a frame after drawing");
@@ -69,5 +69,8 @@ assert.equal(engine.quality, 1);
 assert.match(source, /new ResizeObserver\(\(\) => \{ this.surfaceDirty = true; \}\)/);
 assert.match(source, /idle && !this.surfaceDirty && !this.qualityDirty/);
 assert.match(source, /webglcontextrestored/);
-assert.match(source, /if \(!this\.firstFrameSent && this\.model\)/, "an empty pre-data scene is not the plugin's first model frame");
+assert.match(source, /if \(!this\.options\.headless && !this\.contextLost\) \{\s*this\.updateScene\(0\);\s*this\.renderFrame\(\);/,
+  "a newly mounted or replaced model must draw before the loading UI is dismissed");
+assert.match(source, /if \(!this\.firstFrameSent\) \{\s*this\.firstFrameSent = true;\s*this\.options\.onFirstFrame\?\.\(\);/,
+  "the first-frame callback remains one-shot even though replacements also draw synchronously");
 console.log("City frame surface: OK (same-frame reset/draw, no-op resize, deferred quality, export sizing, hysteresis, idle invalidation).");

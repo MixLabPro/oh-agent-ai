@@ -227,7 +227,7 @@ export class CityEngine {
     },
     capture: async (selection: GameSelection, signal) => {
       const parts = this.parts;
-      if (!parts || this.disposed) return Object.freeze({ status: "unavailable", reason: "city-not-ready" });
+      if (!parts || !this.layout || this.disposed) return Object.freeze({ status: "unavailable", reason: "city-not-ready" });
       let frozen: ReturnType<CityParts["acquireStaticSceneSource"]>;
       try { frozen = parts.acquireStaticSceneSource(); }
       catch { return Object.freeze({ status: "unavailable", reason: "static-source-unavailable" }); }
@@ -866,15 +866,18 @@ export class CityEngine {
     // 重建后 display 是「已完工」初值：先对齐到当前时间轴进度，否则回放中
     // 每次数据发布（分页到齐/后台刷新）都会看到城市闪满高再缩回去。
     this.parts.snapToTargets();
-    // A newly attached WKWebView may report hidden and withhold rAF until its
-    // drawing surface has been presented. Bootstrap the model synchronously;
-    // subsequent frames remain scheduled, and export workers are unaffected.
-    if (!this.options.headless && !this.firstFrameSent && !this.contextLost) {
+    // Present the newly mounted model before the loading overlay is dismissed.
+    // A newly attached WKWebView may withhold rAF until its drawing surface has
+    // been presented; later model replacements also need a fresh frame rather
+    // than relying on CityApp to mistake applyModel() for a render.
+    if (!this.options.headless && !this.contextLost) {
       this.updateScene(0);
       this.renderFrame();
       this.lastRenderAt = performance.now();
-      this.firstFrameSent = true;
-      this.options.onFirstFrame?.();
+      if (!this.firstFrameSent) {
+        this.firstFrameSent = true;
+        this.options.onFirstFrame?.();
+      }
     }
   }
 

@@ -49,8 +49,14 @@ try {
   const asyncBudget = await budgeted.moveAsync(start, desired, async () => {});
   assert.equal(syncBudget.queryStatus, "unresolved");
   assert.deepEqual(normalize(asyncBudget), normalize(syncBudget), "yields never reset a collision query's budget");
-  assert.deepEqual(normalize(await m.diagnosticSpawnAsync(surface, regions, environment)), normalize(m.diagnosticSpawn(surface, regions, environment)),
+  const spawnProgress = [];
+  const asyncSpawn = await m.diagnosticSpawnAsync(surface, regions, environment, undefined, undefined,
+    (completed, limit) => spawnProgress.push({ completed, limit }));
+  assert.deepEqual(normalize(asyncSpawn), normalize(m.diagnosticSpawn(surface, regions, environment)),
     "candidate ordering and bidirectional clearance are identical");
+  assert.ok(spawnProgress.length > 0, "diagnostic spawn reports progress for a short search too");
+  assert.ok(spawnProgress.every((item, index) => item.completed <= item.limit && (!index || item.completed > spawnProgress[index - 1].completed)),
+    "candidate progress is monotonic and stays within the real candidate budget");
 } finally { clearInterval(heartbeat); }
 
 // Cancellation at each asynchronous preparation boundary must release the exact

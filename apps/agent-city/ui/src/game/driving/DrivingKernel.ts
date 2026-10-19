@@ -2,6 +2,7 @@
  * wraps the existing arcade model; it does not certify the synthetic world as City.
  */
 import { DRIVING_DT, DRIVING_PARAMS, stepDriving, type DrivingEnvironment, type DrivingInputState, type DrivingState, type DrivingMoveResult } from "../DrivingSimulation";
+import type { VtolAirMotion, VtolAirResult } from "./vtolDriving";
 export { DRIVING_DT } from "../DrivingSimulation";
 export type KernelStep = Readonly<{
   state: Readonly<DrivingState>;
@@ -24,6 +25,16 @@ export class DrivingKernel {
     if (!validDrivingState(previous)) throw new Error("invalid-driving-state");
     let blocked = false; let reason: string | null = null;
     let details: Pick<DrivingMoveResult,"trajectory"|"contacts"|"contact"|"queryStatus"> = {};
+    const recordMove = <T extends DrivingMoveResult>(result: T): T => {
+      details = {};
+      if(result.trajectory&&result.trajectory.length>2048)throw new Error("motion-trajectory-budget");
+      if(result.trajectory)details.trajectory=result.trajectory.map(p=>Object.freeze({...p}));
+      if(result.contacts)details.contacts=Object.freeze(result.contacts.map(c=>Object.freeze({...c,normal:Object.freeze({...c.normal})})));
+      if(result.contact!==undefined)details.contact=result.contact;
+      if(result.queryStatus!==undefined)details.queryStatus=result.queryStatus;
+      blocked = result.blocked; reason = result.reason ?? null;
+      return { ...result } as T;
+    };
     // Pass copies to the existing mutable adapter contract. Neither a pilot nor
     // an environment may mutate a live state held by the runner/runtime.
     // 步进函数拿到的是「move 被记账包装、其余成员经原型链直通真实环境」的代理——
@@ -31,15 +42,12 @@ export class DrivingKernel {
     const proxiedWorld = Object.create(this.world) as DrivingEnvironment;
     proxiedWorld.move = (before, desired) => {
       const result = this.world.move({ ...before }, { ...desired });
-      details={};
-      if(result.trajectory&&result.trajectory.length>2048)throw new Error("motion-trajectory-budget");
-      if(result.trajectory)details.trajectory=result.trajectory.map(p=>Object.freeze({...p}));
-      if(result.contacts)details.contacts=Object.freeze(result.contacts.map(c=>Object.freeze({...c,normal:Object.freeze({...c.normal})})));
-      if(result.contact!==undefined)details.contact=result.contact;
-      if(result.queryStatus!==undefined)details.queryStatus=result.queryStatus;
-      blocked = result.blocked; reason = result.reason ?? null;
-      return { ...result };
+      return recordMove(result);
     };
+    const airWorld = this.world as DrivingEnvironment & { moveAir?: (before: DrivingState, desired: VtolAirMotion) => VtolAirResult };
+    if (typeof airWorld.moveAir === "function") {
+      (proxiedWorld as typeof airWorld).moveAir = (before, desired) => recordMove(airWorld.moveAir!({ ...before }, { ...desired }));
+    }
     const state = this.stepFn({ ...previous } as DrivingState, {
       forward: input.forward === true, backward: input.backward === true,
       left: input.left === true, right: input.right === true,

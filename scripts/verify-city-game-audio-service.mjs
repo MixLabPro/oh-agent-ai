@@ -44,7 +44,9 @@ function fixture() {
   car.update({ speed: 3, maxSpeed: 13, braking: false, reversing: false });
   assert.equal(f.devices, 0, "telemetry cannot request the device");
   plane.start(); car.start(); assert.equal(f.devices, 1);
-  assert.equal(f.service.snapshot.channels, 2); assert.equal(f.service.snapshot.sources, 9);
+  assert.equal(f.service.snapshot.channels, 2);
+  // The shared car graph owns engine/sub/LFO, brake noise, rain noise and VTOL noise.
+  assert.equal(f.service.snapshot.sources, 10);
   plane.suspend(); f.runTimers(); await flush();
   assert.equal(f.ctx.suspends, 0, "plane cannot suspend an active car device");
   car.update({ speed: 5, maxSpeed: 13, braking: true, reversing: false, rainIntensity: 0.8 });

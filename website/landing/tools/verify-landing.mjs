@@ -14,9 +14,15 @@ const explorationCss = read('exploration.css');
 assert.doesNotMatch(explorationCss, /@import|https?:\/\//);
 assert.match(explorationCss, /prefers-reduced-motion/);
 assert.match(html, /id="play"/);
-assert.match(html, /DRIVING · IN DEVELOPMENT/);
+assert.match(html, /DRIVING · FREE DRIVE AVAILABLE IN DESKTOP CITY/);
 assert.match(html, /not recorded gameplay/);
-assert.match(html, /flying and driving controls are not enabled here/);
+assert.match(html, /Flight and driving are available in desktop City/);
+assert.match(html, /retro open-top car with jet boost/);
+assert.match(read('i18n.js'), /桌面版已开放自由驾驶/);
+assert.match(html, /MixLabPro\/oh-agent-ai/, 'The source FAQ must name the relocated repository');
+assert.match(html, /public source repository is/);
+assert.match(html, /desktop installer is not published yet/);
+assert.match(read('i18n.js'), /'faq\.8\.before': '项目代码采用 MIT 许可。公开源码仓库位于 '/, 'The Chinese FAQ must link to the public repository');
 const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1].split('?')[0]);
 for (const name of scripts) {
   assert.ok(!/^https?:/.test(name), 'Scripts must be same-origin');
@@ -41,7 +47,8 @@ assert.match(html, /Mac app is not available to download here yet/);
 assert.match(css, /city-window:not\(\[data-city-state="ready"\]\):not\(\[data-city-state="updating"\]\) \.city-actions/);
 assert.ok(html.indexOf('id="city"') < html.indexOf('id="insights"'));
 assert.ok(!html.includes('data-ascii'), 'No obsolete primary animation dependency');
-assert.ok(!/<a[^>]+href="https?:/.test(html), 'Unverified public links must not be enabled');
+const publicLinks = [...html.matchAll(/<a[^>]+href="(https?:[^"]+)"/g)].map((match) => match[1]);
+assert.deepEqual(publicLinks, ['https://github.com/MixLabPro/oh-agent-ai'], 'Only the verified public source link may leave the landing page');
 for (const [, anchor] of html.matchAll(/href="#([\w-]+)"/g)) assert.ok(html.includes(`id="${anchor}"`), `Missing anchor ${anchor}`);
 assert.doesNotMatch(html, /health score|framework-agnostic|burning money|saves you/i);
 

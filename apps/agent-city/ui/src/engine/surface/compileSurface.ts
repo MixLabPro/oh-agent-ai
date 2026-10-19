@@ -24,7 +24,7 @@ import type { SurfaceRegionsBuild } from "./surfaceRegions";
 import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch, SurfacePortal } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 8;
+export const CITY_SURFACE_GEOMETRY_VERSION = 9;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
 const LANDING_ZONE = 3;
 
@@ -84,7 +84,15 @@ export function compileStaticStructureObstacles(layout: CitySurfaceLayout): read
       obstacles.push(Object.freeze({ id: `expressway:${piece.highway}:${piece.role}:${obstacles.length}`, role: piece.role, shape: "box", corners: Object.freeze(boxCorners(piece)) }));
     } else if (piece.role === "expressway-deck") {
       const id = `expressway:${piece.highway}:${String(piece.segment).padStart(4, "0")}`;
-      obstacles.push(Object.freeze({ id: `${id}:slab`, role: "expressway-deck", shape: "box", corners: Object.freeze(boxCorners(piece)) }));
+      // The top face is also compiled as the driveable elevated-road surface.
+      // On pitched segments the box's global top edge can protrude above the local
+      // road plane and behave like a wall at segment seams. Allow only that bounded
+      // top-edge envelope to be mounted; the underside and sides still collide.
+      const corners = boxCorners(piece);
+      const topYs = [corners[2].y, corners[3].y, corners[6].y, corners[7].y];
+      const rise = Math.max(...topYs) - Math.min(...topYs);
+      const mountableHeight = Math.min(0.9, Math.round((rise + 0.3) * 100) / 100);
+      obstacles.push(Object.freeze({ id: `${id}:slab`, role: "expressway-deck", shape: "box", corners: Object.freeze(corners), mountableHeight }));
     }
   }
   return Object.freeze(obstacles);

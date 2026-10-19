@@ -23,6 +23,8 @@ export type CarPresentation = Readonly<{
   state: CarPresentationState;
   blocked: boolean;
   reason: string | null;
+  contactIds: readonly string[];
+  queryStatus: "resolved" | "unresolved" | undefined;
   frameSeconds: number;
   /** Frozen query over the same compiled solids used by car movement. */
   cameraSweep: CameraClearanceQuery;
@@ -34,6 +36,8 @@ export class CarAdapter implements VehicleAdapter<DrivingInputState> {
   private disposed = false;
   private blocked = false;
   private reason: string | null = null;
+  private contactIds: readonly string[] = Object.freeze([]);
+  private queryStatus: "resolved" | "unresolved" | undefined;
   readonly revision: string;
   constructor(private readonly binding: CarWorldBinding, private readonly spawn: Readonly<DrivingState>,
     private readonly render: (frame: CarPresentation) => void, private readonly cameraSweep: CameraClearanceQuery) {
@@ -60,7 +64,9 @@ export class CarAdapter implements VehicleAdapter<DrivingInputState> {
     // display that step, even when its numerical result looks valid.
     this.assertCurrent();
     this.previous = this.state; this.state = result.state;
-    this.blocked = result.motion.blocked; this.reason = result.motion.reason;
+    this.blocked = result.motion.blocked || result.motion.contact === true; this.reason = result.motion.reason;
+    this.contactIds = Object.freeze([...new Set(result.motion.contacts?.map((contact) => contact.obstacleId) ?? [])].slice(0, 32));
+    this.queryStatus = result.motion.queryStatus;
   }
   present(alpha: number, frameSeconds = 0): void {
     this.assertReady();
@@ -79,13 +85,13 @@ export class CarAdapter implements VehicleAdapter<DrivingInputState> {
     const delta = this.state.heading - this.previous.heading;
     state.heading = this.previous.heading + Math.atan2(Math.sin(delta), Math.cos(delta)) * t;
     this.render(Object.freeze({ revision: this.revision, state: Object.freeze(state) as CarPresentationState, blocked: this.blocked, reason: this.reason, frameSeconds,
-      cameraSweep: this.cameraSweep }));
+      contactIds: this.contactIds, queryStatus: this.queryStatus, cameraSweep: this.cameraSweep }));
   }
   reset(): void {
     this.assertReady();
     if (!this.binding.validateSpawn(this.spawn)) throw new Error("unsafe-car-spawn");
     this.assertCurrent();
-    this.state = this.previous = this.spawn; this.blocked = false; this.reason = null;
+    this.state = this.previous = this.spawn; this.blocked = false; this.reason = null; this.contactIds = Object.freeze([]); this.queryStatus = "resolved";
   }
   /** Drop interpolation history when paused, avoiding a visible backward snap. */
   settle(): void { this.previous = this.state; }

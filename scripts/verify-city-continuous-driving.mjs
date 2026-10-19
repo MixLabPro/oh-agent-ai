@@ -103,6 +103,9 @@ const move=env.move(initial,{x:10,z:8,heading:0});
 // Explicit large-step fixture needs its own bounded prediction budget.
 assert.equal(move.queryStatus,"unresolved");
 const roomy=new k.ContinuousDrivingEnvironment(region,{surfaceRevision:region.revision,worldRevision:"world",solidRevision:"world",solids:wall,dimensions:dims,centerHeight:1,isCurrent:()=>true},undefined,undefined,{maxSupportSegments:256});
+const idleMove=roomy.move(initial,{...initial,travelBudget:0});
+assert.equal(idleMove.blocked,false,"a supported parked car is not reported as blocked without a movement request");
+assert.equal(idleMove.reason,undefined);
 const result=roomy.move(initial,{x:10,z:8,heading:0});assert.equal(result.queryStatus,"resolved");assert.ok(result.x<4.499&&result.z>7.99);
 assert.equal(roomy.validateTrajectory(initial,result,result.trajectory),true);
 const forged=result.trajectory.map(p=>({...p}));forged[forged.length-1].x=8;
