@@ -18,18 +18,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: require verified release commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Require successful Verify run for release commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -eu
+          sha="$(git rev-parse HEAD)"
+          result="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow verify.yml --commit "$sha" --limit 1 --json status,conclusion --jq '.[0] | select(.status == "completed" and .conclusion == "success") | .conclusion')"
+          [ "$result" = success ] || {
+            echo "Release commit $sha needs a completed, successful Verify run" >&2
+            exit 1
+          }
+
   platform_packages:
+    needs: preflight
     uses: ./.github/workflows/desktop-platforms.yml
     with:
       ref: ${{ inputs.release_tag || github.ref }}
 
   build:
     name: build and notarize macOS app
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15-intel
             arch: x86_64
           - runner: macos-14
             arch: arm64

@@ -6,12 +6,14 @@ import path from "node:path";
 const repo = path.resolve(import.meta.dirname, "..");
 const workflow = readFileSync(path.join(repo, ".github/workflows/release-desktop.yml"), "utf8");
 const checks = [
+  ["release commit CI preflight", "Require successful Verify run for release commit"],
+  ["exact commit verification", '--workflow verify.yml --commit "$sha"'],
   ["native platform package workflow", "uses: ./.github/workflows/desktop-platforms.yml"],
   ["all platforms gate publication", "needs: [build, platform_packages]"],
   ["platform installer download", "pattern: desktop-*-x86_64"],
   ["tag trigger", 'tags: ["app-v*"]'],
   ["manual release tag input", "release_tag:"],
-  ["Intel runner matrix", "runner: macos-13"],
+  ["Intel runner matrix", "runner: macos-15-intel"],
   ["Apple Silicon runner matrix", "runner: macos-14"],
   ["architecture-specific staging", "Stage architecture-specific artifacts"],
   ["architecture-specific artifact upload", "path: dist/${{ matrix.arch }}"],
@@ -46,6 +48,7 @@ for (const [label, needle] of checks) {
   }
 }
 for (const [label, needle, minimum] of [
+  ["both build paths depend on verification", "needs: preflight", 2],
   ["runner/matrix architecture mapping", "EXPECTED_ARCH", 2],
   ["publish architecture loop", "for arch in x86_64 arm64", 1],
   ["build strict architecture assertion", "--require-architecture=$EXPECTED_ARCH", 1],

@@ -43,6 +43,28 @@ for macOS and both native platform builds, collects all installers, and includes
 them in SHA256SUMS. Existing macOS signing and notarization gates still apply.
 Windows installers are currently unsigned: Authenticode signing is not configured.
 
+The release preflight requires a completed successful `verify.yml` run for the
+exact tagged commit before either platform build starts. A pending, failed or
+missing Verify run prevents release. The Intel macOS builder uses
+`macos-15-intel`; `macos-13` is retired. Apple Silicon uses `macos-14`, and each
+builder still checks its native architecture before staging artifacts.
+
+### 2026-10-19 release preparation
+
+- Public Releases remains empty. Windows/Linux CI artifacts are build outputs,
+  not published downloads or proof of desktop UI acceptance.
+- A valid local Developer ID signing identity exists. Repository signing secrets
+  and a usable local notarization profile have not been configured/confirmed.
+  Never publish the old local DMG as if it were a current notarized release.
+- The infrastructure guard exposed missing short expressway exit slabs. The
+  shared structure compiler now preserves nonzero short segments; its regression
+  accounts for ramp resampling instead of assuming one slab per input segment.
+- Typecheck and bridge-crossing regression pass. The full infrastructure guard
+  proceeds past that regression but still fails the tier-1 seed-corpus highway
+  survival assertion. The controlled river fixture passes. This remaining
+  planning/fixture mismatch must be resolved before declaring Verify green or
+  publishing the release; the assertion has not been disabled.
+
 Package checks verify CLI presence and execution, not full desktop UI acceptance.
 Before declaring a platform release ready, test installation, tray/window behavior,
 sync, official plugins, and uninstall on a clean machine. macOS-only screenshot
