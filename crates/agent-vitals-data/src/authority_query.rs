@@ -1308,7 +1308,7 @@ const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, harness,
        AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
        AND session_key IS NOT NULL
        AND event_ts_ms >= ?2 AND event_ts_ms < ?3
-       AND (?4 < 0 OR (CAST((", local_hour_idx!(), " + (?5 - ?5) + (?6 - ?6)) % 24 AS INTEGER) = ?4))
+       AND (?4 < 0 OR (CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', printf('%+d hours', (?5 / ?6))) AS INTEGER) = ?4))
        AND (?7 IS NULL OR COALESCE(model_id, '<unknown>') = ?7)
        AND (?8 IS NULL OR COALESCE(provider_id, '<unknown>') = ?8)
        GROUP BY session_key");
