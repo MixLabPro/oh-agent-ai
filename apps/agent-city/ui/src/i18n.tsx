@@ -59,6 +59,11 @@ const english: Record<string, string> = {
   "后台视频导出失败，City 可以继续使用。": "Background video export failed. City remains available.",
   "合成会话没有宿主日志详情，请使用原生真实数据模式。": "Synthetic sessions have no host log details. Use native local data mode.",
   "无法打开宿主会话详情，数据可能已删除或当前实例已失效。": "Could not open host session details; data may have been deleted or the instance expired.",
+  // 城市加载进度与驾车入口（CityApp）、会话标题来源（CityExperience）。
+  "驾车": "Drive", "整理城市数据": "Preparing city data", "规划道路与街区": "Planning roads and blocks", "装配城市": "Assembling the city", "等待城市首帧": "Waiting for the first frame",
+  "正在组织会话与建筑数据": "Organising sessions and buildings", "正在计算道路、地形与街区": "Computing roads, terrain and blocks", "正在创建三维场景对象": "Creating 3D scene objects", "城市即将就绪": "City almost ready",
+  "显示规划器实际完成的工作量，不代表百分比": "Shows work the planner has actually finished, not a percentage", "复杂城市需要一些时间，请稍候": "Large cities take a while, please wait",
+  "Codex 线程名": "Codex thread name", "Claude AI 标题": "Claude AI title", "DSH 工作区名": "DSH workspace name", "未知来源": "unknown source",
 };
 export function useCityLanguage() {
   const [locale, setLocale] = useState(pluginLocale);
