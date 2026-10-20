@@ -66,3 +66,11 @@ On 2026-10-19 the current worktree passed:
 - `cd apps/agent-city/ui && npm run typecheck && npm run build`
 
 These tests do not replace the interactive endurance run above.
+
+## 2026-10-20 P0 build and attempted acceptance
+
+- Base `b1cb7d3d` plus the input/title/navigation repairs and collision v6; the same source is now recorded in `aa7efe9d`, `481844e7`, `a24b2731`, and packaging configuration in `ce432d8c`.
+- `cargo tauri build --bundles app --no-sign --ci` succeeded. Bundle path: `apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`; identifier `ai.ohagent.desktop`, CLI authority schema v32. This is an unsigned local validation bundle, not a notarized release.
+- Workbench/City/native driving preparation were observed; a key-held acceleration reached 77.6 km/h, pause/resume/reverse controls responded, and a rolling HUD snapshot showed frame P95 about 22–24 ms, tick/present CPU P95 1 ms, catch-up maximum 3 and zero frame overruns. These observations were made while an older installed app with the same identifier was still running, so they are preliminary and cannot prove which build was controlled.
+- The older installed instance was exited to disambiguate. The next computer-control observation reported the Mac locked; a manual unlock was requested. Latest-build driving, physical IME, airplane/car switching, session-detail navigation and the 30-minute endurance run are therefore **not accepted yet**. No 30-minute memory or frame trend was recorded.
+- Collision evidence independent of the GUI: captured tick181 query resolves as contact in 9235 tests with the original 18553 remaining budget; 17 historical differential cases pass. Large-city structure-transition checks have no budget-exhausted results in the tested 1000/7, 1000/65537 and 2000/42 runs; 1000/7 still has topology/pilot failures. These are not substitutes for native acceptance.
