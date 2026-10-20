@@ -741,13 +741,16 @@ crate），manifest ingest 落在 `agent-vitals-ingest`。附录 C 行号为
         "maximum": 500000 } }, "additionalProperties": false },
     "billing": { "type": "object", "required": ["policy"],
       "properties": { "policy": { "const": "lock:metered_estimate" } },
-      "additionalProperties": false }
+      "additionalProperties": false },
+    "session_title_adapter": { "type": "string",
+      "enum": ["zcode_sqlite_session_v1"],
+      "description": "Optional reviewed read-only title index adapter; no manifest-provided path, SQL, or code." }
   }
 }
 ```
 
-P0 发布 schema 明确不包含 `records` 或 `adapter`。P2/P1.5 若立项，通过新的
-manifest capability/version 扩展，不能让当前版本“结构校验通过、运行时不支持”。
+P0 发布 schema 明确不包含 `records` 或可执行脚本 `adapter`。`session_title_adapter`
+是单独的闭集只读能力：只能选择已审计的实现，不接受路径、SQL 或代码。
 
 ## 附录 B：zcode recipe 试点（2026-09-19 实测格式）
 
@@ -769,6 +772,7 @@ manifest capability/version 扩展，不能让当前版本“结构校验通过�
     "pattern": "^model-io-sess_(?P<id>.+)\\.jsonl$"
   },
   "recipe": "request-usage-anthropic-v1",
+  "session_title_adapter": "zcode_sqlite_session_v1",
   "overrides": {
     "event_ts": "completedAt",
     "model_raw": "model.modelId",

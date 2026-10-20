@@ -162,9 +162,31 @@ pub struct PluginManifest {
     pub event_key_paths: Vec<String>,
     pub max_rows_per_file: u64,
     pub billing_locked: bool,
+    /// Optional reviewed local session-title adapter. Manifests select only a
+    /// closed adapter id; they cannot provide paths, SQL, or executable code.
+    pub session_title_adapter: Option<PluginSessionTitleAdapter>,
     /// Optional local Trust artifact profile. This is a declarative, read-only
     /// capability; it does not authorize a scanner to read file contents.
     pub trust: Option<TrustArtifactProfile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginSessionTitleAdapter {
+    ZcodeSqliteSessionV1,
+}
+
+impl PluginSessionTitleAdapter {
+    pub const fn as_str(self) -> &'static str {
+        match self { Self::ZcodeSqliteSessionV1 => "zcode_sqlite_session_v1" }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value { "zcode_sqlite_session_v1" => Some(Self::ZcodeSqliteSessionV1), _ => None }
+    }
+
+    fn supports_slug(self, slug: &str) -> bool {
+        match self { Self::ZcodeSqliteSessionV1 => slug == "zcode" }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +353,7 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         "limits",
         "billing",
         "trust",
+        "session_title_adapter",
         "requires",
         "min_app_version",
     ];
@@ -607,6 +630,16 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         Some(_) => return Err(err("trust", "必须是 object")),
     };
 
+    let session_title_adapter = match obj.get("session_title_adapter") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => PluginSessionTitleAdapter::parse(value)
+            .map(Some).ok_or_else(|| err("session_title_adapter", "不是受支持的受审计 adapter"))?,
+        Some(_) => return Err(err("session_title_adapter", "必须是 string")),
+    };
+    if session_title_adapter.is_some_and(|adapter| !adapter.supports_slug(slug)) {
+        return Err(err("session_title_adapter", "此 adapter 与 manifest slug 不匹配"));
+    }
+
     Ok(PluginManifest {
         slug: slug.to_string(),
         display_name: display_name.to_string(),
@@ -618,6 +651,7 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         event_key_paths,
         max_rows_per_file,
         billing_locked,
+        session_title_adapter,
         trust,
     })
 }
@@ -683,6 +717,7 @@ mod tests {
                 "pattern": "^model-io-sess_(?P<id>.+)\\.jsonl$"
             },
             "recipe": "request-usage-anthropic-v1",
+            "session_title_adapter": "zcode_sqlite_session_v1",
             "overrides": {
                 "event_ts": "completedAt",
                 "model_raw": "model.modelId",
@@ -747,6 +782,7 @@ mod tests {
             (json!({"requires": {"recipes": ["future-v2"]}}), "requires.recipes[0]"),
             (json!({"requires": {"recipes": [RECIPE_IDS[0], RECIPE_IDS[0]]}}), "requires.recipes[1]"),
             (json!({"requires": {"features": "records"}}), "requires.features"),
+            (json!({"session_title_adapter": "arbitrary_sql"}), "session_title_adapter"),
         ] {
             let mut v = zcode_manifest();
             v.as_object_mut().unwrap().extend(extension.as_object().unwrap().clone());
@@ -763,11 +799,20 @@ mod tests {
         assert_eq!(m.recipe, "request-usage-anthropic-v1");
         assert_eq!(m.overrides.len(), 3);
         assert_eq!(m.event_key_paths, ["requestId", "attempt"]);
+        assert_eq!(m.session_title_adapter, Some(PluginSessionTitleAdapter::ZcodeSqliteSessionV1));
         assert!(m.billing_locked);
         assert_eq!(m.max_rows_per_file, DEFAULT_MAX_ROWS_PER_FILE);
         // 具名组提取走一次真实匹配。
         let caps = m.session_pattern.captures("model-io-sess_abc-123.jsonl").unwrap();
         assert_eq!(caps.name("id").unwrap().as_str(), "abc-123");
+    }
+
+    #[test]
+    fn session_title_adapter_must_match_its_plugin_identity() {
+        let mut value = zcode_manifest();
+        value["slug"] = json!("other-plugin");
+        let error = parse_manifest(value).unwrap_err();
+        assert_eq!(error.field, "session_title_adapter");
     }
 
     #[test]

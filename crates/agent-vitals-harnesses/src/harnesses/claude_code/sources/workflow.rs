@@ -391,19 +391,21 @@ pub fn claude_file_to_workflow_events(
     if let Some((uuid, text)) = last_assistant {
         push_excerpt(&mut excerpts, &session_key, &mut excerpt_ordinal, ExcerptRole::AssistantFinal, &text, &uuid);
     }
-    // 会话标题（V32）：取第一条 ai-title 记录（`sources::title_of` 同款取材：
+    // 会话标题（V32）：取最后一条有效 ai-title 记录（`sources::title_of` 同款取材：
     // `aiTitle` 优先、`title` 兜底——那条函数收 owned 切片，这里的 records 是
     // 借用，取材逻辑就地重写、语义逐字段一致），`bound_session_title` 脱敏 +
     // 截断。整形后为空 → 不产行（同摘录纪律）。
     let raw_title = records
         .iter()
+        .rev()
         .filter(|r| r.value.get("type").and_then(Value::as_str) == Some("ai-title"))
         .find_map(|r| {
             r.value.get("aiTitle").and_then(Value::as_str)
-                .or_else(|| r.value.get("title").and_then(Value::as_str))
+                .and_then(agent_vitals_domain::enrichment::bound_session_title)
+                .or_else(|| r.value.get("title").and_then(Value::as_str)
+                    .and_then(agent_vitals_domain::enrichment::bound_session_title))
         });
     let session_titles = raw_title
-        .and_then(agent_vitals_domain::enrichment::bound_session_title)
         .map(|title| vec![SessionTitle {
             native_session_id: native_session_id.to_string(),
             title,
@@ -418,22 +420,24 @@ mod tests {
     use super::claude_file_to_workflow_events;
     use std::path::PathBuf;
 
-    /// V32 会话标题：第一条 ai-title 记录（`aiTitle` 优先、`title` 兜底）整形
-    /// 后随解析产出；后续条目不覆盖（与 sources::title_of 同款「取第一条」）；
+    /// V32 会话标题：最后一条有效 ai-title 记录（`aiTitle` 优先、`title` 兜底）整形
+    /// 后随解析产出；后续有效条目覆盖旧标题，与 Claude 会话当前标题一致；
     /// 无 ai-title → 空集（City 走 fallback 命名，不编造）。
     #[test]
     fn ai_title_records_yield_bounded_session_title() {
         let path = std::env::temp_dir().join(format!("av-claude-aititle-{}.jsonl", std::process::id()));
         std::fs::write(&path, concat!(
             r#"{"type":"user","timestamp":"2026-10-01T10:00:00.000Z","uuid":"u1","message":{"content":"帮我修登录页"}}"#, "\n",
-            // 首条 ai-title：aiTitle 优先；后续条目不覆盖。
+            // 最后一条有效 ai-title：更新后的会话标题应胜过旧标题。
             r#"{"type":"ai-title","aiTitle":"修复登录页跳转","title":"不该用我"}"#, "\n",
             r#"{"type":"ai-title","aiTitle":"后来更新的标题，不该赢"}"#, "\n",
+            // 最新记录为空时，不让它抹掉最近一条有效标题。
+            r#"{"type":"ai-title","aiTitle":"   ","title":""}"#, "\n",
         )).unwrap();
         let (_events, _excerpts, titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "session-1").unwrap();
         assert_eq!(titles.len(), 1);
         assert_eq!(titles[0].native_session_id, "session-1");
-        assert_eq!(titles[0].title, "修复登录页跳转");
+        assert_eq!(titles[0].title, "后来更新的标题，不该赢");
         assert_eq!(titles[0].source, "claude_ai_title");
         assert!(titles[0].validate().is_ok());
         std::fs::remove_file(path).ok();

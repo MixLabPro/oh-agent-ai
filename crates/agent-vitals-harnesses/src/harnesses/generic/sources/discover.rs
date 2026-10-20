@@ -196,6 +196,7 @@ mod tests {
                 "pattern": "^model-io-sess_(?P<id>.+)\\.jsonl$"
             },
             "recipe": "request-usage-anthropic-v1",
+            "session_title_adapter": "zcode_sqlite_session_v1",
             "event_key": { "paths": ["requestId"] }
         });
         parse_manifest(v).unwrap()

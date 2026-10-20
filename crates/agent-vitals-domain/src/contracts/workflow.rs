@@ -222,7 +222,7 @@ pub struct SessionTitle {
     pub native_session_id: String,
     /// 脱敏 + 截断后的标题文本；空文本不产行（adapter 侧就不产）。
     pub title: String,
-    /// 闭集：`codex_thread_name | claude_ai_title | dsh_workspace_title`。
+    /// 闭集：adapter 明确采集的原生标题来源。
     pub source: String,
 }
 
@@ -239,7 +239,7 @@ impl SessionTitle {
         }
         if !matches!(
             self.source.as_str(),
-            "codex_thread_name" | "claude_ai_title" | "dsh_workspace_title"
+            "codex_thread_name" | "claude_ai_title" | "dsh_workspace_title" | "zcode_session_title"
         ) {
             return Err("session title source is unknown");
         }
@@ -387,6 +387,8 @@ mod tests {
             source: "claude_ai_title".to_string(),
         };
         assert!(base.validate().is_ok());
+        let zcode = SessionTitle { source: "zcode_session_title".to_string(), ..base.clone() };
+        assert!(zcode.validate().is_ok());
 
         let empty_sid = SessionTitle { native_session_id: String::new(), ..base.clone() };
         assert!(empty_sid.validate().is_err());

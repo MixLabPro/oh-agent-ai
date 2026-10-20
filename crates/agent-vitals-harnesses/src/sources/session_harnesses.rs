@@ -171,6 +171,69 @@ fn dsh_title_index(roots: &HarnessRoots<'_>) -> Vec<agent_vitals_domain::contrac
         .collect()
 }
 
+/// ZCode 标题来自本机 CLI 索引数据库，而不是用量 JSONL。插件 manifest
+/// 必须显式选择受审计的 adapter；数据库只读，缺表/损坏/忙碌均降级为空标题集。
+/// ZCode 文件名捕获的是 UUID，而 DB 的 id 通常带 `sess_` 前缀，写库时
+/// 两种形式都兼容，最终以实际采集到的 native session id 做自然键匹配。
+pub fn plugin_session_titles(
+    adapter: Option<crate::generic_manifest::PluginSessionTitleAdapter>,
+    home: &Path,
+    native_session_ids: &[String],
+) -> Vec<agent_vitals_domain::contracts::workflow::SessionTitle> {
+    match adapter {
+        Some(crate::generic_manifest::PluginSessionTitleAdapter::ZcodeSqliteSessionV1) => {
+            zcode_sqlite_session_titles(home, native_session_ids)
+        }
+        None => Vec::new(),
+    }
+}
+
+fn zcode_sqlite_session_titles(
+    home: &Path,
+    native_session_ids: &[String],
+) -> Vec<agent_vitals_domain::contracts::workflow::SessionTitle> {
+    use agent_vitals_domain::contracts::workflow::SessionTitle;
+    use agent_vitals_domain::enrichment::bound_session_title;
+    use rusqlite::{Connection, OpenFlags};
+
+    let path = home.join(".zcode/cli/db/db.sqlite");
+    let Ok(db) = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return Vec::new();
+    };
+    let _ = db.busy_timeout(std::time::Duration::from_millis(500));
+    let mut titles = Vec::new();
+    let Ok(mut stmt) = db.prepare("SELECT title FROM session WHERE id = ?1 AND title IS NOT NULL LIMIT 1") else {
+        return Vec::new();
+    };
+    let ids = native_session_ids.iter().filter(|id| !id.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    // Bound work by this ingest batch, rather than an arbitrary lexical prefix of
+    // the whole index. ZCode stores `sess_<uuid>` while the usage filename carries
+    // just `<uuid>`; both spellings are checked, but the fact's original ID stays
+    // the authoritative join key written to the sessions table. Deduplicate first
+    // so a many-request session cannot consume the bounded lookup budget.
+    for id in ids.into_iter().take(100_000) {
+        let alternate = if id.starts_with("sess_") { id.trim_start_matches("sess_").to_string() } else { format!("sess_{id}") };
+        let raw_title = stmt.query_row([id.as_str()], |row| row.get::<_, String>(0))
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => stmt.query_row([alternate], |row| row.get::<_, String>(0)),
+                other => Err(other),
+            });
+        let Ok(raw_title) = raw_title else { continue };
+        let Some(title) = bound_session_title(&raw_title) else { continue };
+        titles.push(SessionTitle {
+            native_session_id: id.to_string(),
+            title,
+            source: "zcode_session_title".to_string(),
+        });
+    }
+    titles.sort_by(|a, b| a.native_session_id.cmp(&b.native_session_id));
+    titles
+}
+
 /// 会话执行环境注册表（顺序即同步批次顺序，见模块文档）。
 pub static SESSION_HARNESSES: [SessionHarness; 4] = [
     SessionHarness {
@@ -282,5 +345,52 @@ mod tests {
         assert_eq!(root("dsh", &with_dsh), Some(PathBuf::from("/d")));
         assert_eq!(root("dsh", &no_dsh), None, "DSH 根未知 → 枚举为空，不是错误");
         assert_eq!(root("workbuddy", &with_dsh), Some(PathBuf::from("/h/.workbuddy")));
+    }
+
+    #[test]
+    fn zcode_plugin_titles_are_read_only_scrubbed_and_keyed_by_session_id() {
+        let home = std::env::temp_dir().join(format!(
+            "agent-vitals-zcode-title-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let db_path = home.join(".zcode/cli/db/db.sqlite");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("CREATE TABLE session (id TEXT, title TEXT);").unwrap();
+        db.execute("INSERT INTO session VALUES (?1, ?2)", rusqlite::params!["sess_abc", "  修复标题  "]).unwrap();
+        db.execute("INSERT INTO session VALUES (?1, ?2)", rusqlite::params!["sess_prefixed", "带前缀会话"]).unwrap();
+        db.execute("INSERT INTO session VALUES (?1, ?2)", rusqlite::params!["raw-id", "使用 sk-abcdefghij0123456789 的任务"]).unwrap();
+        db.execute("INSERT INTO session VALUES (?1, ?2)", rusqlite::params!["sess_blank", "   "]).unwrap();
+        drop(db);
+
+        let titles = plugin_session_titles(
+            Some(crate::generic_manifest::PluginSessionTitleAdapter::ZcodeSqliteSessionV1),
+            &home,
+            &["abc".to_string(), "abc".to_string(), "raw-id".to_string(), "sess_prefixed".to_string(), "missing".to_string()],
+        );
+        assert_eq!(titles.len(), 3);
+        assert_eq!(titles[0].native_session_id, "abc");
+        assert_eq!(titles[0].title, "修复标题");
+        assert_eq!(titles[0].source, "zcode_session_title");
+        assert_eq!(titles[1].native_session_id, "raw-id");
+        assert!(!titles[1].title.contains("sk-abcdefghij0123456789"));
+        assert_eq!(titles[2].native_session_id, "sess_prefixed");
+        assert!(plugin_session_titles(None, &home, &["abc".to_string()]).is_empty());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn zcode_plugin_title_index_degrades_when_database_is_missing() {
+        let home = std::env::temp_dir().join(format!(
+            "agent-vitals-zcode-title-missing-{}",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(plugin_session_titles(
+            Some(crate::generic_manifest::PluginSessionTitleAdapter::ZcodeSqliteSessionV1),
+            &home,
+            &["abc".to_string()],
+        ).is_empty());
     }
 }

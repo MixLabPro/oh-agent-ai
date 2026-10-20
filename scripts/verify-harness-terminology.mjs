@@ -20,7 +20,10 @@ assert.match(read("apps/agent-city/ui/src/data/provider.ts"), /CityProjectionV1 
 assert.match(read("packages/agent-vitals-app-sdk/src/city-ui-projection.ts"), /harness: string/);
 assert.doesNotMatch(read("packages/agent-vitals-app-sdk/src/city-ui-projection.ts"), /\bhost: string/);
 assert.doesNotMatch(read("apps/agent-city/ui/src/data/provider.ts"), /\bhost: string/);
-assert.match(read("crates/agent-vitals-data/src/authority.rs"), /SCHEMA_VERSION: i64 = 31/);
+const authoritySource = read("crates/agent-vitals-data/src/authority.rs");
+const authoritySchema = authoritySource.match(/pub const SCHEMA_VERSION: i64 = (\d+);/)?.[1];
+assert.ok(authoritySchema, "authority schema version must be declared");
+assert.ok(Number(authoritySchema) >= 31, "harness terminology rename requires schema v31 or newer");
 // Network hostname evidence is not an Agent execution environment identifier.
 assert.match(read("crates/agent-vitals-provider/src/lib.rs"), /pub endpoint_host: Option<String>/);
 assert.match(read("apps/agent-city/ui/package.json"), /vite --host 127\.0\.0\.1/);

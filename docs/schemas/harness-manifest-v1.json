@@ -146,6 +146,11 @@
         "policy": { "const": "lock:metered_estimate" }
       }
     },
+    "session_title_adapter": {
+      "type": "string",
+      "enum": ["zcode_sqlite_session_v1"],
+      "description": "Optional reviewed, read-only local title index adapter. The manifest selects an allowlisted adapter id; it cannot provide a path, SQL, or executable code."
+    },
     "trust": {
       "type": "object",
       "description": "Optional read-only Trust artifact profile. It never permits content or network-payload access.",

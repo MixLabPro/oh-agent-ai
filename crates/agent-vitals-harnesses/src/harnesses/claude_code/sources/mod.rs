@@ -233,12 +233,14 @@ fn file_info(path: &Path) -> FileInfo {
 fn title_of(records: &[Value]) -> Option<String> {
     records
         .iter()
+        .rev()
         .filter(|r| r.get("type").and_then(Value::as_str) == Some("ai-title"))
         .find_map(|r| r
             .get("aiTitle")
             .and_then(Value::as_str)
-            .or_else(|| r.get("title").and_then(Value::as_str))
-            .map(str::to_owned))
+            .and_then(agent_vitals_domain::enrichment::bound_session_title)
+            .or_else(|| r.get("title").and_then(Value::as_str)
+                .and_then(agent_vitals_domain::enrichment::bound_session_title)))
 }
 
 /// 第一条携带 cwd 的记录（会话的起跑目录——同 core 适配器的 first_cwd 惯例）。

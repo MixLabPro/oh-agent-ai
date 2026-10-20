@@ -72,6 +72,9 @@ pub struct PluginRunReport {
     /// Opaque exact-input digest for local preview binding; not a serving field.
     #[serde(skip_serializing)]
     pub corpus_fingerprint: String,
+    /// Local-only sidecar title enrichment. Never emitted in plugin reports.
+    #[serde(skip_serializing)]
+    pub session_titles: Vec<agent_vitals_domain::contracts::workflow::SessionTitle>,
 }
 
 /// 加载并校验 manifest 文件（含 slug == 目录名检查）。`--file` 模式下
@@ -677,7 +680,13 @@ fn plugin_ingest_write(
     data_home: &Path,
     home: &Path,
 ) -> Result<Value, String> {
+    let (manifest, _) = load_manifest(manifest_path)?;
+    let title_adapter = manifest.session_title_adapter;
     let mut report = run_plugin(manifest_path, &[], machine_namespace, home)?;
+    let session_ids = report.facts.iter()
+        .filter_map(|fact| fact.get("native_session_id").and_then(Value::as_str))
+        .map(str::to_string).collect::<Vec<_>>();
+    report.session_titles = agent_vitals_harnesses::sources::session_harnesses::plugin_session_titles(title_adapter, home, &session_ids);
     validate_gate(&report).map_err(|e| format!("validate 拒绝安装：{e}"))?;
     let facts = std::mem::take(&mut report.facts);
     let authority = open_authority_and_write(data_home, &report, &facts)
@@ -730,8 +739,8 @@ fn open_authority_and_write_extension(
         &[],
         // session_excerpts：行为面素材，插件执行环境不产（行为须官方，spec §1）。
         &[],
-        // session_titles：同上——插件执行环境没有会话标题来源。
-        &[],
+        // 仅消费由 adapter 明确提供的本机侧车标题；不从 usage/prompt 猜标题。
+        &report.session_titles,
         None,
         None,
         now,
@@ -843,8 +852,13 @@ fn ingest_active_generation_after_pin(
             let value = store.load(&hash).map_err(|e| format!("active object: {e}"))?;
             let manifest = generic_manifest::parse_manifest(value).map_err(|e| e.to_string())?;
             if manifest.slug != slug { return Err("active manifest slug does not match slot".into()); }
+            let title_adapter = manifest.session_title_adapter;
             super::extension_installer::ensure_compiled_sources_exclusive(&manifest, user_home, data_home)?;
             let mut report = run_manifest(manifest, hash[..16].to_string(), &[], ns, user_home)?;
+            let session_ids = report.facts.iter()
+                .filter_map(|fact| fact.get("native_session_id").and_then(Value::as_str))
+                .map(str::to_string).collect::<Vec<_>>();
+            report.session_titles = agent_vitals_harnesses::sources::session_harnesses::plugin_session_titles(title_adapter, user_home, &session_ids);
             validate_gate(&report)?;
             let facts = std::mem::take(&mut report.facts);
             let context = agent_vitals_data::fact_writer_sql::ExtensionFactContext {
@@ -941,6 +955,7 @@ mod tests {
             "source": { "format": "jsonl" },
             "session": { "from": "filename", "pattern": "^model-io-sess_(?P<id>.+)\\.jsonl$" },
             "recipe": "request-usage-anthropic-v1",
+            "session_title_adapter": "zcode_sqlite_session_v1",
             "overrides": {
                 "event_ts": "completedAt",
                 "model_raw": "model.modelId",
@@ -1373,8 +1388,16 @@ mod tests {
         let data_home = home.join("data-home");
         std::fs::create_dir_all(&data_home).unwrap();
         let (manifest, _files) = setup_harness(&home);
+        let title_db_path = home.join(".zcode/cli/db/db.sqlite");
+        std::fs::create_dir_all(title_db_path.parent().unwrap()).unwrap();
+        let title_db = rusqlite::Connection::open(&title_db_path).unwrap();
+        title_db.execute_batch("CREATE TABLE session (id TEXT, title TEXT);").unwrap();
+        title_db.execute("INSERT INTO session VALUES (?1, ?2)", rusqlite::params!["sess_aaa", "会话 A"]).unwrap();
+        title_db.execute("INSERT INTO session VALUES (?1, ?2)", rusqlite::params!["sess_bbb", "会话 B"]).unwrap();
+        drop(title_db);
 
         let payload = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap();
+        assert!(payload["report"].get("session_titles").is_none(), "本地标题不出现在报告中");
         let ingest = &payload["ingest"];
         assert_eq!(ingest["harnesses"][0]["appended"], 3, "首跑追加 3 条");
         assert_eq!(ingest["harnesses"][0]["duplicate"], 0);
@@ -1397,6 +1420,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 3, "authority 双写落行");
+        let titled: Vec<(String, String)> = db.conn().prepare(
+            "SELECT native_session_id, title FROM sessions WHERE harness = 'harness:zcode' ORDER BY native_session_id",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+            .map(Result::unwrap).collect();
+        assert_eq!(titled, [("aaa".to_string(), "会话 A".to_string()), ("bbb".to_string(), "会话 B".to_string())]);
 
         // 重跑：两个阶段都 exactly-once。
         let payload2 = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap();

@@ -510,7 +510,7 @@ CREATE TABLE sessions (
   last_observed_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
   title TEXT,                               -- v32：会话标题（City 楼名等本地展示面；NULL = 无标题证据）
-  title_source TEXT,                        -- v32：codex_thread_name | claude_ai_title | dsh_workspace_title
+  title_source TEXT,                        -- v32：受审计的本机标题来源枚举
   UNIQUE(harness, machine_namespace, native_session_id)
 );
 
