@@ -13,7 +13,9 @@ export class ContinuousWorldValidator implements AuditWorldValidator {
     const state=step.state,path=step.motion.trajectory;
     if(!validDrivingState(previous)||!validDrivingState(state)||step.motion.queryStatus!=="resolved"||!path||
       !this.environment.validateTrajectory(previous,state,path))return "simulation-invalid";
-    let distance=0;for(let i=1;i<path.length;i++)distance+=Math.hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y,path[i].z-path[i-1].z);
+    // 里程按内核的计费口径（3D 弧长减接缝支撑跳变，ContinuousDrivingEnvironment.travelCharge）：曾自算 3D 弧长，
+    // 内核对 ≤ aliasTolerance 的接缝跳变不计行程后两边差出跳变量，过缝的每一步都被判 simulation-invalid。
+    const distance=this.environment.travelCharge(path);
     const maximum=DRIVING_PARAMS.maxForward*DRIVING_DT+1e-6;
     const angular=DRIVING_PARAMS.maxForward/DRIVING_PARAMS.wheelbase*Math.tan(DRIVING_PARAMS.maxSteering)*DRIVING_DT+1e-6;
     if(distance>maximum||Math.abs(Math.abs(state.distance-previous.distance)-distance)>1e-6||

@@ -17,7 +17,7 @@ import type { AuditKey, AuditManifest, AuditUnit, AuditUnitKind, RoadAuditCase }
 import { ROUTE_PILOT_CONTROLLER_VERSION, routePilotFactory } from "./RoutePilot";
 import { auditRoute, type PassabilityOptions, type PassabilityResult, type PassabilityRoute, type PassabilityWorld } from "./RoadPassabilityAudit";
 
-export const ROAD_AUDIT_PLANNER_VERSION = 2; // 2: routes start/exit on the deck layer their end points lie on
+export const ROAD_AUDIT_PLANNER_VERSION = 3; // 2: routes start/exit on the deck layer their end points lie on; 3: ramp landings follow the real host road
 
 type P = Readonly<{ x: number; z: number }>;
 export type PlannerEdge = Readonly<{ id: string; from: string; to: string; width: number; points: readonly P[]; bridge?: boolean; structure?: string }>;
@@ -222,13 +222,15 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
  * incident road most aligned with the span (through degree-2 continuations); null when the structure is not
  * a road-edge bridge (expressway ramps) or no approach exists. */
 function bridgeApproach(l: StructureLanding, edges: readonly PlannerEdge[], incident: Incident, reach: number): P[] | null {
-  if (!l.structureId.startsWith("bridge:")) return null;
-  const bridge = edges.find((e) => e.id === l.structureId.slice("bridge:".length));
-  if (!bridge) return null;
-  const node = l.end === "from" ? bridge.from : bridge.to;
+  // 匝道落在路中间的节点上（骨架在出口处切分宿主路）：同样沿实际的地面路走，而不是沿匝道方向直出。
+  // 0/42 的高架 0 to 端以约 61° 斜接宿主干道，直出 6 就上了路缘（structure:expressway:0:to:off pilot-failed）。
+  const bridge = l.structureId.startsWith("bridge:") ? edges.find((e) => e.id === l.structureId.slice("bridge:".length)) : undefined;
+  if (l.structureId.startsWith("bridge:") && !bridge) return null;
+  const node = bridge ? (l.end === "from" ? bridge.from : bridge.to) : `${l.x}:${l.z}`;
+  if (!bridge && !incident.has(node)) return null;
   let best: { edge: PlannerEdge; atStart: boolean } | null = null; let bestDot = -Infinity;
   for (const x of incident.get(node) ?? []) {
-    if (x.edge.id === bridge.id) continue;
+    if (bridge && x.edge.id === bridge.id) continue;
     const pts = x.atStart ? x.edge.points : [...x.edge.points].reverse();
     const d = { x: pts[1].x - pts[0].x, z: pts[1].z - pts[0].z }; const len = Math.hypot(d.x, d.z) || 1;
     const dot = (d.x * l.outX + d.z * l.outZ) / len;
