@@ -44,6 +44,7 @@ import { finishDeadEnds } from "./planner/deadEnds";
 import { connectGroundJunctions } from "./planner/junctions";
 import { buildLandingCircles } from "./planner/landing";
 import { buildJunctionRings, type JunctionRing } from "./planner/junctionRings";
+import { rampLowZoneDiscs } from "./planner/rampLowZone";
 import { planHighwayRamps, type HighwayRamp } from "./planner/highwayRamps";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 import { clearsHighways, polygonDistance, roadNodeId, SegmentIndex, segmentDistance } from "./roadGeometry";
@@ -378,7 +379,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── 统一连接器（网络优先批次 4-2）：本函数改走 planner/connect.ts 的 direct-projection 策略，
   // 经 commitNetworkPatch 事务提交；搜索判据逐字保留（投影/吸附/夹角/safeRoadLink/clearAngle/交叉），
   // 规划基线哈希不变是行为等价的证明。
-  const connectorWorld: ConnectorWorld = { network, geo, inRiver, reservations };
+  // 高架落地端低段禁行区（planner/rampLowZone.ts）：只并进连接器的预留——新地面路绕开低段；用地/地块不受影响。
+  const rampLowZones = rampLowZoneDiscs(ringRuns);
+  const connectorWorld: ConnectorWorld = { network, geo, inRiver, reservations: () => [...reservations(), ...rampLowZones] };
   let connectSeq = 0;
   const connectToNetwork = (endpoint: Vec2, maxDistance: number, arterial: boolean, exclude: (edge: RoadEdge) => boolean = () => false, minAngle = 60): boolean =>
     runConnection({
@@ -643,7 +646,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // （悬索桥装饰选址 withBridgeLandmark、nearBridgeEnd 桥头避让全部保持兼容）。树先于此遍放置，
   // 落到新增地面边上的按报告清除（与放置时的 width/2+3 同口径）。
   {
-    const landingReport = buildLandingCircles({ network, geo, inRiver, sites: reservations, carPaths });
+    const landingReport = buildLandingCircles({ network, geo, inRiver, sites: reservations, carPaths,
+      pinned: new Set(ringRuns.flatMap((run) => [run[0], run[run.length - 1]].map((p) => roadNodeId(keyOf(p))))) });
     if (landingReport.addedEdges.length) {
       for (let t = parkTrees.length - 1; t >= 0; t -= 1) {
         const tree = parkTrees[t];

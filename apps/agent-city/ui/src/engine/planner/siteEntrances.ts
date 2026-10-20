@@ -82,11 +82,11 @@ export function connectSiteEntrances(w: SiteEntranceWorld) {
         const edgePt = key({ x: site.x - ((site.x - candidate.shore.x) / l) * site.radius * 0.9, z: site.z - ((site.z - candidate.shore.z) / l) * site.radius * 0.9 });
         const shorePt = key(candidate.shore);
         const staged: Network = { nodes: new Map([...network.nodes].map(([id, node]) => [id, { ...node }])), edges: new Map([...network.edges].map(([id, edge]) => [id, { ...edge, points: edge.points.map((p) => ({ ...p })) }])), version: 0 };
-        const stagedConnector: ConnectorWorld = { ...connectorWorld, network: staged, reservations: () => reservations().filter((reserved) => reserved !== site) };
+        const stagedConnector: ConnectorWorld = { ...connectorWorld, network: staged, reservations: () => connectorWorld.reservations().filter((reserved) => reserved !== site) };
         const causeway = commitFixedLink(stagedConnector, [{ a: shorePt, b: edgePt, arterial: false, bridge: true, primary: false }]);
         if (!causeway.ok) { failed.push(`causeway:${causeway.detail ?? causeway.reason}`); continue; }
         // 连接器的 owner-revalidation 必须能重新找到设施；路径候选本身仍从 blockers 中排除 owner。
-        stagedConnector.reservations = reservations;
+        stagedConnector.reservations = connectorWorld.reservations;
         const stagedComponents = componentOf({ roadNodes: [...staged.nodes.values()], roadEdges: [...staged.edges.values()] } as ConstraintPlan);
         const primaryAnchor = primaryAnchorNodeIds.find((id) => staged.nodes.has(id));
         const primaryComponent = primaryAnchor ? stagedComponents.get(primaryAnchor) : undefined;

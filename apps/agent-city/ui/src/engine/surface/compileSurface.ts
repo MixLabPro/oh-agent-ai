@@ -25,6 +25,8 @@ import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatc
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
 export const CITY_SURFACE_GEOMETRY_VERSION = 11;
+/** Lift of an expressway ribbon's interior seams above the higher slab top (keeps slabs below the drivable surface). */
+const RIBBON_LIFT = 0.03;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
 const LANDING_ZONE = 3;
 
@@ -253,7 +255,9 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
     const sideOf = (i: number) => { const t = tops[i]; const sx = t[3].x - t[0].x, sz = t[3].z - t[0].z; const l = Math.hypot(sx, sz) || 1; return { x: sx / l, z: sz / l }; };
     // Seam at the vertex shared by pieces i−1 and i: [−side point, +side point].
     const seamAt = (i: number): [P3, P3] | null => {
-      const a = endAt(i - 1, 1), b = endAt(i, -1); const c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+      // 接缝取两块板顶中较高者再抬 RIBBON_LIFT：取平均时一块板顶会高出驾驶面（≤ 半个错台），车底与本匝道的板相撞
+      // （0/42 expressway:0:0003:slab，法向朝上）。驾驶面因此恒在所有板顶之上，两端端边不抬，落地接缝不变。
+      const a = endAt(i - 1, 1), b = endAt(i, -1); const c = { x: (a.x + b.x) / 2, y: Math.max(a.y, b.y) + RIBBON_LIFT, z: (a.z + b.z) / 2 };
       const s0 = sideOf(i - 1), s1 = sideOf(i); let mx = s0.x + s1.x, mz = s0.z + s1.z; const ml = Math.hypot(mx, mz);
       if (ml < 1e-9) return null; mx /= ml; mz /= ml;
       const cos = mx * s0.x + mz * s0.z; if (cos < 0.5) return null; // sharper than 120°: keep the slab tops there
