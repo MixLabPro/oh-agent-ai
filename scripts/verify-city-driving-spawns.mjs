@@ -134,6 +134,7 @@ assert.equal(resolveFormalSpawn(confirmation, binding, accepted.credentials[0]).
 assert.equal(confirmation.derive(binding, candidateChoice), true);
 assert.equal(confirmation.validate(binding, accepted.credentials[0]), true);
 assert.equal(confirmation.confirm(binding, accepted.credentials[0].spawnId), true);
+assert.equal(confirmation.confirm(binding, accepted.credentials[0].spawnId), true, "repeated confirmation is idempotent while its credential is fresh");
 assert.equal(confirmation.snapshot.status, "confirmed");
 assert.equal(confirmation.getConfirmed(binding), accepted.credentials[0]);
 assert.equal(resolveFormalSpawn(confirmation, binding, accepted.credentials[0]).ok, true, "formal entry gate accepts only the confirmed current credential");
@@ -175,4 +176,15 @@ assert.equal(spawn.deriveSpawnCandidates(noFence.graph, () => "ground").length, 
 const noFenceWorld = { ...validationWorld, graph: noFence.graph, isGraphCurrent: () => true };
 assert.equal((await spawn.validateSpawnSpec(noFenceWorld, validSpec, dims, 0.55)).reason, "spawn-geometry-unavailable");
 
-console.log("Driving spawns: released fence evidence, full-table valid-world point checks, boundary/tangent/layer/solid rejection, stale graph and missing-evidence guards passed.");
+// A diagnostic road audit without the mandatory final-boundary replay is not a
+// published graph and cannot seed confirmation state or formal entry.
+const unpublishedManifest = { ...manifest, key: { ...key, releaseBoundaryHash: null } };
+const unpublished = publishDrivingGraph(unpublishedManifest, decision);
+assert.equal(unpublished.ok, false, "missing final-boundary replay rejects graph publication");
+assert.equal(unpublished.reason, "final-boundary-replay-required");
+const noPublishedConfirmation = new SpawnConfirmationStore();
+assert.equal(noPublishedConfirmation.derive(binding, []), false, "no published graph yields no candidates");
+assert.equal(noPublishedConfirmation.snapshot.status, "unavailable");
+assert.equal(resolveFormalSpawn(noPublishedConfirmation, null, null).ok, false, "formal entry rejects without a published graph");
+
+console.log("Driving spawns: released fence evidence, full-table valid-world point checks, boundary/tangent/layer/solid rejection, stale graph, missing evidence, and unpublished graph guards passed.");

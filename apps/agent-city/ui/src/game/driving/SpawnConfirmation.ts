@@ -71,6 +71,10 @@ export class SpawnConfirmationStore {
 
   confirm(binding: SpawnConfirmationBinding, spawnId: string): boolean {
     const current = this.current;
+    // Confirmation is idempotent for the same live authorization. Repeated clicks
+    // must not turn an already confirmed candidate into an invalidated session.
+    if (current.status === "confirmed" && sameBinding(current.binding, binding) && current.selectedSpawnId === spawnId &&
+      this.credential && isVerifiedSpawnCredential(this.credential) && this.credential.isFresh()) return true;
     if (current.status !== "validated" || !sameBinding(current.binding, binding) || current.selectedSpawnId !== spawnId ||
       !this.credential || !isVerifiedSpawnCredential(this.credential) || !this.credential.isFresh()) {
       this.invalidate("spawn-confirmation-stale-or-mismatched"); return false;

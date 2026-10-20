@@ -205,3 +205,13 @@ A批次剩余项不再是几何问题：跨层portal（立交、高架匝道）�
 
 B 批次（审计、恢复）到此完成。下一步是 D 的用例规划器，以及更强的驾驶员。详见 [CITY_PASSABILITY_AND_RECOVERY_NOTES.md](CITY_PASSABILITY_AND_RECOVERY_NOTES.md)。
 
+## 16. P1 正式出生点交接（2026-10-20）
+
+正式入口必须消费 `PublishedDrivingGraph` 和由 `validateSpawnSpec` 签发的 `VerifiedSpawnCredential`。`DrivingSpawnConfirmationController` 的最小接线契约为：`publishedGraph: PublishedDrivingGraph | null`、宿主冻结 `capture`、与其 revision / 发布边界 / 车辆配置完全一致的 `SpawnConfirmationBinding`、`useCityDriving` 返回的确认状态与 actions，以及正式入口 `onEnter`。controller 仅从已发布图导出候选；校验时把候选交给完整 `validateSpawnSpec`，只把验证器签发的凭证写入 `SpawnConfirmationStore`。缺图、过期租约、binding 不匹配或验证失败均不可确认；同一新鲜凭证的重复确认幂等。卸载时失效 Store。验证异常会撤销候选并显式报告 `spawn-validation-failed`。
+
+**当前阻塞是正式发布证据的生产者缺失。** `useRoadAudit` 可以给出有界 audit 的 `plan`、`manifest`、`report` 和冻结 capture，但 manifest 使用 `releaseBoundaryHash: null`，`publishDrivingGraph` 会按 `final-boundary-replay-required` 拒绝发布。普通 passability 结果、planner corridor、表面支撑局部检查或任意道路边都不是最终边界重放证据，不能据此构造 fence 或伪造 `ReleasedUnitBoundaryEvidence`。当前城市驾驶 runtime 和 capture/world validator 没有共享的最终 fence 几何、版本化边界编译器及边界碰撞接线。因此发布图、正式确认与正式驾驶入口必须继续保持不可用，直到同一组可追溯 fences 同时参与最终 replay 和正式运行时判碰撞，并能按 verifier 契约产出边界证据。
+
+接续实现应先提供版本化 fence 编译/哈希与单一数据源，再把它接到正式 runtime 和冻结 replay world；对 manifest/key 绑定的完整 mandatory plan 执行边界重放，最后由现有 verifier 校验并发布图。至少验收：无 hash 或 replay 不完整时拒绝发布；任一 fence/runtime/revision/key 不匹配时拒绝发布或确认；修改场景后旧租约、候选、凭证和已确认状态全部失效；成功凭证只可在同一 binding 下进入正式入口；取消/卸载释放 capture 并失效确认；重复确认不改变结果；validator 返回拒绝或抛异常时不留下可用凭证；free-drive 与诊断入口不创建正式确认状态。
+
+**联调生命周期注意**：`useRoadAudit` 持有 capture lease 到结果消费结束，取消、禁用和卸载应释放它；新一轮 audit 开始前也必须释放上一轮已完成而保留的 capture。完成态若继续暴露 capture，仍须检测 revision/scene 失效，不能依赖 React 再次渲染才发现租约过期。正式确认 controller 卸载会调用 `invalidateSpawn`；capture 的释放仍归 audit hook 所有。当前 `useCityDrivingPlay` 显式设置 `confirmationEnabled: false`，其 handler 与 `enter` 不能作为正式确认接线；集成需由 `useCityDriving` 的正式配置提供 enabled actions、binding 和入口。不要为绕过该边界而改用本地支撑检查或新建同名发布协议。
+
