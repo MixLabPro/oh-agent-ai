@@ -11,6 +11,7 @@ import { renderRoadEdges } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
 import { EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, expresswayDeckHeights } from "./structureProfiles";
 import { terrainSurfaceHeight } from "./terrainSampling";
+import { groundRoadClearance } from "./roadClearance";
 
 /** Road surface lift (same constant as groundRoadCompiler.ROAD_SURFACE_LIFT; kept here to avoid a cycle). */
 const ROAD_LIFT = 0.04;
@@ -95,9 +96,48 @@ export function bridgeDeckProfile(layout: BridgeLayoutInput, from: Vec2, to: Vec
 export function bridgeDeckParts(edge: RoadEdge, layout: BridgeLayoutInput): BoxPart[] {
   const [a,b]=edge.points,profile=bridgeDeckProfile(layout,a,b,edge.width);
   const change=Math.abs(profile.leanTo-profile.leanFrom)*edge.width;
-  const parts: BoxPart[] = change<=0.08 ? bridgeDeckSectionParts(edge,layout,profile) : bridgeDeckSplitParts(edge,layout,profile);
+  const parts: BoxPart[] = trimLandedRailings(edge, layout, change<=0.08 ? bridgeDeckSectionParts(edge,layout,profile) : bridgeDeckSplitParts(edge,layout,profile));
   appendDeadEndBarriers(edge, layout, parts, profile);
   return parts;
+}
+
+/** Railing centreline must stay this far outside every ground carriageway (railings are 0.3 wide). */
+export const RAILING_ROAD_CLEARANCE = 0.2;
+/** 落地端护栏退让（2026-10-19）：护栏铺满整个桥面（还随桥面板外伸 0.25），而桥头节点上的地面路从桥端直接分出——
+ * 0/7 的 115.26:-210.98/409.02:-210.98 桥头有一条 12 宽、96.5° 折返的引道，它的车道盖住了 +z 侧护栏最后约 6，
+ * 出生路线在这里转弯时车身扫上护栏（continuous-collision:prefix:solid）。占路诊断按角色跳过 bridge-railing，
+ * 所以一直没报。现按与道路编译器相同的地面路面（渲染边 + 路口扇面，groundRoadClearance）逐侧从落地端向内
+ * 0.5 一步退，直到护栏线离路面 ≥ RAILING_ROAD_CLEARANCE，最多退到 1/3 跨。只看落地端：桥下穿过的地面路
+ * 在 XZ 上也「相交」，不能因此剪掉跨中护栏。 */
+function trimLandedRailings(edge: RoadEdge, layout: BridgeLayoutInput, parts: BoxPart[]): BoxPart[] {
+  const [a, b] = edge.points;
+  const len = Math.hypot(b.x - a.x, b.z - a.z);
+  if (!(len > 0) || !Array.isArray(layout.roadEdges)) return parts;
+  const ux = (b.x - a.x) / len, uz = (b.z - a.z) / len, nx = -uz, nz = ux;
+  const lateral = edge.width / 2 - 0.15;
+  const clear = (s: number, side: number) => groundRoadClearance(layout.roadEdges, a.x + ux * s + nx * side * lateral, a.z + uz * s + nz * side * lateral) >= RAILING_ROAD_CLEARANCE;
+  const setback = (fromA: boolean, side: number) => {
+    if (!landsOnRoad(layout, fromA ? a : b)) return 0;
+    let sb = 0; while (sb < len / 3 && !clear(fromA ? sb : len - sb, side)) sb += 0.5;
+    return Math.min(sb, len / 3);
+  };
+  const range = new Map([-1, 1].map((side) => [side, [setback(true, side), len - setback(false, side)]] as const));
+  const out: BoxPart[] = [];
+  for (const p of parts) {
+    if (p.role !== "bridge-railing") { out.push(p); continue; }
+    const e0 = boxPoint(p, -0.5, 0, 0), e1 = boxPoint(p, 0.5, 0, 0);
+    const s0 = (e0.x - a.x) * ux + (e0.z - a.z) * uz, s1 = (e1.x - a.x) * ux + (e1.z - a.z) * uz;
+    const side = ((p.x - a.x) * nx + (p.z - a.z) * nz) >= 0 ? 1 : -1;
+    const [lo, hi] = range.get(side)!;
+    if (Math.min(s0, s1) >= lo && Math.max(s0, s1) <= hi) { out.push(p); continue; }
+    // Local fraction along the part's own axis for an along-span distance (e0 ↔ −0.5, e1 ↔ +0.5).
+    const frac = (s: number) => -0.5 + (s - s0) / (s1 - s0);
+    const f0 = Math.max(-0.5, Math.min(frac(lo), frac(hi))), f1 = Math.min(0.5, Math.max(frac(lo), frac(hi)));
+    if ((f1 - f0) * p.sx < 0.3) continue;
+    const c = boxPoint(p, (f0 + f1) / 2, 0, 0);
+    out.push(part(c.x, c.y, c.z, p.sx * (f1 - f0), p.sy, p.sz, p.color, p.role, p.ry, p.rz, p.order, p.rx));
+  }
+  return out;
 }
 
 /** A rigid slab cannot meet opposite bank leans. Short overlapping slabs
@@ -162,7 +202,12 @@ function bridgeDeckSectionParts(edge: RoadEdge, layout: BridgeLayoutInput, profi
     const t = distance / length;
     const px = a.x + (b.x - a.x) * t; const pz = a.z + (b.z - a.z) * t;
     const bed = layout.terrain.height(px, pz);
-    parts.push(part(px, bed, pz, 1.6, Math.max(0.1, profile.at(t) - 0.35 - bed), edge.width - 0.6, "#a9aaa0", "bridge-pier", yaw));
+    // The pier top is flat but the slab is rolled to the (interpolated) bank lean: on the low side the slab
+    // underside drops by lean × half-width. A centreline top poked through the deck on rolled/split bridges
+    // (7/1: 1.58 above the carriageway — road obstruction guard).
+    const lean = Number.isFinite(profile.leanFrom) && Number.isFinite(profile.leanTo) ? profile.leanFrom + (profile.leanTo - profile.leanFrom) * t : profile.crossSlope;
+    const drop = Math.max(Math.abs(lean), Math.abs(profile.crossSlope)) * (edge.width - 0.6) / 2;
+    parts.push(part(px, bed, pz, 1.6, Math.max(0.1, profile.at(t) - 0.35 - drop - bed), edge.width - 0.6, "#a9aaa0", "bridge-pier", yaw));
   }
   return parts;
 }
@@ -206,8 +251,46 @@ export function expresswayRun(layout: ExpresswayLayout, run: ReadonlyArray<{ x: 
     points.push({ x: b.x, z: b.z });
     along += length;
   }
-  const heights = points.length ? expresswayDeckHeights(points, (x, z) => layout.terrain.height(x, z), (x, z) => groundRoadTopAt(layout as BridgeLayoutInput, x, z)) : [];
+  const hold = closed || points.length < 2 ? { from: 0, to: 0 } : { from: rampHold(layout, points), to: rampHold(layout, [...points].reverse()) };
+  const heights = points.length ? expresswayDeckHeights(points, (x, z) => layout.terrain.height(x, z), (x, z) => groundRoadTopAt(layout as BridgeLayoutInput, x, z), hold) : [];
   return { points, heights };
+}
+
+/** Longest flush stretch a ramp end may hold at road height before it starts to climb. */
+export const EXPRESSWAY_RAMP_HOLD_MAX = 24;
+/** 匝道分岔贴路段（2026-10-19）：0/42 的高架 0 从路口 50.63:-73.24 起步，与 5 宽路成约 25° 分出，
+ * 按 ease 剖面头 8 就比路面高 0.12–0.2（> aliasTolerance）。车沿路走被支撑抬上桥面（取较高面），到分岔处桥面
+ * 侧边是 closed，挡住——出生路线 pilot-failed。现量出从落地端起、桥面侧边（±可驶半宽）仍压在一条「中线不在其上」
+ * 的地面路里的最远沿程，在这段内桥面保持路面高度（与路面差 ≤ aliasTolerance，侧边按区域规则开放），过了才爬升。
+ * 沿宿主路落地的匝道中线与侧边在同一条路上，hold = 0，不受影响。上限 EXPRESSWAY_RAMP_HOLD_MAX，爬升坡度
+ * 最多从 1.5·Δh/90 变到 1.5·Δh/66。 */
+function rampHold(layout: ExpresswayLayout, points: readonly Vec2[]): number {
+  if (!Array.isArray(layout.roadEdges)) return 0;
+  const roads = renderRoadEdges(layout.roadEdges).filter((e) => !e.bridge && e.structure !== "deck");
+  const inside = (x: number, z: number) => {
+    const ids = new Set<string>();
+    for (const e of roads) for (let i = 1; i < e.points.length; i++) {
+      const a = e.points[i - 1], b = e.points[i], dx = b.x - a.x, dz = b.z - a.z, ll = dx * dx + dz * dz;
+      const t = ll === 0 ? 0 : Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / ll));
+      if (Math.hypot(x - a.x - dx * t, z - a.z - dz * t) <= e.width / 2) { ids.add(e.id); break; }
+    }
+    return ids;
+  };
+  let hold = 0, along = 0;
+  for (let i = 1; i < points.length && along < EXPRESSWAY_RAMP_HOLD_MAX; i++) {
+    const a = points[i - 1], b = points[i], length = Math.hypot(b.x - a.x, b.z - a.z);
+    if (length < 1e-6) continue;
+    const ux = (b.x - a.x) / length, uz = (b.z - a.z) / length;
+    for (let s = 0; s <= length && along + s <= EXPRESSWAY_RAMP_HOLD_MAX; s += 0.5) {
+      const cx = a.x + ux * s, cz = a.z + uz * s; const centre = inside(cx, cz);
+      for (const side of [-1, 1]) {
+        const hits = inside(cx - uz * side * EXPRESSWAY_DRIVABLE_HALF, cz + ux * side * EXPRESSWAY_DRIVABLE_HALF);
+        if ([...hits].some((id) => !centre.has(id))) hold = along + s;
+      }
+    }
+    along += length;
+  }
+  return hold;
 }
 
 export type ExpresswayPiece = BoxPart & Readonly<{ highway: number; segment: number }>;
@@ -269,16 +352,18 @@ function expresswaySupport(layout: ExpresswayLayout, points: Vec2[], heights: nu
     })) continue;
     return support;
   }
-  // Keep a physical support if no road-free station exists; audits must still expose it.
-  return fallback;
+  // No road-free station: no support here (the span runs on to the next pier). A fallback support stood
+  // on a road under a low ramp — its 1.0-high crossbeam blocked every car (0/42, 90/42); the deck itself
+  // left room to drive under. Kept as a reference for diagnostics only.
+  void fallback;
+  return [];
 }
 /** District expressways: piers, then per segment deck + lane lines + rails (buildDistrictExpressways order).
- * Only near-zero segments are skipped: exit curves are sampled every 8 and contain valid short segments.
- * Rails open where an interchange ramp merges (its first 40%), otherwise the ramp is cut off by the rail. */
+ * Segments shorter than 6 are not drawn — and therefore not driveable. */
 export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"> & Partial<Pick<CityLayout, "extent" | "roadEdges" | "highwayRamps">>): ExpresswayPiece[] {
   const pieces: ExpresswayPiece[] = [];
-  // 合流处留护栏开口（ad697cfa 在旧 buildDistrictExpressways 里加的；dev 把高架几何抽到这里时丢了，合并后匝道又被主桥护栏横截）。
-  // 只切与匝道分流段相交的 6 单位护栏片，不整段删除。
+  // 匝道合流口：主桥护栏与匝道分流段（前 40%）相交的 6 单位护栏片不画，否则匝道接上桥面后被护栏横截。
+  // 与 rampRailRuns（高架两端落地处贴近地面路的开口）是两回事，两者叠加。
   const mergeHeads = (layout.highwayRamps ?? []).map((ramp) => ({ width: ramp.width, points: ramp.points.slice(0, Math.ceil(ramp.points.length * 0.4) + 1) }));
   const nearSegment = (p: Vec2, a: Vec2, b: Vec2) => {
     const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
@@ -286,6 +371,20 @@ export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"
     return Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t);
   };
   const merging = (from: Vec2, to: Vec2) => mergeHeads.some((ramp) => ramp.points.some((point) => nearSegment(point, from, to) < ramp.width / 2 + 0.5));
+  /** rampRailRuns 给出的护栏区间再扣掉匝道合流口：区间按 ≤6 单位分片，相交的片丢掉。 */
+  const mergeRuns = (runs: Array<[number, number]>, a: Vec2, b: Vec2, ox: number, oz: number, length: number): Array<[number, number]> => {
+    if (!mergeHeads.length) return runs;
+    const at = (t: number) => ({ x: a.x + (b.x - a.x) * t + ox, z: a.z + (b.z - a.z) * t + oz });
+    const out: Array<[number, number]> = [];
+    for (const [t0, t1] of runs) {
+      const steps = Math.max(1, Math.ceil(((t1 - t0) * length) / 6));
+      for (let k = 0; k < steps; k += 1) {
+        const s0 = t0 + ((t1 - t0) * k) / steps, s1 = t0 + ((t1 - t0) * (k + 1)) / steps;
+        if (!merging(at(s0), at(s1))) out.push([s0, s1]);
+      }
+    }
+    return out;
+  };
   (layout.highways ?? []).forEach((run, highway) => {
     const push = (p: BoxPart, segment: number) => pieces.push(Object.freeze({ ...p, highway, segment }));
     const { points, heights } = expresswayRun(layout, run);
@@ -325,21 +424,40 @@ export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"
       const sideX = Math.sin(yaw);
       const sideZ = Math.cos(yaw);
       for (const offset of [-3.6, 0, 3.6]) push(part(mx + sideX * offset, top, mz + sideZ * offset, slant, 0.05, 0.3, "#c6c6bb", "expressway-lane-line", yaw, pitch, "YZX"), index);
-      for (const offset of [-5.1, 5.1]) {
-        const start = { x: a.x + sideX * offset, z: a.z + sideZ * offset }, end = { x: b.x + sideX * offset, z: b.z + sideZ * offset };
-        if (!mergeHeads.length || !merging(start, end)) { push(part(mx + sideX * offset, top, mz + sideZ * offset, slant, 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index); continue; }
-        const steps = Math.ceil(length / 6);
-        for (let k = 0; k < steps; k += 1) {
-          const from = { x: start.x + (end.x - start.x) * k / steps, z: start.z + (end.z - start.z) * k / steps };
-          const to = { x: start.x + (end.x - start.x) * (k + 1) / steps, z: start.z + (end.z - start.z) * (k + 1) / steps };
-          if (merging(from, to)) continue;
-          const t = (k + 0.5) / steps;
-          push(part((from.x + to.x) / 2, ya + (yb - ya) * t + EXPRESSWAY_DECK_THICKNESS, (from.z + to.z) / 2, slant / steps, 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index);
-        }
+      for (const offset of [-5.1, 5.1]) for (const [t0, t1] of mergeRuns(rampRailRuns(layout, a, b, ya, yb, sideX * offset, sideZ * offset, length), a, b, sideX * offset, sideZ * offset, length)) {
+        const tm = (t0 + t1) / 2;
+        push(part(a.x + (b.x - a.x) * tm + sideX * offset, ya + (yb - ya) * tm + EXPRESSWAY_DECK_THICKNESS, a.z + (b.z - a.z) * tm + sideZ * offset,
+          slant * (t1 - t0), 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index);
       }
     }
   });
   return pieces;
+}
+/** A ramp rail lower than this above the terrain is a solid on whatever ground road it lies on. */
+export const RAMP_RAIL_HEADROOM = 2.6;
+/** 匝道落地端护栏退让（2026-10-19）：匝道在地面路中间落地，0/65537 的最后一段（8.24→10.2）与 12 宽的南北向
+ * 宿主路垂直相交，侧护栏（y 1.24–1.80）横躺在宿主路车道里，沿路行驶的车撞上（0/2026 同形）。占路诊断跳过
+ * expressway-rail，所以没报。护栏只在「XZ 落在地面车道内且离地低于 RAMP_RAIL_HEADROOM」的样本处断开；
+ * 高架跨过地面路处离地高，照常保留。没有被剪的护栏返回 [[0, 1]]，与旧几何逐字节相同。 */
+function rampRailRuns(layout: Partial<Pick<CityLayout, "roadEdges">> & Pick<CityLayout, "terrain">, a: Vec2, b: Vec2, ya: number, yb: number,
+  ox: number, oz: number, length: number): Array<[number, number]> {
+  if (!Array.isArray(layout.roadEdges)) return [[0, 1]];
+  const n = Math.max(1, Math.ceil(length / 0.5));
+  const blocked: boolean[] = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, x = a.x + (b.x - a.x) * t + ox, z = a.z + (b.z - a.z) * t + oz;
+    blocked.push(ya + (yb - ya) * t + EXPRESSWAY_DECK_THICKNESS < layout.terrain.height(x, z) + RAMP_RAIL_HEADROOM &&
+      groundRoadClearance(layout.roadEdges, x, z) < RAILING_ROAD_CLEARANCE);
+  }
+  if (!blocked.some(Boolean)) return [[0, 1]];
+  const runs: Array<[number, number]> = [];
+  for (let i = 0; i <= n; i++) {
+    if (blocked[i]) continue;
+    let j = i; while (j + 1 <= n && !blocked[j + 1]) j++;
+    if ((j - i) / n * length >= 0.3) runs.push([i / n, j / n]);
+    i = j;
+  }
+  return runs;
 }
 /** Rail inner face from the expressway centreline (rails 0.3 wide at ±5.1). */
 export const EXPRESSWAY_DRIVABLE_HALF = 5.1 - 0.15;
@@ -360,15 +478,33 @@ export function trussBars(layout: Pick<CityLayout, "landmarks" | "bridges" | "te
     const deckAt = (t: number) => profile.at(t / len);
     // Keep the low truss members inside the span: bank junction fans can cross
     // behind a side girder even though the bridge centreline itself is clear.
-    const setback = Math.min(8, len / 4), trussLength = len - 2 * setback;
+    // The truss planes stand OUTSIDE the deck slab: a wide bridge's drivable deck (width/2 − 0.3) reached past
+    // the fixed ±6.6, so the bottom chord lay across the carriageway 0.2 above it (road obstruction guard).
+    const deckEdge = renderRoadEdges(layout.roadEdges ?? []).find((e) => e.bridge && e.points.length === 2 &&
+      ((Math.hypot(e.points[0].x - bridge.from.x, e.points[0].z - bridge.from.z) < 0.01 && Math.hypot(e.points[1].x - bridge.to.x, e.points[1].z - bridge.to.z) < 0.01) ||
+       (Math.hypot(e.points[1].x - bridge.from.x, e.points[1].z - bridge.from.z) < 0.01 && Math.hypot(e.points[0].x - bridge.to.x, e.points[0].z - bridge.to.z) < 0.01)));
+    const lateral = Math.max(6.6, (deckEdge?.width ?? 0) / 2 + 0.6);
+    // Per-end setback: at least min(8, len/4), then walked inward until both truss lines are clear of every
+    // ground carriageway — a bank approach road leaving the bridgehead diagonally still ran under the low
+    // members 8 into the span (0/2026). Capped at len/3 per end (the truss always keeps its middle third).
+    const base = Math.min(8, len / 4);
+    const lineClear = (t: number) => [-1, 1].every((side) => groundRoadClearance(layout.roadEdges,
+      bridge.from.x + ux * t + nx * side * lateral, bridge.from.z + uz * t + nz * side * lateral) >= TRUSS_ROAD_CLEARANCE);
+    const endSetback = (fromEnd: boolean) => {
+      let sb = base;
+      while (sb < len / 3 && !lineClear(fromEnd ? sb : len - sb)) sb += 0.5;
+      return Math.min(sb, len / 3);
+    };
+    const sFrom = endSetback(true), sTo = endSetback(false);
+    const setback = sFrom, trussLength = len - sFrom - sTo, centre = sFrom + trussLength / 2;
     const H = 7; const panels = Math.max(4, Math.round(trussLength / 9)); const step = trussLength / panels;
     for (const side of [-1, 1]) {
-      const ox = nx * side * 6.6; const oz = nz * side * 6.6;
+      const ox = nx * side * lateral; const oz = nz * side * lateral;
       const at = (t: number) => ({ x: bridge.from.x + ux * t + ox, z: bridge.from.z + uz * t + oz });
-      const mid = at(len / 2);
+      const mid = at(centre);
       const chordLength = trussLength / Math.cos(profile.pitch);
-      bars.push([mid.x, deckAt(len / 2) + H, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);          // 上弦
-      bars.push([mid.x, deckAt(len / 2) + 0.2, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);        // 下弦
+      bars.push([mid.x, deckAt(centre) + H, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);          // 上弦
+      bars.push([mid.x, deckAt(centre) + 0.2, mid.z, chordLength, 0.6, yaw, profile.pitch, 0]);        // 下弦
       for (let i = 0; i <= panels; i += 1) {
         const station = setback + i * step, p = at(station);
         bars.push([p.x, deckAt(station), p.z, 0.45, H, yaw, 0, 1]);                 // 竖杆
@@ -381,11 +517,13 @@ export function trussBars(layout: Pick<CityLayout, "landmarks" | "bridges" | "te
     // 顶部横撑（每两格一根），让桁架从远处读成「穿式」而不是两片护栏。
     for (let i = 0; i <= panels; i += 2) {
       const t = setback + i * step; const x = bridge.from.x + ux * t; const z = bridge.from.z + uz * t;
-      bars.push([x, deckAt(t) + H, z, 13.2, 0.5, yaw + Math.PI / 2, 0, 0]);
+      bars.push([x, deckAt(t) + H, z, 2 * lateral, 0.5, yaw + Math.PI / 2, 0, 0]);
     }
   }
   return bars;
 }
+/** Clearance the truss lines keep from any ground carriageway (bar half-width 0.3 + body margin). */
+export const TRUSS_ROAD_CLEARANCE = 1.0;
 /** A truss bar as the BOX instance the renderer composes (YXZ, horizontal bars centred on y). */
 export function trussBarPart([x, y, z, a, b, rotY, tilt, vertical]: [number, number, number, number, number, number, number, number]): BoxPart {
   return vertical ? part(x, y, z, a, b, a, "#a8322a", "truss", rotY, tilt, "YXZ") : part(x, y - b / 2, z, a, b, b, "#a8322a", "truss", rotY, tilt, "YXZ");

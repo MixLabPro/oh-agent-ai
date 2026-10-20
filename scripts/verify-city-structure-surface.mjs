@@ -218,7 +218,7 @@ if (process.argv.includes("--cities")) {
     // by design; everything else — curbs included — must still equal the pre-descriptor renderer.
     const before = baseline[`${seed}/${tier}`]; const corrected = correctedPlans[`${seed}/${tier}`];
     for (const name of Object.keys(before)) {
-      const expected = baselineFile.terrainResolution?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.bridgeheadTruss?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.portalPiers?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.rollTransition?.plans?.[`${seed}/${tier}`]?.[name] ?? (name === "buildInfrastructure" || name === "buildTrussBridges" ? corrected[name] : corrected[name] ?? before[name]);
+      const expected = baselineFile.planRefresh?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.terrainResolution?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.bridgeheadTruss?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.portalPiers?.plans?.[`${seed}/${tier}`]?.[name] ?? baselineFile.rollTransition?.plans?.[`${seed}/${tier}`]?.[name] ?? (name === "buildInfrastructure" || name === "buildTrussBridges" ? corrected[name] : corrected[name] ?? before[name]);
       assert.equal(digests[name], expected, `seed ${seed} tier ${tier}: ${name} render output changed`);
     }
     const { c, regions } = build(plan);
@@ -230,9 +230,11 @@ if (process.argv.includes("--cities")) {
     // the span itself (must pass), and approach → approach along the axis (counted; a straight pilot
     // cannot follow an angled approach, and a local landing conflict is reported, not hidden).
     const env = new kit.SurfaceDrivingEnvironment(regions); const kernel = new kit.DrivingKernel(env, key);
-    const run = (from, ux, uz, s0, s1) => {
+    // 起点按它所在的层分类：跨度用例从桥面上起步，必须问桥面层。structure: "deck" 的桥面是独立层，
+    // 离开落地点几米后 ground 层上根本没有面——旧代码一律问 ground，7/2 的桥面整段可驶，却报 start:no-surface。
+    const run = (from, ux, uz, s0, s1, layerId = "ground") => {
       const heading = Math.atan2(uz, ux); const sx = from.x + ux * s0, sz = from.z + uz * s0;
-      const start = regions.classify(sx, sz, "ground"); if (start.status !== "drivable") return `start:${start.cause}`;
+      const start = regions.classify(sx, sz, layerId); if (start.status !== "drivable") return `start:${start.cause}`;
       const placed = env.place(sx, sz, heading, start.regionId); if (!placed) return "start:footprint";
       let s = { ...kit.initialDrivingState(sx, sz, heading, start.regionId), ...placed };
       const validator = new kit.SurfaceWorldValidator(regions, kit.polylineProgress([{ x: sx, z: sz }, { x: from.x + ux * s1, z: from.z + uz * s1 }]));
@@ -253,7 +255,7 @@ if (process.argv.includes("--cities")) {
       totals.crossable++;
       const [from, to] = ends.map((x) => x.landing); const ux = -from.outX, uz = -from.outZ; const len = Math.hypot(to.x - from.x, to.z - from.z);
       const reach = 1.4 + 0.25 + 0.2; // half car length + deck overhang + margin
-      assert.equal(run(from, ux, uz, reach + 1, len - reach - 1), "ok", `seed ${seed} tier ${tier} ${id}: the open span itself is drivable`);
+      assert.equal(run(from, ux, uz, reach + 1, len - reach - 1, from.layerId), "ok", `seed ${seed} tier ${tier} ${id}: the open span itself is drivable`);
       const full = run(from, ux, uz, -1.5, len + reach);
       if (full === "ok") totals.crossings++; else failures.push(`${seed}/${tier} ${id.slice(0, 28)} ${full}`);
     }
@@ -286,7 +288,11 @@ if (process.argv.includes("--cities")) {
   if (failures.length) console.log(`Structure surface: landing-zone failures (reported, not opened): ${failures.join("; ")}`);
   // Floors measured 2026-10-16 (landed + densified ramps, v4 portals): all 14 ramp ends connect, 13
   // climb to the deck (one pilot start sits on a footprint-blocked approach), all 14 descend to the road.
-  assert.ok(totals.rampsConnected >= 14 && totals.rampsUp >= 13 && totals.rampsDown >= 14, `expressway ramps regressed: ${JSON.stringify(totals)} ${rampFailures.join("; ")}`);
+  // 2026-10-19 重测：ad697cfa（junction rings / highway interchange planning）后这 15 个规划里高架只剩
+  // 42/2、42/3 两条（8 → 2 条，坡道端 4 个）——是规划层的取舍，不是坡道几何退化：剩下的 4 个端全部
+  // 接上、爬上、下来。下限改为「现存端全部通过」且不少于 4；规划层把高架加回来时这个下限自动收紧不了，
+  // 届时按新实测值改回。
+  assert.ok(totals.ramps >= 4 && totals.rampsConnected === totals.ramps && totals.rampsUp >= totals.ramps - 1 && totals.rampsDown === totals.ramps, `expressway ramps regressed: ${JSON.stringify(totals)} ${rampFailures.join("; ")}`);
   if (rampFailures.length) console.log(`Structure surface: ramp runs reported: ${rampFailures.join("; ")}`);
   console.log(`Structure surface: ${totals.bridges} bridges, ${totals.landings} landings — ${totals.connected} join the deck region ${JSON.stringify(reasons)}; every connected span driven end to end; ${totals.crossings}/${totals.crossable} crossed approach → approach tick-by-tick. Expressway ramps through cross-layer portals: ${totals.rampsConnected}/${totals.ramps} connected, ${totals.rampsUp} climbed road → deck, ${totals.rampsDown} descended deck → road. Remaining closed landings are reported with their reason.`);
 }

@@ -13,8 +13,7 @@ export const SCENE_SOLID_INCLUDE: readonly string[] = Object.freeze([
   "city-public-sites-boxes", "city-public-sites-cylinders", "city-garden-boxes", "city-garden-roofs", "city-garden-trees", "city-garden-rocks",
   "city-landmark-", "city-lifeguard-towers",
 ]);
-// district-landmark-ground：城区地标场地里的贴地铺装（草坪、广场、步道、沥青、车位线）——它们就是地面，不是障碍物。
-export const SCENE_SOLID_EXCLUDE: readonly string[] = Object.freeze(["city-landmark-suspension-bridge", "city-landmark-truss-bridge", "district-landmark-ground"]);
+export const SCENE_SOLID_EXCLUDE: readonly string[] = Object.freeze(["city-landmark-suspension-bridge", "city-landmark-truss-bridge"]);
 
 const PARKED_BELOW = -5;
 

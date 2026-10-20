@@ -3,6 +3,17 @@ import * as THREE from "three";
 import type { LandmarkCtx } from "../../models/landmarkContext";
 import { hashSeed } from "../../../cityModel";
 import { isletEstate, isletGolf, isletStudio } from "../../cityIsletEstate";
+import { groundRoadClearance } from "../../surface/roadClearance";
+
+/** Scenery must stay off the REAL road network (the islet's causeway road reaches onto the island):
+ * a palm trunk or the decorative spur slab standing on it blocked every car (road obstruction guard). */
+const PALM_ROAD_CLEARANCE = 1.0; const SPUR_ROAD_GAP = 0.3;
+type Place = (lx: number, lz: number) => number;
+/** Local → world road clearance for this landmark group (position x,z; rotation.y = yaw). */
+function clearanceOf(ctx: LandmarkCtx): Place {
+  const { landmark, host } = ctx; const c = Math.cos(landmark.yaw ?? 0), s = Math.sin(landmark.yaw ?? 0);
+  return (lx, lz) => groundRoadClearance(host.layout.roadEdges, landmark.x + lx * c + lz * s, landmark.z - lx * s + lz * c);
+}
 
 /**
  * 地标「islet-grounds」：豪宅岛的场地层——椭圆内部环路、接堤道的支路、满岛棕榈。原点 = 小岛中心，
@@ -38,12 +49,21 @@ export function drawIsletGrounds(ctx: LandmarkCtx): void {
   };
   ring(0, estate.loop.width, 0.3, asphalt);
   for (const side of [-1, 1]) ring(side * (estate.loop.width / 2 + 0.3), 0.6, 0.36, curb);
-  const spur = new THREE.Mesh(keep(new THREE.BoxGeometry(estate.spur.width, 0.08, estate.spur.z1 - estate.spur.z0)), asphalt);
-  spur.position.set(estate.spur.x, 0.28, (estate.spur.z0 + estate.spur.z1) / 2);
-  spur.receiveShadow = true;
-  group.add(spur);
+  // The spur runs from the ring toward the causeway; it stops short of the real road it meets.
+  const clear = clearanceOf(ctx); const { x: sx, z0, z1, width: sw } = estate.spur; const dir = Math.sign(z1 - z0) || 1;
+  let end = z1;
+  for (let z = z0; dir * (z1 - z) > 0; z += dir * 0.25) {
+    if ([-sw / 2, 0, sw / 2].some((dx) => clear(sx + dx, z + dir * 0.25) < SPUR_ROAD_GAP)) { end = z; break; }
+  }
+  // Unclipped spurs are drawn exactly as before; a spur clipped down to a stub is dropped.
+  if (end === z1 || Math.abs(end - z0) > 0.5) {
+    const spur = new THREE.Mesh(keep(new THREE.BoxGeometry(sw, 0.08, Math.abs(end - z0))), asphalt);
+    spur.position.set(sx, 0.28, (z0 + end) / 2);
+    spur.receiveShadow = true;
+    group.add(spur);
+  }
 
-  addPalms(group, keep, estate.palms);
+  addPalms(group, keep, estate.palms.filter((p) => clear(p.x, p.z) >= PALM_ROAD_CLEARANCE));
 }
 
 type Keep = <T extends THREE.BufferGeometry | THREE.Material>(item: T) => T;
@@ -75,8 +95,9 @@ function flat(keep: Keep, color: string, order: number): THREE.MeshLambertMateri
 }
 
 /** Leaf Links：球道（浅绿长条，两端圆头）、果岭 + 旗杆、沙坑、会所（白墙红陶四坡顶 + 遮阳廊）、阔叶树与棕榈。 */
-function drawGolf({ group, landmark, host }: LandmarkCtx): void {
-  const keep = keeper(host);
+function drawGolf(ctx: LandmarkCtx): void {
+  const { group, landmark, host } = ctx;
+  const keep = keeper(host); const clear = clearanceOf(ctx);
   const golf = isletGolf(landmark.reach ?? 0, Math.floor(hashSeed(landmark.id) * 0x7fffffff), landmark.roadZ ?? 0);
   const fairway = flat(keep, "#86d36f", 0); const green = flat(keep, "#a7e78a", 1); const sand = flat(keep, "#f1e2b8", 2);
   for (const f of golf.fairways) {
@@ -113,7 +134,8 @@ function drawGolf({ group, landmark, host }: LandmarkCtx): void {
     club.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   }
   // 阔叶树：树干 + 压扁的二十面体树冠（实例化）；少量棕榈
-  const broad = golf.trees.filter((t) => !t.palm);
+  const onLand = golf.trees.filter((t) => clear(t.x, t.z) >= PALM_ROAD_CLEARANCE);
+  const broad = onLand.filter((t) => !t.palm);
   if (broad.length) {
     const trunk = new THREE.InstancedMesh(keep(new THREE.CylinderGeometry(0.25, 0.35, 1, 6).translate(0, 0.5, 0)), keep(new THREE.MeshLambertMaterial({ color: "#8a6a4c" })), broad.length);
     const crown = new THREE.InstancedMesh(keep(new THREE.IcosahedronGeometry(1, 0)), keep(new THREE.MeshLambertMaterial({ color: "#3f9a55" })), broad.length);
@@ -124,12 +146,13 @@ function drawGolf({ group, landmark, host }: LandmarkCtx): void {
     });
     trunk.castShadow = true; crown.castShadow = true; group.add(trunk, crown);
   }
-  addPalms(group, keep, golf.trees.filter((t) => t.palm).map((t) => ({ x: t.x, z: t.z, height: m(REAL.palm.min) + t.size, turn: t.x * 0.37 + t.z })));
+  addPalms(group, keep, onLand.filter((t) => t.palm).map((t) => ({ x: t.x, z: t.z, height: m(REAL.palm.min) + t.size, turn: t.x * 0.37 + t.z })));
 }
 
 /** Prawn Island：拱顶摄影棚（墙 + 半圆筒屋面 + 卷帘门）、停车场（条纹 + 几辆车）、四脚水塔、沿岸棕榈。 */
-function drawStudio({ group, landmark, host }: LandmarkCtx): void {
-  const keep = keeper(host);
+function drawStudio(ctx: LandmarkCtx): void {
+  const { group, landmark, host } = ctx;
+  const keep = keeper(host); const clear = clearanceOf(ctx);
   const studio = isletStudio(landmark.reach ?? 0, Math.floor(hashSeed(landmark.id) * 0x7fffffff));
   const wall = keep(new THREE.MeshLambertMaterial({ color: "#e2dccd" })); const roof = keep(new THREE.MeshLambertMaterial({ color: "#b7b0a0" }));
   const door = keep(new THREE.MeshLambertMaterial({ color: "#6f7a80" })); const steel = keep(new THREE.MeshLambertMaterial({ color: "#9aa3a8" }));
@@ -161,5 +184,5 @@ function drawStudio({ group, landmark, host }: LandmarkCtx): void {
     solid(new THREE.CylinderGeometry(2.4, 2.4, 3.2, 14), steel, t.x, t.h + 1.6, t.z);
     solid(new THREE.ConeGeometry(2.6, 1.4, 14), roof, t.x, t.h + 3.9, t.z);
   }
-  addPalms(group, keep, studio.palms);
+  addPalms(group, keep, studio.palms.filter((p) => clear(p.x, p.z) >= PALM_ROAD_CLEARANCE));
 }

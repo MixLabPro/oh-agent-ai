@@ -10,7 +10,7 @@ import { DRIVING_FOOTPRINT } from "./vehicleFootprint";
 import { resolveDrivingCollision, type SupportedPose } from "./DrivingCollisionSolver";
 import { DEFAULT_SWEEP_LIMITS, interpolateBody, type SweepLimits, type BodyPose } from "./DrivingCollision";
 import { isValidMountableHeight, MOUNTABLE_POLICY_VERSION, type MountablePolicy } from "./staticSolidContracts";
-export const CONTINUOUS_DRIVING_QUERY_VERSION=4;
+export const CONTINUOUS_DRIVING_QUERY_VERSION=5; // 5: seam support steps are not charged as travel; relative budget tolerance
 export const CONTINUOUS_MOUNTABLE_POLICY_VERSION=MOUNTABLE_POLICY_VERSION;
 export type ContinuousEnvironmentPolicy=Readonly<{boundarySlide?:boolean;mountablePolicy?:MountablePolicy}>;
 export type ContinuousWorldBinding=Readonly<{
@@ -19,6 +19,24 @@ export type ContinuousWorldBinding=Readonly<{
 }>;
 export type ContinuousMotionParams=Partial<SweepLimits>&Readonly<{maxSlides?:number;maxSupportSegments?:number;supportStep?:number}>;
 export const CONTINUOUS_MOTION_DEFAULTS=Object.freeze({maxSlides:4,maxSupportSegments:64,supportStep:0.1});
+/** 行程预算的计费长度（2026-10-19 起，C 内核由 B/D 接手）。曾直接用 3D 弧长与 1e-10 绝对容差比较，两处在
+ *  真实城市里卡死成 travel-prefix-precision（0/42 匝道落地端，D1 审计 simulation-invalid）：
+ *  1. 支撑跳变：同区域内的接缝允许 ≤ aliasTolerance（0.1）的高差，过缝那一小段里竖直落差 0.05 而水平只有 0.03，
+ *     3D 长度被跳变撑大且不随裁切比例缩小，12 次裁切都压不进预算。超出最大坡度所能解释的那部分竖直落差
+ *     （封顶 SUPPORT_STEP_EXEMPT）不算油门行程——与可越路缘的 riseAllowance 同一道理；真坡道照旧按 3D 计费。
+ *  2. 浮点：坐标 ~600、高度来自 float32 时，裁切结果比预算多 2.3e-9 就判失败；容差改为相对量。 */
+const SUPPORT_STEP_EXEMPT = 0.1 + 1e-6;
+const budgetSlack = (remaining: number) => 1e-9 + remaining * 1e-7;
+function chargedLength(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }, riseAllowance: number, maxSlope: number): number {
+  const h = Math.hypot(b.x - a.x, b.z - a.z), dy = Math.abs(b.y - a.y);
+  const step = Math.min(Math.max(0, dy - h * Math.tan(maxSlope)), SUPPORT_STEP_EXEMPT);
+  return Math.hypot(h, dy) - Math.max(step, Math.min(dy, riseAllowance));
+}
+function pathCharge(path: readonly { x: number; y: number; z: number }[], riseAllowance: number, maxSlope: number): number {
+  let total = 0;
+  for (let k = 1; k < path.length; k++) total += chargedLength(path[k - 1], path[k], riseAllowance, maxSlope);
+  return total;
+}
 export class ContinuousDrivingEnvironment implements DrivingEnvironment {
   private readonly solids:readonly Solid[];
   private readonly mountable:MountableQuery|null;
@@ -131,20 +149,21 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
           // 支撑跳变发生在车轮过线而车身中心仍在岛外——用车头/车尾探针判定可越覆盖。
           return this.mountable!.covers(endpoint.x+dx/len*reach,endpoint.z+dz/len*reach)||this.mountable!.covers(pose.x-dx/len*reach,pose.z-dz/len*reach)||this.mountable!.covers(endpoint.x,endpoint.z)||this.mountable!.covers(pose.x,pose.z);
         })()?this.mountable.riseBudget:0;
-        const length=Math.hypot(endpoint.x-pose.x,endpoint.y-pose.y,endpoint.z-pose.z)-Math.min(Math.abs(endpoint.y-pose.y),riseAllowance),remaining=Math.max(0,roadBudget-distance);
-        if(length>remaining+1e-10) {
-          let fraction=remaining/length,trimmed:ReturnType<typeof resolveDrivingCollision>|null=null;
+        const length=chargedLength(pose,endpoint,riseAllowance,this.params.maxSlope),remaining=Math.max(0,roadBudget-distance);
+        if(length>remaining+budgetSlack(remaining)) {
+          let fraction=remaining/length,trimmed:ReturnType<typeof resolveDrivingCollision>|null=null,charged=Infinity;
           for(let attempt=0;attempt<12;attempt++) {
             const target={...interpolateBody(pose,endpoint,fraction),surfaceId:pose.surfaceId};
             trimmed=resolveDrivingCollision(this.solids,{isCurrent:()=>this.current(),constrain:this.constrain,body:this.body},pose,target,this.binding.dimensions,{...this.motionParams,mountablePolicy:this.policy.mountablePolicy,maxSlides:0,maxTests:Math.max(1,testBudget-tests)});
             tests+=trimmed.tests;
             if(tests>testBudget)return stopped("continuous-collision:budget",true);
             if(trimmed.status!=="moved")return stopped(`travel-prefix:${trimmed.reason}`,true);
-            if(trimmed.distance<=remaining+1e-10)break;
-            fraction*=remaining/trimmed.distance;
+            charged=pathCharge(trimmed.path,riseAllowance,this.params.maxSlope);
+            if(charged<=remaining+budgetSlack(remaining))break;
+            fraction*=remaining/charged;
           }
-          if(!trimmed||trimmed.distance>remaining+1e-10)return stopped("travel-prefix-precision",true);
-          pose=trimmed.pose;distance+=trimmed.distance;trajectory.push(...trimmed.path.slice(1));exhausted=true;break;
+          if(!trimmed||charged>remaining+budgetSlack(remaining))return stopped("travel-prefix-precision",true);
+          pose=trimmed.pose;distance+=charged;trajectory.push(...trimmed.path.slice(1));exhausted=true;break;
         }
         distance+=length;pose=endpoint;trajectory.push(pose);
       }
@@ -161,6 +180,9 @@ export class ContinuousDrivingEnvironment implements DrivingEnvironment {
       speedFraction:requested>0?Math.min(retained,distance/requested):retained,contact,contacts:Object.freeze(contacts),queryStatus:"resolved",trajectory:Object.freeze(trajectory.map(p=>Object.freeze({...p})))};
   }
   /** B can call this on every submitted piece instead of trusting a trace label. */
+  /** Road-budget distance of a trajectory (the odometer's unit): 3D arc length minus seam support steps.
+   *  The audit validator measures with this, not its own 3D sum, so the two cannot disagree on a seam. */
+  travelCharge(path:readonly {x:number;y:number;z:number}[]):number{return pathCharge(path,0,this.params.maxSlope);}
   validateTrajectory(previous:Readonly<DrivingTrajectoryPose>,next:Readonly<DrivingTrajectoryPose>,path:readonly Readonly<DrivingTrajectoryPose>[]):boolean {
     if(!this.current()||path.length<1||path.length>2048)return false;
     const same=(a:Readonly<DrivingTrajectoryPose>,b:Readonly<DrivingTrajectoryPose>)=>["x","y","z","heading","pitch","roll"].every(k=>Math.abs(a[k as "x"]-b[k as "x"])<=1e-8)&&a.surfaceId===b.surfaceId;

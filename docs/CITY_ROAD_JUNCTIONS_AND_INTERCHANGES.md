@@ -1,6 +1,6 @@
 # City 路口、环岛与立交：代码分析
 
-更新时间：2026-10-20。代码基准：分支 `claude/city-visual-style-analysis-a9ddd6` 合并 `dev`（`d4479f2a`）之后，`CITY_GENERATOR_VERSION = 4`。
+更新时间：2026-10-20。代码基准：分支 `claude/city-visual-style-analysis-a9ddd6` 合并 `origin/dev`（`be220c39`）之后。
 
 本文按**当前代码**说明四项路网能力的实现：高架出口接驳（闸道）、湾岸主干道过桥头、路口环岛、高架立交匝道。规格层面的路口类型表见 [CITY_ROAD_NETWORK_SPEC.md](CITY_ROAD_NETWORK_SPEC.md) §5；开发过程与验证记录见 [CITY_VISUAL_STYLE_TAKEOVER.md](CITY_VISUAL_STYLE_TAKEOVER.md)。
 
@@ -126,7 +126,7 @@
 
 ### 3.5 渲染——`systems/roadSystem.ts`
 
-- **高架护栏开口**（`surface/structureCompiler.ts::expresswayPieces`）：主桥护栏在匝道前 40% 分流段处按 6 单位分片，与匝道相交的片不画，只切合流口，不整段删除。高架几何在 `dev` 中被抽到 `structureCompiler`，与驾驶路面/碰撞共用；抽取时这条逻辑丢失过，合并后已补回，并由 `verify-city-highway-ramps` 的护栏断言守住。
+- **高架护栏开口**（`surface/structureCompiler.ts::expresswayPieces`）：两类开口叠加——`rampRailRuns` 在高架两端贴近地面路的落地段开口（`dev`）；`mergeRuns` 在匝道前 40% 分流段与护栏相交的 6 单位片处开口（合流口）。高架几何在 `dev` 中被抽到 `structureCompiler`，与驾驶路面/碰撞共用；合流口逻辑在抽取和后来的合并中各丢过一次，现由 `verify-city-highway-ramps` 的护栏断言守住。
 - **匝道高度**（`buildHighwayRamps`，[roadSystem.ts:246](../apps/agent-city/ui/src/engine/systems/roadSystem.ts:246)）：匝道整个横截面离开主桥幅（与高架中线距离 ≥ (10.5 + 7)/2 + 0.5）之后才开始下降，按剩余路程 smoothstep 从 `EXPRESSWAY_DECK_Y` 降到地面以上 0.3。不能按固定百分比提前下降，否则会钻进主桥面。墩柱每 18 一根，离地 <1.5 不立。
 - **短弧不跳过**（`expresswayPieces`）：高架绘制原先跳过 <6 的折线段；出口曲线按 8 单位采样，会产生合法短段，曾因此出现断桥（seed 1927/t5 有 19 条）。现只跳过近零长度段。
 
@@ -194,7 +194,7 @@ dev 预览（`?fixtureSessions=2000`，按用户生成的种子）实测：21 �
 4. **桥头大路口不建环岛**。岸路 × 引道形成的三主干交汇（规划期大部分主干候选）因 `bridgeClear = 60`、通往桥头的腿太短而全部放弃，这些路口仍是平交。
 5. **出口曲线的退化**。曲线擦到水边/山坡时会退回直线弦，出口处仍可能有约 60° 的折角（锥角上限）。
 6. **旧 `mini-roundabout` 路径未改**。它仍只作为 `acuteJunctions` 的修复档存在；新的 `runJunctionRing` 与它代码重复，后续可让前者成为后者的参数化特例（需验证基线不变）。
-7. **城区地标场地压路（已修复，2026-10-20）**：`verify-city-collision` 曾在 `dev` 上失败（500 会话 / seed 2026 有 12 个实体在路上，上限 7），其中 7 个是城区地标场地部件。原因有二：碰撞白名单把 `city-landmark-*` 下的每个网格都当实体，包括 0.04–0.05 厚的草坪与铺装；场地按地块包围盒铺成矩形，而 `block.polygon` 的顶点在道路中线上，非矩形街区的角伸到路面。修法：贴地铺装移入 `district-landmark-ground` 子组并加入 `SCENE_SOLID_EXCLUDE`；`landmarkSite` 接收街区多边形与周边道路，所有部件按「在多边形内 + 离路缘 ≥ 人行道 1.8」校验（`siteClear` / `rectSiteClear`），草坪按道路半宽 + 人行道内缩后的多边形铺；窄街区里裙楼退回布局阶段验证过的地块中心附近。修后该场景城区地标在路上的实体为 0。
+7. **城区地标场地压路（已修复）**：场地曾按街区内地块的包围盒铺矩形，非矩形街区的角伸到路面（500 会话 / seed 2026 一个场景 7 个部件在路上）。`dev` 的 `6c202531` 用真实路面几何（`surface/roadClearance.ts::groundRoadClearance`，含路口扇形与渐变段）把场地矩形从压路的一侧往里收，离路 ≥ `LANDMARK_ROAD_CLEARANCE`（1.0）；裙楼放不下时退回布局验证过的 17 见方裙楼、不留前院；雨棚、台阶、树只放在场地内。由 `verify-city-road-obstructions`（15 场景清零）与 `verify-city-collision`（城区地标零压路断言）守住。本分支同期的另一种修法（按街区多边形裁剪）在合并时让位于该实现。
 8. **场景基线**：`verify-city-scene-baseline` 在 `dev` 上即不匹配（市政建筑、基础设施装饰等多组），与本文能力无关；护栏开口只额外改变有匝道场景的 `city-district-expressways`。
 9. **既有失败（非本文能力引入）**：`2001361477/t3` 主干净距 1，原提交 `9e4a0ad4` 即存在（见接管记录）。本文写作时没有重跑完整套件，当前是否全绿以最近一次 `verify-city-suite.mjs` 结果为准。
 
