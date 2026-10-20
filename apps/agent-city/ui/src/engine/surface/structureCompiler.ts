@@ -273,9 +273,19 @@ function expresswaySupport(layout: ExpresswayLayout, points: Vec2[], heights: nu
   return fallback;
 }
 /** District expressways: piers, then per segment deck + lane lines + rails (buildDistrictExpressways order).
- * Segments shorter than 6 are not drawn — and therefore not driveable. */
-export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"> & Partial<Pick<CityLayout, "extent" | "roadEdges">>): ExpresswayPiece[] {
+ * Only near-zero segments are skipped: exit curves are sampled every 8 and contain valid short segments.
+ * Rails open where an interchange ramp merges (its first 40%), otherwise the ramp is cut off by the rail. */
+export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"> & Partial<Pick<CityLayout, "extent" | "roadEdges" | "highwayRamps">>): ExpresswayPiece[] {
   const pieces: ExpresswayPiece[] = [];
+  // 合流处留护栏开口（ad697cfa 在旧 buildDistrictExpressways 里加的；dev 把高架几何抽到这里时丢了，合并后匝道又被主桥护栏横截）。
+  // 只切与匝道分流段相交的 6 单位护栏片，不整段删除。
+  const mergeHeads = (layout.highwayRamps ?? []).map((ramp) => ({ width: ramp.width, points: ramp.points.slice(0, Math.ceil(ramp.points.length * 0.4) + 1) }));
+  const nearSegment = (p: Vec2, a: Vec2, b: Vec2) => {
+    const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+    const t = l2 > 1e-12 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2)) : 0;
+    return Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t);
+  };
+  const merging = (from: Vec2, to: Vec2) => mergeHeads.some((ramp) => ramp.points.some((point) => nearSegment(point, from, to) < ramp.width / 2 + 0.5));
   (layout.highways ?? []).forEach((run, highway) => {
     const push = (p: BoxPart, segment: number) => pieces.push(Object.freeze({ ...p, highway, segment }));
     const { points, heights } = expresswayRun(layout, run);
@@ -315,7 +325,18 @@ export function expresswayPieces(layout: Pick<CityLayout, "highways" | "terrain"
       const sideX = Math.sin(yaw);
       const sideZ = Math.cos(yaw);
       for (const offset of [-3.6, 0, 3.6]) push(part(mx + sideX * offset, top, mz + sideZ * offset, slant, 0.05, 0.3, "#c6c6bb", "expressway-lane-line", yaw, pitch, "YZX"), index);
-      for (const offset of [-5.1, 5.1]) push(part(mx + sideX * offset, top, mz + sideZ * offset, slant, 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index);
+      for (const offset of [-5.1, 5.1]) {
+        const start = { x: a.x + sideX * offset, z: a.z + sideZ * offset }, end = { x: b.x + sideX * offset, z: b.z + sideZ * offset };
+        if (!mergeHeads.length || !merging(start, end)) { push(part(mx + sideX * offset, top, mz + sideZ * offset, slant, 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index); continue; }
+        const steps = Math.ceil(length / 6);
+        for (let k = 0; k < steps; k += 1) {
+          const from = { x: start.x + (end.x - start.x) * k / steps, z: start.z + (end.z - start.z) * k / steps };
+          const to = { x: start.x + (end.x - start.x) * (k + 1) / steps, z: start.z + (end.z - start.z) * (k + 1) / steps };
+          if (merging(from, to)) continue;
+          const t = (k + 0.5) / steps;
+          push(part((from.x + to.x) / 2, ya + (yb - ya) * t + EXPRESSWAY_DECK_THICKNESS, (from.z + to.z) / 2, slant / steps, 0.55, 0.3, "#b9bcb2", "expressway-rail", yaw, pitch, "YZX"), index);
+        }
+      }
     }
   });
   return pieces;

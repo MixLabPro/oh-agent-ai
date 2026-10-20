@@ -1,6 +1,6 @@
 # City 路口、环岛与立交：代码分析
 
-更新时间：2026-10-20。代码基准：分支 `claude/city-visual-style-analysis-a9ddd6`，提交 `09f39fe2`（含功能提交 `ad697cfa` 与 main 合并），`CITY_GENERATOR_VERSION = 4`。
+更新时间：2026-10-20。代码基准：分支 `claude/city-visual-style-analysis-a9ddd6` 合并 `dev`（`d4479f2a`）之后，`CITY_GENERATOR_VERSION = 4`。
 
 本文按**当前代码**说明四项路网能力的实现：高架出口接驳（闸道）、湾岸主干道过桥头、路口环岛、高架立交匝道。规格层面的路口类型表见 [CITY_ROAD_NETWORK_SPEC.md](CITY_ROAD_NETWORK_SPEC.md) §5；开发过程与验证记录见 [CITY_VISUAL_STYLE_TAKEOVER.md](CITY_VISUAL_STYLE_TAKEOVER.md)。
 
@@ -38,7 +38,7 @@
 
 关键设计点：**所有形状都在地块生成之前确定**。地块离高架桥面的实际余量只有 1.1–1.7 单位（实测），任何在渲染期改动高架形状的做法都会压到地块——曾试过渲染期用贝塞尔曲线修出口，压到 51 个地块，已放弃。
 
-数据通路：`createCityPlan` 输出 `junctionRings`、`highwayRamps` → worker 快照（[planningProtocol.ts](../apps/agent-city/ui/src/engine/planningWorker/planningProtocol.ts) 把两者列入必需集合）→ `layoutCity` 展开到 `CityLayout`（[cityLayout.ts:102](../apps/agent-city/ui/src/engine/cityLayout.ts:102)）→ `roadSystem` 渲染。
+数据通路：`createCityPlan` 输出 `junctionRings`、`highwayRamps` → worker 快照（[planningProtocol.ts](../apps/agent-city/ui/src/engine/planningWorker/planningProtocol.ts) 把两者列入必需集合）→ `layoutCity` 展开到 `CityLayout`（[cityLayout.ts:105](../apps/agent-city/ui/src/engine/cityLayout.ts:105)）→ `roadSystem` 渲染。
 
 ---
 
@@ -98,7 +98,7 @@
 
 **引用折线改写**（`rewriteRoutes`）：干道 trunk、岸路/滨海路、滨海大道段、车流回路里经过环心 V 的「前 → V → 后」改写为「前 → 进口切点 → 沿环按角度升序的弧点 → 出口切点 → 后」；以 V 为端点的折线改从切点起。若 V 前后都不是这个路口的腿（理论上不应发生），V 被丢弃，由下游引用校验报出。
 
-**中心岛**：生成地块时环岛作为预留地，半径取到环道内缘；`buildJunctionIslands`（[roadSystem.ts:502](../apps/agent-city/ui/src/engine/systems/roadSystem.ts:502)）画草坪圆盘 + 浅色路缘，主干环岛中间三棵棕榈 + 一圈花坛，支路小环一棵棕榈。岛周围剩不到 3 条环段时不画（编辑器删环道、或展示裁剪隐藏了环道时）。
+**中心岛**：生成地块时环岛作为预留地，半径取到环道内缘；`buildJunctionIslands`（[roadSystem.ts:357](../apps/agent-city/ui/src/engine/systems/roadSystem.ts:357)）画草坪圆盘 + 浅色路缘，主干环岛中间三棵棕榈 + 一圈花坛，支路小环一棵棕榈。岛周围剩不到 3 条环段时不画（编辑器删环道、或展示裁剪隐藏了环道时）。
 
 ### 3.4 高架立交匝道——`planner/highwayRamps.ts`
 
@@ -126,13 +126,13 @@
 
 ### 3.5 渲染——`systems/roadSystem.ts`
 
-- **高架护栏开口**（[roadSystem.ts:330](../apps/agent-city/ui/src/engine/systems/roadSystem.ts:330)）：主桥护栏在匝道前 40% 分流段处按 6 单位分片，与匝道相交的片不画，只切合流口，不整段删除。
-- **匝道高度**（`buildHighwayRamps`，[roadSystem.ts:375](../apps/agent-city/ui/src/engine/systems/roadSystem.ts:375)）：匝道整个横截面离开主桥幅（与高架中线距离 ≥ (10.5 + 7)/2 + 0.5）之后才开始下降，按剩余路程 smoothstep 从 `EXPRESSWAY_DECK_Y` 降到地面以上 0.3。不能按固定百分比提前下降，否则会钻进主桥面。墩柱每 18 一根，离地 <1.5 不立。
-- **短弧不跳过**：`buildDistrictExpressways` 原先跳过 <6 的折线段；出口曲线按 8 单位采样，会产生合法短段，曾因此出现断桥（seed 1927/t5 有 19 条）。现只跳过近零长度段。
+- **高架护栏开口**（`surface/structureCompiler.ts::expresswayPieces`）：主桥护栏在匝道前 40% 分流段处按 6 单位分片，与匝道相交的片不画，只切合流口，不整段删除。高架几何在 `dev` 中被抽到 `structureCompiler`，与驾驶路面/碰撞共用；抽取时这条逻辑丢失过，合并后已补回，并由 `verify-city-highway-ramps` 的护栏断言守住。
+- **匝道高度**（`buildHighwayRamps`，[roadSystem.ts:246](../apps/agent-city/ui/src/engine/systems/roadSystem.ts:246)）：匝道整个横截面离开主桥幅（与高架中线距离 ≥ (10.5 + 7)/2 + 0.5）之后才开始下降，按剩余路程 smoothstep 从 `EXPRESSWAY_DECK_Y` 降到地面以上 0.3。不能按固定百分比提前下降，否则会钻进主桥面。墩柱每 18 一根，离地 <1.5 不立。
+- **短弧不跳过**（`expresswayPieces`）：高架绘制原先跳过 <6 的折线段；出口曲线按 8 单位采样，会产生合法短段，曾因此出现断桥（seed 1927/t5 有 19 条）。现只跳过近零长度段。
 
 ### 3.6 展示裁剪——`cityLayout.ts`
 
-布局按活动裁剪街道：宽 12 与桥永远显示，宽 ≤8 的街道只在服务已建成街区、设施附近时显示。与本文相关的两条例外（[cityLayout.ts:758](../apps/agent-city/ui/src/engine/cityLayout.ts:758) 起）：
+布局按活动裁剪街道：宽 12 与桥永远显示，宽 ≤8 的街道只在服务已建成街区、设施附近时显示。与本文相关的两条例外（[cityLayout.ts:784](../apps/agent-city/ui/src/engine/cityLayout.ts:784) 起）：
 
 - 市政广场周边（半径 + 20）的路口永远保留，避免把广场入口裁成两岔；
 - 匝道落地点、开放高架两端所在的地面路永远保留：它们是固定服务入口，附近没有建筑时宿主路也不能被裁掉。
@@ -194,7 +194,9 @@ dev 预览（`?fixtureSessions=2000`，按用户生成的种子）实测：21 �
 4. **桥头大路口不建环岛**。岸路 × 引道形成的三主干交汇（规划期大部分主干候选）因 `bridgeClear = 60`、通往桥头的腿太短而全部放弃，这些路口仍是平交。
 5. **出口曲线的退化**。曲线擦到水边/山坡时会退回直线弦，出口处仍可能有约 60° 的折角（锥角上限）。
 6. **旧 `mini-roundabout` 路径未改**。它仍只作为 `acuteJunctions` 的修复档存在；新的 `runJunctionRing` 与它代码重复，后续可让前者成为后者的参数化特例（需验证基线不变）。
-7. **既有失败（非本文能力引入）**：`2001361477/t3` 主干净距 1，原提交 `9e4a0ad4` 即存在（见接管记录）。本文写作时没有重跑完整套件，当前是否全绿以最近一次 `verify-city-suite.mjs` 结果为准。
+7. **城区地标场地压路**：`verify-city-collision` 在 `dev` 上即失败（500 会话 / seed 2026 有 12 个实体在路上，上限 7），其中 7 个是城区地标场地部件——场地范围按街区内地块的包围盒取，非矩形街区的角会伸出到路面。需改为按街区多边形裁剪场地。
+8. **场景基线**：`verify-city-scene-baseline` 在 `dev` 上即不匹配（市政建筑、基础设施装饰等多组），与本文能力无关；护栏开口只额外改变有匝道场景的 `city-district-expressways`。
+9. **既有失败（非本文能力引入）**：`2001361477/t3` 主干净距 1，原提交 `9e4a0ad4` 即存在（见接管记录）。本文写作时没有重跑完整套件，当前是否全绿以最近一次 `verify-city-suite.mjs` 结果为准。
 
 ---
 

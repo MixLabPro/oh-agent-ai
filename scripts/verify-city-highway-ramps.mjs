@@ -2,12 +2,13 @@
 // 匝道必须接上真实高架和有限地面宿主，不能只在切线/道路延长线上看起来接近。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
-const { planHighwayRamps, HIGHWAY_RAMP_CONFIG: C, segmentDistance, THREE, buildHighwayRamps, EXPRESSWAY_DECK_Y } = await loadCity({
+const { planHighwayRamps, HIGHWAY_RAMP_CONFIG: C, segmentDistance, THREE, buildHighwayRamps, EXPRESSWAY_DECK_Y, expresswayPieces } = await loadCity({
   "engine/planner/highwayRamps.ts": ["planHighwayRamps", "HIGHWAY_RAMP_CONFIG"],
   "engine/roadGeometry.ts": ["segmentDistance"],
   "pkg:three": ["* as THREE"],
   "engine/systems/roadSystem.ts": ["buildHighwayRamps"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_Y"],
+  "engine/surface/structureCompiler.ts": ["expresswayPieces"],
 });
 const road = (id, x, lo = -100, hi = 100) => ({ id, from: `${x}:${lo}`, to: `${x}:${hi}`,
   width: 12, kind: "arterial", structure: "ground-road", points: [{ x, z: lo }, { x, z: hi }] });
@@ -66,4 +67,16 @@ assert.ok(C.endClear >= 90, "merge points must be above the existing highway end
   assert.ok(rails > 0, "the descent retains protective rails between open ends");
   for (const disposable of host.disposables) disposable.dispose();
 }
-console.log("City highway ramps: curved bridge contact, finite ground hosts, slope clearance, closed spacing, obstacles and determinism passed.");
+// 主桥护栏在匝道合流处开口：dev 把高架几何抽进 structureCompiler 时丢过这条，合并后护栏又横截匝道。
+{
+  const base = { highways: [run], terrain: { height: () => 1.2 } };
+  const railsOf = (layout) => expresswayPieces(layout).filter((piece) => piece.role === "expressway-rail");
+  const closedRails = railsOf(base), openRails = railsOf({ ...base, highwayRamps: result.ramps });
+  assert.notEqual(openRails.length, closedRails.length, "a merging ramp changes the main rail layout");
+  for (const ramp of result.ramps) {
+    const head = ramp.points.slice(0, Math.ceil(ramp.points.length * 0.4) + 1);
+    for (const rail of openRails) assert.ok(head.every((point) => Math.hypot(rail.x - point.x, rail.z - point.z) >= ramp.width / 2),
+      `main rail at ${rail.x.toFixed(1)},${rail.z.toFixed(1)} cuts across a merging ramp`);
+  }
+}
+console.log("City highway ramps: curved bridge contact, finite ground hosts, slope clearance, closed spacing, obstacles, determinism and rail openings passed.");
