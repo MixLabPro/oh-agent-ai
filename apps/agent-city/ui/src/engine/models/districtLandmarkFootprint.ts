@@ -36,12 +36,58 @@ export type LandmarkSite = {
   podium: { cu: number; cv: number; w: number; d: number };
   /** 前院：裙楼正面到街区前沿之间的深度；< 4 时不放停车场。 */
   yardDepth: number;
+  /** 街区多边形（正则系）。它是道路中线围成的面（顶点在路中线上），所以只判「在多边形内」不够，还要离路缘留人行道。 */
+  outline: Vec2[] | null;
+  /** 街区周边道路（正则系线段 + 半路宽）：部件离路缘至少 SIDEWALK + 边距（见 siteClear）。 */
+  roads: Array<{ a: Vec2; b: Vec2; half: number }>;
 };
+/** 人行道带宽（与 cityRoadJunctions.SIDEWALK_BAND 同值）：场地部件不压人行道。 */
+export const SITE_SIDEWALK = 1.8;
+type Vec2 = { x: number; z: number };
+
+/** 点在多边形内，且离每条边至少 margin。多边形顶点按任意绕向给出。 */
+export function insideOutline(outline: readonly Vec2[] | null, x: number, z: number, margin = 0): boolean {
+  if (!outline || outline.length < 3) return true;
+  let inside = false;
+  for (let i = 0, j = outline.length - 1; i < outline.length; j = i, i += 1) {
+    const a = outline[i], b = outline[j];
+    if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) inside = !inside;
+  }
+  if (!inside) return false;
+  if (margin <= 0) return true;
+  for (let i = 0, j = outline.length - 1; i < outline.length; j = i, i += 1) {
+    const a = outline[j], b = outline[i];
+    const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+    const t = l2 > 1e-12 ? Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / l2)) : 0;
+    if (Math.hypot(x - a.x - dx * t, z - a.z - dz * t) < margin) return false;
+  }
+  return true;
+}
+
+/** 点在街区内，且离每条周边道路的路缘至少 SITE_SIDEWALK + margin。 */
+export function siteClear(site: Pick<LandmarkSite, "outline" | "roads">, x: number, z: number, margin = 0): boolean {
+  if (!insideOutline(site.outline, x, z)) return false;
+  for (const road of site.roads) {
+    const dx = road.b.x - road.a.x, dz = road.b.z - road.a.z, l2 = dx * dx + dz * dz;
+    const t = l2 > 1e-12 ? Math.max(0, Math.min(1, ((x - road.a.x) * dx + (z - road.a.z) * dz) / l2)) : 0;
+    if (Math.hypot(x - road.a.x - dx * t, z - road.a.z - dz * t) < road.half + SITE_SIDEWALK + margin) return false;
+  }
+  return true;
+}
+
+/** 正则系轴对齐矩形（中心 x,z，宽 w 沿 x，深 d 沿 z）整圈落在街区内：沿四条边每 ≤4 单位采样一点。 */
+export function rectSiteClear(site: Pick<LandmarkSite, "outline" | "roads">, x: number, z: number, w: number, d: number, margin = 0): boolean {
+  const nx = Math.max(1, Math.ceil(w / 4)), nz = Math.max(1, Math.ceil(d / 4));
+  for (let i = 0; i <= nx; i += 1) for (const sz of [-1, 1]) if (!siteClear(site, x - w / 2 + (w * i) / nx, z + (sz * d) / 2, margin)) return false;
+  for (let j = 0; j <= nz; j += 1) for (const sx of [-1, 1]) if (!siteClear(site, x + (sx * w) / 2, z - d / 2 + (d * j) / nz, margin)) return false;
+  return true;
+}
 
 const DEFAULT_RECT = 13; // 找不到地块时的保底半宽：与旧的 26 单位见方保留量一致
 
 /** 地标局部系下街区所有地块的包围盒，并按朝路方向转到正则系。找不到所属地块返回保底场地。 */
-export function landmarkSite(landmark: { x: number; z: number; yaw: number; parcelId: string }, parcels: readonly Placed[], height: number): LandmarkSite {
+export function landmarkSite(landmark: { x: number; z: number; yaw: number; parcelId: string }, parcels: readonly Placed[], height: number,
+  blockOutline: readonly Vec2[] | null = null, roadSegments: ReadonlyArray<{ a: Vec2; b: Vec2; half: number }> = []): LandmarkSite {
   const own = parcels.find((p) => p.id === landmark.parcelId);
   const cos = Math.cos(landmark.yaw), sin = Math.sin(landmark.yaw);
   const toLocal = (wx: number, wz: number) => { const dx = wx - landmark.x, dz = wz - landmark.z; return { u: dx * cos - dz * sin, v: dx * sin + dz * cos }; };
@@ -75,9 +121,30 @@ export function landmarkSite(landmark: { x: number; z: number; yaw: number; parc
   const roomW = rect.u1 - rect.u0, roomD = rect.v1 - rect.v0;
   const skirt = DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtWidth;
   const wanted = Math.max(1, height / (LANDMARK_SLENDER * LANDMARK_SHAFT_BASE));
-  const grow = Math.max(1, Math.min(wanted, (PODIUM_MAX_SHARE * Math.min(roomW, roomD)) / skirt));
-  const w = skirt * grow, d = DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth * grow;
-  // 裙楼靠街区里侧（-z），前面留前院；左右居中。
-  const podium = { cu: (rect.u0 + rect.u1) / 2, cv: rect.v0 + d / 2, w, d };
-  return { turn, rect, grow, podium, yardDepth: Math.max(0, rect.v1 - (podium.cv + d / 2)) };
+  let grow = Math.max(1, Math.min(wanted, (PODIUM_MAX_SHARE * Math.min(roomW, roomD)) / skirt));
+  // 街区多边形转到正则系：rect 只是地块包围盒，非矩形街区的角在路上（verify-city-collision 实测：
+  // 草坪/树/绿篱伸出街区压路）。裙楼（含 0.45 挑檐）必须整个落在多边形内：先往前挪，再缩小放大系数。
+  const toCanon = (p: Vec2): Vec2 => { const { u, v } = toLocal(p.x, p.z); return { x: u * ct - v * st, z: u * st + v * ct }; };
+  const outline = blockOutline && blockOutline.length >= 3 ? blockOutline.map(toCanon) : null;
+  const roads = roadSegments.map((road) => ({ a: toCanon(road.a), b: toCanon(road.b), half: road.half }));
+  const placed = { outline, roads };
+  const cu = (rect.u0 + rect.u1) / 2;
+  let podium = { cu, cv: rect.v0 + (DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth * grow) / 2, w: skirt * grow, d: DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth * grow };
+  if (outline || roads.length) {
+    // 候选中心：① 靠街区里侧、左右居中（前面留前院）；② 地块中心附近——布局按「地块中心 + 17 见方包络」验证过地标放得下，
+    // 窄街区（包围盒只有几个单位宽）里①怎么都放不下，退回②。先带 0.45 挑檐余量找，找不到再按墙体本身找。
+    const centers = (d: number) => [
+      ...Array.from({ length: 13 }, (_, shift) => ({ x: cu, z: rect.v0 + d / 2 + shift })),
+      ...[0, 1, -1, 2, -2, 3, -3, 4, -4].flatMap((dx) => [0, 1, -1, 2, -2, 3, -3, 4, -4].map((dz) => ({ x: dx, z: dz }))),
+    ];
+    search: for (const [overhang, margin] of [[0.9, 0.3], [0, 0]] as const) {
+      for (let g = grow; g >= 1 - 1e-9; g -= 0.05) {
+        const w = skirt * g, d = DISTRICT_LANDMARK_RENDER_GEOMETRY.skirtDepth * g;
+        for (const c of centers(d)) {
+          if (rectSiteClear(placed, c.x, c.z, w + overhang, d + overhang, margin)) { grow = g; podium = { cu: c.x, cv: c.z, w, d }; break search; }
+        }
+      }
+    }
+  }
+  return { turn, rect, grow, podium, yardDepth: Math.max(0, rect.v1 - (podium.cv + podium.d / 2)), outline, roads };
 }

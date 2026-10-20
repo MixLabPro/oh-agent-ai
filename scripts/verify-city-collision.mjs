@@ -42,6 +42,10 @@ for (const sessions of [0, 90, 500]) for (const seed of [1, 7, 42, 2026, 65537])
   assert.ok(!Object.keys(roles).some((r) => /suspension-bridge|truss-bridge|infrastructure|beach|road-surface/.test(r)), "structure meshes come from descriptors, decor is not solid");
   const onRoad = kit.solidsOnRoad(regions, collision);
   assert.ok(onRoad.length <= MAX_ON_ROAD, `${sessions}/${seed}: ${onRoad.length} solids on road (${onRoad.map((s) => s.id).join(", ")})`);
+  // 城区地标场地（裙楼、停车场、树、绿篱）必须整个落在自己的街区内：曾按地块包围盒铺矩形草坪，非矩形街区的角伸到路面，
+  // 贴地铺装又被当成实体，500/2026 一个场景就有 7 个（2026-10-20 修复）。贴地铺装不是实体，其余部件不得在路上。
+  const districtOnRoad = onRoad.filter((s) => s.role === "city-landmark-district");
+  assert.equal(districtOnRoad.length, 0, `${sessions}/${seed}: district landmark site parts on road (${districtOnRoad.map((s) => s.id).join(", ")})`);
   for (const s of onRoad) totals.onRoad[s.role] = (totals.onRoad[s.role] ?? 0) + 1;
   // Straight roads with solids on: spawn 12 in, drive to 6 past the end node; outcomes reported.
   const layout = source.layout; const outcomes = {};

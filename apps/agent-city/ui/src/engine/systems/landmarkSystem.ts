@@ -101,7 +101,14 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
     const h = host.districtLandmarkHeight(spot.districtId);
     // 地基随楼高放大（按会话楼「高楼加宽」的策略），只在地标已预留的整块街区里放大；街区里其余部分做前院（停车场、绿化）。
     const parcels = host.layout.blocks.flatMap((block) => block.parcels);
-    const site = landmarkSite(spot, parcels, h);
+    // 街区多边形 + 周边道路：场地部件不得伸出街区压到路面/人行道（verify-city-collision 曾实测 7 个地标部件在路上）。
+    const ownParcel = parcels.find((parcel) => parcel.id === spot.parcelId);
+    const block = ownParcel ? host.layout.blocks.find((candidate) => candidate.id === ownParcel.blockId) : undefined;
+    const outline = block?.polygon?.length ? block.polygon : null;
+    const reach = outline ? Math.max(...outline.map((p) => Math.hypot(p.x - spot.x, p.z - spot.z))) + 20 : 120;
+    const nearRoads = host.layout.roadEdges.filter((edge) => !edge.bridge).flatMap((edge) => edge.points.slice(1).map((b, i) => ({ a: edge.points[i], b, half: edge.width / 2 })))
+      .filter((road) => Math.min(Math.hypot(road.a.x - spot.x, road.a.z - spot.z), Math.hypot(road.b.x - spot.x, road.b.z - spot.z)) < reach + Math.hypot(road.b.x - road.a.x, road.b.z - road.a.z));
+    const site = landmarkSite(spot, parcels, h, outline, nearRoads);
     const grow = site.grow;
     const day = createRenderCanvas(); day.width = 64; day.height = 64;
     const dctx = day.getContext("2d");
