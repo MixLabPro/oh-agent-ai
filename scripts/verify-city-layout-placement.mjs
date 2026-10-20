@@ -41,7 +41,11 @@ function verify(layout, input) {
     check(block, { ...landmark, ...DISTRICT_LANDMARK_ENVELOPE }, `district landmark ${landmark.districtId}`);
     assert.ok(addresses.every(([, parcel]) => parcel.blockId !== block.id), "17m skirt cannot consume another session address");
   }
-  const expectedCivics = Math.max(2, Math.min(30, Math.floor(input.buildings.length / 45)));
+  // 配套按城区规划（d4479f2a）：每个非空城区必有医院+学校，额外配套按本区 floor(会话数/45) 增长，总数到 max(30, 2·城区数) 为止。
+  // 旧式 max(2, min(30, floor(全城会话/45))) 是全城口径，那次提交同步了 verify-city-district-services 却漏了这里（500 会话：16 ≠ 11）。
+  const served = input.districts.filter((district) => district.sessionCount > 0);
+  let expectedCivics = served.length * 2;
+  for (const district of served) for (let i = 0; i < Math.floor(district.sessionCount / 45) && expectedCivics < Math.max(30, served.length * 2); i++) expectedCivics++;
   assert.equal(layout.placementReport.filter((entry) => entry.class === "garden").length, 4);
   assert.equal(layout.placementReport.filter((entry) => entry.class === "district-landmark").length, 4);
   assert.equal(layout.placementReport.filter((entry) => entry.class === "civic").length, expectedCivics);
