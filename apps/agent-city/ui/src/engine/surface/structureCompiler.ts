@@ -90,14 +90,46 @@ export function bridgeDeckProfile(layout: BridgeLayoutInput, from: Vec2, to: Vec
   const leans = [fromLands ? lean(from) : null, toLands ? lean(to) : null].filter((v): v is number => v !== null);
   const crossSlope = leans.length ? leans.reduce((n, v) => n + v, 0) / leans.length : 0;
   const leanFrom = fromLands ? lean(from) : crossSlope, leanTo = toLands ? lean(to) : crossSlope;
-  return Object.freeze({ ya, yb, length, pitch, crossSlope, leanFrom, leanTo, fromLands, toLands, slant: Math.hypot(length, yb - ya), at: (t: number) => ya + (yb - ya) * t });
+  // A bridge end can overlap the road's junction fan for up to LANDING_ZONE. A single plane
+  // between the endpoint heights then sits below the rising ground fan (notably on steep banks),
+  // making the same-layer road/deck pair disconnected. Follow the rendered terrain surface only
+  // within a bounded landing zone, then ease back to the span chord. No-ground ends keep the old
+  // chord and never sample the terrain profile.
+  const blendLength = Math.min(3, length / 3);
+  const smoothFalloff = (distance: number) => {
+    const t = Math.max(0, Math.min(1, distance / blendLength));
+    return 1 - t * t * (3 - 2 * t);
+  };
+  const baseAt = (t: number) => ya + (yb - ya) * t;
+  const baseLeanAt = (t: number) => leanFrom + (leanTo - leanFrom) * t;
+  const positionAt = (t: number) => ({ x: from.x + (to.x - from.x) * t, z: from.z + (to.z - from.z) * t });
+  const blendAt = (t: number) => {
+    const distance = Math.max(0, Math.min(length, t * length));
+    if (fromLands && distance < blendLength) return smoothFalloff(distance);
+    if (toLands && length - distance < blendLength) return smoothFalloff(length - distance);
+    return 0;
+  };
+  const at = (t: number) => {
+    const base = baseAt(t), blend = blendAt(t);
+    if (blend === 0) return base;
+    const p = positionAt(t);
+    return base + (road(p) - base) * blend;
+  };
+  const leanAt = (t: number) => {
+    const base = baseLeanAt(t), blend = blendAt(t);
+    if (blend === 0) return base;
+    return base + (lean(positionAt(t)) - base) * blend;
+  };
+  return Object.freeze({ ya, yb, length, pitch, crossSlope, leanFrom, leanTo, fromLands, toLands, blendLength,
+    slant: Math.hypot(length, yb - ya), at, leanAt });
 }
 /** Edge bridge (straight span): deck slab, railings, lane lines, dashes, piers — the parts
  * buildInfrastructure draws, in its order, all standing on the slab's actual top face. */
 export function bridgeDeckParts(edge: RoadEdge, layout: BridgeLayoutInput): BoxPart[] {
   const [a,b]=edge.points,profile=bridgeDeckProfile(layout,a,b,edge.width);
   const change=Math.abs(profile.leanTo-profile.leanFrom)*edge.width;
-  const parts: BoxPart[] = trimLandedRailings(edge, layout, change<=0.08 ? bridgeDeckSectionParts(edge,layout,profile) : bridgeDeckSplitParts(edge,layout,profile));
+  const needsProfileSections = profile.fromLands || profile.toLands;
+  const parts: BoxPart[] = trimLandedRailings(edge, layout, needsProfileSections || change>0.08 ? bridgeDeckSplitParts(edge,layout,profile) : bridgeDeckSectionParts(edge,layout,profile));
   appendDeadEndBarriers(edge, layout, parts, profile);
   return parts;
 }
@@ -147,13 +179,23 @@ function bridgeDeckSplitParts(edge: RoadEdge, layout: BridgeLayoutInput, profile
   const [a,b]=edge.points;
   const roll=Math.abs(profile.leanTo-profile.leanFrom)*edge.width;
   const count=Math.min(256,Math.max(2,Math.ceil(profile.length/8),Math.ceil(roll/0.04)));
+  const stations = new Set(Array.from({ length: count + 1 }, (_, i) => i / count));
+  const blendSteps = Math.ceil(profile.blendLength / 0.5);
+  if (profile.fromLands) for (let i = 0; i <= blendSteps; i++) stations.add((profile.blendLength * i / blendSteps) / profile.length);
+  if (profile.toLands) for (let i = 0; i <= blendSteps; i++) stations.add(1 - (profile.blendLength * i / blendSteps) / profile.length);
+  const sortedStations = [...stations].sort((x, y) => x - y);
+  const cuts: number[] = [];
+  for (const t of sortedStations) {
+    if (!cuts.length || (t - cuts[cuts.length - 1]) * profile.length > 1e-6) cuts.push(t);
+    else if (t === 1) cuts[cuts.length - 1] = 1;
+  }
   const parts:BoxPart[]=[];
-  for(let i=0;i<count;i++){
-    const t0=i/count,t1=(i+1)/count,point=(t:number)=>({x:a.x+(b.x-a.x)*t,z:a.z+(b.z-a.z)*t});
-    const ya=profile.at(t0),yb=profile.at(t1),length=profile.length/count;
-    const crossSlope=profile.leanFrom+(profile.leanTo-profile.leanFrom)*(t0+t1)/2;
+  for(let i=0;i<cuts.length-1;i++){
+    const t0=cuts[i],t1=cuts[i+1],point=(t:number)=>({x:a.x+(b.x-a.x)*t,z:a.z+(b.z-a.z)*t});
+    const ya=profile.at(t0),yb=profile.at(t1),length=profile.length*(t1-t0);
+    const crossSlope=profile.leanAt((t0+t1)/2);
     parts.push(...bridgeDeckSectionParts({...edge,points:[point(t0),point(t1)]},layout,
-      {...profile,ya,yb,length,crossSlope,slant:Math.hypot(length,yb-ya),at:(t:number)=>ya+(yb-ya)*t}).filter(p=>p.role!=="bridge-pier"));
+      {...profile,ya,yb,length,crossSlope,pitch:Math.atan2(yb-ya,length),leanFrom:profile.leanAt(t0),leanTo:profile.leanAt(t1),slant:Math.hypot(length,yb-ya),at:(t:number)=>ya+(yb-ya)*t}).filter(p=>p.role!=="bridge-pier"));
   }
   parts.push(...bridgeDeckSectionParts(edge,layout,profile).filter(p=>p.role==="bridge-pier"));
   return parts;

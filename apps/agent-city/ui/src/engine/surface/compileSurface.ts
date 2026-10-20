@@ -24,7 +24,7 @@ import type { SurfaceRegionsBuild } from "./surfaceRegions";
 import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch, SurfacePortal } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 15;
+export const CITY_SURFACE_GEOMETRY_VERSION = 16;
 /** Lift of an expressway ribbon's interior seams above the higher slab top (keeps slabs below the drivable surface). */
 const RIBBON_LIFT = 0.03;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
