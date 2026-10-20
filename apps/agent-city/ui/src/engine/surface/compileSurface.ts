@@ -17,14 +17,14 @@ import { extractMeshBoundaries } from "./meshBoundaries";
 import { buildSurfaceIndex } from "./SurfaceIndex";
 import {
   boxCorners, boxPoint, boxTopFace, bridgeDeckParts, bridgeDrivableHalf, channelizedGeometry, culDeSacDiscs, culDeSacTopCap,
-  EXPRESSWAY_DRIVABLE_HALF, expresswayPieces, FLARE_LIFT, flareTriangles, trussBarPart, trussBars, type BoxPart,
+  EXPRESSWAY_DRIVABLE_HALF, expresswayPieces, FLARE_LIFT, flareTriangles, highwayRampPieces, rampDrivableHalf, trussBarPart, trussBars, type BoxPart,
 } from "./structureCompiler";
 import { conformMesh, terrainFit } from "./terrainClip";
 import type { SurfaceRegionsBuild } from "./surfaceRegions";
 import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch, SurfacePortal } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 12;
+export const CITY_SURFACE_GEOMETRY_VERSION = 13;
 /** Lift of an expressway ribbon's interior seams above the higher slab top (keeps slabs below the drivable surface). */
 const RIBBON_LIFT = 0.03;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
@@ -56,7 +56,7 @@ export type CitySurfaceCompilation = Readonly<{
   landings: readonly StructureLanding[];
   counts: Readonly<{ bridges: number; expresswaySegments: number; flares: number; islands: number; culDeSacs: number }>;
 }>;
-export type CitySurfaceLayout = Pick<CityLayout, "roadEdges" | "extent" | "terrain" | "highways" | "bridges" | "landmarks" | "culDeSacEnds">;
+export type CitySurfaceLayout = Pick<CityLayout, "roadEdges" | "extent" | "terrain" | "highways" | "bridges" | "landmarks" | "culDeSacEnds"> & Partial<Pick<CityLayout, "highwayRamps">>;
 
 /** Road-compiler-independent static collision descriptors shared by plane and car. */
 export function compileStaticStructureObstacles(layout: CitySurfaceLayout): readonly StructureObstacle[] {
@@ -97,6 +97,17 @@ export function compileStaticStructureObstacles(layout: CitySurfaceLayout): read
       obstacles.push(Object.freeze({ id: `${id}:slab`, role: "expressway-deck", shape: "box", corners: Object.freeze(corners), mountableHeight }));
     }
   }
+  // 立交匝道：护栏与墩柱是实体；桥面板与高架桥面同一规则（只允许越过坡度错台那一点顶边）。
+  for (const piece of highwayRampPieces(layout)) {
+    if (piece.role === "ramp-rail" || piece.role === "ramp-pier") {
+      obstacles.push(Object.freeze({ id: `ramp:${piece.ramp}:${piece.role}:${obstacles.length}`, role: piece.role, shape: "box", corners: Object.freeze(boxCorners(piece)) }));
+    } else if (piece.role === "ramp-deck") {
+      const corners = boxCorners(piece);
+      const topYs = [corners[2].y, corners[3].y, corners[6].y, corners[7].y];
+      const mountableHeight = Math.min(0.9, Math.round((Math.max(...topYs) - Math.min(...topYs) + 0.3) * 100) / 100);
+      obstacles.push(Object.freeze({ id: `ramp:${piece.ramp}:${String(piece.segment).padStart(4, "0")}:slab`, role: "ramp-deck", shape: "box", corners: Object.freeze(corners), mountableHeight }));
+    }
+  }
   return Object.freeze(obstacles);
 }
 
@@ -121,6 +132,32 @@ const seamOf = (top: readonly P3[], end: StructureLanding["end"]) => {
   const owned = (p: P3) => Object.freeze({ x: Math.fround(p.x), y: Math.fround(p.y), z: Math.fround(p.z) });
   return Object.freeze({ a: owned(end === "from" ? top[0] : top[1]), b: owned(end === "from" ? top[3] : top[2]) });
 };
+
+/** Drivable ribbon over a run of deck slabs (expressways and interchange ramps): interior seams are shared
+ * between neighbours — the higher of both slab tops at the true segment end, lifted RIBBON_LIFT where the
+ * pitch changes — and mitred sideways; the run's two end edges stay the first/last slab's full top edge. */
+function ribbonFaces(deck: readonly BoxPart[], half: number, overhang: number): P3[][] {
+  const tops = deck.map((piece) => boxTopFace(piece, half));
+  // Centre of the top face at the piece's true segment end: slabs are `overhang` longer than their segment
+  // (expressways slant + 0.5, ramps slant + 0.4) so neighbouring render slabs close their gaps.
+  const endAt = (i: number, sign: number) => { const piece = deck[i]; const f = sign * Math.max(0, (piece.sx - overhang) / 2) / piece.sx; return boxPoint(piece, f, 1, 0); };
+  const sideOf = (i: number) => { const t = tops[i]; const sx = t[3].x - t[0].x, sz = t[3].z - t[0].z; const l = Math.hypot(sx, sz) || 1; return { x: sx / l, z: sz / l }; };
+  const seamAt = (i: number): [P3, P3] | null => {
+    const lift = Math.abs(deck[i - 1].rz - deck[i].rz) > 1e-9 ? RIBBON_LIFT : 0;
+    const a = endAt(i - 1, 1), b = endAt(i, -1); const c = { x: (a.x + b.x) / 2, y: Math.max(a.y, b.y) + lift, z: (a.z + b.z) / 2 };
+    const s0 = sideOf(i - 1), s1 = sideOf(i); let mx = s0.x + s1.x, mz = s0.z + s1.z; const ml = Math.hypot(mx, mz);
+    if (ml < 1e-9) return null; mx /= ml; mz /= ml;
+    const cos = mx * s0.x + mz * s0.z; if (cos < 0.5) return null; // sharper than 120°: keep the slab tops there
+    const w = half / cos;
+    return [{ x: c.x - mx * w, y: c.y, z: c.z - mz * w }, { x: c.x + mx * w, y: c.y, z: c.z + mz * w }];
+  };
+  const seams = deck.map((_, i) => (i === 0 ? null : seamAt(i)));
+  return deck.map((_, i) => {
+    const t = tops[i]; const start = seams[i], end = i + 1 < deck.length ? seams[i + 1] : null;
+    // boxTopFace order: [start −side, end −side, end +side, start +side].
+    return [start ? start[0] : t[0], end ? end[0] : t[1], end ? end[1] : t[2], start ? start[1] : t[3]];
+  });
+}
 
 export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?: CompiledGroundRoadSurface; aliasTolerance?: number } = {}): CitySurfaceCompilation {
   const tolerance = options.aliasTolerance ?? 0.1;
@@ -249,33 +286,30 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
   for (const piece of pieces) if (piece.role === "expressway-deck") deckByHighway.set(piece.highway, [...(deckByHighway.get(piece.highway) ?? []), piece]);
   for (const [highway, deck] of [...deckByHighway].sort((a, b) => a[0] - b[0])) {
     deck.sort((x, y) => x.segment - y.segment);
-    const tops = deck.map((piece) => boxTopFace(piece, EXPRESSWAY_DRIVABLE_HALF));
-    // Centre of the top face at the piece's true segment end (the slab overhangs 0.25 past it).
-    const endAt = (i: number, sign: number) => { const piece = deck[i]; const f = sign * Math.max(0, (piece.sx - 0.5) / 2) / piece.sx; return boxPoint(piece, f, 1, 0); };
-    const sideOf = (i: number) => { const t = tops[i]; const sx = t[3].x - t[0].x, sz = t[3].z - t[0].z; const l = Math.hypot(sx, sz) || 1; return { x: sx / l, z: sz / l }; };
-    // Seam at the vertex shared by pieces i−1 and i: [−side point, +side point].
-    const seamAt = (i: number): [P3, P3] | null => {
-      // 接缝取两块板顶中较高者再抬 RIBBON_LIFT：取平均时一块板顶会高出驾驶面（≤ 半个错台），车底与本匝道的板相撞
-      // （0/42 expressway:0:0003:slab，法向朝上）。驾驶面因此恒在所有板顶之上，两端端边不抬，落地接缝不变。
-      // 只在坡度变化处抬：同坡的相邻两块板外伸部分同高，不会高出驾驶面（平直高架的桥面高度保持精确）。
-      const lift = Math.abs(deck[i - 1].rz - deck[i].rz) > 1e-9 ? RIBBON_LIFT : 0;
-      const a = endAt(i - 1, 1), b = endAt(i, -1); const c = { x: (a.x + b.x) / 2, y: Math.max(a.y, b.y) + lift, z: (a.z + b.z) / 2 };
-      const s0 = sideOf(i - 1), s1 = sideOf(i); let mx = s0.x + s1.x, mz = s0.z + s1.z; const ml = Math.hypot(mx, mz);
-      if (ml < 1e-9) return null; mx /= ml; mz /= ml;
-      const cos = mx * s0.x + mz * s0.z; if (cos < 0.5) return null; // sharper than 120°: keep the slab tops there
-      const w = EXPRESSWAY_DRIVABLE_HALF / cos;
-      return [{ x: c.x - mx * w, y: c.y, z: c.z - mz * w }, { x: c.x + mx * w, y: c.y, z: c.z + mz * w }];
-    };
-    const seams = deck.map((_, i) => (i === 0 ? null : seamAt(i)));
-    deck.forEach((piece, i) => {
+    ribbonFaces(deck, EXPRESSWAY_DRIVABLE_HALF, 0.5).forEach((face, i) => {
+      const piece = deck[i];
       expresswaySegments++;
-      const t = tops[i]; const start = seams[i], end = i + 1 < deck.length ? seams[i + 1] : null;
-      // boxTopFace order: [start −side, end −side, end +side, start +side].
-      const face = [start ? start[0] : t[0], end ? end[0] : t[1], end ? end[1] : t[2], start ? start[1] : t[3]];
       const patchId = `expressway:${highway}:${String(piece.segment).padStart(4, "0")}`;
       add(patchId, Math.abs(piece.rz) > 1e-4 ? "ramp" : "expressway-deck",
         `expressway:${highway}`, { kind: "structure", id: `expressway:${highway}` }, quad(face));
     });
+  }
+  // 立交匝道（可驾驶，2026-10-20）：与所属高架同一层——起点压在高架桥面上、同高，两者在同层叠置处直接并为一个
+  // 区域（分流不需要门户）；地面端像高架落地一样，按端部范围内的地面车道给门户候选，并登记为落地点
+  // （结构过渡审计 structure:ramp:<i>:to:onto/off）。
+  const rampPieces = highwayRampPieces(layout);
+  const rampDecks = new Map<number, typeof rampPieces>();
+  for (const piece of rampPieces) if (piece.role === "ramp-deck" && piece.highway >= 0) rampDecks.set(piece.ramp, [...(rampDecks.get(piece.ramp) ?? []), piece]);
+  const rampEnds: Array<{ ramp: number; highway: number; patchId: string; top: P3[]; half: number }> = [];
+  for (const [ramp, deck] of [...rampDecks].sort((a, b) => a[0] - b[0])) {
+    deck.sort((x, y) => x.segment - y.segment);
+    const width = (layout.highwayRamps ?? [])[ramp].width, half = rampDrivableHalf(width);
+    ribbonFaces(deck, half, 0.4).forEach((face, i) => {
+      const piece = deck[i];
+      add(`ramp:${ramp}:${String(piece.segment).padStart(4, "0")}`, "ramp", `expressway:${piece.highway}`, { kind: "structure", id: `ramp:${ramp}` }, quad(face));
+    });
+    const last = deck[deck.length - 1];
+    rampEnds.push({ ramp, highway: last.highway, patchId: `ramp:${ramp}:${String(last.segment).padStart(4, "0")}`, top: boxTopFace(last, half), half });
   }
   const patchById = new Map(patches.map((p) => [p.id, p]));
   (layout.highways ?? []).forEach((points, highway) => {
@@ -301,6 +335,22 @@ export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?
       for (const id of [...ids].sort()) portal(deckPatch, id, p);
     }
   });
+
+  for (const end of rampEnds) {
+    const pts = (layout.highwayRamps ?? [])[end.ramp].points;
+    const p = pts[pts.length - 1], q = pts[pts.length - 2]; const l = Math.hypot(p.x - q.x, p.z - q.z) || 1;
+    const ux = (p.x - q.x) / l, uz = (p.z - q.z) / l;
+    const y = (end.top[1].y + end.top[2].y) / 2, g = groundY(p.x, p.z);
+    landings.push(Object.freeze({ structureId: `ramp:${end.ramp}`, end: "to" as const, layerId: `expressway:${end.highway}`, patchId: end.patchId, seam: seamOf(end.top, "to"),
+      x: p.x, z: p.z, outX: ux, outZ: uz, deckY: y, groundY: g, step: g === null ? null : y - g, status: "layered" as const }));
+    const deckPatch = patchById.get(end.patchId);
+    if (!deckPatch) continue;
+    const ids = new Set<string>();
+    for (let s = -0.25; s <= 3 + 1e-9; s += 0.5) for (let w = -end.half; w <= end.half + 1e-9; w += end.half / 4) {
+      for (const id of groundPatchesAt(p.x - ux * s - uz * w, p.z - uz * s + ux * w)) ids.add(id);
+    }
+    for (const id of [...ids].sort()) portal(deckPatch, id, p);
+  }
 
   const surface: CompiledCitySurface = Object.freeze({
     revision: "unpublished", geometryVersion: CITY_SURFACE_GEOMETRY_VERSION,

@@ -67,7 +67,7 @@ export function throttledCurrent(isCurrent: () => boolean, every = 1000): () => 
   return () => { if (!ok) return false; if (++calls >= every) { calls = 0; ok = isCurrent(); } return ok; };
 }
 /** Roles the region rules already bound exactly (or a hull would over-approximate): never cut evidence. */
-const NON_EVIDENCE_ROLES: ReadonlySet<string> = new Set(["island", "bridge-railing", "expressway-rail", "bridge-deck", "expressway-deck"]);
+const NON_EVIDENCE_ROLES: ReadonlySet<string> = new Set(["island", "bridge-railing", "expressway-rail", "bridge-deck", "expressway-deck", "ramp-rail", "ramp-deck"]);
 
 /** `declareNoBuildings`: the caller asserts this world has no building/landmark layer at all (synthetic
  * fixtures). A plan-only capture is NOT such a world — its buildings simply were not captured. */

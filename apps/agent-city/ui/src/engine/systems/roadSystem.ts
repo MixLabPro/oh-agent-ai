@@ -10,7 +10,7 @@ import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { cornerArc, curbClearance, junctionIndex, pavementIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_DECK_Y, expresswayDeckHeights } from "../render/shared";
-import { bridgeDeckParts, channelizedGeometry, culDeSacDiscs, expresswayPieces, FLARE_LIFT, flareTriangles, trussBars } from "../surface/structureCompiler";
+import { bridgeDeckParts, channelizedGeometry, culDeSacDiscs, expresswayPieces, FLARE_LIFT, highwayRampPieces, flareTriangles, trussBars } from "../surface/structureCompiler";
 import { conformMesh, terrainFit } from "../surface/terrainClip";
 export { culDeSacBulbRadius } from "../surface/structureCompiler";
 
@@ -240,66 +240,14 @@ export function buildDistrictExpressways(host: RoadHost): void {
   host.disposables.push(geometry, mesh.material);
 }
 
-/** 高架立交匝道（planner/highwayRamps.ts）：与区界高架同一视觉语言（桥面板 / 护栏 / 车道边线 / 墩柱），
- *  匝道完全离开主桥幅后，桥面高度才沿剩余路程 smoothstep 降到地面以上 0.3，
- *  落在干道 T 口上。墩柱每 18 一根，桥面离地 < 1.5 的落地段不立墩。 */
+/** 高架立交匝道（planner/highwayRamps.ts）：与区界高架同一视觉语言（桥面板 / 护栏 / 车道边线 / 墩柱）。
+ *  几何来自 surface/structureCompiler.highwayRampPieces——与驾驶面、碰撞是同一份（2026-10-20 起匝道可驾驶）。
+ *  匝道完全离开主桥幅后才沿剩余路程 smoothstep 降到路面，落在干道 T 口上；墩柱每 18 一根，离地 < 1.5 或压在
+ *  地面车道上的不立。 */
 export function buildHighwayRamps(host: RoadHost): void {
-  const ramps = host.layout.highwayRamps ?? [];
-  if (!ramps.length) return;
-  type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; pitch: number; color: string };
-  const pieces: Piece[] = [];
-  const groundAt = (x: number, z: number) => Math.max(0, host.layout.terrain.height(x, z));
-  const highwayDistance = (point: Vec2) => {
-    let nearest = Infinity;
-    for (const run of host.layout.highways ?? []) {
-      for (let i = 1; i < run.length; i += 1) nearest = Math.min(nearest, segmentDistance(point, run[i - 1], run[i]));
-    }
-    return nearest;
-  };
-  for (const ramp of ramps) {
-    const pts = ramp.points;
-    const along: number[] = [0];
-    for (let i = 1; i < pts.length; i += 1) along.push(along[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
-    const total = along[along.length - 1] || 1;
-    // 整个匝道横截面离开主桥之后才开始下降，不能按固定百分比提前钻入桥面。
-    const clearIndex = (host.layout.highways ?? []).length ? pts.findIndex((p) => highwayDistance(p) >= (EXPRESSWAY_DECK_WIDTH + ramp.width) / 2 + 0.5) : -1;
-    const mergeEnd = clearIndex >= 0 ? along[clearIndex] : total * 0.4;
-    const heights = pts.map((p, i) => {
-      const t = Math.max(0, (along[i] - mergeEnd) / Math.max(1, total - mergeEnd)), e = t * t * (3 - 2 * t);
-      const ground = groundAt(p.x, p.z) + 0.3 - EXPRESSWAY_DECK_THICKNESS;
-      return EXPRESSWAY_DECK_Y + (ground - EXPRESSWAY_DECK_Y) * e;
-    });
-    let nextPier = 9;
-    for (let i = 1; i < pts.length; i += 1) {
-      const a = pts[i - 1], b = pts[i];
-      const length = Math.hypot(b.x - a.x, b.z - a.z);
-      if (length < 1e-3) continue;
-      const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
-      const ya = heights[i - 1], yb = heights[i];
-      const pitch = Math.atan2(yb - ya, length);
-      const slant = Math.hypot(length, yb - ya);
-      const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2, my = (ya + yb) / 2;
-      pieces.push({ x: mx, y: my, z: mz, sx: slant + 0.4, sy: EXPRESSWAY_DECK_THICKNESS, sz: ramp.width, yaw, pitch, color: "#6a7071" });
-      const sideX = Math.sin(yaw), sideZ = Math.cos(yaw);
-      // 两端留出开放的分流/地面 T 口，护栏不伸进主桥或横穿干道。
-      if (along[i - 1] >= mergeEnd && total - along[i] >= 10) {
-        for (const offset of [-(ramp.width / 2 - 0.15), ramp.width / 2 - 0.15]) pieces.push({ x: mx + sideX * offset, y: my + EXPRESSWAY_DECK_THICKNESS, z: mz + sideZ * offset, sx: slant, sy: 0.55, sz: 0.3, yaw, pitch, color: "#b9bcb2" });
-      }
-      for (const offset of [-(ramp.width / 2 - 0.7), ramp.width / 2 - 0.7]) {
-        const point = { x: mx + sideX * offset, z: mz + sideZ * offset };
-        // 重叠桥幅内沿用主线标线；匝道边线不能横穿主线车道。
-        if (highwayDistance(point) <= EXPRESSWAY_DECK_WIDTH / 2 + 0.4) continue;
-        pieces.push({ x: point.x, y: my + EXPRESSWAY_DECK_THICKNESS, z: point.z, sx: slant, sy: 0.05, sz: 0.18, yaw, pitch, color: "#e4dfc9" });
-      }
-      while (nextPier <= along[i]) {
-        const t = (nextPier - along[i - 1]) / length;
-        const px = a.x + (b.x - a.x) * t, pz = a.z + (b.z - a.z) * t, py = ya + (yb - ya) * t;
-        const bed = Math.max(-3, host.layout.terrain.height(px, pz));
-        if (py - bed >= 1.5) pieces.push({ x: px, y: bed, z: pz, sx: 1.4, sy: py - bed + 0.05, sz: ramp.width - 1.5, yaw, pitch: 0, color: "#a9aaa0" });
-        nextPier += 18;
-      }
-    }
-  }
+  const parts = highwayRampPieces(host.layout);
+  if (!parts.length) return;
+  const pieces = parts.map((p) => ({ x: p.x, y: p.y, z: p.z, sx: p.sx, sy: p.sy, sz: p.sz, yaw: p.ry, pitch: p.rz, color: p.color }));
   const mesh = new THREE.InstancedMesh(BOX.clone(), new THREE.MeshLambertMaterial({ color: "#ffffff" }), pieces.length);
   mesh.castShadow = true; mesh.receiveShadow = true;
   pieces.forEach((piece, index) => {

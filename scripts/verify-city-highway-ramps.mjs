@@ -2,13 +2,14 @@
 // 匝道必须接上真实高架和有限地面宿主，不能只在切线/道路延长线上看起来接近。
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
-const { planHighwayRamps, HIGHWAY_RAMP_CONFIG: C, segmentDistance, THREE, buildHighwayRamps, EXPRESSWAY_DECK_Y, expresswayPieces } = await loadCity({
+const { planHighwayRamps, HIGHWAY_RAMP_CONFIG: C, segmentDistance, THREE, buildHighwayRamps, EXPRESSWAY_DECK_Y, expresswayPieces, compileCitySurface, compileStaticStructureObstacles } = await loadCity({
   "engine/planner/highwayRamps.ts": ["planHighwayRamps", "HIGHWAY_RAMP_CONFIG"],
   "engine/roadGeometry.ts": ["segmentDistance"],
   "pkg:three": ["* as THREE"],
   "engine/systems/roadSystem.ts": ["buildHighwayRamps"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_Y"],
   "engine/surface/structureCompiler.ts": ["expresswayPieces"],
+  "engine/surface/compileSurface.ts": ["compileCitySurface", "compileStaticStructureObstacles"],
 });
 const road = (id, x, lo = -100, hi = 100) => ({ id, from: `${x}:${lo}`, to: `${x}:${hi}`,
   width: 12, kind: "arterial", structure: "ground-road", points: [{ x, z: lo }, { x, z: hi }] });
@@ -79,4 +80,21 @@ assert.ok(C.endClear >= 90, "merge points must be above the existing highway end
       `main rail at ${rail.x.toFixed(1)},${rail.z.toFixed(1)} cuts across a merging ramp`);
   }
 }
-console.log("City highway ramps: curved bridge contact, finite ground hosts, slope clearance, closed spacing, obstacles, determinism and rail openings passed.");
+// 立交匝道可驾驶（2026-10-20）：与高架同进结构编译器——桥面是高架层上的驾驶面片，地面端是带门户的落地点，
+// 护栏/墩柱/桥面板是碰撞实体。此前匝道只渲染：车开上去是穿模的空气，结构过渡审计也看不到它。
+{
+  const layout = { roadEdges: [road("host", 0)], extent: 600, terrain: { height: () => 1.2 }, highways: [run], bridges: [], landmarks: [], culDeSacEnds: [], highwayRamps: result.ramps };
+  const compiled = compileCitySurface(layout);
+  for (const [i, ramp] of result.ramps.entries()) {
+    const patches = compiled.surface.patches.filter((p) => p.id.startsWith(`ramp:${i}:`));
+    assert.ok(patches.length > 0 && patches.every((p) => p.kind === "ramp" && p.layerId.startsWith("expressway:")), `ramp ${i} is a drivable patch run on its highway layer`);
+    const landing = compiled.landings.find((l) => l.structureId === `ramp:${i}` && l.end === "to");
+    assert.ok(landing, `ramp ${i} has a ground landing`);
+    assert.ok(landing.step !== null && Math.abs(landing.step) < 0.35, `ramp ${i} lands flush (step ${landing.step})`);
+    const end = ramp.points.at(-1);
+    assert.ok(Math.hypot(landing.x - end.x, landing.z - end.z) < 1e-6, `ramp ${i} landing sits at the ground end`);
+  }
+  const obstacles = compileStaticStructureObstacles(layout);
+  for (const role of ["ramp-rail", "ramp-deck"]) assert.ok(obstacles.some((o) => o.role === role), `ramp ${role} is a collision solid`);
+}
+console.log("City highway ramps: drivable patches/landings/solids, curved bridge contact, finite ground hosts, slope clearance, closed spacing, obstacles, determinism and rail openings passed.");

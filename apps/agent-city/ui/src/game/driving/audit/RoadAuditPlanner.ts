@@ -17,7 +17,7 @@ import type { AuditKey, AuditManifest, AuditUnit, AuditUnitKind, RoadAuditCase }
 import { ROUTE_PILOT_CONTROLLER_VERSION, routePilotFactory } from "./RoutePilot";
 import { auditRoute, type PassabilityOptions, type PassabilityResult, type PassabilityRoute, type PassabilityWorld } from "./RoadPassabilityAudit";
 
-export const ROAD_AUDIT_PLANNER_VERSION = 3; // 2: routes start/exit on the deck layer their end points lie on; 3: ramp landings follow the real host road
+export const ROAD_AUDIT_PLANNER_VERSION = 4; // 2: routes start/exit on the deck layer their end points lie on; 3: ramp landings follow the real host road; 4: ramp landings mid-host-edge follow that edge
 
 type P = Readonly<{ x: number; z: number }>;
 export type PlannerEdge = Readonly<{ id: string; from: string; to: string; width: number; points: readonly P[]; bridge?: boolean; structure?: string }>;
@@ -227,7 +227,7 @@ function bridgeApproach(l: StructureLanding, edges: readonly PlannerEdge[], inci
   const bridge = l.structureId.startsWith("bridge:") ? edges.find((e) => e.id === l.structureId.slice("bridge:".length)) : undefined;
   if (l.structureId.startsWith("bridge:") && !bridge) return null;
   const node = bridge ? (l.end === "from" ? bridge.from : bridge.to) : `${l.x}:${l.z}`;
-  if (!bridge && !incident.has(node)) return null;
+  if (!bridge && !incident.has(node)) return midEdgeApproach(l, edges, reach);
   let best: { edge: PlannerEdge; atStart: boolean } | null = null; let bestDot = -Infinity;
   for (const x of incident.get(node) ?? []) {
     if (bridge && x.edge.id === bridge.id) continue;
@@ -240,6 +240,32 @@ function bridgeApproach(l: StructureLanding, edges: readonly PlannerEdge[], inci
   const leg = legPoints(best, node, incident, false);
   const L = lengthsOf(leg);
   return slice(leg, 0, Math.min(reach, L.at(-1)! * 0.8));
+}
+/** 立交匝道落在宿主路中段（宿主路未在出口处切分，1000/7 的菱形立交）：沿宿主路走向与匝道出向更一致的那一侧。
+ * 直出 6 会横穿 8 宽的宿主路上路缘（structure:ramp:0:to:onto start:no-surface）。 */
+function midEdgeApproach(l: StructureLanding, edges: readonly PlannerEdge[], reach: number): P[] | null {
+  let best: { pts: P[]; dot: number; id: string } | null = null;
+  for (const e of edges) {
+    if (e.bridge || (e.structure && e.structure !== "ground-road")) continue;
+    for (let i = 1; i < e.points.length; i++) {
+      const a = e.points[i - 1], b = e.points[i]; const dx = b.x - a.x, dz = b.z - a.z; const len2 = dx * dx + dz * dz;
+      if (len2 < 1e-12) continue;
+      const t = Math.max(0, Math.min(1, ((l.x - a.x) * dx + (l.z - a.z) * dz) / len2));
+      const q = { x: a.x + dx * t, z: a.z + dz * t };
+      if (Math.hypot(l.x - q.x, l.z - q.z) > e.width / 2) continue;
+      const len = Math.sqrt(len2);
+      for (const sign of [1, -1]) {
+        const dot = sign * (dx * l.outX + dz * l.outZ) / len;
+        if (best && (dot < best.dot || (dot === best.dot && e.id >= best.id))) continue;
+        const pts = sign > 0 ? [q, ...e.points.slice(i)] : [q, ...e.points.slice(0, i).reverse()];
+        best = { pts, dot, id: e.id };
+      }
+    }
+  }
+  if (!best) return null;
+  const L = lengthsOf(best.pts);
+  if (L.at(-1)! < 1e-6) return null;
+  return [{ x: l.x, z: l.z }, ...slice(best.pts, 0, Math.min(reach, L.at(-1)! * 0.8)).slice(1)];
 }
 type Incident = Map<string, { edge: PlannerEdge; atStart: boolean }[]>;
 type Chain = { id: string; edgeIds: string[]; points: P[]; width: number; loop: boolean };

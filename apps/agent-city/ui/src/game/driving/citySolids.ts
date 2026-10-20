@@ -22,7 +22,7 @@ export type SolidOnRoad = Readonly<{ id: string; role: string; x: number; z: num
 export function solidsOnRoad(regions: SurfaceRegionsBuild, collision: CollisionIndex, options: { step?: number; skipRoles?: ReadonlySet<string>; maxSamplesPerSolid?: number } = {}): SolidOnRoad[] {
   if (regions.status !== "ready") return [];
   const step = options.step ?? 1;
-  const skip = options.skipRoles ?? new Set(["bridge-railing", "expressway-rail", "island", "bridge-deck", "expressway-deck"]);
+  const skip = options.skipRoles ?? new Set(["bridge-railing", "expressway-rail", "island", "bridge-deck", "expressway-deck", "ramp-rail", "ramp-deck"]);
   const layers = [...new Set(regions.regions.flatMap((r) => r.layerIds))].sort();
   const out: SolidOnRoad[] = [];
   for (const solid of collision.solids()) {
