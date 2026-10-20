@@ -57,6 +57,38 @@ assert.equal(vm.runInContext("statisticsTimezoneName()", sandbox), "Pacific/Kiri
 assert.equal(result.data.daily.date, result.window.date);
 assert.equal(result.data.monthly.month, result.window.month);
 
+// Declarations are provider-scoped, matching the real Rust producer: no fabricated
+// harness is required. A null revision remains visible but cannot authorize revoke.
+assert.ok(result.data.declarations.declarations.length > 0);
+assert.ok(!Object.hasOwn(result.data.declarations.declarations[0], "harness"));
+override = async (command, args) => {
+  const value = await fixtureInvoke(command, args);
+  if (command === "billing_declarations") return { ...value, declarations: value.declarations.map((d) => ({ ...d, current_revision_id: null })) };
+  return value;
+};
+result = await sandbox.loadOverviewData();
+assert.deepEqual(Object.keys(result.errors), []);
+assert.equal(result.data.declarations.declarations[0].current_revision_id, null);
+for (const mutate of [
+  (d) => { d.current_revision_id = 17; },
+  (d) => { delete d.current_revision_id; },
+  (d) => { d.scopes = [{ scope_kind: "provider", scope_value: 17 }]; },
+]) {
+  override = async (command, args) => {
+    const value = await fixtureInvoke(command, args);
+    if (command === "billing_declarations") {
+      const declarations = value.declarations.map((d) => ({ ...d }));
+      mutate(declarations[0]);
+      return { ...value, declarations };
+    }
+    return value;
+  };
+  result = await sandbox.loadOverviewData();
+  assert.equal(result.errors.declarations.code, "schema-mismatch");
+  assert.ok(result.data.monthly, "malformed declaration does not erase valid siblings");
+}
+override = null;
+
 // Every missing/malformed command becomes its own error; siblings survive.
 for (const request of requests) {
   override = async (command, args) => command === request.command ? {} : fixtureInvoke(command, args);

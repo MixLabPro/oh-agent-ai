@@ -917,7 +917,14 @@ const OVERVIEW_REQUESTS = Object.freeze([
       && v.groups.every((g) => overviewNumber(g.tokens) && overviewNumber(g.session_count)
         && Array.isArray(g.estimated_amounts) && g.estimated_amounts.every((a) => overviewRecord(a)
           && typeof a.currency === "string" && Number.isFinite(a.amount_minor))) },
-  { key: "declarations", command: "billing_declarations", sections: ["billing"], valid: overviewList("declarations", ["declaration_id", "harness", "provider_id", "relationship_kind", "effective_start", "current_revision_id"]) },
+  // Provider-level declarations no longer carry a harness (Rust billing_declarations_value).
+  // A missing current revision is nullable evidence, not a malformed whole overview;
+  // renderBillingDeclarations refuses revision-dependent mutations in that case.
+  { key: "declarations", command: "billing_declarations", sections: ["billing"],
+    valid: (v) => overviewList("declarations", ["declaration_id", "provider_id", "relationship_kind", "effective_start"])(v)
+      && v.declarations.every((d) => (d.current_revision_id === null || typeof d.current_revision_id === "string")
+        && Array.isArray(d.scopes) && d.scopes.every((sc) => overviewRecord(sc)
+          && typeof sc.scope_kind === "string" && typeof sc.scope_value === "string")) },
   { key: "jobs", command: "billing_recalculation_jobs", sections: ["billing"], valid: overviewList("jobs", ["job_id", "status"]) },
 ]);
 
