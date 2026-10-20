@@ -15,6 +15,8 @@ import { replayStartMs } from "./replayRange";
 import { useCityGame } from "./game/useCityGame";
 import { useCityDrivingPlay } from "./game/useCityDrivingPlay";
 import { DrivingHud } from "./game/DrivingHud";
+import { useRoadAudit } from "./game/useRoadAudit";
+import { RoadAuditPanel } from "./game/ui/RoadAuditPanel";
 import type { PlanningWorkSnapshot } from "./engine/planner/operationBudget";
 
 const windowOptions = [7, 30, 90, 366] as const;
@@ -213,6 +215,8 @@ export function CityApp() {
   const dataAvailable = projection !== null && projection.status !== "unavailable";
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
   const cityLoading = dataLoaded && dataAvailable && projection?.status !== "empty" && !sceneUnavailable && !firstModelFrame;
+  const roadAuditEnabled = sceneReady && !driving.active && !game.active && !cinema && !experience.busy && !experience.film && !planRepair.state.active;
+  const roadAudit = useRoadAudit(engineRef, roadAuditEnabled);
   const toolbarReady = true; // UI/command channel ready; scene actions stay disabled until the first model frame.
   const tools: Tool[] = [
     // 时间范围、显示标签移入城市设置（用户：这两个应放设置里）；画质同样在设置里。city.window / city.labels 命令仍保留给宿主与自动化。
@@ -303,6 +307,8 @@ export function CityApp() {
         actions={{ clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,
           resume: driving.resume, openUiContext: driving.openUiContext }}
         locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />
+      {roadAuditEnabled && <RoadAuditPanel snapshot={roadAudit.snapshot} run={() => { void roadAudit.run(); }} cancel={() => roadAudit.cancel()}
+        engineRef={engineRef} locale={language === "en" ? "en" : "zh-Hans"} canRun={roadAuditEnabled} />}
     </section>
   ), language);
 }

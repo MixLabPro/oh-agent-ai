@@ -504,6 +504,14 @@
     "file": "verify-city-audit-planner.mjs"
   },
   {
+    "id": "verify-city-road-audit-ui",
+    "file": "verify-city-road-audit-ui.mjs"
+  },
+  {
+    "id": "verify-city-road-audit-worker",
+    "file": "verify-city-road-audit-worker.mjs"
+  },
+  {
     "id": "verify-city-driving-release-graph",
     "file": "verify-city-driving-release-graph.mjs"
   },
