@@ -44,6 +44,7 @@ import { finishDeadEnds } from "./planner/deadEnds";
 import { connectGroundJunctions } from "./planner/junctions";
 import { buildLandingCircles } from "./planner/landing";
 import { buildJunctionRings, type JunctionRing } from "./planner/junctionRings";
+import { rampLowZoneDiscs } from "./planner/rampLowZone";
 import { planHighwayRamps, type HighwayRamp } from "./planner/highwayRamps";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 import { clearsHighways, polygonDistance, roadNodeId, SegmentIndex, segmentDistance } from "./roadGeometry";
@@ -69,7 +70,11 @@ const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasia
 
 /** Capacity is discontinuous when terrain/site/skeleton choices change. Never
  * extrapolate an almost-empty plan into a many-hundred-fold area expansion. */
-export const RADIUS_CALIBRATION_CONFIG = { version: 1, maxRetries: 4, maxAreaGrowth: 2, capacityMargin: 1.04 };
+/** unsupportedNudge（v2，2026-10-20）：一次尝试一个街区都没有（路网拓扑不成立：roadBlockReport road-faces-have-unresolved-topology）不是容量信号。
+ *  曾按 0 地块去外推半径（被 maxAreaGrowth 截成 ×√2），基线岛 1703366229/t2 在 773.45 处拓扑失败，下一次直接
+ *  长到 1094、4486 个地块（应 ~1900）。同半径下 dev 代码同样失败，是潜在的拓扑缺陷；这里只在拓扑失败时把半径
+ *  微调 1% 重试，避开坏点，正常的容量校正不变。 */
+export const RADIUS_CALIBRATION_CONFIG = { version: 2, maxRetries: 4, maxAreaGrowth: 2, capacityMargin: 1.04, unsupportedNudge: 1.01 };
 export function nextCalibrationRadius(radius: number, required: number, available: number): number {
   if (![radius, required, available].every(Number.isFinite) || radius <= 0 || required <= 0 || available < 0) throw new RangeError("invalid capacity calibration input");
   if (available >= required) return radius;
@@ -125,7 +130,7 @@ function createCityPlanDraft(seed: number, tier: number, config: CoastalConfig |
   for (let attempt = 0; attempt < RADIUS_CALIBRATION_CONFIG.maxRetries; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
-    radius = nextCalibrationRadius(radius, targetParcels(tier), parcels);
+    radius = plan.blocks.length === 0 ? radius * RADIUS_CALIBRATION_CONFIG.unsupportedNudge : nextCalibrationRadius(radius, targetParcels(tier), parcels);
     plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve, opts.memoizeTerrain === true, opts.legacyGridParcels === true);
     radiusAttempts += 1;
     radiusHistory.push({ attempt: radiusAttempts, radius, generatedParcels: plan.parcelGeneration.generated,
@@ -378,7 +383,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── 统一连接器（网络优先批次 4-2）：本函数改走 planner/connect.ts 的 direct-projection 策略，
   // 经 commitNetworkPatch 事务提交；搜索判据逐字保留（投影/吸附/夹角/safeRoadLink/clearAngle/交叉），
   // 规划基线哈希不变是行为等价的证明。
-  const connectorWorld: ConnectorWorld = { network, geo, inRiver, reservations };
+  // 高架落地端低段禁行区（planner/rampLowZone.ts）：只并进连接器的预留——新地面路绕开低段；用地/地块不受影响。
+  const rampLowZones = rampLowZoneDiscs(ringRuns);
+  const connectorWorld: ConnectorWorld = { network, geo, inRiver, reservations: () => [...reservations(), ...rampLowZones] };
   let connectSeq = 0;
   const connectToNetwork = (endpoint: Vec2, maxDistance: number, arterial: boolean, exclude: (edge: RoadEdge) => boolean = () => false, minAngle = 60): boolean =>
     runConnection({
@@ -643,7 +650,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // （悬索桥装饰选址 withBridgeLandmark、nearBridgeEnd 桥头避让全部保持兼容）。树先于此遍放置，
   // 落到新增地面边上的按报告清除（与放置时的 width/2+3 同口径）。
   {
-    const landingReport = buildLandingCircles({ network, geo, inRiver, sites: reservations, carPaths });
+    const landingReport = buildLandingCircles({ network, geo, inRiver, sites: reservations, carPaths,
+      pinned: new Set(ringRuns.flatMap((run) => [run[0], run[run.length - 1]].map((p) => roadNodeId(keyOf(p))))) });
     if (landingReport.addedEdges.length) {
       for (let t = parkTrees.length - 1; t >= 0; t -= 1) {
         const tree = parkTrees[t];

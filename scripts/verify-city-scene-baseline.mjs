@@ -5,6 +5,10 @@
 //   node scripts/verify-city-scene-baseline.mjs [--diff|--update]
 // 范围：日夜两态（setNightGlow 0 / 1）× 两个岛档（380 与 1600 会话）。贴图内容不进哈希（Node 里画布是空替身）。
 // 时间相关量固定：生成时间 generatedAt 与回放游标写死，不读墙钟。
+// 时区钉死：天气与天光按本机时区算当地时刻（engine/environment/WeatherState.ts 默认取 getTimezoneOffset），
+// 屋顶/竖井/实例网格的哈希随之变。基线是在 +0800 机器上冻结的，UTC 的 CI/云端容器上同一份代码恒失配
+// （2026-10-19 实测：连冻结它的 929921c3 自身都过不了）。Node 运行时改 TZ 即生效；须在建场景之前设置。
+process.env.TZ = "Asia/Shanghai";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";

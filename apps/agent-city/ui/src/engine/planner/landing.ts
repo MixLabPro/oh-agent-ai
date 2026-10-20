@@ -54,6 +54,9 @@ export type LandingWorld = {
   sites: () => Array<{ x: number; z: number; radius: number }>;
   /** 车流折线（可选）：被车流走过的链不会被 pruneShortSpurs 删，不算「缺失风险」。 */
   carPaths?: Vec2[][];
+  /** 不可动节点（可选）：高架出口落在这些节点上。删除与之相连的边或删除节点本身的落地环一律放弃——
+   *  0/42（seed 42 tier 1 Miami）的落地环曾删掉高架 to 端所在的路，出口离最近的路中线 2.29，路缘穿过落地区。 */
+  pinned?: ReadonlySet<string>;
 };
 
 export type LandingReport = {
@@ -419,6 +422,10 @@ export function buildLandingCircles(world: LandingWorld): LandingReport {
         let live = 0;
         for (const e of network.edges.values()) if (!removedSet.has(e.id) && (e.from === id || e.to === id)) live += 1;
         if (live === 0 && !adds.some((e) => roadNodeId(keyOf(e.a)) === id || roadNodeId(keyOf(e.b)) === id)) removeNodeIds.push(id);
+      }
+      const pinned = world.pinned;
+      if (pinned && (removeNodeIds.some((id) => pinned.has(id)) || removeIds.some((id) => { const e = network.edges.get(id); return !!e && (pinned.has(e.from) || pinned.has(e.to)); }))) {
+        lastReason = "pinned-exit"; continue;
       }
       const minGap = (LANDING_CONFIG.minJunctionGapDeg * Math.PI) / 180;
       const patch: NetworkPatch = { baseVersion: network.version ?? 0, removeEdgeIds: removeIds, removeNodeIds, splits, addEdges: adds };

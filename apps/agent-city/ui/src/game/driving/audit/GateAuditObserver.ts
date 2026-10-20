@@ -43,6 +43,9 @@ export class GateAuditObserver implements AuditObserver {
         const lateral = Math.abs(-(x - gate.x) * gate.forwardZ + (z - gate.z) * gate.forwardX);
         const halfWidth = DRIVING_FOOTPRINT.halfLength * Math.abs(-Math.cos(heading) * gate.forwardZ + Math.sin(heading) * gate.forwardX) +
           DRIVING_FOOTPRINT.halfWidth * Math.abs(Math.sin(heading) * gate.forwardZ + Math.cos(heading) * gate.forwardX);
+        // 门是一条无限长的平面：长路线（出生 → 最远节点）会在别处横穿自己出口门的延长线（0/7 实测：离门 517），
+        // 那不是这道门，不计也不判偏离。离门近处的真偏离由走廊校验先报。
+        if (lateral > 2 * gate.halfWidth + 2 * DRIVING_FOOTPRINT.halfLength) break;
         const y = a.y + (b.y - a.y) * t;
         if (lateral + halfWidth > gate.halfWidth || Math.abs(y - gate.y) > gate.heightTolerance || !gate.surfaceIds.includes(b.surfaceId)) {
           return { status: "route-deviation", progress, plannedStop: false };

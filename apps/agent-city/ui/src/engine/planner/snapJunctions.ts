@@ -254,7 +254,10 @@ export function rebindJunctionReferences(ctx: RepairContext, source: RoadNode, t
 
 function commitSnap(ctx: RepairContext, source: RoadNode, target: RoadNode, splits: NetworkPatch["splits"] = [], coalesceStraightGround = false): boolean {
   const incident = [...ctx.network.edges.values()].filter((edge) => [edge.from, edge.to].some((id) => id === source.id || id === target.id));
-  if (source.id === ctx.primaryAnchorNodeId || incident.some((edge) => edge.bridge)) return false;
+  // 只禁止移动「桥头」本身（source 带桥：重绑会把桥端挪走）。把普通路端吸到桥头上（target 带桥）不动桥：
+  // survey seed 2004608076 t1 的 12 宽干道端点离桥头 2.2、离桥头引道 0.5，曾因 target 带桥被拒，未接路口修不上。
+  // 角度、短腿、走廊与交叉校验照旧。
+  if (source.id === ctx.primaryAnchorNodeId || incident.some((edge) => edge.bridge && (edge.from === source.id || edge.to === source.id))) return false;
   // Two near junctions may already be joined by a sub-unit connector. Rebinding
   // them would turn that edge into a self-loop, so remove only that collapsed
   // connector in the same atomic patch (never a bridge or a longer road).
@@ -293,10 +296,16 @@ function commitSnap(ctx: RepairContext, source: RoadNode, target: RoadNode, spli
       if (groundJunctionFindings([...draft.edges.values()]).some((finding) => !existingCrossings.has([...finding.edges].sort().join("|")))) return "snap introduced a new crossing";
       if (legs.length < 2) return "snap needs a real road continuation";
       for (const edge of legs) {
+        // 桥腿只会出现在 target 一侧（source 带桥已在上面拒绝），重绑不改它的端点：不是地面路，不走地面走廊校验。
+        if (edge.bridge) continue;
         const parent = [...incident, ...originalHosts.values()].find((old) => remappedIds(old.id).includes(edge.id)) ?? edge;
+        // 用地净距只要求「不比原来更差」：腿的父边本来就压进用地净距时（survey seed 2004608076 t1：桥头引道离
+        // riverside-park 中心 46.48，半径 47），吸附即使不碰它的几何也会因重新校验这条旧违例被拒，未接路口永远修不上。
+        // 父边已有 site-clearance 违例时同类违例放行；其余（坡度、可建、交叉、角度、地块）照旧。
+        const parentSiteViolation = parent.points.slice(1).some((point, k) => groundJunctionCorridorViolation(world, parent.points[k], point, parent.width, parent)?.kind === "site-clearance");
         for (let k = 1; k < edge.points.length; k += 1) {
           const failure = groundJunctionCorridorViolation(world, edge.points[k - 1], edge.points[k], edge.width, parent);
-          if (failure) return `snap corridor unsafe: ${failure.kind}/${failure.cause}${failure.at ? ` at ${failure.at.x}:${failure.at.z}` : ""} on ${edge.id}`;
+          if (failure && !(failure.kind === "site-clearance" && parentSiteViolation)) return `snap corridor unsafe: ${failure.kind}/${failure.cause}${failure.at ? ` at ${failure.at.x}:${failure.at.z}` : ""} on ${edge.id}`;
         }
         if (changedEdges.some((old) => old.from === edge.from || old.to === edge.to || old.from === edge.to || old.to === edge.from)) {
           for (const parcel of ctx.blocks.flatMap((block) => block.parcels)) if (polylineDistance([edge.points], parcel) < Math.hypot(parcel.width, parcel.depth) / 2 + edge.width / 2 + 0.5) return "snap parcel clearance";

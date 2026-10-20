@@ -19,6 +19,7 @@ import { isletEstate } from "./cityIsletEstate";
 import { findBlockLotCandidate, LAYOUT_PLACEMENT_WORK_CONFIG } from "./planner/blockLotCandidates";
 import { inspectBlockPlacement, type BlockPlacementInput, type BlockPlacementResult } from "./planner/blockPlacement";
 import { compileGroundRoadSurface } from "./surface/groundRoadCompiler";
+import { groundRoadClearance } from "./surface/roadClearance";
 import { civicMinimumSize, civicEnvelopeSize, GARDEN_MINIMUM_SIZE, DISTRICT_LANDMARK_ENVELOPE } from "./models/layoutPlacementGeometry";
 
 export type Vec2 = { x: number; z: number };
@@ -752,6 +753,18 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
   const grown = growWithBuildings(plan, used, districts, civics, hotelBlocks.flatMap(block => block.parcels));
+  // Background buildings were cleared against the PLAN's roads; the displayed network (grown) can add or
+  // restore roads, and one 60-tall facade stood on such a road (90/1, road obstruction guard). Keep only
+  // those whose rotated footprint stays off every displayed carriageway.
+  const displayedRoads = grown.roadEdges ?? plan.roadEdges;
+  const contextOffRoad = contextBuildings.filter((b) => {
+    const c = Math.cos(b.yaw), s = Math.sin(b.yaw);
+    for (const fx of [-0.5, 0, 0.5]) for (const fz of [-0.5, 0, 0.5]) {
+      const lx = fx * b.width, lz = fz * b.depth;
+      if (groundRoadClearance(displayedRoads, b.x + lx * c + lz * s, b.z - lx * s + lz * c) < 0.5) return false;
+    }
+    return true;
+  });
   // 生长剪枝（G1）会删掉空置街区的支路：计划层的回车点若所在路已被删，就不再画回车圈。
   // 只保留最终路网里仍是度 1 非桥路端的点（与 classifyEndpoints 的度口径一致）。
   const liveDegree = new Map<string, number>();
@@ -760,7 +773,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
     sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
     aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
-  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: layoutCoastalKey(coastal), coastalConfig: coastal, contextBuildings, oceanDrive };
+  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: layoutCoastalKey(coastal), coastalConfig: coastal, contextBuildings: contextOffRoad, oceanDrive };
 }
 
 /**
