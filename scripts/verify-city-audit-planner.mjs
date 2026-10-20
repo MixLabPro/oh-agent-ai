@@ -111,7 +111,10 @@ if (process.argv.includes("--cities")) {
       const capture = await new kit.CitySurfacePort().capture(lease.source); assert.equal(capture.status, "ready");
       const snap = capture.readWorld();
       const world = kit.passabilityWorld(snap, kit.buildSurfaceRegions(snap.surface, kit.buildSurfaceIndex(snap.surface)), capture.isCurrent).world;
-      const full = kit.planRoadAudit({ worldRevision: snap.revision, roadEdges: lease.source.layout.roadEdges, landings: snap.landings });
+      const lay = lease.source.layout;
+      // 结构中线（桥面一侧沿它走）：高架 = layout.highways[i]，立交匝道 = highwayRamps[i].points（from 端 → to 端）。
+      const structurePaths = Object.fromEntries([...(lay.highways ?? []).map((pts, i) => [`expressway:${i}`, pts]), ...(lay.highwayRamps ?? []).map((r, i) => [`ramp:${i}`, r.points])]);
+      const full = kit.planRoadAudit({ worldRevision: snap.revision, roadEdges: lay.roadEdges, landings: snap.landings, structurePaths });
       const plan = full; const stride = limit ? Math.ceil(full.routes.length / limit) : 1;
       const t = Date.now();
       // PLANNER_KINDS=spawn-access,turn：只跑这几类单元（诊断用；分母照旧是完整清单）。

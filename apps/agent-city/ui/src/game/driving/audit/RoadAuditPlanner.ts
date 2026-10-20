@@ -17,7 +17,7 @@ import type { AuditKey, AuditManifest, AuditUnit, AuditUnitKind, RoadAuditCase }
 import { ROUTE_PILOT_CONTROLLER_VERSION, routePilotFactory } from "./RoutePilot";
 import { auditRoute, type PassabilityOptions, type PassabilityResult, type PassabilityRoute, type PassabilityWorld } from "./RoadPassabilityAudit";
 
-export const ROAD_AUDIT_PLANNER_VERSION = 4; // 2: routes start/exit on the deck layer their end points lie on; 3: ramp landings follow the real host road; 4: ramp landings mid-host-edge follow that edge
+export const ROAD_AUDIT_PLANNER_VERSION = 5; // 2: routes start/exit on the deck layer their end points lie on; 3: ramp landings follow the real host road; 4: ramp landings mid-host-edge follow that edge; 5: the deck side follows the structure centreline when one is given
 
 type P = Readonly<{ x: number; z: number }>;
 export type PlannerEdge = Readonly<{ id: string; from: string; to: string; width: number; points: readonly P[]; bridge?: boolean; structure?: string }>;
@@ -28,6 +28,10 @@ export type PlannerInput = Readonly<{
   roadEdges: readonly PlannerEdge[];
   landings: readonly StructureLanding[];
   spawns?: readonly AuditSpawn[];
+  /** Structure centrelines keyed by structureId, ordered from its "from" end to its "to" end
+   * (`expressway:<i>` → layout.highways[i], `ramp:<i>` → layout.highwayRamps[i].points). Optional: without
+   * one the deck side runs straight along the landing's span axis (edge bridges are straight anyway). */
+  structurePaths?: Readonly<Record<string, readonly P[]>>;
 }>;
 export type PlannerParams = Readonly<{
   /** Directed edges: trimmed off the node fans at both ends. */
@@ -181,7 +185,10 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
     // Legal envelope: the wider of the deck's seam and the approach road (region boundaries still bound the deck).
     const approachWidth = l.structureId.startsWith("bridge:") ? Math.max(0, ...[...(incident.get((() => { const b = edges.find((e) => e.id === l.structureId.slice(7)); return b ? (l.end === "from" ? b.from : b.to) : ""; })()) ?? [])].filter((x) => x.edge.id !== l.structureId.slice(7)).map((x) => x.edge.width)) : 0;
     const half = Math.max(Math.hypot(l.seam.b.x - l.seam.a.x, l.seam.b.z - l.seam.a.z) / 2, approachWidth / 2) + params.structureMargin;
-    const deck = { x: l.x - l.outX * params.deckReach, z: l.z - l.outZ * params.deckReach };
+    // 桥面一侧沿结构中线走：曾一律沿落地出向直退 deckReach。高架首段只有 1.9–2.4 长、紧接约 65° 的转弯
+    // （1000/7、1000/65537 的 expressway:0 from 端），直退 12 早已离开桥面，onto 出门 / off 起步都是 no-surface。
+    const deckSide = deckApproach(l, input.structurePaths?.[l.structureId], params.deckReach)
+      ?? [{ x: l.x, z: l.z }, { x: l.x - l.outX * params.deckReach, z: l.z - l.outZ * params.deckReach }];
     // Ground side along the ACTUAL approach: a bridge lands on a road node, whose approach bends often — a
     // straight line along the span axis ran onto sidewalks. Expressway ramps land mid-road (straight, short).
     const approach = bridgeApproach(l, edges, incident, params.groundReach);
@@ -189,7 +196,7 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
     for (const dir of ["onto", "off"] as const) {
       const id = `${base}:${dir}`;
       if (l.status === "no-ground") { exclude(id, "structure-transition", "no-ground-landing"); continue; }
-      const onto = fillet([...[...groundSide].reverse(), deck], params.filletRadius, params.filletStep);
+      const onto = fillet([...[...groundSide].reverse(), ...deckSide.slice(1)], params.filletRadius, params.filletStep);
       route(id, "structure-transition", dir === "onto" ? onto : [...onto].reverse(), half,
         dir === "onto" ? { startLayer: "ground", exitLayer: l.layerId } : { startLayer: l.layerId, exitLayer: "ground" });
     }
@@ -218,6 +225,16 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
     units: Object.freeze(units), exclusions: Object.freeze(exclusions), routes: Object.freeze(routes), counts: Object.freeze(counts) });
 }
 
+/** Deck-side polyline of a landing: from the landing point `reach` along the structure centreline into the
+ * structure; null when no centreline is given or its matching end is not at the landing. */
+function deckApproach(l: StructureLanding, path: readonly P[] | undefined, reach: number): P[] | null {
+  if (!path || path.length < 2) return null;
+  const pts = l.end === "from" ? [...path] : [...path].reverse();
+  if (Math.hypot(pts[0].x - l.x, pts[0].z - l.z) > 0.5) return null;
+  const L = lengthsOf(pts);
+  if (L.at(-1)! < 1e-6) return null;
+  return [{ x: l.x, z: l.z }, ...slice(pts, 0, Math.min(reach, L.at(-1)! * 0.8)).slice(1)];
+}
 /** Ground-side polyline of a bridge landing, starting at the landing node and running `reach` along the
  * incident road most aligned with the span (through degree-2 continuations); null when the structure is not
  * a road-edge bridge (expressway ramps) or no approach exists. */

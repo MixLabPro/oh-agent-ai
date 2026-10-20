@@ -24,7 +24,7 @@ import type { SurfaceRegionsBuild } from "./surfaceRegions";
 import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatch, SurfacePortal } from "./types";
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
-export const CITY_SURFACE_GEOMETRY_VERSION = 13;
+export const CITY_SURFACE_GEOMETRY_VERSION = 14;
 /** Lift of an expressway ribbon's interior seams above the higher slab top (keeps slabs below the drivable surface). */
 const RIBBON_LIFT = 0.03;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
@@ -152,11 +152,34 @@ function ribbonFaces(deck: readonly BoxPart[], half: number, overhang: number): 
     return [{ x: c.x - mx * w, y: c.y, z: c.z - mz * w }, { x: c.x + mx * w, y: c.y, z: c.z + mz * w }];
   };
   const seams = deck.map((_, i) => (i === 0 ? null : seamAt(i)));
-  return deck.map((_, i) => {
+  // boxTopFace order: [start −side, end −side, end +side, start +side].
+  const faceOf = (i: number): P3[] => {
     const t = tops[i]; const start = seams[i], end = i + 1 < deck.length ? seams[i + 1] : null;
-    // boxTopFace order: [start −side, end −side, end +side, start +side].
     return [start ? start[0] : t[0], end ? end[0] : t[1], end ? end[1] : t[2], start ? start[1] : t[3]];
-  });
+  };
+  // 斜接不得把短段折叠（2026-10-20）：弯内侧的斜接点比接缝中心后退 half·tan(θ/2)，短段（高架落地处 1.9–2.4 长、
+  // 紧接 ~65° 转弯）上它越过了这段另一端的接缝，面片自交成蝴蝶结，边界提取失败 → 面片 boundary-unresolved 被排除，
+  // 1000/7、1000/65537 的 expressway:0 from 端落地后第一块驾驶面不存在（structure:expressway:0:from:* 无法连通）。
+  // 侧边恒平行于段轴，未折叠的四边形必为凸——非凸即折叠：该段两端的接缝退回板顶（与 >120° 的退路相同），直到全部为凸。
+  const convex = (q: readonly P3[]) => {
+    let sign = 0;
+    for (let k = 0; k < 4; k++) {
+      const a = q[k], b = q[(k + 1) % 4], c = q[(k + 2) % 4];
+      const cr = (b.x - a.x) * (c.z - b.z) - (b.z - a.z) * (c.x - b.x);
+      if (Math.abs(cr) < 1e-9) return false;
+      if (sign === 0) sign = Math.sign(cr); else if (Math.sign(cr) !== sign) return false;
+    }
+    return true;
+  };
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let i = 0; i < deck.length; i++) {
+      if (convex(faceOf(i))) continue;
+      if (seams[i]) { seams[i] = null; changed = true; }
+      if (i + 1 < deck.length && seams[i + 1]) { seams[i + 1] = null; changed = true; }
+    }
+  }
+  return deck.map((_, i) => faceOf(i));
 }
 
 export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?: CompiledGroundRoadSurface; aliasTolerance?: number } = {}): CitySurfaceCompilation {
