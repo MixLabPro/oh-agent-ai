@@ -30,6 +30,8 @@ import functools
 import json
 from pathlib import Path
 
+from ..paths import user_home
+
 from agent_vitals.adapters import claude_session
 from agent_vitals.agent import canonical_audit, claude_evidence, harness_capability
 
@@ -70,7 +72,7 @@ def claude_session_list(home=None):
     evidence 的 extract_model 同一惯例）。`home` 默认 `Path.home()`——尊重
     `HOME`（测试用 isolated_home_env 注入）。"""
     if home is None:
-        home = Path.home()
+        home = user_home()
     sessions = []
     for path in claude_session.claude_project_files(home):
         info = claude_session._file_info(path)

@@ -26,7 +26,7 @@
                     **回填**是累加（新证据不能覆盖已有数据）——两条路径的
                     区别见 `merge_month` 与 `_archive_days` 各自的注释。
 
-四件事共用同一把锁：`fcntl.flock` on `<state_dir>/.lock`。POSIX rename
+四件事共用同一把锁：POSIX 用 `flock`，Windows 用 `msvcrt.locking`，锁文件在 `<state_dir>/.lock`。POSIX rename
 原子，所以「写 tmp → rename」不需要锁保护；锁是给「read-modify-write」
 合并场景防两个并发审计互相覆盖的。
 
@@ -37,7 +37,6 @@ xbar tick 是本地脚本，日历是本地 HTML。
 
 import contextlib
 import errno
-import fcntl
 import json
 import os
 import sys
@@ -47,6 +46,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .. import paths
+
+if sys.platform != "win32":
+    import fcntl
 
 
 SCHEMA_VERSION = "1.0.0"
@@ -118,29 +120,41 @@ def cache_dir() -> Path:
 
 
 @contextlib.contextmanager
-def _locked(path: Path):
-    """flock(LOCK_EX) 守护 read-modify-write。
-
-    flock 是**咨询性**锁：只对**也走 flock 的进程**生效。xbar tick 脚本
-    必须用同一个 helper 取锁才不会互相覆盖。其他进程（人手 vim 改
-    文件）仍然可以直读 —— 这是 POSIX flock 的语义，不补保证。
-
-    Windows 不支持 fcntl.flock；这里直接报错而不是静默走无锁路径
-    （CLAUDE.md §「harness 能力缺失时降级、绝不臆造」是数据纪律不是
-    锁纪律，锁缺失必须显式失败）。
-    """
+def _locked_fd(fd):
+    """Lock one byte on Windows or flock the descriptor on POSIX."""
     if sys.platform == "win32":
-        raise OSError("state.py uses POSIX flock; Windows not supported")
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _locked(path: Path):
+    """Platform file lock guards read-modify-write.
+
+    Locks are advisory on both platforms. POSIX uses flock; Windows locks
+    the first byte with msvcrt. Writers must use this helper to avoid lost
+    updates; unrelated readers can still read the file without taking a lock.
+    """
     lock_path = path.with_suffix(path.suffix + ".lock")
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        with _locked_fd(fd):
+            yield
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        os.close(fd)
 
 
 def _atomic_write(path: Path, data: dict) -> None:
@@ -704,7 +718,7 @@ def merge_month(hour_buckets_result, by_date_model=None) -> Path:
 def append_session_history(summary):
     """追加一行到 sessions.jsonl —— xbar 显示「最近 5 次审计」用。
 
-    追加(append-only)+ fcntl 锁,确保多个并发 oneline 不会丢行。
+    追加(append-only)+平台文件锁，确保多个并发 oneline 不会丢行。
     sessions.jsonl **不** rotate 也没事 —— 月增 ~100 行,几年才上 MB。
 
     summary 是 oneline 的那一份 dict(见 cli.py::oneline handler),
@@ -719,15 +733,12 @@ def append_session_history(summary):
     lock_path = path.with_suffix(path.suffix + ".lock")
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        line = json.dumps(payload, ensure_ascii=False, default=str)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with _locked_fd(fd):
+            line = json.dumps(payload, ensure_ascii=False, default=str)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        os.close(fd)
 
 
 

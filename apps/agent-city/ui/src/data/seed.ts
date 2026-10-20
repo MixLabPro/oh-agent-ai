@@ -1,10 +1,19 @@
 import { invokeHost, embedded } from "../host";
 import type { PluginResponseV1 } from "@agent-vitals/app-sdk";
 let sequence = 0;
+export const DEMO_CITY_SEED = 74031;
+
+/** Demo previews intentionally ignore and never modify the user's city seed. */
+export function isStandaloneDemo(): boolean {
+  return typeof window !== "undefined" && !window.__AV_PLUGIN_INSTANCE__ &&
+    typeof location !== "undefined" && new URLSearchParams(location.search).get("demo") === "1";
+}
+
 export function randomSeed(): number {
   return (crypto.getRandomValues(new Uint32Array(1))[0] >>> 0) || 1;
 }
 export async function citySeed(action: "read" | "write", seed?: number): Promise<number | null> {
+  if (isStandaloneDemo()) return action === "read" ? DEMO_CITY_SEED : (seed ?? DEMO_CITY_SEED);
   if (!embedded() || window.__CITY_ISOLATION_FIXTURE__) {
     if (action === "write") localStorage.setItem("city.seed", String(seed));
     const saved = Number(localStorage.getItem("city.seed") ?? localStorage.getItem("agent-vitals.city-seed"));

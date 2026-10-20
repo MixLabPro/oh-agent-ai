@@ -9,8 +9,14 @@ declare global { interface Window {
 const browserInstance = window.parent !== window && !window.__TAURI__?.core?.invoke
   ? new URL(location.href).searchParams.get("instanceId") : null;
 if (browserInstance) window.__AV_PLUGIN_INSTANCE__ = browserInstance;
-if (browserInstance) window.__AV_PLUGIN_LOCALE__ = new URL(location.href).searchParams.get("locale") === "en" ? "en" : "zh-Hans";
-export const pluginLocale = () => window.__AV_PLUGIN_LOCALE__ ?? "zh-Hans";
+// Unspecified locale follows the system language; unsupported systems (ja, ko, …) fall back to English.
+const systemLocale = (): "en" | "zh-Hans" =>
+  typeof navigator !== "undefined" && navigator.language.toLowerCase().startsWith("zh") ? "zh-Hans" : "en";
+if (browserInstance) {
+  const requested = new URL(location.href).searchParams.get("locale");
+  window.__AV_PLUGIN_LOCALE__ = requested === "zh-Hans" || requested === "en" ? requested : systemLocale();
+}
+export const pluginLocale = () => window.__AV_PLUGIN_LOCALE__ ?? systemLocale();
 export function observeLocale(callback: () => void) {
   window.addEventListener("__AV_PLUGIN_LOCALE_CHANGED__", callback);
   return () => window.removeEventListener("__AV_PLUGIN_LOCALE_CHANGED__", callback);

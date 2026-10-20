@@ -1294,7 +1294,7 @@ impl SessionAgg {
 /// 导致订阅声明一生效，会话列表与峰值小时下钻整段空掉（mcp_smoke Q04：峰值小时
 /// 13.8M tokens、构成会话 0 个，2026-09-17）。钱归谁由 `session_billing_buckets`
 /// 的 billing_mode 表达，不靠隐藏会话。
-const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, harness,
+const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, harness,
             MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
             SUM(uncached_input_tokens), SUM(cache_read_tokens),
             SUM(cache_write_tokens), SUM(output_tokens),
@@ -1308,10 +1308,10 @@ const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, harness,
        AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
        AND session_key IS NOT NULL
        AND event_ts_ms >= ?2 AND event_ts_ms < ?3
-       AND (?4 < 0 OR (CAST((", local_hour_idx!(), " + (?5 - ?5) + (?6 - ?6)) % 24 AS INTEGER) = ?4))
+       AND (?4 < 0 OR (CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', printf('%+d hours', (?5 / ?6))) AS INTEGER) = ?4))
        AND (?7 IS NULL OR COALESCE(model_id, '<unknown>') = ?7)
        AND (?8 IS NULL OR COALESCE(provider_id, '<unknown>') = ?8)
-       GROUP BY session_key");
+       GROUP BY session_key";
 
 /// 窗口内的会话聚合，跨 wired 执行环境合并。`hour` = 北京小时过滤（`None` = 不过滤）；
 /// `min_tokens` = HAVING 门槛；按 `total` 降序 + `session_key` 升序稳定排序，
@@ -1574,6 +1574,27 @@ pub fn session_billing_buckets(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Vec<Value>, AuthorityError> {
+    session_billing_buckets_in_window(conn, session_key, None)
+}
+
+/// Same billing buckets restricted to an inclusive event-time window. City
+/// uses this so the building's estimate matches the tokens shown for its view.
+pub fn session_billing_buckets_in_window(
+    conn: &Connection,
+    session_key: &str,
+    window: Option<(i64, i64)>,
+) -> Result<Vec<Value>, AuthorityError> {
+    let mut grouped = sessions_billing_buckets_in_window(conn, &[session_key.to_string()], window)?;
+    Ok(grouped.remove(session_key).unwrap_or_default())
+}
+
+/// Shared batch read: schema and sync overlay are read once per request, not once per building.
+/// The session keys are internal query inputs and never belong to a serving DTO.
+pub fn sessions_billing_buckets_in_window(
+    conn: &Connection,
+    session_keys: &[String],
+    window: Option<(i64, i64)>,
+) -> Result<std::collections::BTreeMap<String, Vec<Value>>, AuthorityError> {
     // Trace fixtures from before v1.0 intentionally omit the derived attribution
     // tables. Keep their scalar billing_mode path, while production databases use
     // the latest saved subscription attribution as the authoritative session view.
@@ -1598,29 +1619,38 @@ pub fn session_billing_buckets(
     } else {
         "COALESCE(f.billing_mode, 'unknown')"
     };
+    let time_filter = if window.is_some() {
+        " AND f.event_ts_ms >= ?2 AND f.event_ts_ms <= ?3"
+    } else { "" };
     let query = format!(
         "SELECT f.harness, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
                 f.billing_template_id, {billing_mode_expr},
                 COALESCE(f.pricing_basis, 'unavailable'), COALESCE(f.evidence_basis, 'missing'),
                 f.event_peak, ps.pricing_version, ps.payload_json,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens), MAX(f.event_ts_ms)
+                SUM(cache_write_tokens), SUM(output_tokens), MAX(f.event_ts_ms), f.session_key
          FROM usage_facts AS f
          LEFT JOIN pricing_snapshots AS ps ON ps.pricing_version = (
              SELECT pricing_version FROM pricing_snapshots
              WHERE captured_at_ms <= f.event_ts_ms
              ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1
          )
-         WHERE f.session_key = ?1 AND f.observation_kind != 'legacy_aggregate'
-           AND f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL
-         GROUP BY f.harness, f.provider_id, f.provider_raw, f.model_id, f.billing_template_id,
+         WHERE f.session_key IN (SELECT value FROM json_each(?1)) AND f.observation_kind != 'legacy_aggregate'
+           AND f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL {time_filter}
+         GROUP BY f.session_key, f.harness, f.provider_id, f.provider_raw, f.model_id, f.billing_template_id,
                   {billing_mode_expr}, f.pricing_basis, f.evidence_basis, f.event_peak,
                   ps.pricing_version, ps.payload_json
          ORDER BY f.provider_id, f.provider_raw, f.model_id, f.billing_template_id, event_peak, ps.pricing_version",
         billing_mode_expr = billing_mode_expr,
+        time_filter = time_filter,
     );
-    let mut stmt = conn.prepare(&query)?;
-    let rows = stmt.query_map(rusqlite::params![session_key], |r| {
+    let mut stmt = conn.prepare_cached(&query)?;
+    let mut query_params = vec![rusqlite::types::Value::Text(serde_json::to_string(session_keys).map_err(|_| rusqlite::Error::InvalidQuery)?)];
+    if let Some((from, to)) = window {
+        query_params.push(rusqlite::types::Value::Integer(from));
+        query_params.push(rusqlite::types::Value::Integer(to));
+    }
+    let rows = stmt.query_map(rusqlite::params_from_iter(query_params.iter()), |r| {
         Ok((
             r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
             r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?,
@@ -1628,17 +1658,17 @@ pub fn session_billing_buckets(
             r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, i64>(8)?,
             r.get::<_, Option<String>>(9)?, r.get::<_, Option<String>>(10)?,
             r.get::<_, i64>(11)?, r.get::<_, i64>(12)?, r.get::<_, i64>(13)?,
-            r.get::<_, i64>(14)?, r.get::<_, i64>(15)?,
+            r.get::<_, i64>(14)?, r.get::<_, i64>(15)?, r.get::<_, String>(16)?,
         ))
     })?;
     // 每日同步叠加层：历史快照里当时没有的卡用它补（只补缺卡，已有价不动）。
     let sync_overlay: Option<Value> = crate::authority::latest_pricing_sync_overlay(conn)?
         .and_then(|raw| serde_json::from_str(&raw).ok());
-    let mut buckets = Vec::new();
+    let mut buckets: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
     for row in rows {
         let (harness, provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
             evidence_basis, peak, pricing_version, pricing_payload, uncached, cache_read,
-            cache_write, output, last_event_ms) = row?;
+            cache_write, output, last_event_ms, key) = row?;
         let usage = billing_bucket_usage_json(
             &harness, &model_id, provider_id.as_deref(), peak != 0,
             [uncached, cache_read, cache_write, output],
@@ -1670,7 +1700,9 @@ pub fn session_billing_buckets(
         } else {
             None
         };
-        buckets.push(json!({
+        let total = uncached.checked_add(cache_read).and_then(|n| n.checked_add(cache_write))
+            .and_then(|n| n.checked_add(output)).ok_or(rusqlite::Error::InvalidQuery)?;
+        buckets.entry(key).or_default().push(json!({
             "provider_id": provider_id,
             "provider_raw": provider_raw,
             "model_id": model_id,
@@ -1688,7 +1720,7 @@ pub fn session_billing_buckets(
                 "cache_read_tokens": cache_read,
                 "cache_write_tokens": cache_write,
                 "output_tokens": output,
-                "total": uncached + cache_read + cache_write + output,
+                "total": total,
             },
             // Subscription usage is explicitly classified and therefore is not
             // an unresolved attribution. Keep the explanatory reason, but do
@@ -1711,6 +1743,12 @@ pub fn session_cost_view(
     session_key: &str,
 ) -> Result<Value, AuthorityError> {
     let buckets = session_billing_buckets(conn, session_key)?;
+    Ok(session_cost_view_from_buckets(&buckets))
+}
+
+/// Cost status derived from already-loaded, window-scoped billing buckets.
+/// This lets local projections price exactly the same facts as their token totals.
+pub fn session_cost_view_from_buckets(buckets: &[Value]) -> Value {
     let token_total: i64 = buckets
         .iter()
         .filter_map(|bucket| bucket.get("tokens").and_then(|tokens| tokens.get("total")))
@@ -1736,8 +1774,7 @@ pub fn session_cost_view(
         })
         .collect();
 
-    let mut cost_minor = session_cost_minor(conn, session_key)?
-        .map(|money| money.to_json());
+    let mut cost_minor = session_cost_minor_from_buckets(buckets).map(|money| money.to_json());
     let pricing_versions: std::collections::BTreeSet<String> = buckets
         .iter()
         .filter_map(|bucket| bucket["pricing_version"].as_str())
@@ -1789,13 +1826,13 @@ pub fn session_cost_view(
     let status_has_unresolved = has_unresolved
         || state == "unpriced"
         || (state == "unavailable" && token_total > 0);
-    Ok(json!({
+    json!({
         "cost_minor": cost_minor,
         "status": state,
         "reason": reason,
         "has_unresolved": status_has_unresolved,
         "pricing_versions": pricing_versions.iter().collect::<Vec<_>>(),
-    }))
+    })
 }
 
 // ─────── v0.9.1 最后一公里（PR #2）：sessions_search / session_detail envelope
@@ -1847,8 +1884,6 @@ pub fn session_cost_minor(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Option<agent_vitals_domain::data_contract::MoneyMinor>, AuthorityError> {
-    use std::collections::BTreeSet;
-
     let buckets = match session_billing_buckets(conn, session_key) {
         Ok(buckets) => buckets,
         // A few read-only trace fixtures intentionally model the pre-v3 authority
@@ -1857,6 +1892,14 @@ pub fn session_cost_minor(
         Err(error) if error.to_string().contains("no such column") => return session_cost_minor_legacy(conn, session_key),
         Err(error) => return Err(error),
     };
+    Ok(session_cost_minor_from_buckets(&buckets))
+}
+
+fn session_cost_minor_from_buckets(
+    buckets: &[Value],
+) -> Option<agent_vitals_domain::data_contract::MoneyMinor> {
+    use std::collections::BTreeSet;
+
     let providers: BTreeSet<String> = buckets.iter()
         .filter(|bucket| bucket["billing_mode"] != "subscription")
         .map(|bucket| bucket["provider_id"].as_str()
@@ -1864,7 +1907,7 @@ pub fn session_cost_minor(
             .unwrap_or("<unknown>").to_string())
         .collect();
     if providers.len() != 1 {
-        return Ok(None);
+        return None;
     }
     let mut total: Option<agent_vitals_domain::data_contract::MoneyMinor> = None;
     for bucket in buckets {
@@ -1873,13 +1916,12 @@ pub fn session_cost_minor(
         match &mut total {
             None => total = Some(cost),
             Some(sum) if sum.currency == cost.currency && sum.basis == cost.basis => {
-                sum.amount_minor = sum.amount_minor.checked_add(cost.amount_minor)
-                    .ok_or_else(|| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+                sum.amount_minor = sum.amount_minor.checked_add(cost.amount_minor)?;
             }
-            Some(_) => return Ok(None),
+            Some(_) => return None,
         }
     }
-    Ok(total)
+    total
 }
 
 #[allow(dead_code)]
@@ -3363,6 +3405,10 @@ mod tests {
         assert_eq!(buckets[1]["pricing_version"], "old");
         assert_eq!(session_cost_minor(db.conn(), key).unwrap().unwrap().amount_minor, 1350,
             "¥4.50 old card + ¥9.00 new card, never reprice both at the latest card");
+        let window_buckets = session_billing_buckets_in_window(db.conn(), key, Some((start, start + 2_000))).unwrap();
+        assert_eq!(window_buckets.len(), 1, "window excludes the later usage event");
+        assert_eq!(session_cost_view_from_buckets(&window_buckets)["cost_minor"]["amount_minor"], 450,
+            "window cost is computed from the same subset as window tokens");
         let _ = std::fs::remove_file(&path);
     }
 

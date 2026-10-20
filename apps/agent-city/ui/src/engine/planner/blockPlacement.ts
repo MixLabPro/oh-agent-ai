@@ -6,6 +6,8 @@ export type BlockPlacementInput = {
   block: { polygon: readonly Vec2[]; holes?: readonly (readonly Vec2[])[] };
   footprint: Vec2 & { yaw: number; width: number; depth: number };
   roads: readonly RoadEdge[]; sites: readonly (Vec2 & { radius: number })[];
+  /** Actual rendered road/sidewalk triangles, including junction fans beyond centreline capsules. */
+  roadPolygons?: readonly (readonly Vec2[])[];
   highways: readonly (readonly Vec2[])[]; buildable: (x: number, z: number) => boolean;
   reserved?: (point: Vec2) => boolean; terrainSampleBudget?: number; cancelled?: () => boolean;
 };
@@ -41,6 +43,7 @@ export function inspectBlockPlacement(input: BlockPlacementInput): BlockPlacemen
     || !Number.isSafeInteger(Math.ceil(f.width)) || !Number.isSafeInteger(Math.ceil(f.depth)) || !Number.isSafeInteger(budget) || budget < 0) return fail("invalid-footprint-or-budget");
   if (input.block.polygon.length < 3 || input.block.polygon.some(p => !validPoint(p)) || holes.some(hole => hole.length < 3 || hole.some(p => !validPoint(p)))) return fail("invalid-block-boundary");
   if (input.roads.some(edge => edge.points.length < 2 || !Number.isFinite(edge.width) || edge.width <= 0 || edge.points.some(p => !validPoint(p)))
+    || input.roadPolygons?.some(ring => ring.length < 3 || ring.some(p=>!validPoint(p)))
     || input.sites.some(site => !validPoint(site) || !Number.isFinite(site.radius) || site.radius < 0) || input.highways.some(run => run.some(p => !validPoint(p)))) return fail("invalid-obstacle-envelope");
   if (input.cancelled?.()) return fail("cancelled");
   const c = Math.cos(f.yaw), s = Math.sin(f.yaw), at = (x: number, z: number) => ({ x: f.x + c * x + s * z, z: f.z - s * x + c * z });
@@ -52,6 +55,14 @@ export function inspectBlockPlacement(input: BlockPlacementInput): BlockPlacemen
     const a = edge.points[i - 1], b = edge.points[i];
     if (contains(result.polygon, a) || contains(result.polygon, b) || ringGap(result.polygon, a, b) < edge.width / 2 + 0.5) return fail("actual-road-capsule-conflict");
   }
+  const minX=Math.min(...result.polygon.map(p=>p.x))-0.5, maxX=Math.max(...result.polygon.map(p=>p.x))+0.5;
+  const minZ=Math.min(...result.polygon.map(p=>p.z))-0.5, maxZ=Math.max(...result.polygon.map(p=>p.z))+0.5;
+  if (input.roadPolygons?.some(ring => {
+    if (Math.max(...ring.map(p=>p.x))<minX || Math.min(...ring.map(p=>p.x))>maxX
+      || Math.max(...ring.map(p=>p.z))<minZ || Math.min(...ring.map(p=>p.z))>maxZ) return false;
+    return ring.some(p=>contains(result.polygon,p)) || result.polygon.some(p=>contains(ring,p))
+      || result.polygon.some((a,i)=>ringGap(ring,a,result.polygon[(i+1)%4])<0.5);
+  })) return fail("rendered-road-polygon-conflict");
   if (input.sites.some(site => pointGap(result.polygon, site) < site.radius)) return fail("declared-site-circle-conflict");
   for (const run of input.highways) for (let i = 1; i < run.length; i++) if (contains(result.polygon, run[i - 1]) || contains(result.polygon, run[i]) || ringGap(result.polygon, run[i - 1], run[i]) < 6.25) return fail("highway-capsule-conflict");
   const columns = Math.max(1, Math.ceil(f.width)), rows = Math.max(1, Math.ceil(f.depth));

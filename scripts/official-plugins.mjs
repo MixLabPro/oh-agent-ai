@@ -1,5 +1,5 @@
+import { runNpm } from "./run-npm.mjs";
 import { readFileSync, cpSync, existsSync, readdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,8 +18,8 @@ if (registry.version !== 1) throw new Error("Unsupported official plugin registr
 export function buildOfficialPlugins({ install = false, probe = false, copy = true } = {}) {
   for (const plugin of registry.plugins) {
     const cwd = path.join(repo, plugin.source);
-    if (install) execFileSync("npm", ["ci"], { cwd, stdio: "inherit" });
-    execFileSync("npm", ["run", "build", ...(probe ? ["--", "--mode", "debug"] : [])], { cwd, stdio: "inherit" });
+    if (install) runNpm(["ci"], { cwd, stdio: "inherit" });
+    runNpm(["run", "build", ...(probe ? ["--", "--mode", "debug"] : [])], { cwd, stdio: "inherit" });
     const entry = path.join(cwd, "dist/index.html");
     if (!existsSync(entry)) throw new Error(`Plugin entry missing: ${plugin.id}`);
     if (plugin.debugProbeMarker) {

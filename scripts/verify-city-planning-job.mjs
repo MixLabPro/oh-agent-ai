@@ -6,13 +6,13 @@ import { createRequire } from "node:module";
 import { Worker as NodeWorker } from "node:worker_threads";
 import { citySrc, loadCity, repo } from "./city-kit/index.mjs";
 const { runPlanningJob, executePlanningWorkerJob, hydratePlanningPlan, planningRequestKey, createCityPlan,
-  MIAMI_COASTAL, PLANNING_WORK_UNITS, buildCityModel, layoutCity, cityPlanCacheSize, CITY_PLAN_CACHE_CONFIG,
+  MIAMI_COASTAL, PLANNING_WORK_UNITS, buildCityModel, layoutCity, cityPlanCacheSize, CITY_PLAN_CACHE_CONFIG, prepareCityLayout,
   createPlanningWorkLedger, withPlanningWorkLedger } = await loadCity({
   "engine/planningWorker/planningJob.ts": ["runPlanningJob"],
   "engine/planningWorker/planningWorkerJob.ts": ["executePlanningWorkerJob"],
   "engine/planningWorker/planningProtocol.ts": ["hydratePlanningPlan", "planningRequestKey"],
   "engine/planner/operationBudget.ts": ["PLANNING_WORK_UNITS", "createPlanningWorkLedger", "withPlanningWorkLedger"],
-  "engine/cityLayout.ts": ["layoutCity", "cityPlanCacheSize", "CITY_PLAN_CACHE_CONFIG"], "cityModel.ts": ["buildCityModel"],
+  "engine/cityLayout.ts": ["layoutCity", "cityPlanCacheSize", "CITY_PLAN_CACHE_CONFIG", "prepareCityLayout"], "cityModel.ts": ["buildCityModel"],
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],
 });
 const parameters = () => ({ seed: 4005969553, tier: 1, coastal: { ...MIAMI_COASTAL },
@@ -121,6 +121,24 @@ const workerFactory = () => {
   try { assert.equal((await pending).status, "cancelled"); } finally { clearTimeout(timer); }
   assert.equal(active, 0, "real cancelled worker is terminated");
 }
+{
+  const model = buildCityModel({ rows: [], findings: [], windowStartMs: 0, windowEndMs: 86400000, windowLabel: "synthetic", totalSessions: 0, truncated: false, generatedAt: 1 });
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(prepareCityLayout(model, input.seed, MIAMI_COASTAL, { signal: cancelled.signal, workerFactory }), /cancelled/);
+  const count = workers.length; let pulses = 0;
+  const interval = setInterval(() => pulses++, 10);
+  try {
+    await prepareCityLayout(model, input.seed, MIAMI_COASTAL, { signal: new AbortController().signal, workerFactory });
+  } finally { clearInterval(interval); }
+  assert.ok(pulses > 1, "actual layout preparation keeps the host heartbeat responsive");
+  assert.equal(workers.length, count + 1);
+  await prepareCityLayout(model, input.seed, MIAMI_COASTAL, { signal: new AbortController().signal,
+    workerFactory: () => { throw new Error("cache missed"); } });
+  const layout = layoutCity(model, null, input.seed, MIAMI_COASTAL);
+  assert.ok(layout.workBudget && layout.workBudget.consumed.terrainSample > 0,
+    "real layout consumes the verified worker plan and its work receipt");
+  assert.equal(active, 0);
+}
 await Promise.all(terminations);
 assert(workers.every(worker => worker.threadId === -1), "both workers actually exited, not merely received a stop request");
 {
@@ -136,4 +154,4 @@ assert(workers.every(worker => worker.threadId === -1), "both workers actually e
   assert.throws(() => withPlanningWorkLedger(ledger, () => layoutCity(model, null, input.seed + 1, MIAMI_COASTAL)), /budget-exhausted/);
   assert.equal(cityPlanCacheSize(), before, "interrupted planning does not insert a cache entry");
 }
-console.log("City planning job: real isolated worker, responsive receiver, verified termination/stale-result refusal, exact terrain hydration, finite operation budgets and complete snapshot transport pass; browser/WKWebView and default UI wiring/limit policy remain pending.");
+console.log("City planning job: real isolated worker, responsive receiver, verified termination/stale-result refusal, exact terrain hydration, finite operation budgets and complete snapshot transport pass; UI layout prewarming/cache/cancellation pass; native WKWebView acceptance remains pending.");

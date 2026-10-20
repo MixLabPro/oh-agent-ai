@@ -36,10 +36,22 @@ import { CityAmbient } from "./cityAmbient";
 import { CityWildlife } from "./cityWildlife";
 import { planAirport, roadSamples } from "./cityAirport";
 import { LIGHT_BUDGET, nightFactor } from "./cityLightBudget";
-import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
+import { DRIVING_PARAMS } from "../game/DrivingSimulation";
+import { CAR_DIMENSIONS } from "../game/carDimensions";
+import { CarCamera } from "../game/CarCamera";
+import { FlightCameraControls } from "../game/FlightCameraControls";
+import { RainbowArch, RainOverlay } from "./cityWeather";
+import { CityEnvironment, type CityEnvironmentSnapshot } from "./environment/CityEnvironment";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 import { buildingFrame, isSelectionGesture } from "./cityCameraInteraction";
 import type { ReturnCameraView } from "../game/types";
+import { CitySurfacePort, type CitySurfaceCapture, type ReadyCitySurfaceCapture } from "./surface/citySurfacePort";
+import { CityStaticWorldPort, type ReadyCityStaticWorldCapture } from "./surface/cityStaticWorldPort";
+import { HostGameScenePort } from "../game/runtime/HostGameScenePort";
+import type { CameraPose, GameSelection } from "../game/runtime/GameScenePort";
+import type { GameSceneSnapshot } from "../game/runtime/GameSceneSnapshot";
+import type { CameraClearanceQuery, ChaseCameraSafety } from "../game/VehicleChaseCamera";
+import type { GameSceneLease } from "../game/runtime/GameScenePort";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -47,6 +59,7 @@ const CINEMATIC_HOUR_TO = 19.6;
 
 export type EngineQualityMode = "auto" | "high" | "eco";
 export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean; geometries: number; textures: number };
+export type CityDrivingWorldCapture = Exclude<CitySurfaceCapture, ReadyCitySurfaceCapture> | (ReadyCitySurfaceCapture & Readonly<{ release: () => void }>);
 export type PhotoView = { position: number[]; target: number[]; fov: number; elapsed: number; cursorMs: number | null };
 /** 相机所有权（游戏模式 §4）：同一帧只允许一个所有者推进相机。 */
 export type CameraOwner = "orbit" | "cinematic" | "game";
@@ -97,6 +110,20 @@ export class CityEngine {
   private parts: CityParts | null = null;
   /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
+  /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
+  private readonly environment = new CityEnvironment();
+  private environmentSnapshot = this.environment.sample(Date.now());
+  /** Shared facts for lighting, rain, audio and future world systems. */
+  get environmentState(): CityEnvironmentSnapshot { return this.environmentSnapshot; }
+  private readonly surfacePort = new CitySurfacePort();
+  private readonly staticWorldPort = new CityStaticWorldPort();
+  private readonly drivingWorldPort = new CitySurfacePort();
+  private drivingWorldFrame: { token: symbol; run: (dt: number) => void } | null = null;
+  private drivingCameraInitialized = false;
+  private drivingCamera: CarCamera | null = null;
+  private drivingCameraScratch: THREE.PerspectiveCamera | null = null;
+  private drivingControls: FlightCameraControls | null = null;
+  private drivingShakeUntil = 0;
   /** layoutCity 的原始产物，下一轮 `previous`（刷新不搬家）只能读它：补丁每次重建后重新套，不能叠套。 */
   private baseLayout: CityLayout | null = null;
   private repairHook: RepairHook | null = null;
@@ -110,6 +137,9 @@ export class CityEngine {
   private elapsed = 0;
   private lastRenderAt = 0;
   private disposed = false;
+  private hostEpoch = 0;
+  private gameSceneToken: symbol | null = null;
+  private ambientCarsVisible = true;
   private documentHidden = false;
   private firstFrameSent = false;
 
@@ -117,6 +147,7 @@ export class CityEngine {
   private cursorMs: number | null = null; // null = live（跟随现在）
   /** 昼夜相位缓存（上次 apply 的 hour，变化才写 uniform）。 */
   private lastSkyHour = -1;
+  private lastWeatherKey = "";
   private aurora: CityAurora | null = null;
   private ambient: CityAmbient | null = null;
   private wildlife: CityWildlife | null = null;
@@ -186,6 +217,88 @@ export class CityEngine {
   // tween/拾取，唯一的相机更新来自 gameFrame 回调（由 GameModeController 侧注册）。
   private cameraOwner: CameraOwner = "orbit";
   private gameFrame: ((dt: number) => void) | null = null;
+  readonly gameScenePort = new HostGameScenePort<GameSceneSnapshot, THREE.Object3D>({
+    epoch: () => this.hostEpoch,
+    isAlive: () => !this.disposed,
+    canAcquire: () => {
+      if (!this.parts || !this.layout || !this.model) return Object.freeze({ status: "unavailable", reason: "city-not-ready" });
+      if (this.cinematic || this.drivingWorldFrame || this.gameFrame || this.cameraOwner !== "orbit") return Object.freeze({ status: "busy", reason: "host-busy" });
+      return true;
+    },
+    capture: async (selection: GameSelection, signal) => {
+      const parts = this.parts;
+      if (!parts || !this.layout || this.disposed) return Object.freeze({ status: "unavailable", reason: "city-not-ready" });
+      let frozen: ReturnType<CityParts["acquireStaticSceneSource"]>;
+      try { frozen = parts.acquireStaticSceneSource(); }
+      catch { return Object.freeze({ status: "unavailable", reason: "static-source-unavailable" }); }
+      const staticWorld = await this.staticWorldPort.capture(frozen.source, frozen.release, signal);
+      if (staticWorld.status !== "ready") return Object.freeze({ status: staticWorld.status === "cancelled" ? "cancelled" : "unavailable", reason: staticWorld.reason ?? staticWorld.status });
+      let drivingWorld: ReadyCitySurfaceCapture | undefined;
+      if (selection.vehicle === "car") {
+        let roads: CitySurfaceCapture;
+        try { roads = await this.surfacePort.capture(frozen.drivingSource, signal); }
+        catch {
+          staticWorld.release();
+          return Object.freeze({ status: signal.aborted ? "cancelled" : "unavailable", reason: "driving-capture-failed" });
+        }
+        if (roads.status !== "ready") {
+          staticWorld.release();
+          return Object.freeze({ status: roads.status === "cancelled" ? "cancelled" : "unavailable", reason: `driving-${roads.status}` });
+        }
+        drivingWorld = roads;
+      }
+      const snapshot: GameSceneSnapshot = Object.freeze({ staticWorld, ...(drivingWorld ? { drivingWorld } : {}) });
+      const release = () => {
+        staticWorld.release();
+        if (drivingWorld) this.surfacePort.releaseFrozenSource(frozen.drivingSource);
+      };
+      const current = () => staticWorld.isLeaseCurrent() && (!drivingWorld || drivingWorld.isLeaseCurrent());
+      const verifyCurrent = () => staticWorld.verifyCurrent() && (!drivingWorld || drivingWorld.verifyCurrent());
+      return Object.freeze({ status: "ready", capture: Object.freeze({ revision: drivingWorld?.worldRevision ?? staticWorld.worldRevision, snapshot,
+        isCurrent: current, verifyCurrent, release }) });
+    },
+    captureReturnState: () => ({ view: this.captureReturnView(), cameraNear: this.camera.near, controlsEnabled: this.controls.enabled,
+      autoRotate: this.controls.autoRotate, ambientCarsVisible: this.readAmbientCarsVisible() }),
+    takeOwnership: (token) => {
+      if (!this.setCameraOwner("game")) return false;
+      this.gameSceneToken = token;
+      this.camera.near = 0.15;
+      this.camera.updateProjectionMatrix();
+      return true;
+    },
+    restoreReturnState: (token, value) => {
+      if (this.gameSceneToken !== token) return;
+      this.gameSceneToken = null;
+      const state = value as { view: ReturnCameraView; cameraNear: number; controlsEnabled: boolean; autoRotate: boolean; ambientCarsVisible: boolean };
+      if (!this.disposed) {
+        this.restoreReturnView(state.view);
+        this.camera.near = state.cameraNear;
+        this.camera.updateProjectionMatrix();
+        this.controls.enabled = state.controlsEnabled;
+        this.controls.autoRotate = state.autoRotate;
+        this.writeAmbientCarsVisible(state.ambientCarsVisible);
+        if (this.cameraOwner === "game") this.cameraOwner = "orbit";
+      }
+    },
+    setFrameHook: (token, hook) => {
+      if (this.gameSceneToken !== token) throw new Error("stale-game-scene");
+      this.gameFrame = hook;
+    },
+    attach: (token, objects) => { if (this.gameSceneToken !== token) throw new Error("stale-game-scene"); this.scene.add(...objects); },
+    detach: (token, objects) => { if (this.gameSceneToken === token) this.scene.remove(...objects); },
+    setCamera: (token, pose: CameraPose) => {
+      this.applyGameCameraPose(token, pose);
+    },
+    setAmbientCarsVisible: (token, visible) => { if (this.gameSceneToken !== token) throw new Error("stale-game-scene"); this.writeAmbientCarsVisible(visible); },
+    onReleased: (token) => {
+      if (this.gameSceneToken !== token) return;
+      // Restore decal pools when leaving driving mode; no analytic lights leak into flight/orbit.
+      this.parts?.clearDrivingStreetLamps();
+      this.drivingControls?.detach(); this.drivingControls = null;
+      this.drivingCamera?.dispose(); this.drivingCamera = null;
+      this.drivingCameraScratch = null; this.drivingCameraInitialized = false; this.drivingShakeUntil = 0;
+    },
+  });
 
   constructor(private readonly options: CityEngineOptions) {
     // 开发调试钩子（仅 vite dev + ?cityDebug）：把场景与 THREE 挂到 window，供比例尺测量等脚本遍历真实场景图。生产构建不含。
@@ -567,16 +680,20 @@ export class CityEngine {
 
   /** 游戏对象挂载/摘除（飞机、圆环等）；渲染管线与既有场景不动。 */
   attachGameObjects(...objects: THREE.Object3D[]): void {
+    if (this.gameSceneToken) throw new Error("scene-lease-required");
     this.scene.add(...objects);
   }
 
   detachGameObjects(...objects: THREE.Object3D[]): void {
+    if (this.gameSceneToken) throw new Error("scene-lease-required");
     this.scene.remove(...objects);
   }
 
   /** 相机所有权切换（§4）。game 接管要求航拍未在进行（互斥由调用方先拒，这里兜底返回 false）；
    *  orbit 归还时恢复 controls；cinematic 所有权由 startCinematic/stopCinematic 自管。 */
   setCameraOwner(owner: CameraOwner): boolean {
+    if (this.gameSceneToken && owner !== "game") return false;
+    if (owner === "game" && this.drivingWorldFrame) return false;
     if (owner === this.cameraOwner) return true;
     if (owner === "game") {
       if (this.cinematic) return false;
@@ -595,6 +712,8 @@ export class CityEngine {
 
   /** 游戏每帧回调：owner === "game" 时在 updateScene 中调用（dt 秒），不启动第二个绘制循环。 */
   setGameFrameHook(fn: ((dt: number) => void) | null): void {
+    if (this.gameSceneToken) throw new Error("scene-lease-required");
+    if (fn && this.drivingWorldFrame) throw new Error("driving-frame-already-owned");
     this.gameFrame = fn;
   }
 
@@ -644,6 +763,8 @@ export class CityEngine {
     if (seed === this.seed) return;
     const first = this.seed === null;
     this.seed = seed;
+    this.surfacePort.invalidate();
+    this.drivingWorldPort.invalidate();
     this.layout = null;
     this.baseLayout = null;
     this.planResult = null;
@@ -659,6 +780,10 @@ export class CityEngine {
     if (this.seed === null) return;
     // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
     const previousDisplays = this.parts ? this.parts.displaySnapshot() : null;
+    this.hostEpoch += 1;
+    this.gameScenePort.invalidate();
+    this.surfacePort.invalidate();
+    this.drivingWorldPort.invalidate();
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
@@ -741,15 +866,18 @@ export class CityEngine {
     // 重建后 display 是「已完工」初值：先对齐到当前时间轴进度，否则回放中
     // 每次数据发布（分页到齐/后台刷新）都会看到城市闪满高再缩回去。
     this.parts.snapToTargets();
-    // A newly attached WKWebView may report hidden and withhold rAF until its
-    // drawing surface has been presented. Bootstrap the model synchronously;
-    // subsequent frames remain scheduled, and export workers are unaffected.
-    if (!this.options.headless && !this.firstFrameSent && !this.contextLost) {
+    // Present the newly mounted model before the loading overlay is dismissed.
+    // A newly attached WKWebView may withhold rAF until its drawing surface has
+    // been presented; later model replacements also need a fresh frame rather
+    // than relying on CityApp to mistake applyModel() for a render.
+    if (!this.options.headless && !this.contextLost) {
       this.updateScene(0);
       this.renderFrame();
       this.lastRenderAt = performance.now();
-      this.firstFrameSent = true;
-      this.options.onFirstFrame?.();
+      if (!this.firstFrameSent) {
+        this.firstFrameSent = true;
+        this.options.onFirstFrame?.();
+      }
     }
   }
 
@@ -777,11 +905,14 @@ export class CityEngine {
     const bounds = Math.max(120, this.boundsRadius);
     // Frame the city rather than leaving excessive ocean margin: screenshots
     // showed the street fabric occupying too little of the default view.
-    const fit = 0.95 * Math.max(1, 1 / this.camera.aspect);
+    // The embedded landing prioritizes the skyline; native overview is unchanged.
+    const landing = typeof window !== "undefined" && window.parent !== window
+      && new URLSearchParams(window.location.search).get("presentation") === "landing";
+    const fit = (landing ? 0.72 : 0.95) * Math.max(1, 1 / this.camera.aspect);
     // 海滨锚定取景（VICE B5）：有海滨带时，默认视角从海侧看向酒店街——
     // 「酒店—步道—棕榈—沙滩—浅海」的断面在首屏即可辨认（识别锚点）。
     const seaside = this.layout?.seaside;
-    if (seaside && !seaside.degraded && seaside.samples.length) {
+    if (!landing && seaside && !seaside.degraded && seaside.samples.length) {
       const valid = seaside.samples.filter((s) => s.valid);
       if (valid.length) {
         const mid = valid[Math.floor(valid.length / 2)];
@@ -962,6 +1093,11 @@ export class CityEngine {
   catalogTarget(id: string): number[] | null {
     const L = this.layout; const P = this.parts; const model = this.model;
     if (!L || !P || !model) return null;
+    if (id.startsWith("district-service:")) {
+      const key = id.slice("district-service:".length);
+      const civic = L.civics.find((item) => `${item.districtId}:${item.kind}` === key);
+      return civic ? [civic.x, civic.y + 8, civic.z, 95] : null;
+    }
     const slots = new Map(L.districts.flatMap((district) => [...district.slots]));
     const pick = (pred: (b: CityModel["buildings"][number], s: { blockId: string }) => boolean) => {
       for (const building of model.buildings) {
@@ -1127,6 +1263,60 @@ export class CityEngine {
     this.noteActivity();
   }
 
+  /** Car presentation shares the leased frame loop; no independent camera timer.
+   * 与演练场同一套 VehicleChaseCamera 内核（阻尼 15/20）：手动 lerp(5/10) 版本存在
+   * ~2.7 单位稳态滞后，驾驶中的转动与变向会持续糊。环绕/缩放由挂在该帧上的
+   * FlightCameraControls 驱动。每次写相机都用活动场景 token 授权。 */
+  presentDrivingCamera(pose: Readonly<{ x: number; y: number; z: number; heading: number; speed?: number }>, dt = 1 / 60,
+    cameraSweep?: CameraClearanceQuery, sceneLease?: Pick<GameSceneLease<unknown, THREE.Object3D>, "token" | "isCurrent" | "setCamera">): ChaseCameraSafety {
+    const token = this.gameSceneToken;
+    if (!token || !sceneLease || sceneLease.token !== token || !sceneLease.isCurrent() || ![pose.x, pose.y, pose.z, pose.heading].every(Number.isFinite)) return "unresolved";
+    if (!this.drivingCamera) {
+      const reducedMotion = typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      this.drivingCameraScratch = this.camera.clone();
+      this.drivingCamera = new CarCamera(this.drivingCameraScratch, reducedMotion);
+      if (!this.options.headless && this.options.canvas instanceof HTMLElement) {
+        this.drivingControls = new FlightCameraControls({ canvas: this.options.canvas, camera: () => this.drivingCamera,
+          isActive: () => this.gameSceneToken === token && sceneLease.isCurrent() });
+        this.drivingControls.attach();
+      }
+    }
+    const safeDt = Number.isFinite(dt) ? Math.max(0, Math.min(0.1, dt)) : 0;
+    // y 是支撑面高度：车停在桥面板/岛缘等实体上时，相机包络必须从车身中心出发
+    // （sweepLift=半高），否则包络立方体与车下实体重叠 → 假「无法确认净空」暂停。
+    const target = { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading, speed: pose.speed ?? 0, maxSpeed: DRIVING_PARAMS.maxForward, sweepLift: CAR_DIMENSIONS.height / 2 };
+    if (!this.drivingCameraInitialized) { this.drivingCameraInitialized = true; this.drivingCamera.reset(target); }
+    const failClosedSweep: CameraClearanceQuery = cameraSweep ?? (() => ({ status: "unresolved" }));
+    const safety = this.drivingCamera.update(safeDt, target, { terrain: (x: number, z: number) => this.layout?.terrain.height(x, z) ?? 0, cameraSweep: failClosedSweep });
+    if (safety === "unresolved") return safety;
+    const camera = this.drivingCameraScratch;
+    if (!camera || this.gameSceneToken !== token) return "unresolved";
+    const direction = camera.getWorldDirection(new THREE.Vector3());
+    const targetPoint = camera.position.clone().addScaledVector(direction, 10);
+    sceneLease.setCamera({ position: camera.position.toArray() as [number, number, number],
+      target: targetPoint.toArray() as [number, number, number], up: camera.up.toArray() as [number, number, number], fov: camera.fov });
+    // N5: update the nearest analytic street lamps from the final leased camera pose.
+    this.parts?.updateDrivingStreetLamps(camera.position.x, camera.position.z);
+    return safety;
+  }
+
+  private applyGameCameraPose(token: symbol, pose: CameraPose): void {
+    if (this.gameSceneToken !== token || ![...pose.position, ...pose.target, ...pose.up, pose.fov].every(Number.isFinite) ||
+      pose.fov <= 0 || pose.fov >= 180) throw new Error("stale-game-scene");
+    const direction = pose.target.map((value, index) => value - pose.position[index]);
+    const upLength = Math.hypot(...pose.up), directionLength = Math.hypot(...direction);
+    const cross = [pose.up[1] * direction[2] - pose.up[2] * direction[1], pose.up[2] * direction[0] - pose.up[0] * direction[2], pose.up[0] * direction[1] - pose.up[1] * direction[0]];
+    if (upLength < 1e-8 || directionLength < 1e-8 || Math.hypot(...cross) <= upLength * directionLength * 1e-8) throw new Error("invalid-camera-pose");
+    this.camera.position.fromArray(pose.position); this.camera.up.fromArray(pose.up); this.controls.target.fromArray(pose.target);
+    this.camera.fov = pose.fov; this.camera.updateProjectionMatrix(); this.camera.lookAt(this.controls.target);
+  }
+
+  /** 撞击反馈入口（由驾驶 present 回调在 blocked 上升沿调用）：触发短暂相机抖动。 */
+  pulseDrivingImpact(): void {
+    if (!this.gameSceneToken) return;
+    this.drivingShakeUntil = performance.now() + 200;
+  }
+
   /** 指针射线与地形的交点（迭代逼近地形高度，3 轮足够；射线朝天或在城市包围盒外返回 null）。 */
   private groundPointAtPointer(): { x: number; z: number } | null {
     if (!this.layout) return null;
@@ -1158,6 +1348,7 @@ export class CityEngine {
   }
 
   private handleClick(): void {
+    if (this.drivingWorldFrame) return;
     if (!this.parts) return;
     if (this.repairHook) {
       const picked = this.pick();
@@ -1349,7 +1540,7 @@ export class CityEngine {
     this.noteActivityIfNeeded();
 
     // 游戏持有相机时不进入空闲降帧：飞行是持续活动，20fps 环境帧率会打断手感与物理步进节奏。
-    const idle = this.cameraOwner !== "game" && now - this.lastActivityAt > IDLE_AFTER_MS && !this.tween && !this.playing;
+    const idle = !this.drivingWorldFrame && this.cameraOwner !== "game" && now - this.lastActivityAt > IDLE_AFTER_MS && !this.tween && !this.playing;
     if (idle && !this.surfaceDirty && !this.qualityDirty && now - this.lastRenderAt < IDLE_FRAME_INTERVAL_MS) return;
 
     this.updateScene(dt);
@@ -1371,7 +1562,7 @@ export class CityEngine {
   /** 开拍：镜头接管相机与时间游标；用户点/拖画布即中止。
    *  游戏持有相机期间拒绝开拍（§5 互斥；正常入口在进入游戏前已被禁用，此处兜底）。 */
   startCinematic(cut: CinematicCut = "full"): CinematicPlan | null {
-    if (this.cameraOwner === "game") return null;
+    if (this.cameraOwner === "game" || this.drivingWorldFrame) return null;
     if (!this.layout || !this.model || !this.parts) return null;
     this.releaseOrbitLock();
     const plan = planCinematic(this.layout, this.model, this.parts.anchors(), { cut });
@@ -1628,29 +1819,30 @@ export class CityEngine {
   private updateDaylight(): void {
     // 航拍用固定的「黄昏渐入」：15:00 → 19:36 随片长线性推进，片尾城市全亮。
     // 不能跟随真实时钟（导出的片子必须可复现），也不能跟随回放游标（90 天窗口在片中转 90 个昼夜，会频闪）。
-    let hour: number;
-    if (this.cinematic) {
-      hour = CINEMATIC_HOUR_FROM + (CINEMATIC_HOUR_TO - CINEMATIC_HOUR_FROM) * Math.min(1, this.cinematic.lastSeconds / this.cinematic.plan.durationSec);
-    } else {
-      const now = this.cursorMs !== null ? new Date(this.cursorMs) : new Date();
-      hour = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
-    }
+    const cinematicHour = this.cinematic
+      ? CINEMATIC_HOUR_FROM + (CINEMATIC_HOUR_TO - CINEMATIC_HOUR_FROM) * Math.min(1, this.cinematic.lastSeconds / this.cinematic.plan.durationSec)
+      : undefined;
+    this.environmentSnapshot = this.environment.sample(this.cursorMs ?? Date.now(), cinematicHour);
+    const hour = this.environmentSnapshot.hour;
+    const weather = this.environmentSnapshot.weather;
+    const weatherKey = `${this.environmentSnapshot.mode}:${weather.kind}:${Math.round(weather.intensity * 100)}:${Math.round(weather.overcast * 100)}:${Math.round(weather.rainbow * 100)}`;
     // 插值随秒连续；仅在跨过 0.02h（~72s）时重写 uniform，避免无谓上传。
-    if (Math.abs(hour - this.lastSkyHour) < (this.cinematic ? 0.0005 : 0.02)) return;
+    if (Math.abs(hour - this.lastSkyHour) < (this.cinematic ? 0.0005 : 0.02) && weatherKey === this.lastWeatherKey) return;
     this.lastSkyHour = hour;
+    this.lastWeatherKey = weatherKey;
     this.applyDayMix(hour);
     this.parts?.setNightHour(hour);
     const sky = skyStateAt(hour, this.themeName);
     this.applySky(sky);
     // 天气（按日期确定性）：航拍/胶片导出走晴朗（可复现），回放与实况按当天。
-    if (!this.cinematic) this.applyWeather(this.cursorMs ?? Date.now());
+    if (!this.cinematic) this.applyWeather(this.environmentSnapshot);
   }
 
   /** 天气后处理（applySky 之后）：阴/雨对光照、雾、天色、云、水色的幂等调制——
    *  applySky 每个节流 tick 先按预设重写，这里再乘天气系数，不累积。夜灯判定
    *  在 applySky 内由未调制的 sunIntensity 推导，雨天中午不会被误判成夜晚开灯。 */
-  private applyWeather(ms: number): void {
-    const state = weatherAt(ms);
+  private applyWeather(environment: CityEnvironmentSnapshot): void {
+    const state = environment.weather;
     const overcast = state.overcast;
     if (!this.rain) {
       this.rain = new RainOverlay();
@@ -1770,13 +1962,16 @@ export class CityEngine {
   }
 
   private updateScene(dt: number): void {
+    // A frozen driving consumer uses the existing host frame, never a second rAF.
     this.updateDaylight();
+    this.drivingWorldFrame?.run(dt);
     this.aurora?.update(dt);
     this.ambient?.update(dt, this.elapsed);
     this.wildlife?.update(dt, this.elapsed);
     // 雨丝层贴相机前方；航拍期间强制晴朗（applyWeather 不跑，手动关掉防残留）。
     if (this.cinematic) this.rain?.setAmount(0);
     else this.rain?.update(dt, this.elapsed, this.camera);
+    if (this.drivingWorldFrame) { this.parts?.update(dt, this.elapsed); return; }
     // 游戏模式：环境装饰照常更新，但回放推进/tween/轨道相机/地形夹取/拾取全部让位——
     // 相机与模拟只由 gameFrame 回调推进（单一所有权，§4）。渲染仍走本循环。
     if (this.cameraOwner === "game" && this.gameFrame) {
@@ -1886,8 +2081,66 @@ export class CityEngine {
     this.lowFpsWindows = this.highFpsWindows = 0;
   }
 
+  /** Capture current rendered roads + structural solids, with lazy revision-bound queries.
+   *  Model/patch/seed rebuild and teardown invalidate old handles, including cached indices.
+   *  Building/landmark solids are not yet in this structural snapshot (coverage is explicit). */
+  captureDrivingSurface(signal?: AbortSignal): Promise<CitySurfaceCapture> {
+    return this.surfacePort.capture(this.parts?.drivingSurfaceSource() ?? null, signal);
+  }
+
+  /** Explicit display-freeze lease. The caller MUST release it, including on refused entry.
+   * Captures actual building/landmark meshes at current displayed height, not final model height.
+   * Independent readers share the freeze; releasing one cannot unfreeze another reader. */
+  async captureDrivingWorld(signal?: AbortSignal): Promise<CityDrivingWorldCapture> {
+    const parts = this.parts;
+    if (!parts || this.disposed) return Object.freeze({ status: "unavailable" });
+    if (signal?.aborted) return Object.freeze({ status: "cancelled" });
+    let lease: ReturnType<CityParts["acquireDrivingWorldSource"]>;
+    try { lease = parts.acquireDrivingWorldSource(); }
+    catch { return Object.freeze({ status: "unavailable" }); }
+    let active = true;
+    const release = () => {
+      if (!active) return;
+      active = false;
+      lease.release();
+      this.drivingWorldPort.releaseFrozenSource(lease.source);
+    };
+    try {
+      const capture = await this.drivingWorldPort.capture(lease.source, signal);
+      if (capture.status !== "ready") { release(); return capture; }
+      const current = () => active && this.parts === parts && capture.isCurrent();
+      const leaseCurrent = () => active && this.parts === parts && capture.isLeaseCurrent();
+      return Object.freeze({ ...capture, isCurrent: current, isLeaseCurrent: leaseCurrent, release,
+        verifyCurrent: () => active && this.parts === parts && capture.verifyCurrent(),
+        read: () => current() ? capture.read() : null,
+        readWorld: () => current() ? capture.readWorld() : null,
+        querySurface: (request: Parameters<ReadyCitySurfaceCapture["querySurface"]>[0]) => current() ? capture.querySurface(request) : Object.freeze({ status: "stale" as const }),
+        checkStructures: (options: Parameters<ReadyCitySurfaceCapture["checkStructures"]>[0]) => current() ? capture.checkStructures(options) : null,
+        checkLandings: (options: Parameters<ReadyCitySurfaceCapture["checkLandings"]>[0]) => current() ? capture.checkLandings(options) : null,
+      });
+    } catch { release(); return Object.freeze({ status: "unavailable" }); }
+  }
+
+  private readAmbientCarsVisible(): boolean {
+    const mesh = (this.parts as unknown as { carMesh?: THREE.InstancedMesh } | null)?.carMesh;
+    return mesh ? mesh.visible : this.ambientCarsVisible;
+  }
+  private writeAmbientCarsVisible(visible: boolean): void {
+    this.ambientCarsVisible = visible;
+    const mesh = (this.parts as unknown as { carMesh?: THREE.InstancedMesh } | null)?.carMesh;
+    if (mesh) mesh.visible = visible;
+  }
+
   dispose(): void {
     this.disposed = true;
+    this.hostEpoch += 1;
+    this.gameScenePort.invalidate();
+    this.surfacePort.invalidate();
+    this.drivingWorldPort.invalidate();
+    this.drivingWorldFrame = null;
+    this.drivingControls?.detach(); this.drivingControls = null;
+    this.drivingCamera?.dispose(); this.drivingCamera = null;
+    this.drivingCameraInitialized = false;
     this.stopLoop();
     this.gameFrame = null;
     this.cameraOwner = "orbit";

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use agent_vitals_domain::contracts::session_key::SessionKey;
-use agent_vitals_domain::contracts::workflow::SessionExcerpt;
+use agent_vitals_domain::contracts::workflow::{SessionExcerpt, SessionTitle};
 use agent_vitals_domain::session_semantics::{
     fingerprint, invocation_fingerprint, iso_to_epoch_ms, safe_label, ModelSwitchTracker, TurnTracker, TurnTransition,
 };
@@ -185,6 +185,9 @@ fn push_excerpt(
     }
 }
 
+/// `claude_file_to_workflow_events` 的产出三元组（事件 / 摘录 / 会话标题）。
+pub type ClaudeWorkflowEmit = (Vec<WorkflowEvent>, Vec<SessionExcerpt>, Vec<SessionTitle>);
+
 /// Emit privacy-safe workflow events and task-intent excerpts from one Claude
 /// session file.  摘录与富化字段的算法真相源是 `domain::enrichment`；本函数
 /// 只做取材（哪个块是用户首条/后续 prompt、末条 assistant 回复、Task 子代理
@@ -194,7 +197,7 @@ pub fn claude_file_to_workflow_events(
     machine_namespace: &str,
     source_profile: &str,
     native_session_id: &str,
-) -> Result<(Vec<WorkflowEvent>, Vec<SessionExcerpt>), String> {
+) -> Result<ClaudeWorkflowEmit, String> {
     let records = read_records(path)?;
     let session_key = SessionKey::new("claude-code", native_session_id, source_profile, machine_namespace).ledger_key();
     let mut out = Vec::new();
@@ -388,13 +391,72 @@ pub fn claude_file_to_workflow_events(
     if let Some((uuid, text)) = last_assistant {
         push_excerpt(&mut excerpts, &session_key, &mut excerpt_ordinal, ExcerptRole::AssistantFinal, &text, &uuid);
     }
-    Ok((out, excerpts))
+    // 会话标题（V32）：取第一条 ai-title 记录（`sources::title_of` 同款取材：
+    // `aiTitle` 优先、`title` 兜底——那条函数收 owned 切片，这里的 records 是
+    // 借用，取材逻辑就地重写、语义逐字段一致），`bound_session_title` 脱敏 +
+    // 截断。整形后为空 → 不产行（同摘录纪律）。
+    let raw_title = records
+        .iter()
+        .filter(|r| r.value.get("type").and_then(Value::as_str) == Some("ai-title"))
+        .find_map(|r| {
+            r.value.get("aiTitle").and_then(Value::as_str)
+                .or_else(|| r.value.get("title").and_then(Value::as_str))
+        });
+    let session_titles = raw_title
+        .and_then(agent_vitals_domain::enrichment::bound_session_title)
+        .map(|title| vec![SessionTitle {
+            native_session_id: native_session_id.to_string(),
+            title,
+            source: "claude_ai_title".to_string(),
+        }])
+        .unwrap_or_default();
+    Ok((out, excerpts, session_titles))
 }
 
 #[cfg(test)]
 mod tests {
     use super::claude_file_to_workflow_events;
     use std::path::PathBuf;
+
+    /// V32 会话标题：第一条 ai-title 记录（`aiTitle` 优先、`title` 兜底）整形
+    /// 后随解析产出；后续条目不覆盖（与 sources::title_of 同款「取第一条」）；
+    /// 无 ai-title → 空集（City 走 fallback 命名，不编造）。
+    #[test]
+    fn ai_title_records_yield_bounded_session_title() {
+        let path = std::env::temp_dir().join(format!("av-claude-aititle-{}.jsonl", std::process::id()));
+        std::fs::write(&path, concat!(
+            r#"{"type":"user","timestamp":"2026-10-01T10:00:00.000Z","uuid":"u1","message":{"content":"帮我修登录页"}}"#, "\n",
+            // 首条 ai-title：aiTitle 优先；后续条目不覆盖。
+            r#"{"type":"ai-title","aiTitle":"修复登录页跳转","title":"不该用我"}"#, "\n",
+            r#"{"type":"ai-title","aiTitle":"后来更新的标题，不该赢"}"#, "\n",
+        )).unwrap();
+        let (_events, _excerpts, titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "session-1").unwrap();
+        assert_eq!(titles.len(), 1);
+        assert_eq!(titles[0].native_session_id, "session-1");
+        assert_eq!(titles[0].title, "修复登录页跳转");
+        assert_eq!(titles[0].source, "claude_ai_title");
+        assert!(titles[0].validate().is_ok());
+        std::fs::remove_file(path).ok();
+
+        // aiTitle 缺席 → title 兜底。
+        let path2 = std::env::temp_dir().join(format!("av-claude-aititle2-{}.jsonl", std::process::id()));
+        std::fs::write(&path2, concat!(
+            r#"{"type":"user","timestamp":"2026-10-01T10:00:00.000Z","uuid":"u1","message":{"content":"hi"}}"#, "\n",
+            r#"{"type":"ai-title","title":"兜底标题"}"#, "\n",
+        )).unwrap();
+        let (_, _, titles2) = claude_file_to_workflow_events(&PathBuf::from(&path2), "machine", "default", "session-2").unwrap();
+        assert_eq!(titles2[0].title, "兜底标题");
+        std::fs::remove_file(path2).ok();
+
+        // 无 ai-title 记录 → 空集。
+        let path3 = std::env::temp_dir().join(format!("av-claude-aititle3-{}.jsonl", std::process::id()));
+        std::fs::write(&path3, concat!(
+            r#"{"type":"user","timestamp":"2026-10-01T10:00:00.000Z","uuid":"u1","message":{"content":"hi"}}"#, "\n",
+        )).unwrap();
+        let (_, _, titles3) = claude_file_to_workflow_events(&PathBuf::from(&path3), "machine", "default", "session-3").unwrap();
+        assert!(titles3.is_empty());
+        std::fs::remove_file(path3).ok();
+    }
 
     /// Skill 的 tool_result 不带 is_error（真机 16/16）；成败信号在 record 级
     /// `toolUseResult.success`（WORKBENCH_FINDINGS_TAB_SPEC §9.4-① 修复）。
@@ -417,7 +479,7 @@ mod tests {
             r#"{"type":"assistant","timestamp":"2026-08-20T14:30:00.000Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#, "\n",
             r#"{"type":"user","timestamp":"2026-08-20T14:30:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"ok"}]}}"#, "\n",
         )).unwrap();
-        let (events, _excerpts) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let (events, _excerpts, _titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
         let finished = |skill: &str| events.iter().find(|event|
             event.event_type == "skill_finished" && event.capability_id.as_deref() == Some(skill)).cloned();
         assert_eq!(finished("code-review").map(|e| e.outcome).as_deref(), Some("succeeded"));
@@ -446,7 +508,7 @@ mod tests {
             r#"{"type":"assistant","timestamp":"2026-08-20T14:27:05.000Z","uuid":"a1","message":{"model":"claude-sonnet","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"cat /Users/private/secret"}}]}}"#, "\n",
             r#"{"type":"user","timestamp":"2026-08-20T14:27:08.000Z","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"c1","is_error":true,"content":"private error"}]}}"#, "\n",
         )).unwrap();
-        let (events, excerpts) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let (events, excerpts, _titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
         assert!(events.iter().any(|event| event.event_type == "tool_invoked"));
         assert!(events.iter().any(|event| event.event_type == "tool_finished" && event.outcome == "failed"));
         assert!(events.iter().all(|event| event.validate().is_ok()));
@@ -491,7 +553,7 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-09-19T10:01:05.000Z","uuid":"u3","message":{"content":[{"type":"tool_result","tool_use_id":"c1","is_error":true,"content":"Error: 3 failed, harness=prod db=sk-zyxwvutsrqponmlkjihg"}]}}"#, "\n",
             r#"{"type":"assistant","timestamp":"2026-09-19T10:02:00.000Z","uuid":"a2","message":{"model":"claude-sonnet","content":[{"type":"text","text":"改完了，测试通过"}]}}"#, "\n",
         )).unwrap();
-        let (events, excerpts) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let (events, excerpts, _titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
 
         // 锚点与尺寸：
         let invoked = events.iter().find(|e| e.event_type == "tool_invoked").unwrap();
@@ -543,7 +605,7 @@ mod tests {
             r#"{"type":"assistant","timestamp":"2026-09-19T12:00:03.000Z","uuid":"a2","message":{"content":[{"type":"text","text":"主会话的确认"}]}}"#, "
 ",
         )).unwrap();
-        let (_events, excerpts) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let (_events, excerpts, _titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
         let first = excerpts.iter().find(|e| e.role == "user_first").expect("主会话首条");
         assert_eq!(first.native_event_id, "u1");
         assert!(first.excerpt.contains("主会话的任务"));
@@ -567,7 +629,7 @@ mod tests {
             r#"{"type":"assistant","timestamp":"2026-09-19T13:00:05.000Z","uuid":"a1","message":{"model":"claude-sonnet","content":[{"type":"tool_use","id":"t1","name":"Task","input":{"prompt":"审查迁移脚本"}},{"type":"tool_use","id":"t2","name":"Task","input":{"prompt":"审查测试 fixture"}}]}}"#, "
 ",
         )).unwrap();
-        let (_events, excerpts) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let (_events, excerpts, _titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
         let subs: Vec<_> = excerpts.iter().filter(|e| e.role == "subagent_task").collect();
         assert_eq!(subs.len(), 2, "两个并行 Task 都要留下摘录：{subs:?}");
         let ordinals: Vec<i64> = subs.iter().map(|e| e.ordinal).collect();
@@ -584,7 +646,7 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-09-19T11:00:00.000Z","uuid":"u1","message":{"content":"重构迁移脚本"}}"#, "\n",
             r#"{"type":"assistant","timestamp":"2026-09-19T11:00:10.000Z","uuid":"a1","message":{"model":"claude-sonnet","content":[{"type":"tool_use","id":"c9","name":"Task","input":{"prompt":"检查 tests/test_migration.py 的 fencepost，只读不改","description":"审查子任务"}}]}}"#, "\n",
         )).unwrap();
-        let (_events, excerpts) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let (_events, excerpts, _titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
         let sub = excerpts.iter().find(|e| e.role == "subagent_task").expect("Task prompt 必须产 subagent_task 摘录");
         assert!(sub.excerpt.contains("fencepost"));
         assert_eq!(sub.native_event_id, "a1");
@@ -594,7 +656,7 @@ mod tests {
     fn emit(name: &str, lines: &[&str]) -> Vec<agent_vitals_domain::workflow::WorkflowEvent> {
         let path = std::env::temp_dir().join(format!("av-claude-{name}-{}.jsonl", std::process::id()));
         std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
-        let (events, _) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let (events, _, _titles) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
         std::fs::remove_file(path).ok();
         events
     }

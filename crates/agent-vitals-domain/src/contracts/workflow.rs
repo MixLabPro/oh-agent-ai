@@ -206,9 +206,50 @@ impl SessionExcerpt {
     }
 }
 
+/// 会话标题（City 楼名等本地展示面的取材）。与 [`SessionExcerpt`] 同一投
+/// 影族：有界、脱敏后的用户/AI 生成文本，落在 `sessions.title` 业务列。
+///
+/// **为什么按 `native_session_id` 而不是 ledger session_key 键**：DSH 的
+/// profile 由会话日志 header 派生（`dsh_source_profile`），侧车索引
+/// （`workspace.json`）只有 session id → 标题映射、没有 profile——按
+/// session_key join 需要猜 profile，猜错就静默丢标题。写路径按
+/// `(harness, machine_namespace, native_session_id)` 自然键 UPDATE，
+/// 与 `sessions` 表的 UNIQUE 约束同一身份。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionTitle {
+    /// 执行环境原生会话 id（非空；codex = 逻辑 `payload.session_id`，与标题
+    /// 索引的 join 键同源）。
+    pub native_session_id: String,
+    /// 脱敏 + 截断后的标题文本；空文本不产行（adapter 侧就不产）。
+    pub title: String,
+    /// 闭集：`codex_thread_name | claude_ai_title | dsh_workspace_title`。
+    pub source: String,
+}
+
+/// 会话标题的字符上限——与摘录同界（`SessionExcerpt::validate` 的 256）。
+pub const SESSION_TITLE_MAX_CHARS: usize = 256;
+
+impl SessionTitle {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.native_session_id.is_empty() {
+            return Err("session title native session id is empty");
+        }
+        if self.title.is_empty() || self.title.chars().count() > SESSION_TITLE_MAX_CHARS {
+            return Err("session title text is empty or too long");
+        }
+        if !matches!(
+            self.source.as_str(),
+            "codex_thread_name" | "claude_ai_title" | "dsh_workspace_title"
+        ) {
+            return Err("session title source is unknown");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SessionExcerpt, WorkflowEvent};
+    use super::{SessionExcerpt, SessionTitle, WorkflowEvent};
 
     fn base_event() -> WorkflowEvent {
         WorkflowEvent {
@@ -337,4 +378,27 @@ mod tests {
         };
         assert!(negative.validate().is_err());
     }
+
+    #[test]
+    fn session_title_validates_closed_shape() {
+        let base = SessionTitle {
+            native_session_id: "s1".to_string(),
+            title: "修复菜单栏图标".to_string(),
+            source: "claude_ai_title".to_string(),
+        };
+        assert!(base.validate().is_ok());
+
+        let empty_sid = SessionTitle { native_session_id: String::new(), ..base.clone() };
+        assert!(empty_sid.validate().is_err());
+        let empty_text = SessionTitle { title: String::new(), ..base.clone() };
+        assert!(empty_text.validate().is_err());
+        let too_long = SessionTitle { title: "题".repeat(257), ..base.clone() };
+        assert!(too_long.validate().is_err());
+        // 按码点而非字节计上限（与摘录同纪律）
+        let edge = SessionTitle { title: "题".repeat(256), ..base.clone() };
+        assert!(edge.validate().is_ok());
+        let bad_source = SessionTitle { source: "guessed".to_string(), ..base };
+        assert!(bad_source.validate().is_err());
+    }
+
 }

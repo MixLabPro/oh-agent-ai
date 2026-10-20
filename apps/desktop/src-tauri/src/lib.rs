@@ -1233,11 +1233,15 @@ fn refresh_harnesses(app: &AppHandle) {
 ///
 /// **PATH 只放最后**：登录项/launchd 启动的 app PATH 是极简的（没有 ~/.local/bin），
 /// 真机 last-sync 报「未找到二进制」正是这个——部署必须不依赖登录 shell 的 PATH。
+static BUNDLED_RESOURCE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn resolve_binary() -> Option<PathBuf> {
     resolve_binary_from(
         &|k| std::env::var(k).ok(),
         std::env::var("PATH").unwrap_or_default(),
         std::env::current_exe().ok(),
+        BUNDLED_RESOURCE_DIR.get().cloned(),
+        if cfg!(windows) { "agent-vitals.exe" } else { "agent-vitals" },
         &|p: &Path| p.is_file(),
     )
 }
@@ -1258,11 +1262,13 @@ fn resolved_cli_version() -> Option<String> {
 }
 
 /// 纯函数版二进制解析——env、自身可执行文件、文件判断由调用方注入，单测不碰真实
-/// 环境变量。优先序：AGENT_VITALS_BIN > 自身目录（含 `../Resources/bin`）> PATH。
+/// 环境变量。优先序：AGENT_VITALS_BIN > Tauri 资源目录 > 自身目录 > PATH。
 fn resolve_binary_from(
     get_env: &dyn Fn(&str) -> Option<String>,
     path: String,
     exe: Option<PathBuf>,
+    resource_dir: Option<PathBuf>,
+    binary_name: &str,
     is_file: &dyn Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
     if let Some(b) = get_env("AGENT_VITALS_BIN") {
@@ -1271,23 +1277,29 @@ fn resolve_binary_from(
             return Some(p);
         }
     }
+    if let Some(dir) = resource_dir {
+        let bundled = dir.join("bin").join(binary_name);
+        if is_file(&bundled) {
+            return Some(bundled);
+        }
+    }
     // 自身目录：`Contents/MacOS/agent-vitals`（与 menubar 同目录）或
     // `Contents/Resources/bin/agent-vitals`（打包版放 CLI 的规范位置）。用
     // parent 遍历而不是字面 `..`——返回的路径不含 `..`，对 display/spawn 都干净。
     if let Some(macos) = exe.as_deref().and_then(|e| e.parent()) {
-        let sibling = macos.join("agent-vitals");
+        let sibling = macos.join(binary_name);
         if is_file(&sibling) {
             return Some(sibling);
         }
         if let Some(contents) = macos.parent() {
-            let bundled = contents.join("Resources").join("bin").join("agent-vitals");
+            let bundled = contents.join("Resources").join("bin").join(binary_name);
             if is_file(&bundled) {
                 return Some(bundled);
             }
         }
     }
     for dir in std::env::split_paths(&path) {
-        let cand = dir.join("agent-vitals");
+        let cand = dir.join(binary_name);
         if is_file(&cand) {
             return Some(cand);
         }
@@ -2285,6 +2297,7 @@ fn show_workbench(app: &AppHandle) {
     // 证实那些失败的真根因是 get_webview_window 多 webview 门槛 + tao show 在
     // wedge 态静默无效（均已修复），与图标切换无关，故恢复双向。tao 自带 1s
     // 防抖防快速开关产生幽灵图标。
+    #[cfg(target_os = "macos")]
     let _ = app.set_dock_visibility(true);
     // 诊断 2026-10-09「开 City 后关窗，二次唤起失败」：窗口在 CGWindowList 里存在
     // 但 onScreen=false——记录 NSApp 层 hidden 与 show/focus 的真实返回值定位卡点。
@@ -5721,6 +5734,7 @@ pub fn run() {
                     let _ = window.hide();
                     // 关窗 = 撤 Dock 图标（用户理想形态：无窗口时回到纯菜单栏，
                     // 经菜单栏唤起）。真根因（webview 门槛/wedge）已修，双向安全。
+                    #[cfg(target_os = "macos")]
                     let _ = window.app_handle().set_dock_visibility(false);
                 }
             }
@@ -5888,6 +5902,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let _ = BUNDLED_RESOURCE_DIR.set(app.path().resource_dir()?);
             if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
                 &overview::data_home(),
             ) {
@@ -5904,6 +5919,7 @@ pub fn run() {
             // skipTaskbar/visible:false 只藏窗口，藏不住进程的 Dock 图标。
             // 2026-10-09 起：首次唤起工作台时 Dock 图标单向出现（会话内不隐藏，
             // 点图标走 Reopen 重开）；逆向 Transform 会间歇性卡死再唤起，不做。
+            #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),
@@ -7494,6 +7510,7 @@ mod tests {
 
     /// AGENT_VITALS_BIN 优先于自身目录与 PATH（env 指向的文件存在就用它）。
     #[test]
+    #[cfg(not(windows))]
     fn resolve_binary_prefers_env_override() {
         let get = |k: &str| match k {
             "AGENT_VITALS_BIN" => Some("/opt/av/agent-vitals".into()),
@@ -7501,18 +7518,19 @@ mod tests {
         };
         let is_file = |p: &Path| p.to_string_lossy() == "/opt/av/agent-vitals";
         assert_eq!(
-            resolve_binary_from(&get, "/usr/bin:/opt/av".into(), None, &is_file),
+            resolve_binary_from(&get, "/usr/bin:/opt/av".into(), None, None, "agent-vitals", &is_file),
             Some(PathBuf::from("/opt/av/agent-vitals"))
         );
     }
 
     /// 无 env、无自身目录 → PATH 查找。
     #[test]
+    #[cfg(not(windows))]
     fn resolve_binary_falls_back_to_path() {
         let none = |_: &str| None;
         let is_file = |p: &Path| p.to_string_lossy() == "/usr/local/bin/agent-vitals";
         assert_eq!(
-            resolve_binary_from(&none, "/usr/bin:/usr/local/bin".into(), None, &is_file),
+            resolve_binary_from(&none, "/usr/bin:/usr/local/bin".into(), None, None, "agent-vitals", &is_file),
             Some(PathBuf::from("/usr/local/bin/agent-vitals"))
         );
     }
@@ -7520,6 +7538,7 @@ mod tests {
     /// env 指向的文件不存在 → 不硬用，退回自身目录/PATH（宁可 PATH 也不起一个
     /// 不存在的）。
     #[test]
+    #[cfg(not(windows))]
     fn resolve_binary_env_must_exist() {
         let get = |k: &str| match k {
             "AGENT_VITALS_BIN" => Some("/gone/agent-vitals".into()),
@@ -7527,7 +7546,7 @@ mod tests {
         };
         let is_file = |p: &Path| p.to_string_lossy() == "/usr/local/bin/agent-vitals";
         assert_eq!(
-            resolve_binary_from(&get, "/usr/local/bin".into(), None, &is_file),
+            resolve_binary_from(&get, "/usr/local/bin".into(), None, None, "agent-vitals", &is_file),
             Some(PathBuf::from("/usr/local/bin/agent-vitals"))
         );
     }
@@ -7535,6 +7554,7 @@ mod tests {
     /// 自身目录解析：CLI 放进 .app 的 `Contents/MacOS/`（与 menubar 同目录）时，
     /// 无 env 无 PATH 也能找到——登录项启动的 app 不必依赖登录 shell 的 PATH。
     #[test]
+    #[cfg(not(windows))]
     fn resolve_binary_finds_sibling_next_to_exe() {
         let none = |_: &str| None;
         let exe = Some(PathBuf::from(
@@ -7544,7 +7564,7 @@ mod tests {
             p.to_string_lossy() == "/Applications/agent-vitals.app/Contents/MacOS/agent-vitals"
         };
         assert_eq!(
-            resolve_binary_from(&none, "".into(), exe, &is_file),
+            resolve_binary_from(&none, "".into(), exe, None, "agent-vitals", &is_file),
             Some(PathBuf::from(
                 "/Applications/agent-vitals.app/Contents/MacOS/agent-vitals"
             ))
@@ -7554,6 +7574,7 @@ mod tests {
     /// 兄弟目录优先于 PATH：即使 PATH 里也有，app 自带的 CLI 必须赢（部署版不该
     /// 被 PATH 上另一份不同版本的二进制劫持）。
     #[test]
+    #[cfg(not(windows))]
     fn resolve_binary_bundle_wins_over_path() {
         let none = |_: &str| None;
         let exe = Some(PathBuf::from(
@@ -7565,7 +7586,7 @@ mod tests {
                 || s == "/usr/local/bin/agent-vitals"
         };
         assert_eq!(
-            resolve_binary_from(&none, "/usr/local/bin".into(), exe, &is_file),
+            resolve_binary_from(&none, "/usr/local/bin".into(), exe, None, "agent-vitals", &is_file),
             Some(PathBuf::from(
                 "/Applications/agent-vitals.app/Contents/Resources/bin/agent-vitals"
             ))
@@ -7574,6 +7595,7 @@ mod tests {
 
     /// 自身目录里的候选都不存在 → 退回 PATH。
     #[test]
+    #[cfg(not(windows))]
     fn resolve_binary_bundle_missing_falls_back_to_path() {
         let none = |_: &str| None;
         let exe = Some(PathBuf::from(
@@ -7581,11 +7603,51 @@ mod tests {
         ));
         let is_file = |p: &Path| p.to_string_lossy() == "/usr/local/bin/agent-vitals";
         assert_eq!(
-            resolve_binary_from(&none, "/usr/local/bin".into(), exe, &is_file),
+            resolve_binary_from(&none, "/usr/local/bin".into(), exe, None, "agent-vitals", &is_file),
             Some(PathBuf::from("/usr/local/bin/agent-vitals"))
         );
     }
 
+
+    #[test]
+    fn resolve_binary_platform_config_matches_packaged_resource() {
+        use tauri::utils::{config::parse::read_from, platform::Target};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for (target, source, destination) in [
+            (Target::Windows, "../../../target/release/agent-vitals.exe", "bin/agent-vitals.exe"),
+            (Target::Linux, "../../../target/release/agent-vitals", "bin/agent-vitals"),
+            (Target::MacOS, "../../../target/release/agent-vitals", "bin/agent-vitals"),
+        ] {
+            let (value, _) = read_from(target, root).unwrap();
+            let resources = value["bundle"]["resources"].as_object().unwrap();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[source], destination);
+            let _: tauri::utils::config::Config = serde_json::from_value(value).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolve_binary_uses_platform_resource_directory_before_path() {
+        for name in ["agent-vitals", "agent-vitals.exe"] {
+            let resource = PathBuf::from("installed-resources");
+            let expected = resource.join("bin").join(name);
+            let path_dir = PathBuf::from("path-bin");
+            let path_binary = path_dir.join(name);
+            let path = std::env::join_paths([&path_dir]).unwrap().into_string().unwrap();
+            let is_file = |p: &Path| p == expected || p == path_binary;
+            assert_eq!(resolve_binary_from(&|_| None, path.clone(), None,
+                Some(resource.clone()), name, &is_file), Some(expected.clone()));
+            let missing = |p: &Path| p == path_binary;
+            assert_eq!(resolve_binary_from(&|_| None, path, None,
+                Some(resource), name, &missing), Some(path_binary));
+            assert_eq!(resolve_binary_from(&|_| Some("override".into()), String::new(), None,
+                Some(PathBuf::from("resources")), name, &|_| true), Some(PathBuf::from("override")));
+            let sibling = PathBuf::from("installed").join(name);
+            assert_eq!(resolve_binary_from(&|_| Some("missing".into()), String::new(),
+                Some(PathBuf::from("installed").join("desktop")), None, name,
+                &|p| p == sibling), Some(sibling));
+        }
+    }
 
     /// days_from_civil 锚点：2026-08-27T00:00Z = 1787788800 秒（= 20692 天）。与
     /// overview.rs 的 civil_from_unix_secs 互为逆运算，锚点对上了两个方向都信得过。

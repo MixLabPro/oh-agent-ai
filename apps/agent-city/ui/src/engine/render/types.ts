@@ -54,5 +54,7 @@ export type BuildingRuntime = {
 export type CarPath = { points: Vec2[]; cumulative: number[]; total: number; y: number; terrain: TerrainField | null };
 export type Car = { path: CarPath; distance: number; speed: number };
 
-/** 夜间照明：路灯灯头（自发光）、地面光斑（加色）、高架灯带。亮度由 setNightGlow 统一驱动。 */
-export type NightLights = { heads: THREE.MeshBasicMaterial; pools: THREE.MeshBasicMaterial; strips: THREE.MeshBasicMaterial; neon: THREE.MeshBasicMaterial };
+/** 夜间照明：路灯灯头（自发光）、地面光斑（加色）、高架灯带。亮度由 setNightGlow 统一驱动。
+ *  plan 是全部灯位的纯函数描述（与实例矩阵同源同序）——开车模式解析街灯（N5）从这里取灯，
+ *  不再各算一套。 */
+export type NightLights = { heads: THREE.MeshBasicMaterial; pools: THREE.MeshBasicMaterial; strips: THREE.MeshBasicMaterial; neon: THREE.MeshBasicMaterial; plan: import("../render/nightLighting").StreetLampPlan[] };

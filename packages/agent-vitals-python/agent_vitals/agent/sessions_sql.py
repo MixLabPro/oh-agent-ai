@@ -618,7 +618,7 @@ _SQL_SESSIONS_IN_WINDOW = (
     "  AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL "
     "  AND session_key IS NOT NULL "
     "  AND event_ts_ms >= ?2 AND event_ts_ms < ?3 "
-    "  AND (?4 < 0 OR (CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', 'localtime') AS INTEGER) = (?4 + (?5 - ?5) + (?6 - ?6)))) "
+    "  AND (?4 < 0 OR (CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', printf('%+d hours', (?5 / ?6))) AS INTEGER) = ?4)) "
     "GROUP BY session_key"
 )
 

@@ -7,7 +7,21 @@ export const LIGHT_BUDGET = {
   /** 窗光：亮度 0.3..2.0（平方分布，多数暗少数亮）；色温 2400K 暖黄 → 5000K 冷白。 */
   window: { min: 0.3, max: 2.0, warmK: 2400, coolK: 5000 },
   /** 路灯：灯头亮度 / 地面光斑 / 高架灯带；光斑与灯头按道路等级分档（见 lampTier）。 */
-  street: { head: 3.2, pool: 0.9, strip: 2.4 },
+  street: {
+    head: 3.2, pool: 0.9, strip: 2.4,
+    /** 开车模式解析街灯（N5）：tier-1 灯的天底坎德拉（场景单位）。标定锚点是被它在
+     * 交叉带里替换掉的贴纸光斑：贴纸给帧缓存直接加 ~0.9×night 的辐亮度；解析光要走
+     * E×albedo/π——灯下 8m、蝙蝠翼峰值 2.4、沥青反照率 ~0.08 时，cd ≈ 0.9×64×π/(0.08×2.4)
+     * ≈ 900 才与贴纸等亮（真实光度学换算只够黄昏天光下的 24cd，那是 night-street 的场景，
+     * 不是纯夜的这里）。量级再对不齐时优先校这一项。 */
+    analyticCd: 900,
+    /** 钠灯启辉 warm-up 色度端点（峰值通道归一）：起辉暗红粉 → 工作橙。灯与灯在颜色上的
+     * 不一致比亮度不一致更显「刚开灯」，见 lampWarmChroma。 */
+    warmStrike: [1.0, 0.3, 0.36],
+    warmWorking: [1.0, 0.47, 0.13],
+    /** 每盏灯 warm-up 进度的下限：夜里没有全黑灯，但也不盏盏全亮。 */
+    warmthFloor: 0.35,
+  },
   /** 霓虹：招牌、楼顶描边（仅高楼/酒店冠）、桥塔点缀（降饱和后）。 */
   neon: { sign: 2.6, roof: 3.2, bridge: 0.9, bridgeSaturation: 0.55 },
   /** 地标玻璃幕墙：夜里 base + night × gain。 */
@@ -30,6 +44,28 @@ export function lampTier(width: number): number {
   if (width >= 12) return 1;
   if (width >= 7) return 0.6;
   return 0.45;
+}
+
+/** 灯位种子 → 钠灯 warm-up 进度 [warmthFloor, 1]。确定性哈希：同一盏灯每帧同一颜色，
+ * 不随帧闪；两盏灯的进度错开靠 seed（灯位坐标拼接）而不是随机数。 */
+export function lampWarmth(seed: number): number {
+  const h = Math.sin(seed * 12.9898) * 43758.5453;
+  const f = h - Math.floor(h);
+  return LIGHT_BUDGET.street.warmthFloor + (1 - LIGHT_BUDGET.street.warmthFloor) * f;
+}
+
+/** warm-up → 输出比例：w^0.55 强凹（真实钠灯 1 分钟到半输出），半热灯不留光池空洞。 */
+export function lampWarmOutput(w: number): number {
+  return Math.pow(Math.min(1, Math.max(0, w)), 0.55);
+}
+
+/** warm-up → 发光色度：w^0.75 插值（颜色先于亮度稳定——刚亮灯的街，读出的是灯与灯
+ * 颜色不一致，而不是明暗不一致）。峰值通道归一，乘 analyticCd 得各通道坎德拉。 */
+export function lampWarmChroma(w: number): [number, number, number] {
+  const t = Math.pow(Math.min(1, Math.max(0, w)), 0.75);
+  const a = LIGHT_BUDGET.street.warmStrike;
+  const b = LIGHT_BUDGET.street.warmWorking;
+  return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 }
 
 /** Zone → 窗光用途：商业/市中心/滨水 = 办公（整层同亮同灭），住宅 = 零星亮。 */
@@ -69,6 +105,14 @@ export function budgetProblems(): string[] {
   if (LIGHT_BUDGET.window.max / LIGHT_BUDGET.window.min < 4) problems.push("window brightness range too flat");
   if (LIGHT_BUDGET.neon.bridgeSaturation > 0.7) problems.push("bridge neon too saturated");
   if (LIGHT_BUDGET.ambient.exposureCut < 0.1) problems.push("night exposure cut too small");
+  const { analyticCd, warmStrike, warmWorking, warmthFloor } = LIGHT_BUDGET.street;
+  if (analyticCd < 100 || analyticCd > 4000) problems.push("analytic street cd outside readable band");
+  if (Math.max(...warmStrike) !== 1 || Math.max(...warmWorking) !== 1) problems.push("warm-up chroma peaks must be 1");
+  if (warmthFloor <= 0.2 || warmthFloor >= 0.6) problems.push("warmth floor leaves pools too dark or too uniform");
+  const floor = lampWarmth(3.7);
+  if (floor < warmthFloor || floor > 1 || lampWarmth(3.7) !== floor) problems.push("lamp warmth hash must be deterministic in range");
+  if (lampWarmOutput(0.35) < 0.5 || lampWarmOutput(0.35) > 0.65) problems.push("warm-up output curve lost its concavity");
+  if (lampWarmChroma(1).some((c, i) => c !== warmWorking[i]) || lampWarmChroma(0).some((c, i) => c !== warmStrike[i])) problems.push("warm-up chroma endpoints must interpolate exactly");
   for (const use of ["residential", "office"] as WindowUse[]) {
     let peak = 0; let low = 1;
     for (let h = 0; h < 24; h += 0.25) { const r = windowRate(h, use); peak = Math.max(peak, r); low = Math.min(low, r); if (r < 0 || r > 1) problems.push(`${use} rate out of range at ${h}`); }

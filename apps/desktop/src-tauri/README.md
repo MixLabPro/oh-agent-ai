@@ -1,14 +1,14 @@
-# agent-vitals 菜单栏（Tauri 2）
+# Oh Agent 桌面应用（Tauri 2）
 
-macOS 菜单栏应用：托盘图标 + 工作台主窗口，展示当日/本月成本与预算。
+当前产品介绍见[根 README](../../../README.md)。桌面应用包含托盘、React 工作台和
+Agent City 内置插件：本机历史可视化、用量与费用分析、会话证据，以及版本相关的探索玩法。
+对外品牌为 Oh Agent；CLI、数据目录、bundle identifier 和本地构建产物暂保留 `agent-vitals`。
 
-- **后端**：`src/overview.rs` 读数据根的 `state/month.json` + `today.json` +
-  `config.toml` 预算，喂给 `agent-vitals-core::cost` 的纯函数
-  （`priced_day`/`month_cost`/`today_cost`/`bucket_cost`）。**计价一律在 core**，
-  本 crate 不长第四份拷贝。托盘菜单和工作台"总览"tab 读的是同一个
-  `read_overview`。
-- **前端**：`ui/` 纯 HTML/CSS/JS（ADR-010），`withGlobalTauri: true` 提供
-  `window.__TAURI__`，无构建链、无 npm 依赖。
+- **后端**：Rust host 负责本机数据访问与受限投影，资源 CLI 随安装包分发。
+  插件不直接查询 authority DB 或读取日志；计价和证据口径遵守仓库数据契约。
+- **前端**：`../ui-dev/react/` 是 React 工作台源码，生产入口为 `ui-react-dist/`。
+  构建钩子准备工作台、官方插件与 CLI；不是无 npm 依赖的旧版纯 HTML 工作台。
+  City 源码位于 `../../agent-city/ui/`。
 - **交互**：左右键点托盘图标都弹同一个菜单（今日/本月/预算/打开工作台/立即
   同步/退出）——跟多数状态栏图标的通用手势一致，不再区分左右键语义。
   2026-09-01 之前这里还有一个独立的弹出小面板（`toggle_window`，右键单独弹、

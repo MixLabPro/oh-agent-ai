@@ -24,6 +24,7 @@ import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
 import { buildAirport, planAirport, roadSamples } from "./cityAirport";
 import { LANDMARK_BUILDERS } from "./render/landmarkBuilders";
+import { captureRenderedSolids, type RenderedSolidRoot, type RenderedSolidRole } from "./surface/renderedSolids";
 import type { LandmarkHost } from "./models/landmarkContext";
 import { buildGardens, buildCivics, buildFlags, buildPublicSites, updateCivics, writeCivic, type CivicSystemHost } from "./systems/civicSystem";
 import { applyDistrictLandmarkGrowth, buildDistrictLandmarks, buildLandmarks, type LandmarkSystemHost } from "./systems/landmarkSystem";
@@ -33,10 +34,20 @@ import { buildGroundSpill, buildSeaMountains, buildTerrain, buildWater, type Ter
 import { applyFlora, buildTrees, type NatureHost } from "./systems/natureSystem";
 import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type AmbientHost } from "./systems/ambientSystem";
 import { buildRoadSurface, type RoadSurfaceHost } from "./systems/roadSurfaceSystem";
+import { compileGroundRoadSurface, type CompiledGroundRoadSurface } from "./surface/groundRoadCompiler";
+import type { CitySurfaceSource } from "./surface/citySurfacePort";
+import type { RenderedSolidSource } from "./surface/renderedSolidTypes";
+import type { SolidInput } from "../game/driving/CollisionIndex";
+import { collectSceneSolids } from "./surface/sceneSolids";
+import { groundRoadTopAt } from "./surface/structureCompiler";
 import { buildInfrastructure, buildCulDeSacBulbs, buildJunctionIslands, buildChannelizedJunctions, buildDistrictExpressways, buildHighwayRamps, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
+import { clearCarStreetLamps, updateCarStreetLamps } from "./render/drivingStreetLights";
 import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
+
+export type CityStaticSceneSource = Readonly<{ layout: CityLayout; rendered: RenderedSolidSource; solids: readonly SolidInput[];
+  isCurrent: () => boolean; verifyCurrent: () => boolean }>;
 
 import { artDecoTowerGeometry, BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, baseSpeedOf, expresswayDeckHeights, mergeGeometries, originOf, samplePolyline, selfLitMaterial } from "./render/shared";
 import type { BuildingRuntime, Car, CarPath, NightLights, QualityLevel } from "./render/types";
@@ -53,6 +64,9 @@ type StaticCity = {
   landmarkWindows: CityParts["landmarkWindows"];
   lifeguardGlowMaterial: THREE.MeshBasicMaterial | null;
   layout: CityLayout;
+  /** The ground road compilation the rendered road mesh was built from (driving reads the same one). */
+  groundRoadSurface: CompiledGroundRoadSurface;
+  drivingRoots: RenderedSolidRoot[];
   group: THREE.Group;
   disposables: Array<{ dispose: () => void }>;
   water: THREE.Mesh;
@@ -77,6 +91,14 @@ type StaticCity = {
 let staticCityCache: StaticCity | null = null;
 
 export class CityParts {
+  private drivingRoots: RenderedSolidRoot[] = [];
+  private drivingFreezeCount = 0;
+  private drivingFrozenSource: CitySurfaceSource | null = null;
+  private staticFrozenSource: CityStaticSceneSource | null = null;
+  private drivingDisposed = false;
+  private drivingDeferredCursor: [number, boolean, number] | null = null;
+  private drivingDeferredSnap: boolean | null = null;
+  private drivingDeferredReset = false;
   readonly group = new THREE.Group();
   readonly raycastTargets: THREE.Object3D[] = [];
   readonly water: THREE.Mesh;
@@ -190,13 +212,14 @@ export class CityParts {
         const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
         const core = this.layout.core ?? { x: 0, z: 0 };
         const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges), (x, z) => this.layout.terrain.height(x, z) < -0.6);
-        if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null));
+        if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null,
+          (x,z) => groundRoadTopAt(this.layout,x,z)));
       }
-      this.buildCivics();
-      this.buildLandmarks();
+      this.registerDrivingRoots("civic", () => this.buildCivics());
+      this.registerDrivingRoots("landmark", () => this.buildLandmarks());
       this.buildTrussBridges();
-      this.buildDistrictLandmarks();
-      this.buildUrbanContext();
+      this.registerDrivingRoots("landmark", () => this.buildDistrictLandmarks());
+      this.registerDrivingRoots("context", () => this.buildUrbanContext());
       buildOceanDrive(this as unknown as BuildingSystemHost);
       this.buildSeaMountains();
       this.buildBeachRibbon();
@@ -222,6 +245,8 @@ export class CityParts {
       staticCity = {
         seed: layout.seed,
         layout,
+        groundRoadSurface: this.groundRoadSurface!,
+        drivingRoots: this.drivingRoots.slice(),
         group: this.group,
         disposables: staticBucket,
         water: this.water,
@@ -249,6 +274,11 @@ export class CityParts {
       (this.disposables as Array<{ dispose: () => void }>) = [];
     }
     this.group.add(staticCity.group);
+    this.drivingRoots = staticCity.drivingRoots.slice();
+    // The legacy surface-only port carries the compiled road/structure geometry.
+    // Scene proxies belong to captureDrivingWorld(), where they are sampled under
+    // the explicit display-freeze lease below.
+    this.staticSource = Object.freeze({ layout: staticCity.layout, ground: staticCity.groundRoadSurface });
     this.water = staticCity.water;
     this.treeMesh = staticCity.treeMesh;
     this.carMesh = staticCity.carMesh;
@@ -395,12 +425,29 @@ export class CityParts {
     this.signStripeMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), 96);
 
     // ── 动态层：溢出楼群 / 信标 / 标签 / 选中环 / 建筑运行时 ────────────
-    this.buildMassing();
+    this.registerDrivingRoots("massing", () => this.buildMassing());
     this.buildAnomalyMarkers();
     this.hoverRing = this.makeGroundRing("#087f62");
     this.selectRing = this.makeGroundRing("#c96f4a");
-    this.buildRuntimes();
+    this.registerDrivingRoots("building", () => this.buildRuntimes());
     this.buildLabels();
+    for (const object of [...this.shaftMeshes, ...this.roofProfiles, this.podiumMesh, this.roofMesh,
+      this.decoTrimMesh, this.decoCornerMesh, this.cylinderMesh, this.antennaMesh, this.scaffoldMesh,
+      this.craneMastMesh, this.craneArmMesh, this.crownFinMesh, this.signPostMesh, this.signPanelMesh]) {
+      this.drivingRoots.push({ object, role: "building" });
+    }
+    // The hero light beam is a transparent lighting effect, not architectural geometry.
+    this.drivingRoots = this.drivingRoots.filter((root) => root.object !== this.heroParts?.beam);
+    const lightEffects = [this.nightLights?.neon, this.nightLights?.pools, this.nightLights?.strips,
+      this.lifeguardGlowMaterial, this.signageNeonMaterial].filter(Boolean);
+    for (const root of this.drivingRoots) root.object.traverse((object) => {
+      if (object instanceof THREE.Mesh && lightEffects.includes(object.material as THREE.MeshBasicMaterial)) object.userData.cityDrivingNonSolid = true;
+    });
+  }
+
+  private registerDrivingRoots(role: RenderedSolidRole, build: () => void): void {
+    const before = new Set(this.group.children); build();
+    for (const object of this.group.children) if (!before.has(object) && object.name !== "city-civic-glow") this.drivingRoots.push({ object, role });
   }
 
   private makeInstanced(geometry: THREE.BufferGeometry, material: THREE.Material, capacity: number): THREE.InstancedMesh {
@@ -499,7 +546,60 @@ export class CityParts {
 
   /** Batched city furniture and waterfront infrastructure, not selectable data. */
   private buildInfrastructure(): void { buildInfrastructure(this as unknown as RoadHost); }
-  private buildRoadSurface(): void { buildRoadSurface(this as unknown as RoadSurfaceHost); }
+  /** Compiled once per static city; the renderer and the driving surface consume this same object. */
+  private groundRoadSurface: CompiledGroundRoadSurface | null = null;
+  private staticSource: CitySurfaceSource | null = null;
+  private buildRoadSurface(): void {
+    this.groundRoadSurface = compileGroundRoadSurface(this.layout);
+    buildRoadSurface(this as unknown as RoadSurfaceHost);
+  }
+  /** Layout + ground compilation the CURRENTLY drawn static city was built from (the static cache
+   *  may reuse an earlier layout object): the driving surface must match what is on screen. */
+  drivingSurfaceSource(): CitySurfaceSource | null { return this.staticSource; }
+
+  /** Road-neutral reference-counted freeze shared by static collision and road readers.
+   * Time changes queue until the last reader releases; rebuild/dispose still invalidate. */
+  acquireStaticSceneSource(): { source: CityStaticSceneSource; drivingSource: CitySurfaceSource; release: () => void } {
+    if (this.drivingDisposed || !this.staticSource) throw new Error("driving-world-unavailable");
+    this.drivingFreezeCount++;
+    try {
+      if (!this.drivingFrozenSource) {
+        const rendered = captureRenderedSolids(this.drivingRoots);
+        const sceneSolids = Object.freeze(collectSceneSolids(this.group));
+        // Geometry and proxy transforms are captured once for this display lease.
+        // CityParts.update() and cursor/snap/reset writers are frozen while held,
+        // so frame checks need only test the lease identity instead of traversing
+        // every mesh buffer and re-collecting every proxy on every tick.
+        let drivingSource!: CitySurfaceSource;
+        const current = () => !this.drivingDisposed && this.drivingFreezeCount > 0 && this.drivingFrozenSource === drivingSource;
+        drivingSource = Object.freeze({ ...this.staticSource, solids: () => sceneSolids, solidsCurrent: current,
+          verifySolidsCurrent: () => current() && JSON.stringify(collectSceneSolids(this.group)) === JSON.stringify(sceneSolids),
+          rendered: Object.freeze({ solids: rendered.solids, isCurrent: current, verifyCurrent: () => current() && rendered.isCurrent() }) });
+        this.drivingFrozenSource = drivingSource;
+        this.staticFrozenSource = Object.freeze({ layout: drivingSource.layout, rendered: drivingSource.rendered!, solids: sceneSolids,
+          isCurrent: current, verifyCurrent: () => current() && drivingSource.verifySolidsCurrent!() });
+      }
+    } catch (error) { this.drivingFreezeCount--; throw error; }
+    let active = true;
+    return { source: this.staticFrozenSource!, drivingSource: this.drivingFrozenSource!, release: () => {
+      if (!active) return; active = false;
+      if (--this.drivingFreezeCount !== 0) return;
+      this.drivingFrozenSource = null;
+      this.staticFrozenSource = null;
+      if (this.drivingDisposed) return;
+      const cursor = this.drivingDeferredCursor, snap = this.drivingDeferredSnap, reset = this.drivingDeferredReset;
+      this.drivingDeferredCursor = null; this.drivingDeferredSnap = null; this.drivingDeferredReset = false;
+      if (cursor) this.applyCursor(...cursor);
+      if (snap !== null) this.snapToTargets(snap);
+      if (reset) this.resetAnimation();
+    } };
+  }
+
+  /** Compatibility view for the road surface port, backed by the same freeze. */
+  acquireDrivingWorldSource(): { source: CitySurfaceSource; release: () => void } {
+    const frozen = this.acquireStaticSceneSource();
+    return { source: frozen.drivingSource, release: frozen.release };
+  }
 
   /** 尽端回车圈（形态批 §5-3）：合法尽端（culDeSacEnds）的回车圆盘 + 路缘描边，
    *  纯渲染装饰、不改路网拓扑；见 systems/roadSystem.ts。 */
@@ -691,6 +791,7 @@ export class CityParts {
 
   /** pace>0 时按回放节奏夹住升起时长（见 builtFractionAt）；live 或未回放时传 0。 */
   applyCursor(cursor: number, live: boolean, paceMsPerSec = 0): void {
+    if (this.drivingFreezeCount) { this.drivingDeferredCursor = [cursor, live, paceMsPerSec]; return; }
     this.cursor = cursor;
     this.live = live;
     (this.layout.civics ?? []).forEach((civic, index) => { this.civicTarget[index] = live || cursor >= civic.unlockAt ? 1 : 0; });
@@ -717,6 +818,7 @@ export class CityParts {
    *  动画循环追赶，整城会先闪满高、再被压回时间轴进度——数据加载不应改变城市
    *  已呈现的样子。 */
   snapToTargets(all = false): void {
+    if (this.drivingFreezeCount) { this.drivingDeferredSnap = all || this.drivingDeferredSnap === true; return; }
     this.contextProgress.set(this.contextTarget);
     this.writeContext();
     for (const runtime of this.runtimes) {
@@ -805,6 +907,17 @@ export class CityParts {
 
   setNightGlow(selfLit: number): void { setNightGlow(this as unknown as NightHost, selfLit); }
 
+  /** N5 开车模式解析街灯：由 CityEngine 的游戏相机帧驱动（presentDrivingCamera），
+   *  取相机最近 16 盏灯写共享 uniform；夜量随昼夜 tick 的 nightGlow 走。 */
+  updateDrivingStreetLamps(camX: number, camZ: number): void {
+    const plan = this.nightLights?.plan;
+    if (!plan) return;
+    updateCarStreetLamps(plan, camX, camZ, nightFactor(this.nightGlow));
+  }
+
+  /** 退出开车模式：解析灯清零、贴纸光斑恢复（非开车模式两处都回到从前面貌）。 */
+  clearDrivingStreetLamps(): void { clearCarStreetLamps(); }
+
   /** theme 基线 + 夜晚抬升的合成值（theme 切换后由昼夜 tick 重新应用）。 */
   applySelfLit(themeBase: number): void { applySelfLit(this as unknown as NightHost, themeBase); }
 
@@ -839,6 +952,7 @@ export class CityParts {
 
   /** 每帧增量更新。返回是否有矩阵写入（供引擎决定是否强制重绘）。 */
   update(dt: number, elapsed: number): boolean {
+    if (this.drivingFreezeCount) return false;
     this.waterUniforms.uTime.value = elapsed;
     if (this.flagTime) this.flagTime.value = elapsed;
     this.updateCivics(dt);
@@ -1002,6 +1116,7 @@ export class CityParts {
   /** 把所有随帧累加的动画状态放回起点，楼与配套直接落到目标进度（不再有生长插值）。
    *  胶片导出开拍前调用：同一份数据 + seed，任何时候导出都从同一个状态开始。 */
   resetAnimation(): void {
+    if (this.drivingFreezeCount) { this.drivingDeferredReset = true; return; }
     this.contextProgress.set(this.contextTarget);
     this.writeContext();
     for (const car of this.cars) car.distance = originOf(car, car.distance);
@@ -1033,6 +1148,7 @@ export class CityParts {
   }
 
   dispose(): void {
+    this.drivingDisposed = true;
     // 只拆动态层：静态城（地形/基建/车船云）留在模块级缓存，同一 seed 的下一次
     // 重建直接复用；换 seed 时由构造函数统一释放旧缓存。
     this.group.removeFromParent();

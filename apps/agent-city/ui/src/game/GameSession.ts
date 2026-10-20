@@ -17,12 +17,15 @@ import { generateRaceCourse, COURSE_VERSION, type RaceCourse } from "./RaceCours
 import { RaceMission, type RaceMissionSnapshot, type RaceResult } from "./RaceMission";
 import { GameAudio } from "./GameAudio";
 import { GameSfx, type SfxTelemetry } from "./GameSfx";
-import { weatherAt } from "../engine/cityWeather";
-import type { EnterHostState, GamePauseReason, GameSelection, ReturnCameraView } from "./types";
+import * as THREE from "three";
+import { GameRuntime } from "./runtime/GameRuntime";
+import { FlightAdapter } from "./runtime/FlightAdapter";
+import type { GameSceneLease } from "./runtime/GameScenePort";
+import type { GameSceneSnapshot } from "./runtime/GameSceneSnapshot";
+import { compileCitySolidInputs } from "../engine/surface/compileCitySolidInputs";
+import type { EnterHostState, GamePauseReason, GameSelection, ReturnCameraView, FlightInputState } from "./types";
 
 const FIXED_DT = 1 / 60;
-const MAX_STEPS_PER_FRAME = 5;
-const LAG_PAUSE_SECONDS = 0.25;
 const HUD_HZ = 10;
 
 export type GameSessionEvents = {
@@ -64,15 +67,22 @@ export class GameSession {
   private lastSafe: { x: number; y: number; z: number } | null = null;
   private visuals: FlightVisuals | null = null;
   private camera: FlightCamera | null = null;
+  private cameraScratch: THREE.PerspectiveCamera | null = null;
   private cameraControls: FlightCameraControls | null = null;
   private input: FlightInput | null = null;
-  private returnCamera: ReturnCameraView | null = null;
-  private accumulator = 0;
+  private sceneLease: GameSceneLease<GameSceneSnapshot, import("three").Object3D> | null = null;
+  private prepareAbort: AbortController | null = null;
+  private readonly runtime = new GameRuntime<FlightInputState>({
+    dt: FIXED_DT, emptyInput: () => ({ throttleUp: false, throttleDown: false, turnLeft: false, turnRight: false, pitchUp: false, pitchDown: false }),
+    onPause: (reason) => this.onRuntimePause(reason),
+    onError: (reason) => { this.controller.fail(reason); this.emit(true); },
+  });
   private collisions = 0;
   private softOutside = false;
   private hudAt = 0;
   private disposed = false;
   private citySeed = 0;
+  private staticWorldRevision: string | null = null;
   private variant = 0;
   private course: RaceCourse | null = null;
   private mission: RaceMission | null = null;
@@ -89,9 +99,6 @@ export class GameSession {
   private soundVolume = 1;
   private sfxEnabled = true;
   private musicEnabled = true;
-  /** 天气雨强缓存（500ms 取一次 weatherAt，避免每帧哈希）。 */
-  private rainIntensity = 0;
-  private rainCheckedAt = 0;
   /** 倒计时秒数追踪（整数秒变化时发蜂鸣）。 */
   private lastCountdownSec: number | null = null;
 
@@ -108,16 +115,55 @@ export class GameSession {
     return { cityReady: !!(this.engine.currentLayout && this.engine.currentModel), cinemaActive, filmActive, busy };
   }
 
-  enter(kind: GameSelection, host: EnterHostState): { ok: true } | { ok: false; reason: string } {
+  async enter(kind: GameSelection, host: EnterHostState): Promise<{ ok: true } | { ok: false; reason: string }> {
     const attempt = this.controller.enter(kind, host);
     if (!attempt.ok) return { ok: false, reason: attempt.refusal };
-    const build = this.ensureRunObjects(kind);
-    if (!build.ok) {
-      this.settleFailure(build.message, build.reason);
-      return { ok: false, reason: build.reason };
+    const runId = this.controller.snapshot.runId;
+    const abort = new AbortController();
+    this.prepareAbort = abort;
+    this.emit(true);
+    let acquiredLease: GameSceneLease<GameSceneSnapshot, THREE.Object3D> | null = null;
+    try {
+      const selection = { vehicle: "plane" as const, activity: kind.mode };
+      const acquisition = await this.engine.gameScenePort.acquireResult(selection, runId, abort.signal);
+      if (acquisition.status !== "ready") {
+        if (!abort.signal.aborted && this.controller.snapshot.runId === runId && this.controller.snapshot.phase === "preparing") {
+          this.settleFailure(`场景准备失败：${acquisition.reason}`, acquisition.reason);
+        }
+        return { ok: false, reason: acquisition.reason };
+      }
+      const lease = acquisition.lease;
+      acquiredLease = lease;
+      if (abort.signal.aborted || this.controller.snapshot.runId !== runId || this.controller.snapshot.phase !== "preparing") {
+        lease.release(); return { ok: false, reason: "cancelled" };
+      }
+      this.sceneLease = lease;
+      const build = this.ensureRunObjects(kind);
+      if (!build.ok) {
+        lease.release(); this.sceneLease = null;
+        this.settleFailure(build.message, build.reason);
+        return { ok: false, reason: build.reason };
+      }
+      if (!this.attachRun()) {
+        this.cleanupFailedPreparation();
+        if (!this.controller.snapshot.error) this.settleFailure("场景已失效，请重新进入。", "runtime-refused");
+        return { ok: false, reason: "runtime-refused" };
+      }
+      return { ok: true };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "scene-acquire-failed";
+      const stillOwnsAttempt = this.controller.snapshot.runId === runId && this.sceneLease === acquiredLease &&
+        this.controller.snapshot.phase !== "exiting" && this.controller.snapshot.phase !== "data";
+      if (stillOwnsAttempt) this.cleanupFailedPreparation();
+      if (!abort.signal.aborted && this.controller.snapshot.runId === runId && this.controller.snapshot.phase === "preparing") {
+        this.settleFailure(`场景准备失败：${reason}`, reason);
+      } else if (!abort.signal.aborted && this.controller.snapshot.runId === runId && this.controller.inGame) {
+        this.controller.fail(reason); this.emit(true);
+      }
+      return { ok: false, reason };
+    } finally {
+      if (this.prepareAbort === abort) this.prepareAbort = null;
     }
-    this.attachRun();
-    return { ok: true };
   }
 
   /**
@@ -126,18 +172,34 @@ export class GameSession {
    * 在此检查。失败返回可识别原因——调用方进入错误面板，绝不带着半套对象起跑。
    */
   private ensureRunObjects(kind: GameSelection): { ok: true } | { ok: false; reason: string; message: string } {
+    const lease = this.sceneLease;
+    const staticWorld = lease?.snapshot.staticWorld;
+    if (!lease?.isCurrent() || !staticWorld?.isLeaseCurrent() || !staticWorld.verifyCurrent()) return { ok: false, reason: "stale-world", message: "城市场景已更新，请重新进入。" };
+    const staticContentRevision = staticWorld.worldRevision;
+    if (this.world && this.staticWorldRevision !== staticContentRevision) {
+      this.world = null; this.params = null; this.course = null; this.mission = null; this.staticWorldRevision = null;
+    }
     if (!this.world || !this.params) {
-      const layout = this.engine.currentLayout;
+      const layout = staticWorld.readWorld()?.layout;
       const model = this.engine.currentModel;
       if (!layout || !model) return { ok: false, reason: "not-ready", message: "城市尚未就绪，暂时无法起飞。" };
+      const snapshot = staticWorld.readWorld();
+      if (!snapshot) return { ok: false, reason: "static-snapshot-unavailable", message: "城市静态碰撞快照暂不可用。" };
+      const compiled = compileCitySolidInputs(snapshot);
+      if (compiled.status !== "ready") return { ok: false, reason: `static-solids:${compiled.reason}`, message: "城市静态碰撞内容无法安全准备。" };
+      if (!lease.isCurrent() || !staticWorld.verifyCurrent()) return { ok: false, reason: "stale-world", message: "城市场景已更新，请重新进入。" };
       this.citySeed = layout.seed;
-      this.world = new FlightWorld({ layout, model, cursorMs: this.engine.replayCursor });
+      this.world = new FlightWorld({ layout, model, cursorMs: this.engine.replayCursor, staticSolids: compiled.solids,
+        cameraCollisionIndex: compiled.collisionIndex, staticContentRevision,
+        solidCompilerVersion: compiled.compilerVersion, staticCoverage: compiled.coverage });
+      this.staticWorldRevision = staticContentRevision;
       const diagonal = Math.hypot(layout.urbanBounds.right - layout.urbanBounds.left, layout.urbanBounds.south - layout.urbanBounds.north);
       this.params = flightParamsFor(diagonal);
     }
     if (kind.mode === "race") {
       if (!this.course) {
-        const course = this.courseFactory({ world: this.world, params: this.params, citySeed: this.citySeed, physicsVersion: PHYSICS_VERSION, variant: this.variant });
+        const course = this.courseFactory({ world: this.world, params: this.params, citySeed: this.citySeed, physicsVersion: PHYSICS_VERSION,
+          variant: this.variant, staticCollisionIdentity: `solid-v${this.world.solidCompilerVersion ?? 0}:${this.world.staticContentRevision ?? "legacy"}` });
         if (!course) return { ok: false, reason: "no-course", message: "这条航线暂时无法生成安全路线，可重试或先自由练习。" };
         this.course = course;
       }
@@ -147,27 +209,24 @@ export class GameSession {
     if (!this.spawnFor(this.params, this.world)) {
       return { ok: false, reason: "no-safe-spawn", message: "没有可用的安全出生点，暂不能进入飞行。" };
     }
-    // 接管相机与循环（§4：同帧单一所有者；startCinematic 在 game 持有时会被拒绝）。
-    if (this.engine.owner !== "game" && !this.engine.setCameraOwner("game")) {
-      return { ok: false, reason: "camera-busy", message: "相机被占用，暂时无法起飞。" };
-    }
-    if (!this.returnCamera) this.returnCamera = this.engine.captureReturnView();
     return { ok: true };
   }
 
   /** 挂载运行件（幂等）：造型/相机/输入/帧钩子/任务，随后重置到出生点并落成准备。 */
-  private attachRun(): void {
+  private attachRun(): boolean {
+    if (!this.sceneLease?.isCurrent()) return false;
     const params = this.params!;
     if (!this.visuals) {
       this.visuals = new FlightVisuals(params);
-      this.engine.attachGameObjects(this.visuals.group, this.visuals.sceneRoot);
+      this.sceneLease.attach([this.visuals.group, this.visuals.sceneRoot]);
     }
     if (this.course) this.visuals.setRings(this.course.rings);
     else this.visuals.clearRings();
     this.mission = this.course ? new RaceMission(this.course, params) : null;
     if (!this.camera) {
       const reducedMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-      this.camera = new FlightCamera(this.engine.renderCamera, reducedMotion);
+      this.cameraScratch = this.engine.renderCamera.clone();
+      this.camera = new FlightCamera(this.cameraScratch, reducedMotion);
     }
     // 环绕/缩放输入：只在真实 DOM 画布上挂（Worker/OffscreenCanvas 与测试桩没有指针事件）。
     const canvas = this.engine.domCanvas;
@@ -178,11 +237,14 @@ export class GameSession {
     if (!this.input) {
       this.input = new FlightInput({
         isGameFocused: () => this.canvasFocused(),
+        focusTarget: () => {
+          const target = this.engine.domCanvas;
+          return typeof HTMLElement !== "undefined" && target instanceof HTMLElement ? target : null;
+        },
         onInterrupt: (reason) => this.interrupt(reason),
       });
       this.input.attach();
     }
-    this.engine.setGameFrameHook(this.frame);
     this.applySoundSettings();
     this.audio.start();
     this.sfx.start();
@@ -193,7 +255,34 @@ export class GameSession {
     const entryCanvas = this.engine.domCanvas;
     if (entryCanvas instanceof HTMLElement) entryCanvas.focus({ preventScroll: true });
     this.controller.prepareDone();
+    if (this.runtime.snapshot.phase === "idle" || this.runtime.snapshot.phase === "error") {
+      const lease = this.sceneLease;
+      if (!lease?.isCurrent()) return false;
+      const revision = lease.revision;
+      const isCurrent = () => !this.disposed && lease.isCurrent();
+      const adapter = new FlightAdapter(revision, {
+        isCurrent, prepare: () => { if (!this.sim || !this.world || !this.params) throw new Error("flight-not-prepared"); },
+        fixedStep: (input, dt) => this.fixedFlightStep(input, dt),
+        present: (alpha, seconds) => this.presentFlight(alpha, seconds),
+        reset: () => this.resetToSpawn(), settle: () => { this.prevSim = this.sim; },
+        dispose: () => this.releaseRunObjects(),
+      });
+      const runtimeLease: GameSceneLease<GameSceneSnapshot, import("three").Object3D> = {
+        ...lease,
+        setFrameHook: (frame) => lease.setFrameHook(frame ? (seconds) => {
+          this.runtime.setInput(this.input?.snapshot() ?? { throttleUp: false, throttleDown: false, turnLeft: false, turnRight: false, pitchUp: false, pitchDown: false });
+          frame(seconds);
+        } : null),
+        release: () => { lease.release(); if (this.sceneLease === lease) this.sceneLease = null; },
+      };
+      const ready = this.runtime.enterSync(runtimeLease, adapter);
+      if (!ready) return false;
+    } else {
+      this.runtime.pause("activity-reset"); this.runtime.reset();
+    }
+    if (this.controller.simulating) this.runtime.resume();
     this.emit(true);
+    return this.runtime.snapshot.phase === "running";
   }
 
   /** 出生点：挑战取首环后方进近位（沿切线），练习取世界安全位。 */
@@ -211,26 +300,23 @@ export class GameSession {
     return world.findSafeSpawn(params.planeRadius + 1.5, params.planeRadius * 5.2, params.planeRadius * 2.4);
   }
 
-  pause(reason: GamePauseReason): void {
-    this.input?.clear();
-    this.audio.suspend();
-    this.sfx.suspend();
-    this.controller.pause(reason);
+  pause(reason: GamePauseReason): void { this.runtime.pause(reason); }
+
+  private onRuntimePause(reason: string): void {
+    if (reason === "activity-reset" || reason === "activity-result") return;
+    this.input?.clear(); this.audio.suspend(); this.sfx.suspend();
+    this.controller.pause(reason === "long-frame" ? "lag" : reason as GamePauseReason);
     this.emit(true);
   }
 
   resume(): void {
     if (!this.controller.snapshot.paused) return;
-    // §5：恢复需重新确认焦点 + 清空旧键值——把焦点还给画布（点击「继续」时焦点在按钮上），
-    // 之后飞行输入立即生效；焦点获取失败则等待用户点击画布。
     this.input?.clear();
-    this.audio.resume();
-    this.sfx.resume();
+    if (!this.runtime.resume()) return;
+    this.audio.resume(); this.sfx.resume();
     const canvas = this.engine.domCanvas;
     if (canvas instanceof HTMLElement) canvas.focus({ preventScroll: true });
-    this.controller.resume();
-    this.accumulator = 0;
-    this.emit(true);
+    this.controller.resume(); this.emit(true);
   }
 
   /** 重试/重新开始：挑战复用原路线（variant 不变，§7.1）；任务实例必须重建
@@ -246,7 +332,7 @@ export class GameSession {
    *  result/paused 走 restart 语义（控制器回 preparing→prepareDone），错误面板走
    *  retryPrepare——后者不得再推断式递增（曾因 result 阶段 retryPrepare 空转导致
    *  variant 双递增且相位卡死在 result）。 */
-  newCourse(): void {
+  async newCourse(): Promise<void> {
     const snapshot = this.controller.snapshot;
     if (snapshot.selection?.mode !== "race") return;
     if (snapshot.error) {
@@ -255,7 +341,7 @@ export class GameSession {
       this.variant += 1;
       this.course = null;
       this.lastPrepareFailure = null;
-      this.retryPrepare();
+      await this.retryPrepare();
       return;
     }
     if (snapshot.phase !== "result" && !snapshot.paused) return;
@@ -278,7 +364,7 @@ export class GameSession {
     this.emit(true);
   }
 
-  retryPrepare(): void {
+  async retryPrepare(): Promise<void> {
     const selection = this.controller.snapshot.selection;
     if (!selection) return;
     // 生成失败后的重试换 variant，不再撞同一条死路；其他失败（未就绪/无出生点/
@@ -287,49 +373,73 @@ export class GameSession {
     this.lastPrepareFailure = null;
     this.controller.retryPrepare();
     if (failedCourseGeneration && selection.mode === "race") this.variant += 1;
-    // 完整重建（对象缺失时从引擎现状态补齐；相机/返回视角只在首次接管时捕获）。
-    const build = this.ensureRunObjects(selection);
-    if (!build.ok) {
-      this.settleFailure(build.message, build.reason);
-      return;
-    }
-    this.attachRun();
+    const runId = this.controller.snapshot.runId;
+    const complete = () => {
+      if (this.controller.snapshot.runId !== runId || this.controller.snapshot.phase !== "preparing") return;
+      try {
+        const build = this.ensureRunObjects(selection);
+        if (!build.ok) { this.sceneLease?.release(); this.sceneLease = null; this.settleFailure(build.message, build.reason); return; }
+        if (!this.attachRun()) {
+          this.cleanupFailedPreparation();
+          this.settleFailure("场景已失效，请重新进入。", "runtime-refused");
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "scene-prepare-failed";
+        this.cleanupFailedPreparation(); this.settleFailure(`场景准备失败：${reason}`, reason);
+      }
+    };
+    if (this.sceneLease?.isCurrent()) { complete(); return; }
+    const abort = new AbortController(); this.prepareAbort = abort; this.emit(true);
+    try {
+      const lease = await this.engine.gameScenePort.acquire({ vehicle: "plane", activity: selection.mode }, runId, abort.signal);
+      if (abort.signal.aborted || this.controller.snapshot.runId !== runId || this.controller.snapshot.phase !== "preparing") { lease.release(); return; }
+      this.sceneLease = lease;
+      complete();
+    } catch (error) {
+      if (!abort.signal.aborted && this.controller.snapshot.runId === runId && this.controller.snapshot.phase === "preparing") {
+        const reason = error instanceof Error ? error.message : "scene-acquire-failed";
+        this.settleFailure(`场景准备失败：${reason}`, reason);
+      }
+    } finally { if (this.prepareAbort === abort) this.prepareAbort = null; }
   }
 
-  /** 退出（幂等）：停输入与模拟 → 移除对象 → 归还相机 → 通知 React 恢复与刷新。 */
+  /** Explicit exit returns resources through the same runtime as the car. */
   exit(): void {
     if (!this.controller.inGame) return;
-    this.mission?.abort();
-    this.controller.exit();
-    this.input?.detach();
-    this.input = null;
-    this.audio.stop();
-    this.sfx.stop();
-    this.engine.setGameFrameHook(null);
+    this.controller.exit(); this.prepareAbort?.abort(); this.prepareAbort = null;
+    const lease = this.sceneLease;
+    this.runtime.exit(); this.releaseRunObjects();
+    lease?.release(); this.sceneLease = null;
+    this.controller.exitSettled(); this.emit(true); this.events.onExited();
+  }
+
+  private releaseRunObjects(): void {
+    this.mission?.abort(); this.input?.detach(); this.input = null;
+    this.audio.stop(); this.sfx.stop();
     if (this.visuals) {
-      this.engine.detachGameObjects(this.visuals.group, this.visuals.sceneRoot);
-      this.visuals.dispose();
-      this.visuals = null;
+      this.sceneLease?.detach([this.visuals.group, this.visuals.sceneRoot]);
+      this.visuals.dispose(); this.visuals = null;
     }
-    this.cameraControls?.detach();
-    this.cameraControls = null;
-    this.camera?.dispose();
-    this.camera = null;
-    this.engine.setCameraOwner("orbit");
-    if (this.returnCamera) this.engine.restoreReturnView(this.returnCamera);
-    this.returnCamera = null;
-    this.world = null;
-    this.sim = this.prevSim = this.renderSim = null;
-    this.mission = null;
-    this.controller.exitSettled();
-    this.emit(true);
-    this.events.onExited();
+    this.cameraControls?.detach(); this.cameraControls = null;
+    this.camera?.dispose(); this.camera = null;
+    this.cameraScratch = null;
+    this.world = null; this.staticWorldRevision = null; this.sim = this.prevSim = this.renderSim = null; this.mission = null;
+    this.sceneLease = null;
+  }
+
+  private cleanupFailedPreparation(): void {
+    const lease = this.sceneLease;
+    this.runtime.exit();
+    this.releaseRunObjects();
+    lease?.release();
+    this.sceneLease = null;
   }
 
   dispose(): void {
     if (this.disposed) return;
-    this.disposed = true;
     this.exit();
+    this.disposed = true;
+    this.runtime.dispose();
     this.audio.dispose();
     this.sfx.dispose();
   }
@@ -397,103 +507,69 @@ export class GameSession {
 
   // ── 内部 ──
 
-  private readonly frame = (dt: number): void => {
-    if (this.disposed || !this.controller.inGame) return;
+  /** Activity steps are driven only by GameRuntime's shared fixed clock. */
+  private fixedFlightStep(input: Readonly<FlightInputState>, dt: number): boolean {
     const { phase, paused, error } = this.controller.snapshot;
-    if (paused || error || phase === "result" || phase === "preparing" || !this.renderSim) return; // 画面停驻
-    // 倒计时：飞机冻结，任务时钟按固定步推进（§3.4/§6.2 倒计时使用模拟时钟）。
+    if (paused || error) return false;
     if (phase === "countdown" && this.mission) {
-      this.accumulator += dt;
-      let steps = 0;
-      while (this.accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
-        const events = this.mission.tickCountdown(FIXED_DT * 1000);
-        this.accumulator -= FIXED_DT;
-        steps += 1;
-        if (events.some((event) => event.type === "countdown-done")) {
-          this.controller.countdownDone();
-          this.sfx.countdownBeep(true);
-          this.accumulator = 0;
-          this.emit(true);
-          return;
-        }
+      const events = this.mission.tickCountdown(dt * 1000);
+      if (events.some((event) => event.type === "countdown-done")) {
+        this.controller.countdownDone(); this.sfx.countdownBeep(true); this.emit(true);
+        return false; // Discard this frame's remainder, matching the flight transition contract.
       }
-      // 整数秒变化时蜂鸣（3-2-1）；飞机冻结但发动机怠速嗡鸣。
+      return true;
+    }
+    if (phase !== "practice" && phase !== "racing") return false;
+    this.stepPhysics(input);
+    return this.controller.simulating;
+  }
+
+  private presentFlight(alpha: number, dt: number): void {
+    const { phase, paused, error } = this.controller.snapshot;
+    if (paused || error || phase === "result" || !this.sim || !this.prevSim || !this.params || !this.world) return;
+    this.renderSim = lerpSim(this.prevSim, this.sim, alpha);
+    if (phase === "countdown" && this.mission) {
       const sec = Math.ceil(this.mission.snapshot().countdownRemainingMs / 1000);
-      if (sec !== this.lastCountdownSec) {
-        this.lastCountdownSec = sec;
-        if (sec > 0) this.sfx.countdownBeep(false);
-      }
-      if (this.accumulator > LAG_PAUSE_SECONDS) {
-        this.accumulator = 0;
-        this.interrupt("lag");
-        return;
-      }
-      this.visuals?.update(this.renderSim, 0);
-      this.visuals?.updateRings(this.renderSim.simTime, this.mission.snapshot().targetIndex);
-      // 飞机冻结但相机仍要走：倒计时里允许环绕/缩放查看，且相机阻尼继续收敛到目标位。
-      if (this.params && this.world) this.camera?.update(dt, this.renderSim, this.params, this.world);
-      this.updateSfx(false, false);
-      this.emit();
+      if (sec !== this.lastCountdownSec) { this.lastCountdownSec = sec; if (sec > 0) this.sfx.countdownBeep(false); }
+    }
+    this.visuals?.update(this.renderSim, dt);
+    if (this.mission) this.visuals?.updateRings(this.renderSim.simTime, this.mission.snapshot().targetIndex);
+    const cameraSafety = this.camera?.update(dt, this.renderSim, this.params, this.world);
+    if (cameraSafety) this.runtime.noteCameraSafety(cameraSafety);
+    if (cameraSafety === "unresolved") {
+      this.runtime.pause("camera-safety");
       return;
     }
-    if (phase !== "racing" && phase !== "practice") return;
-    this.accumulator += dt;
-    if (this.accumulator > LAG_PAUSE_SECONDS) {
-      // §6.2：单帧间隔超 250ms 进入 paused:lag，清空积压。
-      this.accumulator = 0;
-      this.interrupt("lag");
-      return;
-    }
-    let steps = 0;
-    while (this.accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
-      this.stepPhysics();
-      this.accumulator -= FIXED_DT;
-      steps += 1;
-    }
-    if (steps >= MAX_STEPS_PER_FRAME && this.accumulator > FIXED_DT * MAX_STEPS_PER_FRAME) {
-      this.accumulator = 0;
-      this.interrupt("lag");
-      return;
-    }
-    // 渲染插值：帧内位置取物理步之间的 lerp（§6.2 画面按渲染帧插值）。
-    const alpha = Math.max(0, Math.min(1, this.accumulator / FIXED_DT));
-    if (this.sim && this.prevSim) this.renderSim = lerpSim(this.prevSim, this.sim, alpha);
-    if (this.renderSim && this.params && this.world) {
-      this.visuals?.update(this.renderSim, dt);
-      if (this.mission) this.visuals?.updateRings(this.renderSim.simTime, this.mission.snapshot().targetIndex);
-      this.camera?.update(dt, this.renderSim, this.params, this.world);
-      const inputState = this.input?.snapshot();
-      this.updateSfx(!!inputState?.throttleUp, !!inputState?.throttleDown);
-      this.emit();
-    }
-  };
+    this.applyCameraPose();
+    const input = this.input?.snapshot(); this.updateSfx(!!input?.throttleUp, !!input?.throttleDown); this.emit();
+  }
+
+  private applyCameraPose(): void {
+    const camera = this.cameraScratch;
+    const lease = this.sceneLease;
+    if (!camera || !lease?.isCurrent()) return;
+    const direction = camera.getWorldDirection(new THREE.Vector3());
+    const target = camera.position.clone().addScaledVector(direction, 10);
+    lease.setCamera({ position: camera.position.toArray() as [number, number, number],
+      target: target.toArray() as [number, number, number], up: camera.up.toArray() as [number, number, number], fov: camera.fov });
+  }
 
   /** 喂音效：每帧遥测 + 500ms 一次的天气雨强（跟随回放时钟，clear 恒 0）。 */
   private updateSfx(throttleUp: boolean, throttleDown: boolean): void {
     if (!this.renderSim || !this.params) return;
-    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
-    if (now - this.rainCheckedAt > 500) {
-      this.rainCheckedAt = now;
-      this.rainIntensity = weatherAt(this.engine.replayCursor ?? Date.now()).intensity;
-    }
     this.sfx.update({
       speed: this.renderSim.speed,
       minSpeed: this.params.minSpeed,
       maxSpeed: this.params.maxSpeed,
       throttleUp,
       throttleDown,
-      rainIntensity: this.rainIntensity,
+      rainIntensity: this.engine.environmentState?.rainIntensity ?? 0,
     });
   }
 
-  private stepPhysics(): void {
-    const sim = this.sim;
-    const params = this.params;
-    const world = this.world;
+  private stepPhysics(input: Readonly<FlightInputState>): void {
+    const sim = this.sim, params = this.params, world = this.world;
     if (!sim || !params || !world) return;
-    const input = this.controller.snapshot.phase === "countdown"
-      ? { throttleUp: false, throttleDown: false, turnLeft: false, turnRight: false, pitchUp: false, pitchDown: false }
-      : this.input?.snapshot() ?? { throttleUp: false, throttleDown: false, turnLeft: false, turnRight: false, pitchUp: false, pitchDown: false };
     const next = stepFlight(sim, input, FIXED_DT, params);
     const hit = sweepFlight(world, sim, next, params.planeRadius);
     let teleported = false;
@@ -551,6 +627,7 @@ export class GameSession {
   private finishRace(result: RaceResult): void {
     // 结算恰好一次由 RaceMission 保证；控制器再收敛到 result 相位。
     this.controller.raceFinished();
+    this.runtime.pause("activity-result");
     this.sfx.suspend();  // 结算画面静止：发动机/环境声随暂停语义一起挂起
     if (result.finished && this.course) {
       const best = this.bestByCourse.get(this.course.courseId);
@@ -577,20 +654,12 @@ export class GameSession {
     this.lastSafe = { x: spawn.x, y: spawn.y, z: spawn.z };
     this.collisions = 0;
     this.softOutside = false;
-    this.accumulator = 0;
     this.input?.clear();
     this.camera?.reset(this.sim, params);
     this.visuals?.update(this.sim, 0);
   }
 
-  private interrupt(reason: Extract<GamePauseReason, "focus-lost" | "host-hidden" | "lag">): void {
-    this.accumulator = 0;
-    this.input?.clear();
-    this.audio.suspend();
-    this.sfx.suspend();
-    this.controller.pause(reason);
-    this.emit(true);
-  }
+  private interrupt(reason: Extract<GamePauseReason, "focus-lost" | "host-hidden" | "lag">): void { this.runtime.pause(reason); }
 
   private settleFailure(message: string, reason?: string): void {
     this.lastPrepareFailure = reason ?? null;

@@ -1,137 +1,77 @@
-/**
- * GameHud（§3）：练习 HUD、暂停面板、错误面板。只消费 GameSession 快照与回调，
- * 不直接操纵相机/renderer；文案走 gameCopy（中/英），布局不盖宿主导航。
- */
+/** Flight activity content on the shared vehicle HUD shell. */
 import { useState } from "react";
 import { gameText, type GameLocale } from "./gameCopy";
 import type { GameSessionSnapshot } from "./GameSession";
 import { cityView } from "../i18n";
+import { GameHudShell } from "./ui/GameHudShell";
+import { GameControlsHelp, type GameControlRow } from "./ui/GameControlsHelp";
+import { GameSessionPanel } from "./ui/GameSessionPanel";
+import { GameSoundPanel } from "./ui/GameSoundPanel";
+import { TelemetryChip } from "./ui/TelemetryChip";
 import "./game.css";
 
 export type GameHudActions = {
-  onResume: () => void;
-  onRestart: () => void;
-  onExit: () => void;
-  onRetryPrepare: () => void;
-  onNewCourse: () => void;
-  onSoundVolume: (volume: number) => void;
-  onToggleSfx: () => void;
-  onToggleMusic: () => void;
+  onResume: () => void; onRestart: () => void; onExit: () => void; onRetryPrepare: () => void; onNewCourse: () => void;
+  onSoundVolume: (volume: number) => void; onToggleSfx: () => void; onToggleMusic: () => void;
+  onPause?: () => void;
 };
 
-/** 毫秒 → m:ss.s 展示。 */
 const clock = (ms: number) => {
   const seconds = Math.max(0, ms) / 1000;
   return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}.${Math.floor((seconds * 10) % 10)}`;
 };
+const FLIGHT_CONTROLS: readonly GameControlRow[] = [
+  { keys: "W / S", description: "按住加速 / 减速；松开回到巡航" }, { keys: "A / D", description: "左右转向" },
+  { keys: "↑ / ↓", description: "爬升 / 下降" }, { keys: "拖动 / 滚轮", description: "环绕飞机 / 拉近拉远（双击复位）" },
+  { keys: "Esc", description: "暂停 / 继续" },
+];
 
 export function GameHud({ snapshot, actions, locale, persist }: { snapshot: GameSessionSnapshot; actions: GameHudActions; locale: GameLocale; persist?: { tier: "native" | "local" | "memory" | null; saveFailed: boolean } }) {
   const [helpOpen, setHelpOpen] = useState(false);
+  const [soundOpen, setSoundOpen] = useState(false);
   const t = (text: string) => gameText(text, locale);
   const { controller, telemetry, softOutside, mission, best } = snapshot;
   const phase = controller.phase;
-  if (phase === "data" || phase === "exiting") return null;
   const paused = controller.paused;
   const error = controller.error;
   const racing = controller.selection?.mode === "race";
-  const telemetryView = telemetry && phase !== "preparing" ? (
-    <div className="city-game-chip city-game-telemetry" aria-hidden="true">
-      <span>{t("速度")}</span>{Math.round(telemetry.speed)}
-      <span>{t("高度")}</span>{Math.round(telemetry.altitude)}
-    </div>
-  ) : null;
   const countdown = phase === "countdown" && mission ? Math.ceil(mission.countdownRemainingMs / 1000) : null;
+  const uiPanelOpen = () => actions.onPause?.();
+  if (phase === "data" || phase === "exiting") return null;
 
-  return cityView(<div className="city-game-hud">
-    {/* 常驻 HUD：左上任务标题/进度；右上计时或“自由练习”；右下按键提示（可收起）。 */}
-    {phase !== "preparing" && <>
-      <div className="city-game-topleft">
-        <div className="city-game-chip"><strong>{t(racing ? "穿环挑战" : "自由练习")}</strong></div>
-        {racing && mission && <div className="city-game-chip city-game-telemetry">{mission.progress} / {mission.total}</div>}
-        {softOutside && !paused && !error && <div className="city-game-chip city-game-warn" role="status">{t("已越过软边界，请返航")}</div>}
-      </div>
-      <div className="city-game-topright">
-        {racing && mission
-          ? <div className="city-game-chip city-game-telemetry"><span>{t("剩时")}</span>{clock(mission.remainingMs)}{mission.penaltyMs > 0 && <> · +{(mission.penaltyMs / 1000).toFixed(0)}s</>}</div>
-          : null}
-        {telemetryView}
-        {/* 声音面板：主音量 + 音效/BGM 独立开关（details 展开式，与按键提示同交互）。 */}
-        <details className="city-game-chip city-game-sound">
-          <summary aria-label={t("游戏声音")}>♪ {t("声音")}</summary>
-          <div className="city-game-sound-panel">
-            <label>{t("音量")}
-              <input type="range" min="0" max="100" step="1" defaultValue={Math.round(snapshot.soundVolume * 100)}
-                onInput={(event) => actions.onSoundVolume(Number((event.target as HTMLInputElement).value) / 100)}
-                aria-label={t("游戏声音大小")} />
-            </label>
-            <div className="city-game-sound-toggles">
-              <button type="button" aria-pressed={snapshot.sfxEnabled} onClick={actions.onToggleSfx}>{t("音效")} · {t(snapshot.sfxEnabled ? "开" : "关")}</button>
-              <button type="button" aria-pressed={snapshot.musicEnabled} onClick={actions.onToggleMusic}>BGM · {t(snapshot.musicEnabled ? "开" : "关")}</button>
-            </div>
-          </div>
-        </details>
-      </div>
-      {!paused && !error && phase !== "result" && <details className="city-game-chip city-game-keys" open={helpOpen} onToggle={(event) => setHelpOpen((event.target as HTMLDetailsElement).open)}>
-        <summary aria-label={t("按键提示")}>{t("按键提示")} · {t(helpOpen ? "收起" : "展开")}</summary>
-        <dl>
-          <dt>{t("W / S")}</dt><dd>{t("按住加速 / 减速；松开回到巡航")}</dd>
-          <dt>{t("A / D")}</dt><dd>{t("左右转向")}</dd>
-          <dt>{t("↑ / ↓")}</dt><dd>{t("爬升 / 下降")}</dd>
-          <dt>{t("拖动 / 滚轮")}</dt><dd>{t("环绕飞机 / 拉近拉远（双击复位）")}</dd>
-          <dt>{t("Esc")}</dt><dd>{t("暂停 / 继续")}</dd>
-        </dl>
-      </details>}
+  let panel = null;
+  if (phase === "preparing") panel = <GameSessionPanel locale={locale} title="正在准备飞行场地…"
+    description={t(racing ? "穿过高亮圆环，顺序错误不计数。" : "自由飞行，没有任务与计时。")}
+    actions={[{ label: "取消准备", tone: "danger", onAction: actions.onExit}]} />;
+  else if (error) panel = <GameSessionPanel locale={locale} title="出错了" description={t(error.message)} role="alertdialog"
+    actions={[{ label: "重试准备", onAction: actions.onRetryPrepare }, { label: "回到数据视角", tone: "danger", onAction: actions.onExit}]} />;
+  else if (paused && phase !== "result" && !helpOpen && !soundOpen) panel = <GameSessionPanel locale={locale} title="已暂停"
+    description={paused.reason === "camera-safety" ? t("相机安全检查无法确认，飞行已暂停。") : undefined}
+    children={<><GameControlsHelp locale={locale} rows={FLIGHT_CONTROLS} className="city-game-panel-help" />
+      <GameSoundPanel locale={locale} sound={{ volume: snapshot.soundVolume, onVolume: actions.onSoundVolume,
+        sfx: { enabled: snapshot.sfxEnabled, onToggle: actions.onToggleSfx }, music: { enabled: snapshot.musicEnabled, onToggle: actions.onToggleMusic } }} />
     </>}
+    actions={[{ label: "继续", onAction: actions.onResume }, { label: "重新开始", onAction: actions.onRestart }, { label: "退出游戏", tone: "danger", onAction: actions.onExit}]} />;
+  else if (phase === "result" && mission?.result) panel = <GameSessionPanel locale={locale} title={mission.result.finished ? "完成！" : "超时"}
+    children={<dl className="city-game-result-list"><dt>{t("用时")}</dt><dd>{clock(mission.result.finalMs)}</dd>
+      {mission.result.penaltyMs > 0 && <><dt>{t("罚时")}</dt><dd>+{(mission.result.penaltyMs / 1000).toFixed(0)}s</dd></>}
+      <dt>{t("碰撞")}</dt><dd>{mission.result.collisions}</dd>
+      {best && <><dt>{t("最佳")}</dt><dd>{clock(best.finalMs)}{mission.result.finished && mission.result.finalMs <= best.finalMs && mission.result.collisions <= best.collisions ? ` · ${t("新纪录")}` : ""}</dd></>}
+      {(persist?.saveFailed || persist?.tier === "memory") && mission.result.finished && <dd role="status">{t(persist?.tier === "memory" ? "成绩仅本次保留" : "本次成绩尚未保存")}</dd>}
+    </dl>}
+    actions={[{ label: "重试", onAction: actions.onRestart }, { label: "换一条路线", onAction: actions.onNewCourse }, { label: "退出游戏", tone: "danger", onAction: actions.onExit}]} />;
 
-    {/* 倒计时：大数字居中（不依赖颜色/声音）。 */}
-    {countdown !== null && countdown > 0 && <div className="city-game-countdown" role="status" aria-live="assertive">{countdown}</div>}
-
-    {phase === "preparing" && <div className="city-game-panel" role="status"><div>
-      <h2>{t("正在准备飞行场地…")}</h2>
-      <p>{t(racing ? "穿过高亮圆环，顺序错误不计数。" : "自由飞行，没有任务与计时。")}</p>
-      <div className="city-game-actions"><button className="city-game-danger" onClick={actions.onExit}>{t("退出游戏")}</button></div>
-    </div></div>}
-
-    {paused && !error && <div className="city-game-panel city-game-paused" role="dialog" aria-label={t("已暂停")}><div>
-      <h2>{t("已暂停")}</h2>
-      <dl>
-        <dt>{t("W / S")}</dt><dd>{t("按住加速 / 减速；松开回到巡航")}</dd>
-        <dt>{t("A / D")}</dt><dd>{t("左右转向")}</dd>
-        <dt>{t("↑ / ↓")}</dt><dd>{t("爬升 / 下降")}</dd>
-        <dt>{t("拖动 / 滚轮")}</dt><dd>{t("环绕飞机 / 拉近拉远（双击复位）")}</dd>
-        <dt>{t("Esc")}</dt><dd>{t("暂停 / 继续")}</dd>
-      </dl>
-      <div className="city-game-actions">
-        <button autoFocus onClick={actions.onResume}>{t("继续")}</button>
-        <button onClick={actions.onRestart}>{t("重新开始")}</button>
-        <button className="city-game-danger" onClick={actions.onExit}>{t("退出游戏")}</button>
-      </div>
-    </div></div>}
-
-    {error && <div className="city-game-panel" role="alert"><div>
-      <h2>{t("出错了")}</h2>
-      <p>{error.message}</p>
-      <div className="city-game-actions">
-        <button autoFocus onClick={actions.onRetryPrepare}>{t("重试准备")}</button>
-        <button className="city-game-danger" onClick={actions.onExit}>{t("回到数据视角")}</button>
-      </div>
-    </div></div>}
-
-    {/* 结果面板：冻结输入，只提供显式动作（§3.5：结果面板不自动重开任务）。 */}
-    {phase === "result" && mission?.result && <div className="city-game-panel" role="dialog" aria-label={mission.result.finished ? t("完成！") : t("超时")}><div>
-      <h2>{mission.result.finished ? t("完成！") : t("超时")}</h2>
-      <dl className="city-game-paused">
-        <dt>{t("用时")}</dt><dd>{clock(mission.result.finalMs)}</dd>
-        {mission.result.penaltyMs > 0 && <><dt>{t("罚时")}</dt><dd>+{(mission.result.penaltyMs / 1000).toFixed(0)}s</dd></>}
-        <dt>{t("碰撞")}</dt><dd>{mission.result.collisions}</dd>
-        {best && <><dt>{t("最佳")}</dt><dd>{clock(best.finalMs)}{mission.result.finished && mission.result.finalMs <= best.finalMs && mission.result.collisions <= best.collisions ? ` · ${t("新纪录")}` : ""}</dd></>}
-      </dl>
-      {(persist?.saveFailed || persist?.tier === "memory") && mission.result.finished && <p role="status">{t(persist?.tier === "memory" ? "成绩仅本次保留" : "本次成绩尚未保存")}</p>}
-      <div className="city-game-actions">
-        <button autoFocus onClick={actions.onRestart}>{t("重试")}</button>
-        <button onClick={actions.onNewCourse}>{t("换一条路线")}</button>
-        <button className="city-game-danger" onClick={actions.onExit}>{t("退出游戏")}</button>
-      </div>
-    </div></div>}
-  </div>, locale === "en" ? "en" : "zh-Hans");
+  return cityView(<GameHudShell
+    title={<div className="city-game-chip"><strong>{t(racing ? "穿环挑战" : "自由练习")}</strong></div>}
+    status={softOutside && !paused && !error ? <div className="city-game-chip city-game-warn" role="status">{t("已越过软边界，请返航")}</div> : undefined}
+    telemetry={telemetry && phase !== "preparing" ? <TelemetryChip label={t("飞行遥测")}>
+      <span>{t("速度")}</span><strong>{Math.round(telemetry.speed)}</strong><span>{t("高度")}</span><strong>{Math.round(telemetry.altitude)}</strong>
+    </TelemetryChip> : undefined}
+    sound={(!paused || soundOpen) && !error && phase !== "result" && phase !== "preparing" ? <GameSoundPanel locale={locale} sound={{ volume: snapshot.soundVolume,
+      onVolume: actions.onSoundVolume, sfx: { enabled: snapshot.sfxEnabled, onToggle: actions.onToggleSfx },
+      music: { enabled: snapshot.musicEnabled, onToggle: actions.onToggleMusic } }} onOpenChange={(open) => { setSoundOpen(open); if (open) uiPanelOpen(); }} /> : undefined}
+    help={(!paused || helpOpen) && !error && phase !== "result" && phase !== "preparing" ? <GameControlsHelp locale={locale} rows={FLIGHT_CONTROLS}
+      onOpenChange={(open) => { setHelpOpen(open); if (open) uiPanelOpen(); }} /> : undefined}
+    panel={<>{countdown !== null && countdown > 0 && <div className="city-game-countdown" role="status" aria-live="assertive">{countdown}</div>}{panel}</>}
+  />, locale === "en" ? "en" : "zh-Hans");
 }

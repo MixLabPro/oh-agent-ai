@@ -73,6 +73,13 @@ pub struct SessionHarness {
     /// 下钻（trace）：在内置根下定位某个 native id 的源文件。空 = 源已不在（调用方报
     /// SourceUnavailable，不猜）。路径只在进程内用，不进任何 JSON 出口。
     pub session_sources: fn(&HarnessRoots<'_>, &str) -> Vec<PathBuf>,
+    /// 侧车索引型会话标题（V32 City 楼名）：标题不在会话日志 wire 里、而在
+    /// 执行环境自己的索引文件（codex `session_index.jsonl`、DSH
+    /// `storages/workspace.json`）。`None` = 无索引型标题——claude-code 的标题
+    /// 在会话日志内、由解析器随事实产出；workbuddy 的在 workbuddy.db sessions
+    /// 表，暂未接。取材函数**只读、宽容**：索引缺失/畸形 → 空集（标题是加分
+    /// 项，不是准入项）。
+    pub title_index: Option<fn(&HarnessRoots<'_>) -> Vec<agent_vitals_domain::contracts::workflow::SessionTitle>>,
 }
 
 fn user_home_root(roots: &HarnessRoots<'_>) -> Option<PathBuf> {
@@ -124,6 +131,46 @@ fn workbuddy_session_sources(roots: &HarnessRoots<'_>, _native_id: &str) -> Vec<
     }
 }
 
+/// codex 侧车标题索引：`~/.codex/session_index.jsonl` 的 `{id, thread_name}`
+/// 映射 → 已整形（脱敏 + 截断）的 [`SessionTitle`]。join 键 = 逻辑
+/// `payload.session_id`（与 facts 的 native_session_id 同源，见
+/// `codex/sources/mod.rs::parse_session_index` 的实测注释）。
+fn codex_title_index(roots: &HarnessRoots<'_>) -> Vec<agent_vitals_domain::contracts::workflow::SessionTitle> {
+    use agent_vitals_domain::contracts::workflow::SessionTitle;
+    use agent_vitals_domain::enrichment::bound_session_title;
+    crate::codex_session::read_session_index(roots.user_home)
+        .into_iter()
+        .filter_map(|(sid, raw)| {
+            bound_session_title(&raw).map(|title| SessionTitle {
+                native_session_id: sid,
+                title,
+                source: "codex_thread_name".to_string(),
+            })
+        })
+        .collect()
+}
+
+/// DSH 侧车标题索引：`<DSH_HOME>/storages/workspace.json` 的
+/// `workspaces.{wsid}.{path, title, sessionIds[]}` → 按 session 折叠的
+/// [`SessionTitle`]（值取 title；path 不是标题）。根未知（DSH_HOME 与 HOME
+/// 都没有）→ 空集，不报错。
+fn dsh_title_index(roots: &HarnessRoots<'_>) -> Vec<agent_vitals_domain::contracts::workflow::SessionTitle> {
+    use agent_vitals_domain::contracts::workflow::SessionTitle;
+    use agent_vitals_domain::enrichment::bound_session_title;
+    let Some(dsh_home) = roots.dsh_home else { return Vec::new() };
+    crate::dsh_sources::discovery::read_workspace_index(dsh_home)
+        .by_session
+        .into_iter()
+        .filter_map(|(sid, (_path, raw))| {
+            bound_session_title(&raw).map(|title| SessionTitle {
+                native_session_id: sid,
+                title,
+                source: "dsh_workspace_title".to_string(),
+            })
+        })
+        .collect()
+}
+
 /// 会话执行环境注册表（顺序即同步批次顺序，见模块文档）。
 pub static SESSION_HARNESSES: [SessionHarness; 4] = [
     SessionHarness {
@@ -133,6 +180,7 @@ pub static SESSION_HARNESSES: [SessionHarness; 4] = [
         accepts_custom_roots: true,
         findings: Some(crate::harnesses::claude_code::sources::findings::evaluate),
         session_sources: claude_session_sources,
+        title_index: None,
     },
     SessionHarness {
         id: "codex",
@@ -141,6 +189,7 @@ pub static SESSION_HARNESSES: [SessionHarness; 4] = [
         accepts_custom_roots: true,
         findings: Some(crate::harnesses::codex::sources::findings::evaluate),
         session_sources: codex_session_sources,
+        title_index: Some(codex_title_index),
     },
     SessionHarness {
         id: "dsh",
@@ -149,6 +198,7 @@ pub static SESSION_HARNESSES: [SessionHarness; 4] = [
         accepts_custom_roots: true,
         findings: Some(crate::harnesses::dsh::sources::findings::evaluate),
         session_sources: dsh_session_sources,
+        title_index: Some(dsh_title_index),
     },
     SessionHarness {
         id: "workbuddy",
@@ -157,6 +207,7 @@ pub static SESSION_HARNESSES: [SessionHarness; 4] = [
         accepts_custom_roots: false,
         findings: None,
         session_sources: workbuddy_session_sources,
+        title_index: None,
     },
 ];
 

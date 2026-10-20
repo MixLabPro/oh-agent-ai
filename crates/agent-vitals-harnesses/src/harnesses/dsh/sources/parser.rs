@@ -28,6 +28,9 @@ impl SourceParser for DshParser {
             facts: r.facts,
             workflow_events: r.workflow_events,
             session_excerpts: Vec::new(),
+            // DSH 标题在侧车索引（`storages/workspace.json`），不在会话日志
+            // wire 里——sync 的索引趟直接喂标题写入路径，不经过解析器。
+            session_titles: Vec::new(),
             // 全量执行环境 offset 无语义，落 0；调度器不覆写其检查点。
             new_offset: 0,
         })

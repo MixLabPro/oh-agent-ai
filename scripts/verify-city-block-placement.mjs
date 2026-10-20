@@ -20,6 +20,12 @@ check({ ...base, block: { polygon: notch }, footprint: { ...base.footprint, x: 1
 const road = points => ({ id: "road", from: "a", to: "b", width: 8, kind: "local", points });
 check({ ...base, roads: [road([p(0, 70), p(40, 40), p(80, 70)])] }, "actual-road-capsule-conflict");
 check({ ...base, roads: [road([p(0, 10), p(80, 10)])] });
+// A rendered junction fan reaches beyond its centreline capsule. Reject contained
+// islands and edge-only intersections, even when every rectangle corner is clear.
+check({ ...base, roadPolygons: [[p(39,39),p(41,39),p(40,41)]] }, "rendered-road-polygon-conflict");
+check({ ...base, roadPolygons: [[p(20,39),p(60,39),p(60,41)]] }, "rendered-road-polygon-conflict");
+check({ ...base, roadPolygons: [[p(1,1),p(2,1),p(1,2)]] });
+check({ ...base, roadPolygons: [[p(NaN,1),p(2,1),p(1,2)]] }, "invalid-obstacle-envelope");
 check({ ...base, sites: [{ x: 48, z: 40, radius: 1 }] }, "declared-site-circle-conflict");
 check({ ...base, highways: [[p(0, 40), p(80, 40)]] }, "highway-capsule-conflict");
 check({ ...base, buildable: (x, z) => !(x === 40 && z === 40) }, "rectangle-terrain-or-reserve-conflict");

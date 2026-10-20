@@ -4,6 +4,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
+import { CAR_STREET_LIGHT_GLSL, carLampsAdd, carStreetLightUniforms } from "../engine/render/drivingStreetLights";
 import { CAR_DIMENSIONS } from "./carDimensions";
 export { CAR_DIMENSIONS } from "./carDimensions";
 
@@ -17,6 +18,8 @@ export type CarVisualState = {
   distance: number;
   braking: boolean; reversing: boolean;
   bodyPitch?: number; bodyRoll?: number;
+  /** VTOL 推进器强度 [0,1]（由上升速度驱动）：>0 时渲染底部冷气喷流。 */
+  thruster?: number;
 };
 
 const limit = (n: number, bound: number) => Math.max(-bound, Math.min(bound, Number.isFinite(n) ? n : 0));
@@ -85,13 +88,24 @@ export class CarVisuals {
     this.root.add(this.bodyPivot);
     const material = (options: THREE.MeshStandardMaterialParameters) => {
       const result = new THREE.MeshStandardMaterial(options);
+      // N5 开车模式解析街灯：车身也受路灯照（车顶/引擎盖接住头顶的暖光，低角度相机下
+      // 可信度增益最大）。uCarLampCount = 0（非开车模式 / 白天）时注入块早退，零行为。
+      result.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, carStreetLightUniforms());
+        shader.vertexShader = shader.vertexShader
+          .replace("#include <common>", "#include <common>\nvarying vec3 vCarWPos;\nvarying vec3 vCarWNormal;")
+          .replace("#include <project_vertex>", "#include <project_vertex>\nvCarWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvCarWNormal = normalize(mat3(modelMatrix) * objectNormal);");
+        shader.fragmentShader = shader.fragmentShader
+          .replace("#include <common>", `#include <common>\nvarying vec3 vCarWPos;\nvarying vec3 vCarWNormal;\n${CAR_STREET_LIGHT_GLSL}`)
+          .replace("#include <lights_fragment_end>", `#include <lights_fragment_end>\n${carLampsAdd("vCarWPos", "vCarWNormal")}`);
+      };
       this.materials.add(result); return result;
     };
     const paint = material({ color, roughness: 0.38, metalness: 0.22, flatShading: true });
     const dark = material({ color: "#202b32", roughness: 0.8 });
     const glass = material({ color: "#73b8c0", roughness: 0.16, metalness: 0.2, transparent: true, opacity: 0.48, depthWrite: false, side: THREE.DoubleSide });
     const trim = material({ color: "#f2dfbb", roughness: 0.65, metalness: 0.05 });
-    const head = material({ color: "#fff1ce", emissive: "#ffe4ab", emissiveIntensity: 0.5 });
+    const head = material({ color: "#fff1ce", emissive: "#ffe4ab", emissiveIntensity: 1.0 });
     this.brake = material({ color: "#ad2825", emissive: "#ff2921", emissiveIntensity: 0.12 });
     this.reverse = material({ color: "#c8d1c5", emissive: "#edfff6", emissiveIntensity: 0 });
     const add = (name: string, pieces: THREE.BufferGeometry[], mat: THREE.Material, parent: THREE.Object3D = this.bodyPivot) => {
@@ -147,6 +161,17 @@ export class CarVisuals {
     add("headlights", [-1, 1].map((side) => box(1.112, 0.65, side * 0.42, 0.018, 0.09, 0.22)), head);
     add("brake-lights", [-1, 1].map((side) => box(-1.366, 0.425, side * 0.4, 0.025, 0.075, 0.39)), this.brake);
     add("reverse-lights", [-1, 1].map((side) => box(-1.367, 0.425, side * 0.13, 0.026, 0.06, 0.1)), this.reverse);
+    // 真前灯：灯罩贴片只自发光、照不亮路面（夜间前方全黑的根因）。两个聚光灯随
+    // 车身姿态（root 子对象）指向正前偏下，常亮——白天被环境光淹没，夜里打出光池。
+    for (const side of [-1, 1]) {
+      const beam = new THREE.SpotLight("#ffe9c4", 36, 18, 0.42, 0.5, 1.35);
+      beam.position.set(1.0, 0.6, side * 0.42);
+      const beamTarget = new THREE.Object3D();
+      beamTarget.position.set(9, -0.3, side * 0.5);
+      beamTarget.name = "headlightTarget";
+      this.root.add(beam, beamTarget);
+      beam.target = beamTarget;
+    }
 
     const wheelMaterial = material({ vertexColors: true, roughness: 0.72, metalness: 0.12 });
     const colored = (geometry: THREE.BufferGeometry, color: string) => {
@@ -187,7 +212,64 @@ export class CarVisuals {
     });
     this.brake.emissiveIntensity = state.braking ? 2 : 0.12;
     this.reverse.emissiveIntensity = state.reversing ? 1.5 : 0;
+    if (this.impactLight) {
+      this.impactLight.intensity = Math.max(0, this.impactLight.intensity - 0.12);
+    }
+    this.updateThruster(limit(state.thruster ?? 0, 1));
   }
+
+  /** 底部冷气喷流：4 喷口锥焰 + 车底冷光。强度平滑跟随（点按不频闪），
+   *  焰长带每喷口相位差的高频颤动（纯表现层噪声，不参与任何模拟）。 */
+  private updateThruster(target: number): void {
+    const now = typeof performance !== "undefined" ? performance.now() / 1000 : 0;
+    this.thrusterLevel += (target - this.thrusterLevel) * 0.35;
+    const level = this.thrusterLevel;
+    if (level < 0.02) {
+      if (this.thrusterJets) this.thrusterJets.forEach((jet) => { jet.visible = false; });
+      if (this.thrusterLight) this.thrusterLight.intensity = 0;
+      return;
+    }
+    if (!this.thrusterJets) {
+      const jetMaterial = new THREE.MeshBasicMaterial({ color: "#d9f2ff", transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+      this.materials.add(jetMaterial);
+      this.thrusterJets = [[0.72, 0.34], [0.72, -0.34], [-0.72, 0.34], [-0.72, -0.34]].map(([x, z]) => {
+        // 默认锥顶朝 +Y；翻转后尖端向下，scale.y 控制焰长。
+        const jet = new THREE.Mesh(new THREE.ConeGeometry(0.09, 1, 10, 1, true).rotateX(Math.PI), jetMaterial);
+        jet.name = "thrusterJet";
+        jet.position.set(x, 0.3, z);
+        jet.visible = false;
+        this.root.add(jet);
+        return jet;
+      });
+      this.thrusterLight = new THREE.PointLight("#9fd8ff", 0, 6, 2);
+      this.thrusterLight.position.set(0, 0.15, 0);
+      this.root.add(this.thrusterLight);
+    }
+    this.thrusterJets.forEach((jet, index) => {
+      jet.visible = true;
+      const flicker = 0.85 + 0.3 * Math.sin(now * 47 + index * 2.1);
+      const length = (0.45 + level * 1.05) * flicker;
+      jet.scale.set(0.8 + level * 0.5, length, 0.8 + level * 0.5);
+      (jet.material as THREE.MeshBasicMaterial).opacity = 0.35 + level * 0.55;
+    });
+    this.thrusterLight!.intensity = level * 5;
+  }
+
+  /** Collision feedback: brief warm light pulse from the impact point. */
+  pulseImpact(): void {
+    if (!this.impactLight) {
+      this.impactLight = new THREE.PointLight("#ffb257", 0, 8, 2);
+      this.impactLight.position.set(0, 0.6, 0);
+      this.root.add(this.impactLight);
+    }
+    this.impactLight.intensity = 6;
+  }
+
+  private impactLight: THREE.PointLight | null = null;
+  private thrusterJets: THREE.Mesh[] | null = null;
+  private thrusterLight: THREE.PointLight | null = null;
+  private thrusterLevel = 0;
 
   dispose(): void {
     if (this.disposed) return;

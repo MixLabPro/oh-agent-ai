@@ -1,10 +1,12 @@
 import { auditKeyId, auditCaseId, freezeAuditCase, validateManifest } from "./AuditIdentity";
 import { DrivingRouteRunner } from "./DrivingRouteRunner";
 import type { AuditKey, AuditManifest, AuditRunState, RoadAuditCase, RoadAuditCaseResult } from "./contracts";
+import type { AuditEvidenceSink } from "./AuditEvidenceStore";
 export type AuditBatchReport = Readonly<{
   key: AuditKey; state: AuditRunState | "budget-exhausted"; results: readonly RoadAuditCaseResult[];
 }>;
 export type AuditScheduleOptions = {
+  evidence?:AuditEvidenceSink;
   ticksPerBatch: number;
   maxTotalTicks: number;
   currentKey: () => AuditKey;
@@ -24,8 +26,10 @@ export async function scheduleAudit(manifest: AuditManifest,
   const key = Object.freeze({ ...manifest.key }); const identity = auditKeyId(key);
   const plan = manifest.cases.map(freezeAuditCase);
   const results: RoadAuditCaseResult[] = [];
-  const report = (state: AuditRunState | "budget-exhausted"): AuditBatchReport => Object.freeze({ key, state,
-    results: Object.freeze(state === "complete" ? [...results] : []) });
+  const report = (state: AuditRunState | "budget-exhausted"): AuditBatchReport => {
+    if(state!=="complete")try{options.evidence?.invalidate();}catch{/* diagnostics cannot affect audit outcome */}
+    return Object.freeze({ key, state,results: Object.freeze(state === "complete" ? [...results] : []) });
+  };
   const interrupted = (): "cancelled" | "stale" | null => options.isCancelled() ? "cancelled" : auditKeyId(options.currentKey()) !== identity ? "stale" : null;
   for (const test of plan) {
     const before = interrupted(); if (before) return report(before);

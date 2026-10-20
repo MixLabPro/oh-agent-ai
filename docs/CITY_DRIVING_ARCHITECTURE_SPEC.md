@@ -412,3 +412,19 @@ A/B 输出并锁定：坐标/量纲、几何epsilon、轮距净空、最大坡�
 已实现共享CPU surface类型、DrivingKernel兼容内核、审计contracts/key/case验证、有向整车GateAuditObserver、定步DrivingRouteRunner、可取消/过期/总预算AuditScheduler、缺证据关闭的AuditReleasePolicy、FixedStepClock和GameScenePort接口。合成试驾已使用同一DrivingKernel。
 
 真实路面编译/查询、静态几何证明、自动驾驶pilot和宿主lease仍待实现。完整目录、限制、Agent文件所有权与可直接接续的任务见 [CITY_DRIVING_AGENT_HANDOFF.md](CITY_DRIVING_AGENT_HANDOFF.md)。落地接口以代码contracts为准；需要调整时由集成人统一维护，禁止并行Agent各造一套协议。
+
+A1增量：普通路带/路口/人行道编译与地形采样已提取为纯CPU模块，renderer共用原几何算法；三角片段来源和Float32视图可供后续查询使用。仍未解决边界union、岛排除、桥/高架及SurfaceStore，输出明确为geometry-only。证据与后续边界见 [普通路面提取记录](CITY_GROUND_SURFACE_EXTRACTION_NOTES.md)。
+
+A2增量：已实现单片段闭环/孔洞提取、边界故障/预算诊断、独立patch快照、本地SHA256与防御性复制SurfaceStore；迟到异步发布、clear与旧revision均有明确失效语义。跨片段union/portal及宿主Store接入尚未完成，且路面revision不能代替完整障碍世界身份。验收范围与限制见 [SurfaceStore记录](CITY_SURFACE_STORE_NOTES.md)。
+
+A3增量：`engine/surface/SurfaceIndex.ts` 已提供复制快照、有界XZ三角索引和显式layerId点采样；跨patch重叠返回ambiguous，构建/查询超预算失败关闭。该索引只产出点级几何候选，不能代替全车覆盖、连续运动、portal、碰撞或正式通行审计，尚未连接CityEngine运行时。
+
+2026-10-16任务1/2增量：宿主端口现以generation租约读取surface与结构实体副本，worldRevision覆盖板体/桥墩/护栏等结构数据，并提供绑定该版本的坡度/异层板底净空诊断。完整建筑/地标障碍、合法图与跨层portal仍待闭合，见 [实施记录](CITY_DRIVING_STRUCTURE_HOST_PROGRESS.md)。
+
+A4/B1增量：同层alias合并（精确叠置顶点高差 ≤0.1）、唯一点分类器、按两侧分类切分的curb/closed/step区域边界、整车矩形覆盖（侧向余量0.2）与细分扫掠凸包连续运动验证已实现，并通过 `SurfaceDrivingEnvironment`/`SurfaceWorldValidator` 接入现有kernel/runner/observer。十五城直路同核试跑每个tick独立复核均合法。SurfaceIndex法线错误已修。仍无portal、固体障碍、桥/高架和渠化岛编译，不认证通行。见 [区域与整车覆盖记录](CITY_SURFACE_REGIONS_NOTES.md)。
+
+A5增量：普通路面改为精确贴地（不贴地处按渲染地形三角网保形裁剪，无T形接点），并修复折点自折叠与闭合环线接缝。十五城贴地偏差 ≤0.02，车行片段边界全部是流形；驾驶区域高差冲突与排除片段均为0。平地渲染几何与重构前逐字节一致，坡地变化有新基线和原因记录。见 [A5贴地记录](CITY_GROUND_SURFACE_TERRAIN_FIT_NOTES.md)。
+
+A6增量：结构几何（桥面/高架/桁架/尽端/渠化口）抽成纯描述符，渲染与驾驶同源，结构渲染与改动前逐字节一致；`compileCitySurface` 聚合整城驾驶路面、静态障碍与桥头诊断。跨河桥面放进地面层，以alias规则判同层落地；立交与高架单独成层，跨层portal未实现。十五城规划布局与0/90/500会话显示布局的片段边界全部是流形。CityEngine增加按需、revision校验的驾驶路面快照端口。现有桥面平板与有坡引道在渲染上就不连续，桥梁全部关闭并上报，需另立视觉修复。见 [结构与聚合记录](CITY_STRUCTURE_SURFACE_NOTES.md)。
+
+A7增量（2026-10-16）：桥面改为贴合两端桥头路面的斜板（经产品确认的可视变更），区域规则 v3 让桥面遮挡下方更低的地面。十五城 10 座桥两端连通、桥跨可整段行驶（修复前 0 座），剩余不通的桥头上报原因。见 [结构与聚合记录](CITY_STRUCTURE_SURFACE_NOTES.md) A7 一节。

@@ -730,6 +730,8 @@ fn open_authority_and_write_extension(
         &[],
         // session_excerpts：行为面素材，插件执行环境不产（行为须官方，spec §1）。
         &[],
+        // session_titles：同上——插件执行环境没有会话标题来源。
+        &[],
         None,
         None,
         now,

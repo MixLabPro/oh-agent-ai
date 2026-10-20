@@ -31,6 +31,9 @@ impl SourceParser for WorkbuddyParser {
             facts: r.facts,
             workflow_events: r.workflow_events,
             session_excerpts: Vec::new(),
+            // WorkBuddy 标题在 workbuddy.db 的 sessions 表（SQLite），不在
+            // trace wire 里；当前不接（City 楼名走 fallback 命名）。
+            session_titles: Vec::new(),
             new_offset: 0,
         })
     }

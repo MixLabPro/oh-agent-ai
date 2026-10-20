@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { CityEngine } from "../engine/CityEngine";
 import { GameSession, type GameSessionSnapshot } from "./GameSession";
 import type { GameLocale } from "./gameCopy";
+import { closeOpenGameDisclosure } from "./ui/closeOpenDisclosure";
 import { EMPTY_PROFILE, loadProfilePort, mergeRecord, saveProfile, type FlightProfileV1, type ProfilePort } from "../data/profile";
 
 declare const __CITY_GAME_UAT__: boolean;
@@ -77,13 +78,21 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     return () => { active = false; };
   }, []);
 
-  const enterGame = useCallback((mode: "practice" | "race") => {
+  const enterGame = useCallback(async (mode: "practice" | "race") => {
     const session = getSession();
     const engineInstance = engine.current;
     if (!session || !engineInstance) return;
     setEntryError(null);
     const hostState = session.hostState(hostRef.current.cinemaActive(), hostRef.current.filmActive(), hostRef.current.busy());
-    const result = session.enter({ mode }, hostState);
+    let result: Awaited<ReturnType<GameSession["enter"]>>;
+    try { result = await session.enter({ mode }, hostState); }
+    catch (error) {
+      if (sessionRef.current === session && session.controller.snapshot.phase !== "data") {
+        setEntryError(error instanceof Error ? error.message : (hostRef.current.locale() === "en" ? "Cannot prepare the flight scene." : "飞行场景准备失败。"));
+      }
+      return;
+    }
+    if (sessionRef.current !== session || session.controller.snapshot.phase === "data") return;
     if (!result.ok) {
       const locale = hostRef.current.locale();
       const reasons: Record<string, string> = {
@@ -114,8 +123,12 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
       if (!current) return;
       event.preventDefault();
       event.stopImmediatePropagation();
+      if (event.repeat || event.isComposing) return;
+      if (closeOpenGameDisclosure()) return;
       const { paused, error, phase } = current.controller.snapshot;
       if (error) return;
+      if (phase === "preparing") { current.exit(); return; }
+      if (phase === "result" || phase === "data") return;
       if (paused) current.resume();
       else if (phase === "practice" || phase === "countdown" || phase === "racing") current.pause("user");
     };
@@ -151,7 +164,7 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     enterUatRace: async () => {
       if (typeof __CITY_GAME_UAT__ === "undefined" || !__CITY_GAME_UAT__) return;
       pilotRef.current?.();
-      enterGame("race");
+      await enterGame("race");
       const session = sessionRef.current;
       const instance = engine.current;
       if (!session || !instance || session.controller.snapshot.error) return;

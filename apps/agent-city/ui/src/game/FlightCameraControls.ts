@@ -6,6 +6,10 @@
  * attach/detach 成对注册，与 FlightInput 一致，所有监听可释放。
  */
 import type { FlightCamera } from "./FlightCamera";
+import type { CarCamera } from "./CarCamera";
+
+/** Either camera shell works—both implement orbitBy/zoomBy/setDragging/resetOrbit via VehicleChaseCamera. */
+export type ChaseCameraLike = Pick<FlightCamera, "orbitBy" | "zoomBy" | "setDragging" | "resetOrbit"> | Pick<CarCamera, "orbitBy" | "zoomBy" | "setDragging" | "resetOrbit">;
 
 // 与引擎 OrbitControls（three 0.186）同一条缩放曲线：每 100 滚轮单位 5%（0.95^(Δ/100)），
 // 触控板捏合以 ctrlKey+小 deltaY 上报，OrbitControls 将其放大 10 倍；单次事件不设上限但相机缩放有夹取。
@@ -18,7 +22,7 @@ const PAGE_HEIGHT_PX = 100;
 export type FlightCameraControlsOptions = {
   canvas: HTMLElement;
   /** 取当前相机（会话重建相机时无需重新挂载监听）。 */
-  camera: () => FlightCamera | null;
+  camera: () => ChaseCameraLike | null;
   /** 当前是否接受视角输入。 */
   isActive: () => boolean;
 };

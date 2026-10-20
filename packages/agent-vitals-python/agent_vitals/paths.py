@@ -29,6 +29,12 @@ def _env_path(name: str):
     return Path(value).expanduser() if value else None
 
 
+def user_home() -> Path:
+    """Resolve home consistently across POSIX and Windows."""
+    configured = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    return Path(configured).expanduser() if configured else Path.home()
+
+
 def data_home() -> Path:
     """Return the single local data root selected for this process.
 
@@ -42,7 +48,7 @@ def data_home() -> Path:
     if legacy_explicit is not None:
         return legacy_explicit
 
-    home = Path.home()
+    home = user_home()
     current = home / ".agent-vitals"
     legacy = home / ".skill-vitals"
     if current.exists() or not legacy.exists():

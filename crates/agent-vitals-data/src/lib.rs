@@ -43,3 +43,5 @@ pub mod probe;
 pub mod workflow;
 pub mod trust;
 pub mod trust_correlator;
+
+pub mod session_statistics;

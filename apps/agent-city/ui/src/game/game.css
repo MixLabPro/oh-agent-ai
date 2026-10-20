@@ -1,54 +1,72 @@
-/* 游戏模式局部样式（GameHud）。复用 city.css 的 --city-* 令牌；不覆盖宿主导航。 */
-.city-app .city-game-hud { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+/* Shared vehicle overlays use the City token layer and stay inside the canvas. */
+.city-app .city-game-hud { position: absolute; inset: 0; z-index: 5; pointer-events: none; color: var(--city-text); }
 .city-app .city-game-hud > * { pointer-events: auto; }
-.city-game-chip { padding: 7px 10px; border-radius: var(--city-control-radius); background: var(--city-control-background); border: 1px solid #ffffff38; box-shadow: 0 2px 8px #0001; backdrop-filter: blur(10px); font-size: var(--city-control-font-size); line-height: 1.4; transition: background-color 150ms ease, border-color 150ms ease; }
-.city-game-keys:hover { background: var(--city-control-hover); border-color: #ffffff70; }
+.city-game-chip { box-sizing: border-box; padding: 7px 10px; border-radius: var(--city-control-radius); background: var(--city-control-background); border: 1px solid #ffffff38; box-shadow: 0 2px 8px #0003; backdrop-filter: blur(10px); font-size: var(--city-control-font-size); line-height: 1.4; }
 .city-game-topleft { position: absolute; top: 16px; left: 16px; display: grid; gap: 6px; }
 .city-game-topleft .city-game-chip strong { font-size: 13px; }
-.city-game-topright { position: absolute; top: 16px; right: 16px; display: grid; gap: 6px; text-align: right; }
-.city-game-telemetry { display: inline-flex; gap: 12px; font-variant-numeric: tabular-nums; }
-.city-game-telemetry span { color: var(--city-muted); margin-right: 4px; }
+.city-game-compact-action { min-height: 44px; padding: 7px 12px; border-radius: var(--city-control-radius); border: 1px solid #ffffff38; background: var(--city-control-background); color: var(--city-text); font: inherit; cursor: pointer; }
+.city-game-topright { position: absolute; top: 16px; right: 16px; display: grid; justify-items: end; gap: 6px; text-align: right; }
+.city-game-telemetry { display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.city-game-telemetry span, .city-game-telemetry small { color: var(--city-muted); }
+.city-game-telemetry strong { font-size: 15px; }
 .city-game-warn { border-color: #d8a24a; color: #ffd9a0; }
-/* 声音面板：主音量滑条 + 音效/BGM 独立开关（与按键提示同款 details 展开）。 */
-.city-game-sound summary { list-style: none; cursor: pointer; color: var(--city-muted); }
-.city-game-sound summary::-webkit-details-marker { display: none; }
-.city-game-sound-panel { display: grid; gap: 8px; margin-top: 8px; text-align: left; }
+.city-game-status { font-size: var(--city-control-font-size); }
+.city-game-status[data-tone="warn"] { border-color: #d8a24a; }
+.city-game-status[data-tone="error"] { border-color: #c56a6a; }
+.city-game-hud :is(button, summary, input, select):focus-visible { outline: 3px solid #ffd994; outline-offset: 3px; }
+.city-game-sound summary, .city-game-keys summary { display: flex; align-items: center; min-width: 44px; min-height: 44px; list-style: none; cursor: pointer; color: var(--city-text); }
+.city-game-sound summary::-webkit-details-marker, .city-game-keys summary::-webkit-details-marker { display: none; }
+.city-game-sound-panel { display: grid; gap: 8px; margin-top: 8px; text-align: left; min-width: min(220px, calc(100vw - 40px)); }
 .city-game-sound-panel label { display: grid; gap: 4px; font-size: var(--city-control-font-size); color: var(--city-muted); }
-.city-game-sound-panel input[type="range"] { width: 100%; accent-color: #7ec8ff; }
+.city-game-sound-panel input[type="range"] { width: 100%; min-height: 44px; accent-color: #7ec8ff; }
 .city-game-sound-toggles { display: grid; gap: 6px; }
-.city-game-sound-toggles button { min-height: 28px; cursor: pointer; font: inherit; color: var(--city-text); padding: 4px 8px; border-radius: var(--city-control-radius); background: var(--city-control-background); border: 1px solid #ffffff38; }
+.city-game-sound-toggles button { min-height: 44px; cursor: pointer; font: inherit; color: var(--city-text); padding: 8px; border-radius: var(--city-control-radius); background: var(--city-control-background); border: 1px solid #ffffff38; }
 .city-game-sound-toggles button[aria-pressed="false"] { color: var(--city-muted); border-style: dashed; }
-.city-game-keys { position: absolute; right: 16px; bottom: 16px; width: min(250px, calc(100% - 32px)); padding: 8px 10px; }
-.city-game-keys summary { list-style: none; cursor: pointer; color: var(--city-muted); font-size: var(--city-control-font-size); min-height: 20px; }
-.city-game-keys summary::-webkit-details-marker { display: none; }
-.city-game-keys dl { margin: 8px 0 0; gap: 4px 10px; font-size: var(--city-control-font-size); }
-.city-game-keys dt { color: var(--city-text); font-weight: 600; }
-.city-game-keys dd { margin: 0; color: var(--city-muted); }
-.city-game-panel { position: absolute; inset: 0; display: grid; place-items: center; background: #020a14a8; }
-.city-game-panel > div { width: min(360px, calc(100% - 32px)); max-height: min(80vh, 720px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 12px; background: var(--city-surface); border: 1px solid var(--city-border); box-shadow: 0 8px 28px #0003; display: grid; gap: 10px; }
+.city-game-keys { position: absolute; right: 16px; bottom: 16px; width: min(250px, calc(100% - 32px)); padding: 0 10px; }
+.city-game-keys:hover { background: var(--city-control-hover); border-color: #ffffff70; }
+.city-game-keys summary { font-size: var(--city-control-font-size); }
+.city-game-keys dl, .city-game-panel-help dl, .city-game-result-list { display: grid; grid-template-columns: auto 1fr; margin: 8px 0 0; gap: 5px 12px; font-size: var(--city-control-font-size); }
+.city-game-keys dl > div { display: contents; }
+.city-game-keys dt, .city-game-panel-help dt, .city-game-result-list dt { color: var(--city-text); font-weight: 600; }
+.city-game-keys dd, .city-game-panel-help dd, .city-game-result-list dd { margin: 0; color: var(--city-muted); }
+.city-game-panel { position: absolute; inset: 0; display: grid; place-items: center; padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); box-sizing: border-box; background: #020a14b8; }
+.city-game-panel > div[role="dialog"] { box-sizing: border-box; width: min(420px, 100%); max-height: min(84vh, 720px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 12px; background: var(--city-surface); border: 1px solid var(--city-border); box-shadow: 0 8px 28px #0005; display: grid; gap: 12px; }
 .city-game-panel h2 { margin: 0; font-size: 18px; }
-.city-game-panel p { margin: 0; color: var(--city-muted); font-size: 12px; line-height: 1.5; }
+.city-game-panel p { margin: 0; color: var(--city-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .city-game-panel .city-game-actions { display: grid; gap: 8px; margin-top: 4px; }
-.city-game-panel .city-game-actions button { min-height: 36px; }
-.city-game-panel .city-game-danger { border-color: #7c3a3a; }
-.city-game-paused dl { margin: 10px 0 0; gap: 4px 10px; font-size: 12px; }
-.city-game-paused dt { color: var(--city-text); font-weight: 600; }
-.city-game-paused dd { margin: 0; color: var(--city-muted); font-variant-numeric: tabular-nums; }
+.city-game-panel .city-game-actions button { min-height: 44px; padding: 8px 12px; color: var(--city-text); font: inherit; background: var(--city-control-background); border: 1px solid var(--city-border); border-radius: var(--city-control-radius); cursor: pointer; }
+.city-game-panel .city-game-actions .city-game-danger { border-color: #9a4e4e; }
+.city-game-spawn-candidates { display: grid; gap: 8px; max-height: min(38vh, 320px); overflow: auto; }
+.city-game-spawn-candidate { min-height: 48px; display: grid; gap: 2px; padding: 8px 12px; text-align: left; color: var(--city-text); font: inherit; background: var(--city-control-background); border: 1px solid var(--city-border); border-radius: var(--city-control-radius); cursor: pointer; }
+.city-game-spawn-candidate small { color: var(--city-muted); font-size: 11px; overflow-wrap: anywhere; }
+.city-game-spawn-selection { overflow-wrap: anywhere; }
+.city-game-panel-help { position: static; width: auto; padding: 0 10px; box-shadow: none; }
+.city-game-panel-help dl { margin-bottom: 10px; }
+.city-game-result-list { margin: 0; }
+.city-game-result-list dd { font-variant-numeric: tabular-nums; }
+.city-game-diagnostics { position: absolute; left: 16px; bottom: 16px; max-width: min(320px, calc(100% - 32px)); }
+.city-game-diagnostics summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
+.city-game-diagnostics p { max-height: 24vh; overflow: auto; margin: 6px 0; color: var(--city-muted); font-size: 12px; overflow-wrap: anywhere; }
+.city-game-diagnostics dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; max-height: 25vh; overflow: auto; margin: 6px 0; font-size: 11px; }
+.city-game-diagnostics dt { font-weight: 600; color: var(--city-text); }
+.city-game-diagnostics dd { margin: 0; color: var(--city-muted); font-variant-numeric: tabular-nums; }
+.city-driving-local-audit { max-width: min(360px, 82vw); color: var(--city-muted); font-size: 11px; }
+.city-driving-local-audit summary { min-height: 32px; cursor: pointer; color: var(--city-text); }
+.city-driving-local-audit ol { display: grid; gap: 8px; max-height: 26vh; overflow: auto; margin: 6px 0; padding-left: 20px; }
+.city-driving-local-audit li { overflow-wrap: anywhere; }
+.city-driving-local-audit small { color: var(--city-muted); font-size: 10px; }
 .city-game-countdown { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; font-weight: 700; color: #eaf6ff; text-shadow: 0 2px 24px #0a2033cc; pointer-events: none; }
 
 @media (max-width: 520px) {
   .city-game-topleft, .city-game-topright { top: 12px; }
   .city-game-topleft { left: 12px; }
   .city-game-topright { right: 12px; }
-  .city-game-chip { padding: 6px 8px; }
-  .city-game-keys { right: 12px; bottom: 12px; width: min(230px, calc(100% - 24px)); }
+  .city-game-keys { right: 12px; bottom: 12px; width: min(52%, calc(100% - 24px)); }
+  .city-game-diagnostics { left: 12px; bottom: 12px; max-width: min(40%, calc(100% - 24px)); }
+  .city-game-telemetry { gap: 5px; }
 }
-
 @media (max-height: 520px) {
   .city-game-keys[open] { max-height: 42vh; overflow-y: auto; }
-  .city-game-panel > div { max-height: 88vh; padding: 14px; }
+  .city-game-panel > div[role="dialog"] { max-height: 92vh; padding: 14px; }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .city-app .city-game-chip { transition: none; }
-}
+@media (prefers-reduced-motion: reduce) { .city-game-chip { scroll-behavior: auto; } }

@@ -7,6 +7,9 @@
 import { builtFractionAt, type CityModel } from "../cityModel";
 import type { CityLayout, Parcel } from "../engine/cityLayout";
 import { DetMath as Math } from "../engine/detMath";
+import type { CollisionIndex, SolidInput } from "./driving/CollisionIndex";
+import { createCameraCollisionQuery, combineCameraClearance } from "./driving/cameraCollisionQuery";
+import type { CameraClearanceQuery } from "./VehicleChaseCamera";
 
 export type ObstacleBox = { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number };
 
@@ -15,6 +18,13 @@ export type FlightWorldInput = {
   model: CityModel;
   /** 进入时的回放游标；null = live（按 windowEnd 计冻结高度）。 */
   cursorMs: number | null;
+  /** When present, collision geometry comes from the host's frozen static compiler. */
+  staticSolids?: readonly SolidInput[];
+  /** Same immutable compiler index used to create staticSolids. */
+  cameraCollisionIndex?: CollisionIndex;
+  staticContentRevision?: string;
+  solidCompilerVersion?: number;
+  staticCoverage?: string;
 };
 
 export type FlightBounds = {
@@ -29,6 +39,7 @@ export type FlightBounds = {
 };
 
 export type SpawnPoint = { x: number; y: number; z: number; heading: number };
+export type CameraSweepResult = Readonly<{ status: "clear" } | { status: "blocked"; safeFraction: number } | { status: "unresolved" }>;
 
 const GRID_CELL = 48;
 
@@ -40,6 +51,10 @@ const LANDMARK_HEIGHT: Record<string, number> = {
 
 export class FlightWorld {
   readonly boxes: readonly ObstacleBox[];
+  readonly staticContentRevision: string | null;
+  readonly solidCompilerVersion: number | null;
+  readonly staticCoverage: string | null;
+  private readonly sharedCameraSweep: CameraClearanceQuery | null;
   readonly bounds: FlightBounds;
   /** 岛体半径（路线生成以此外扩海面宽弧）。 */
   readonly islandRadius: number;
@@ -52,6 +67,43 @@ export class FlightWorld {
     const cursor = input.cursorMs ?? model.windowEndMs;
     const live = input.cursorMs === null;
     const boxes: ObstacleBox[] = [];
+
+    this.staticContentRevision = input.staticContentRevision ?? null;
+    this.solidCompilerVersion = input.solidCompilerVersion ?? null;
+    this.staticCoverage = input.staticCoverage ?? null;
+    this.sharedCameraSweep = input.cameraCollisionIndex ? createCameraCollisionQuery(input.cameraCollisionIndex) : null;
+
+    if (input.staticSolids) {
+      for (const solid of input.staticSolids) {
+        if (solid.kind === "box") {
+          const [xAxis, yAxis, zAxis] = solid.halfAxes;
+          const halfX = Math.abs(xAxis.x) + Math.abs(yAxis.x) + Math.abs(zAxis.x);
+          const halfY = Math.abs(xAxis.y) + Math.abs(yAxis.y) + Math.abs(zAxis.y);
+          const halfZ = Math.abs(xAxis.z) + Math.abs(yAxis.z) + Math.abs(zAxis.z);
+          boxes.push({ minX: solid.center.x - halfX, maxX: solid.center.x + halfX,
+            minY: solid.center.y - halfY, maxY: solid.center.y + halfY,
+            minZ: solid.center.z - halfZ, maxZ: solid.center.z + halfZ });
+        } else {
+          const xs = solid.ring.map((point) => point.x), zs = solid.ring.map((point) => point.z);
+          boxes.push({ minX: Math.min(...xs), maxX: Math.max(...xs), minY: solid.yMin, maxY: solid.yMax,
+            minZ: Math.min(...zs), maxZ: Math.max(...zs) });
+        }
+      }
+      // Flight-only far mountain meshes are not part of the current city-solid
+      // source. Keep their conservative authored envelopes until source coverage
+      // includes them; they are isolated offshore and do not seal bridge channels.
+      for (const mountain of layout.seaMountains ?? []) {
+        const half = mountain.radius * 0.9;
+        boxes.push({ minX: mountain.center.x - half, maxX: mountain.center.x + half, minY: -2, maxY: mountain.height,
+          minZ: mountain.center.z - half, maxZ: mountain.center.z + half });
+      }
+      for (const mountain of layout.decorMountains ?? []) {
+        const half = mountain.radius * 0.9;
+        const top = Math.max(30, mountain.terrain.height(mountain.center.x, mountain.center.z));
+        boxes.push({ minX: mountain.center.x - half, maxX: mountain.center.x + half, minY: -2, maxY: top,
+          minZ: mountain.center.z - half, maxZ: mountain.center.z + half });
+      }
+    } else {
 
     // 会话楼：slots 提供 x/z 与地块尺寸，grounds 提供地面高度；高度冻结为进入时的显示高度。
     const slots = new Map<string, Parcel>();
@@ -124,6 +176,7 @@ export class FlightWorld {
       const top = Math.max(30, mountain.terrain.height(mountain.center.x, mountain.center.z));
       boxes.push({ minX: mountain.center.x - half, maxX: mountain.center.x + half, minY: -2, maxY: top, minZ: mountain.center.z - half, maxZ: mountain.center.z + half });
     }
+    }
 
     this.boxes = boxes;
     this.islandRadius = layout.islandRadius;
@@ -165,6 +218,63 @@ export class FlightWorld {
       }
     }
     return out;
+  }
+
+  /** Bounded swept near-plane envelope query used by chase cameras.
+   *  多源合取统一走 combineCameraClearance——与相机适配器同一处策略：
+   *  任一源未决即 fail-closed，被挡源取最小认证前缀。 */
+  queryCameraSweep(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, radius: number,
+    candidateBudget = 4096): CameraSweepResult {
+    const shared = this.sharedCameraSweep?.(from, to, radius) ?? { status: "clear" as const };
+    const local = this.queryLocalCameraSweep(from, to, radius, candidateBudget);
+    const boundsAndTerrain = this.queryCameraBoundsAndTerrain(from, to, radius, candidateBudget);
+    return combineCameraClearance([shared, local, boundsAndTerrain]) as CameraSweepResult;
+  }
+
+  private queryCameraBoundsAndTerrain(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, radius: number,
+    candidateBudget: number): CameraSweepResult {
+    if (![from.x, from.y, from.z, to.x, to.y, to.z, radius].every(Number.isFinite) || radius < 0) return { status: "unresolved" };
+    const delta = { x: to.x - from.x, y: to.y - from.y, z: to.z - from.z };
+    const distance = Math.hypot(delta.x, delta.y, delta.z);
+    const spacing = Math.max(0.05, Math.min(0.5, radius * 0.5));
+    const samples = Math.max(1, Math.ceil(distance / spacing));
+    if (!Number.isSafeInteger(samples) || samples > candidateBudget) return { status: "unresolved" };
+    const { bounds } = this;
+    for (let index = 0; index <= samples; index += 1) {
+      const fraction = index / samples;
+      const x = from.x + delta.x * fraction, y = from.y + delta.y * fraction, z = from.z + delta.z * fraction;
+      const outside = y - radius < bounds.minY || y + radius > bounds.maxY ||
+        Math.hypot(x - bounds.centerX, z - bounds.centerZ) + radius > bounds.hardRadius;
+      const belowTerrain = y - radius < Math.max(0, this.terrainAt(x, z));
+      if (outside || belowTerrain) return { status: "blocked", safeFraction: Math.max(0, fraction - 1 / samples - 1e-4) };
+    }
+    return { status: "clear" };
+  }
+
+  private queryLocalCameraSweep(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, radius: number,
+    candidateBudget: number): CameraSweepResult {
+    if (![from.x, from.y, from.z, to.x, to.y, to.z, radius].every(Number.isFinite) || radius < 0 ||
+      !Number.isSafeInteger(candidateBudget) || candidateBudget < 1) return { status: "unresolved" };
+    const candidates = this.boxesInWindow(Math.min(from.x, to.x) - radius, Math.min(from.z, to.z) - radius,
+      Math.max(from.x, to.x) + radius, Math.max(from.z, to.z) + radius);
+    if (candidates.length > candidateBudget) return { status: "unresolved" };
+    const delta = [to.x - from.x, to.y - from.y, to.z - from.z];
+    let first = Infinity;
+    for (const box of candidates) {
+      const mins = [box.minX - radius, box.minY - radius, box.minZ - radius];
+      const maxs = [box.maxX + radius, box.maxY + radius, box.maxZ + radius];
+      const starts = [from.x, from.y, from.z];
+      let enter = 0, leave = 1, hit = true;
+      for (let axis = 0; axis < 3; axis += 1) {
+        if (Math.abs(delta[axis]) < 1e-12) { if (starts[axis] < mins[axis] || starts[axis] > maxs[axis]) { hit = false; break; } continue; }
+        let a = (mins[axis] - starts[axis]) / delta[axis], b = (maxs[axis] - starts[axis]) / delta[axis];
+        if (a > b) [a, b] = [b, a];
+        enter = Math.max(enter, a); leave = Math.min(leave, b);
+        if (enter > leave) { hit = false; break; }
+      }
+      if (hit && leave >= 0 && enter <= 1) first = Math.min(first, Math.max(0, enter));
+    }
+    return first === Infinity ? { status: "clear" } : { status: "blocked", safeFraction: Math.max(0, first - 1e-4) };
   }
 
   /** 一点是否净空：不与任何碰撞盒（外扩 margin）相交、在地形之上 margin、在硬边界内。 */

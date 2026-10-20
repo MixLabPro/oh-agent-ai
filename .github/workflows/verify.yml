@@ -62,13 +62,17 @@ jobs:
   python:
     name: Python 套件
     runs-on: ubuntu-latest
+    env:
+      # Broad compatibility tests use the product's explicit Asia/Shanghai
+      # fixture timezone; focused timezone tests still exercise other zones.
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9" # 仓库声明支持 3.8+，按下限跑
       - name: 安装 hypothesis（属性测试的可选依赖）
-        run: pip install hypothesis
+        run: pip install hypothesis zstandard
       - name: 全套测试
         run: python -m unittest discover tests -v
       - name: golden 比对（Python 实现）
@@ -78,6 +82,8 @@ jobs:
   rust:
     name: Rust 单元测试
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
     # 没有 Cargo.toml 的分支（比如纯 Python 的 main）整个 job 跳过，
     # 在 checks 页面显示为灰色 Skipped —— 不是绿色 Success。
     needs: probe
@@ -97,6 +103,8 @@ jobs:
   differential:
     name: 双实现差分
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
     needs: probe
     if: needs.probe.outputs.has_cargo == 'yes'
     steps:
@@ -128,7 +136,7 @@ jobs:
           # 相对路径在那里解析不到（本地一直用 $PWD/... 所以没撞上）。
           AGENT_VITALS_BIN: ${{ github.workspace }}/target/release/agent-vitals
         run: |
-          pip install hypothesis
+          pip install hypothesis zstandard
           python -m unittest discover tests
 
       # 假宿主：验运行时适配器的**成功路径**。
@@ -175,11 +183,16 @@ jobs:
       # Python 3.9 on Windows otherwise decodes subprocess output with the
       # active ANSI code page, while the CLI deliberately emits UTF-8.
       PYTHONUTF8: "1"
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
+      - name: Set deterministic test timezone
+        run: tzutil /s "China Standard Time"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
+      - name: Install optional test dependencies
+        run: pip install hypothesis zstandard tzdata
       - name: 全套测试
         run: python -m unittest discover tests -v
       - name: golden 比对（Windows）
@@ -197,7 +210,10 @@ jobs:
         with:
           node-version: "20"
       - name: 检查桌面发布 workflow 门禁
-        run: node scripts/verify-release-desktop-workflow.mjs
+        run: |
+          node scripts/verify-release-desktop-workflow.mjs
+          node scripts/verify-desktop-platforms.mjs
+          node scripts/test-run-npm.mjs
 
   city_guards:
     name: City 专项守卫

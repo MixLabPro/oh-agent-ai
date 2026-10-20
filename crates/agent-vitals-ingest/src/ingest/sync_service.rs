@@ -165,6 +165,7 @@ fn sync_harness(
     ns: &str,
     db: &agent_vitals_data::authority::AuthorityDb,
     data_home: &Path,
+    roots: &agent_vitals_harnesses::sources::session_harnesses::HarnessRoots<'_>,
     files: Vec<PathBuf>,
     report: &mut HarnessSyncReport,
 ) -> Result<(), String> {
@@ -250,6 +251,10 @@ fn sync_harness(
     let mut workflow_events: Vec<WorkflowEvent> = Vec::new();
     // V16：任务意图摘录（现仅 claude-code emitter 产；其他执行环境空集）。
     let mut session_excerpts: Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt> =
+        Vec::new();
+    // V32：解析产出的会话标题（现仅 claude-code 的 ai-title；codex/dsh 的侧车
+    // 索引标题在写完事实后走独立的 apply_session_titles 趟）。
+    let mut session_titles: Vec<agent_vitals_domain::contracts::workflow::SessionTitle> =
         Vec::new();
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
@@ -339,6 +344,7 @@ fn sync_harness(
             Vec<Value>,
             Vec<WorkflowEvent>,
             Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt>,
+            Vec<agent_vitals_domain::contracts::workflow::SessionTitle>,
         );
         let emit: Result<EmitTuple, String> = if let Some(from_offset) = incremental_offset {
             // 增量路径：usage facts 从 offset 续读（GB 级收益）。检查点推进
@@ -350,7 +356,7 @@ fn sync_harness(
                         parser_id: parser.descriptor().parser_id.to_string(),
                         byte_offset: Some(out.new_offset),
                     });
-                (out.facts, out.workflow_events, out.session_excerpts)
+                (out.facts, out.workflow_events, out.session_excerpts, out.session_titles)
             })
         } else {
             // 全量路径（首见/硬失效/全量申报执行环境）。增量能力执行环境的全量轮也要
@@ -366,14 +372,15 @@ fn sync_harness(
                             byte_offset: Some(out.new_offset),
                         });
                 }
-                (out.facts, out.workflow_events, out.session_excerpts)
+                (out.facts, out.workflow_events, out.session_excerpts, out.session_titles)
             })
         };
         match emit {
-            Ok((f, events, excerpts)) => {
+            Ok((f, events, excerpts, titles)) => {
                 facts.extend(f);
                 workflow_events.extend(events);
                 session_excerpts.extend(excerpts);
+                session_titles.extend(titles);
                 synced_sources.push((path.clone(), *fp));
             }
             Err(e) => report.errors.push(format!("{}: {e}", path.display())),
@@ -429,7 +436,7 @@ fn sync_harness(
                 backfill_marker: runtime_snapshot_backfill_needed
                     .then_some("codex_quota_snapshot_backfilled_v2"),
             });
-        let outcome = crate::sql_sync::write_flat_facts_with_sources(
+        let outcome = crate::sql_sync::write_flat_facts_with_sources_and_extension(
             db,
             harness,
             ns,
@@ -438,9 +445,11 @@ fn sync_harness(
             &facts,
             &workflow_events,
             &session_excerpts,
+            &session_titles,
             None,
             snapshot_write,
             now,
+            None,
         )?;
         report.files_synced += outcome.files_synced;
         report.appended = outcome.inserted;
@@ -448,6 +457,21 @@ fn sync_harness(
         report.sql_inserted = Some(outcome.inserted);
         report.sql_duplicate = Some(outcome.duplicate);
         report.errors.extend(outcome.errors);
+    }
+
+    // V32：侧车索引型会话标题——注册表声明（codex `session_index.jsonl`、DSH
+    // `storages/workspace.json`；调度器不做 harness 特判）。索引每 tick 重读、
+    // 与脏文件无关：用户重命名线程后 rollout 未变也要能刷标题。无变更轮零写
+    // 零 revision（apply_session_titles 的先读后写纪律）。
+    if let Some(title_index) = agent_vitals_harnesses::sources::session_harnesses::session_harness(harness)
+        .and_then(|registered| registered.title_index)
+    {
+        let titles = title_index(roots);
+        if !titles.is_empty() {
+            if let Err(e) = crate::sql_sync::apply_session_titles(db, harness, ns, &titles, now) {
+                report.errors.push(format!("{harness} session titles: {e}"));
+            }
+        }
     }
 
     Ok(())
@@ -691,7 +715,7 @@ pub fn sync_facts_filtered(
         let evaluated_harness = agent_vitals_harnesses::sources::session_harnesses::session_harness(harness)
             .filter(|h| h.findings.is_some());
         let all_files = if evaluated_harness.is_some() { files.clone() } else { Vec::new() };
-        sync_harness(harness, &ns, &authority, data_home, files, &mut r)?;
+        sync_harness(harness, &ns, &authority, data_home, &roots, files, &mut r)?;
         if let Some(eval_harness) = evaluated_harness {
             let changed = if findings_backfill {
                 all_files.clone()

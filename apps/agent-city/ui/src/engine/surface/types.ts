@@ -24,6 +24,7 @@ export type SurfacePortal = Readonly<{
 }>;
 export type SurfaceCompileIssue = Readonly<{
   source: SurfaceSource; reason: "unsupported" | "degenerate" | "open-boundary" | "height-gap" | "budget";
+  detail?: "empty" | "invalid-mesh" | "degenerate" | "non-manifold" | "intersection" | "budget";
 }>;
 export type SurfaceCompileReport = Readonly<{
   candidateLength: number; geometricallyEligibleLength: number;

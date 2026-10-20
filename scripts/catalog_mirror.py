@@ -66,10 +66,10 @@ def synchronize(root=ROOT, write=False):
         if not matches:
             candidates.append((target, content))
     if candidates and not write:
-        raise ValueError("catalog mirror drift: " + ", ".join(str(path.relative_to(root)) for path, _ in candidates))
+        raise ValueError("catalog mirror drift: " + ", ".join(path.relative_to(root).as_posix() for path, _ in candidates))
     for target, content in candidates:
         atomic_bytes(target, content)
-    return [str(path.relative_to(root)) for path, _ in candidates]
+    return [path.relative_to(root).as_posix() for path, _ in candidates]
 
 
 def main(argv=None):
