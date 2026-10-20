@@ -53,6 +53,7 @@ export function BuildingBookmark({ assetRef, language, windowDays }: { assetRef:
     setBusy(true); setError(false);
     try {
       const result = await state("plugin.state.write", { revision: save.revision, value: { schemaVersion: 1, assetRefs: refs } });
+      if (result.revision !== save.revision + 1) throw new Error("invalid_save_revision");
       setSave({ revision: result.revision, refs });
     } catch { setError(true); setSave(null); }
     finally { setBusy(false); }
@@ -62,7 +63,7 @@ export function BuildingBookmark({ assetRef, language, windowDays }: { assetRef:
     <button disabled={!save || busy || (!selected && save.refs.length >= 200)} onClick={() => { void toggle(); }}>
       {busy ? (en ? "Saving…" : "正在保存…") : selected ? (en ? "Remove building bookmark" : "取消建筑收藏") : (en ? "Bookmark building" : "收藏建筑")}
     </button>
-    <p aria-live="polite">{save ? `${en ? "Local bookmarks" : "本地收藏"}: ${save.refs.length} / 200` : en ? "Reading local bookmarks…" : "正在读取本地收藏…"}</p>
+    <p aria-live="polite">{save ? `${en ? "Local bookmarks" : "本地收藏"}: ${save.refs.length} / 200` : error ? (en ? "Local bookmarks unavailable." : "本地收藏暂不可用。") : en ? "Reading local bookmarks…" : "正在读取本地收藏…"}</p>
     {coverage && <p role="status">{coverage}</p>}
     {error && <p role="alert">{en ? "Save failed or changed in another window. Reload before retrying." : "保存失败或档案已被其他窗口更新，请重新读取后重试。"}<button onClick={() => setReload((value) => value + 1)}>{en ? "Reload" : "重新读取"}</button></p>}
   </div>;
