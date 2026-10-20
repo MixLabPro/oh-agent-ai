@@ -134,6 +134,11 @@ ${carLampsAdd("vRoadWorld", "vRoadWNormal")}`);
  *  - city-road-surface：路段带（第 2–4 层），带标线所需的每端参数。
  *  拆开是为了体量：填充与人行道占顶点的九成，却用不上那 10 个标线属性（档 10 城每顶点 100 B → 52 B 量级）。
  *  每个材质组一个 polygonOffset 层级，逐层加大。 */
+/** 逐个追加：`push(...arr)` 把整层当实参展开，超大城市（5000/42）一层的 run 属性就超出调用栈上限。 */
+function append(out: number[], values: ArrayLike<number>): void {
+  for (let i = 0; i < values.length; i++) out.push(values[i]);
+}
+
 export function buildRoadSurface(host: RoadSurfaceHost): void {
   const compiled = host.groundRoadSurface ?? compileGroundRoadSurface(host.layout);
   assertGroundRoadSurfaceMatches(compiled, host.layout);
@@ -145,8 +150,8 @@ export function buildRoadSurface(host: RoadSurfaceHost): void {
     for (const layerIndex of layerIndices) {
       const layer = layers[layerIndex];
       const base = positions.length / 3; const first = index.length;
-      positions.push(...layer.positions); normals.push(...layer.normals); colors.push(...layer.colors); run.push(...layer.run);
-      if (full) { uv.push(...layer.uv); ends.push(...layer.ends); edges.push(...layer.edges); zebra.push(...layer.zebra); }
+      append(positions, layer.positions); append(normals, layer.normals); append(colors, layer.colors); append(run, layer.run);
+      if (full) { append(uv, layer.uv); append(ends, layer.ends); append(edges, layer.edges); append(zebra, layer.zebra); }
       for (const i of layer.index) index.push(base + i);
       if (index.length > first) geometry.addGroup(first, index.length - first, layerIndex);
     }
