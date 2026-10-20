@@ -73,7 +73,14 @@ assert.ok(corpusRuns > 0, "seed corpus: at least one expressway run survives at 
 // 变成地理依赖（seed 42 各档保留，1485618003/1927/987654 目前全无）。
 // 「每档保留跨水高架」因此从固定单 seed 改为语料级不变量；单 seed 全档必有的旧断言
 // 依赖的是已被移除的非法跨水地面路，不恢复。
+// 档 1 不要求语料里有高架（footprint guard 照查）：上面的语料级断言（2c960e15）写在驾驶线上，
+// 当时规划器还没有 ad697cfa 的「出口只接朝前干道」（弦与环线切线 ≤60°，不行就回缩最多 8 点，
+// 两端凑不齐就整条剪掉——为消除 150°–180° 回折尖刺，有意为之）。合并 8c647cf2 把两边断言融合，
+// 但合并验证清单没有跑本脚本：ad697cfa 起 seed 42 档 1（R 542）主环 72 点只找到 1 个朝前出口、
+// 被剪，四个 seed 档 1 全部无高架（档 2/5/10 仍由 seed 42 保留）。小档城市半径小、环线贴岸，
+// 本来就最容易凑不齐朝前出口；这是规划器的有意取舍，不是渲染回归，所以存在性只在 5/10 档断言。
 const tierSeeds = [1927, 42, 987654, 1485618003];
+const tiersWithExpressways = new Set([5, 10]);
 for (const tier of [1, 5, 10]) {
   let runs = 0; let crossings = 0;
   for (const seed of tierSeeds) {
@@ -84,6 +91,7 @@ for (const tier of [1, 5, 10]) {
       assert(clearsHighways(parcel, parcel.width, parcel.depth, plan.highways), `tier ${tier}/seed ${seed}: expressway footprint guard`);
     }
   }
+  if (!tiersWithExpressways.has(tier)) continue;
   assert.ok(runs > 0, `tier ${tier}: at least one expressway run survives in the seed corpus`);
   assert.ok(crossings > 0, `tier ${tier}: elevated river crossing retained somewhere in the seed corpus`);
 }
