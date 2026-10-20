@@ -43,8 +43,9 @@ platform-tested after the corresponding release checks pass. macOS is the curren
 public product focus; [Windows/Linux build notes](docs/DESKTOP_PLATFORM_BUILDS.md)
 describe build support, not complete UI acceptance.
 
-Oh Agent is the public brand. Repository names, CLI commands, crates, application
-identifiers and some installed-package labels still use `agent-vitals`.
+Oh Agent is the public brand: the desktop app is `Oh Agent.app` with bundle identifier
+`ai.ohagent.desktop`. Repository names, CLI commands, crates, data directories and some
+installed-package labels still use `agent-vitals`.
 Do not rename existing data directories to match the website.
 
 ## Your history stays on your machine
@@ -88,7 +89,7 @@ npm ci --prefix apps/agent-city/ui
 bash scripts/build-macos-react-app.sh
 
 # Launch the bundle, never the bare menubar executable
-open apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app
+open "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app"
 ```
 
 See [desktop instructions](apps/desktop/src-tauri/README.md) and the

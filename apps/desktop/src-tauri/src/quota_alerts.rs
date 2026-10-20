@@ -79,7 +79,7 @@ pub fn maybe_notify(app: &AppHandle, ov: &overview::Overview) {
             app_for_notification
                 .notification()
                 .builder()
-                .title(native_label(language, "Agent Vitals: Claude Pro quota", "Agent Vitals：Claude Pro 额度"))
+                .title(native_label(language, "Oh Agent: Claude Pro quota", "Oh Agent：Claude Pro 额度"))
                 .body(body)
                 .show()
                 .map_err(|error| error.to_string())

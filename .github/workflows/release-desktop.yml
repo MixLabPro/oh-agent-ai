@@ -159,15 +159,15 @@ jobs:
             "--require-architecture=$EXPECTED_ARCH"
 
       - name: Verify notarization ticket
-        run: xcrun stapler validate apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app
+        run: xcrun stapler validate "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app"
 
       - name: Stage architecture-specific artifacts
         shell: bash
         run: |
           set -eu
           mkdir -p "dist/$EXPECTED_ARCH"
-          ditto apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app \
-            "dist/$EXPECTED_ARCH/agent-vitals.app"
+          ditto "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app" \
+            "dist/$EXPECTED_ARCH/Oh Agent.app"
           dmg="$(find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
           [ -n "$dmg" ] || { echo "missing DMG for $EXPECTED_ARCH" >&2; exit 1; }
           cp "$dmg" "dist/$EXPECTED_ARCH/agent-vitals-${RELEASE_TAG}-${EXPECTED_ARCH}.dmg"
@@ -207,7 +207,7 @@ jobs:
         run: |
           set -eu
           for arch in x86_64 arm64; do
-            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            app="$(find dist -type d -path "*-${arch}/Oh Agent.app" -print -quit)"
             [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
             node scripts/verify-macos-app-bundle.mjs "$app" \
               --require-developer-id \
@@ -219,7 +219,7 @@ jobs:
         run: |
           set -eu
           for arch in x86_64 arm64; do
-            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            app="$(find dist -type d -path "*-${arch}/Oh Agent.app" -print -quit)"
             [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
             xcrun stapler validate "$app"
           done
@@ -230,22 +230,33 @@ jobs:
         run: |
           set -eu
           mkdir -p release
+          # 公开文件名（docs/OH_AGENT_BRAND_RENAME_PLAN.md §2）：无空格，版本取应用版本（不带 app-v 前缀），
+          # 必须与 tauri.conf.json 的 version 一致；不依赖 Tauri 原始输出文件名，每类产物恰好一个。
+          version="${RELEASE_TAG#app-v}"
+          app_version="$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')"
+          [ "$version" = "$app_version" ] || { echo "release tag $RELEASE_TAG does not match app version $app_version" >&2; exit 1; }
+          only_one() {
+            count="$(find "$1" -type f -name "$2" | wc -l | tr -d ' ')"
+            [ "$count" = 1 ] || { echo "expected exactly one $2 in $1, found $count" >&2; exit 1; }
+            find "$1" -type f -name "$2" -print -quit
+          }
           for arch in x86_64 arm64; do
-            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            app="$(find dist -type d -path "*-${arch}/Oh Agent.app" -print -quit)"
             dmg="$(find dist -type f -path "*-${arch}/*.dmg" -print -quit)"
             [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
             [ -n "$dmg" ] || { echo "missing $arch dmg artifact" >&2; exit 1; }
+            case "$arch" in x86_64) public_arch=x64 ;; arm64) public_arch=arm64 ;; esac
             ditto -c -k --sequesterRsrc --keepParent "$app" \
-              "release/agent-vitals-${RELEASE_TAG}-${arch}.app.zip"
-            cp "$dmg" "release/agent-vitals-${RELEASE_TAG}-${arch}.dmg"
+              "release/Oh-Agent-${version}-macos-${public_arch}.app.zip"
+            cp "$dmg" "release/Oh-Agent-${version}-macos-${public_arch}.dmg"
           done
-          for extension in exe deb AppImage; do
-            file="$(find platform-dist -type f -name "*.$extension" -print -quit)"
-            [ -n "$file" ] || { echo "missing $extension installer" >&2; exit 1; }
-            cp "$file" release/
-          done
+          exe="$(only_one platform-dist '*.exe')"
+          deb="$(only_one platform-dist '*.deb')"
+          appimage="$(only_one platform-dist '*.AppImage')"
+          cp "$exe" "release/Oh-Agent-${version}-windows-x64-setup.exe"
+          cp "$deb" "release/Oh-Agent-${version}-linux-x64.deb"
+          cp "$appimage" "release/Oh-Agent-${version}-linux-x64.AppImage"
           (cd release && shasum -a 256 *.zip *.dmg *.exe *.deb *.AppImage > SHA256SUMS)
-          version="${RELEASE_TAG#app-v}"
           if [[ "$version" == *-* ]]; then
             gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes --prerelease
           else

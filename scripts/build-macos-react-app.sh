@@ -6,7 +6,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 desktop_dir="$repo_root/apps/desktop/src-tauri"
-app="$desktop_dir/target/release/bundle/macos/agent-vitals.app"
+app="$desktop_dir/target/release/bundle/macos/Oh Agent.app"
 
 case "$(uname -s)" in
   Darwin) ;;

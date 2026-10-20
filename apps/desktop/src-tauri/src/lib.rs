@@ -7558,15 +7558,15 @@ mod tests {
     fn resolve_binary_finds_sibling_next_to_exe() {
         let none = |_: &str| None;
         let exe = Some(PathBuf::from(
-            "/Applications/agent-vitals.app/Contents/MacOS/agent-vitals-menubar",
+            "/Applications/Oh Agent.app/Contents/MacOS/agent-vitals-menubar",
         ));
         let is_file = |p: &Path| {
-            p.to_string_lossy() == "/Applications/agent-vitals.app/Contents/MacOS/agent-vitals"
+            p.to_string_lossy() == "/Applications/Oh Agent.app/Contents/MacOS/agent-vitals"
         };
         assert_eq!(
             resolve_binary_from(&none, "".into(), exe, None, "agent-vitals", &is_file),
             Some(PathBuf::from(
-                "/Applications/agent-vitals.app/Contents/MacOS/agent-vitals"
+                "/Applications/Oh Agent.app/Contents/MacOS/agent-vitals"
             ))
         );
     }
@@ -7578,17 +7578,17 @@ mod tests {
     fn resolve_binary_bundle_wins_over_path() {
         let none = |_: &str| None;
         let exe = Some(PathBuf::from(
-            "/Applications/agent-vitals.app/Contents/MacOS/agent-vitals-menubar",
+            "/Applications/Oh Agent.app/Contents/MacOS/agent-vitals-menubar",
         ));
         let is_file = |p: &Path| {
             let s = p.to_string_lossy();
-            s == "/Applications/agent-vitals.app/Contents/Resources/bin/agent-vitals"
+            s == "/Applications/Oh Agent.app/Contents/Resources/bin/agent-vitals"
                 || s == "/usr/local/bin/agent-vitals"
         };
         assert_eq!(
             resolve_binary_from(&none, "/usr/local/bin".into(), exe, None, "agent-vitals", &is_file),
             Some(PathBuf::from(
-                "/Applications/agent-vitals.app/Contents/Resources/bin/agent-vitals"
+                "/Applications/Oh Agent.app/Contents/Resources/bin/agent-vitals"
             ))
         );
     }
@@ -7599,7 +7599,7 @@ mod tests {
     fn resolve_binary_bundle_missing_falls_back_to_path() {
         let none = |_: &str| None;
         let exe = Some(PathBuf::from(
-            "/Applications/agent-vitals.app/Contents/MacOS/agent-vitals-menubar",
+            "/Applications/Oh Agent.app/Contents/MacOS/agent-vitals-menubar",
         ));
         let is_file = |p: &Path| p.to_string_lossy() == "/usr/local/bin/agent-vitals";
         assert_eq!(

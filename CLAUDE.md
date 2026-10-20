@@ -249,12 +249,14 @@ when absent, so the repo stays dependency-free. To run it:
 
 **菜单栏 app（apps/desktop/src-tauri）只能以 .app 形态验证，绝不裸跑二进制。**
 验证托盘一律 `cd apps/desktop/src-tauri && cargo tauri build --bundles app`，再
-`open target/release/bundle/macos/agent-vitals.app`（走 LaunchServices）。直接跑
+`open "target/release/bundle/macos/Oh Agent.app"`（走 LaunchServices；2026-10-20 起品牌改名，
+此前是 `agent-vitals.app`）。直接跑
 `target/{debug,release}/agent-vitals-menubar`——无论是否在 agent 的沙箱 shell 里——
 macOS 26 **永远不摆放它的状态栏项**（窗口能建、`rect()` 只给占位坐标），而且每个裸跑路径
 都会往「系统设置 › 菜单栏」的注册表塞一条垃圾条目。2026-09-14 的"托盘突然消失"就是
 Codex 与 Claude 反复裸跑 + 旧 bundle id 在该注册表里的记录损坏叠出来的，最终靠把
-identifier 改成 `com.mixlabpro.agent-vitals` 绕开；另外 `set_activation_policy(Accessory)`
+identifier 改成 `com.mixlabpro.agent-vitals` 绕开（2026-10-20 品牌改名后 identifier 为
+`ai.ohagent.desktop`，又是一个新注册表身份；旧包须退出并删除，否则两个菜单栏图标并存）；另外 `set_activation_policy(Accessory)`
 不能删——tao 启动时显式设回 Regular，Info.plist 的 LSUIElement 会被盖掉。
 
 ## Architecture

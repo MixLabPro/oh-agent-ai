@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 assert.equal(process.platform, "darwin", "The native isolation probe requires macOS");
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tauri = path.join(repo, "apps/desktop/src-tauri");
-const bundle = path.join(tauri, "target/release/bundle/macos/agent-vitals-isolation-probe.app");
+const bundle = path.join(tauri, "target/release/bundle/macos/Oh Agent Isolation Probe.app");
 const artifactDir = await mkdtemp(path.join(os.tmpdir(), "agent-vitals-plugin-probe-"));
 const reportPath = path.join(artifactDir, "native-isolation.json");
 if (!process.argv.includes("--skip-build")) {

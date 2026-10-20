@@ -2,7 +2,12 @@
 
 当前产品介绍见[根 README](../../../README.md)。桌面应用包含托盘、React 工作台和
 Agent City 内置插件：本机历史可视化、用量与费用分析、会话证据，以及版本相关的探索玩法。
-对外品牌为 Oh Agent；CLI、数据目录、bundle identifier 和本地构建产物暂保留 `agent-vitals`。
+对外品牌为 Oh Agent：应用包为 `Oh Agent.app`，bundle identifier 为 `ai.ohagent.desktop`（2026-10-20 起；
+此前为 `agent-vitals.app` / `com.mixlabpro.agent-vitals`）。CLI、数据目录、桌面可执行文件名仍是 `agent-vitals`。
+
+**从旧包升级**：新 identifier 对 macOS 是另一个应用，不会覆盖旧包。先退出并删除 `/Applications/agent-vitals.app`，
+再安装 `Oh Agent.app`；通知权限需重新授权，侧栏折叠、界面语言等 WebView 本地偏好会重置。会话数据、计费声明、
+城市补丁存放在 agent-vitals 数据目录，与 identifier 无关，不受影响。
 
 - **后端**：Rust host 负责本机数据访问与受限投影，资源 CLI 随安装包分发。
   插件不直接查询 authority DB 或读取日志；计价和证据口径遵守仓库数据契约。

@@ -5,7 +5,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 desktop_dir="$repo_root/apps/desktop/src-tauri"
-app="$desktop_dir/target/release/bundle/macos/agent-vitals.app"
+app="$desktop_dir/target/release/bundle/macos/Oh Agent.app"
 cli="$app/Contents/Resources/bin/agent-vitals"
 dmg_dir="$desktop_dir/target/release/bundle/dmg"
 
@@ -90,13 +90,13 @@ case "$version" in
 esac
 
 mkdir -p "$dmg_dir"
-dmg="$dmg_dir/agent-vitals-$version-arm64.dmg"
-staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-vitals-dmg.XXXXXX")"
+dmg="$dmg_dir/Oh-Agent-$version-macos-arm64.dmg"
+staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/oh-agent-dmg.XXXXXX")"
 trap 'rm -rf "$staging_dir"' EXIT
 
 echo "release-macos: creating fresh arm64 DMG"
-ditto "$app" "$staging_dir/agent-vitals.app"
-hdiutil create -ov -format UDZO -volname "agent-vitals" \
+ditto "$app" "$staging_dir/Oh Agent.app"
+hdiutil create -ov -format UDZO -volname "Oh Agent" \
   -srcfolder "$staging_dir" "$dmg"
 
 case "$notarization_mode" in

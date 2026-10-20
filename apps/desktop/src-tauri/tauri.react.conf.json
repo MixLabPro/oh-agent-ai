@@ -9,7 +9,7 @@
     "windows": [
       {
         "label": "workbench",
-        "title": "agent-vitals 工作台",
+        "title": "Oh Agent 工作台",
         "url": "index.html",
         "width": 1100,
         "height": 760,
