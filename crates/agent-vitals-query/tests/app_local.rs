@@ -37,6 +37,8 @@ fn local_projection_is_bounded_redacted_window_scoped_and_honest() {
             VALUES(?1,?2,'private-machine',?1,?1,'private-event','delta',?3,10,20,30,40,'fixture',?4,?4)",
             rusqlite::params![key,harness,ts,now]).unwrap();
     }
+    db.conn().execute("UPDATE usage_facts SET model_id = 'fixture-model' WHERE fact_id = 'private-native-session'", []).unwrap();
+    db.conn().execute("UPDATE usage_facts SET observation_kind = 'legacy_aggregate' WHERE fact_id = 'untitled-session'", []).unwrap();
     db.conn().execute("INSERT INTO session_excerpts(session_key,ordinal,role,excerpt,provenance,ingested_run_id)
         VALUES('private-native-session',0,'user_first',?1,'truncated','fixture')",
         ["帮我修复登录页".repeat(80)]).unwrap();
@@ -59,11 +61,26 @@ fn local_projection_is_bounded_redacted_window_scoped_and_honest() {
     assert_eq!(result["findings"], serde_json::json!([{"harness":"codex","severity":"warning","count":1}]));
     assert_eq!(result["sessions"][0]["tokens"]["input"], 60);
     assert_eq!(result["sessions"][0]["tokens"]["total"], 100);
+    assert_eq!(result["sessions"][0]["tokens"]["uncached_input"], 10);
+    assert_eq!(result["sessions"][0]["tokens"]["cache_read"], 20);
+    assert_eq!(result["sessions"][0]["tokens"]["cache_write"], 30);
+    assert_eq!(result["sessions"][0]["model_ids"], serde_json::json!(["fixture-model"]));
+    assert_eq!(result["sessions"][0]["cost_minor"], serde_json::Value::Null);
+    assert_eq!(result["sessions"][0]["cost_status"]["state"], "unavailable");
+    assert_eq!(result["sessions"][0]["cost_status"]["has_unresolved"], true);
+    assert_eq!(result["models"], serde_json::json!(["fixture-model"]));
+    assert_eq!(result["activity"]["days"].as_array().unwrap().len(), 1);
+    assert_eq!(result["activity"]["days"][0]["session_count"], 2);
+    assert_eq!(result["activity"]["days"][0]["event_count"], 2);
+    assert_eq!(result["activity"]["days"][0]["tokens"], 200);
+    assert!(result["activity"]["busiest_day"].is_object());
     // 两个窗口内会话按 first ASC + key 排序：private-native-session 在前（有标题），
     // untitled-session 在后（无标题 → null，不编造）。
     assert_eq!(result["sessions"].as_array().unwrap().len(), 2);
     assert_eq!(result["sessions"][1]["title"], serde_json::Value::Null);
     assert_eq!(result["sessions"][1]["title_source"], serde_json::Value::Null);
+    assert_eq!(result["sessions"][1]["cost_status"]["reason"], "legacy-aggregate-not-priced");
+    assert_eq!(result["sessions"][1]["cost_status"]["has_unresolved"], true);
     let excerpt = &result["sessions"][0]["task_excerpts"][0];
     assert!(excerpt["text"].as_str().unwrap().chars().count() <= 200);
     assert_eq!(excerpt["provenance"], "truncated");

@@ -363,6 +363,21 @@ pub fn make_excerpt(text: &str, role: ExcerptRole) -> Option<Excerpt> {
     })
 }
 
+/// Shared local-presentation quality filter. Does not remove analytical signal at ingest.
+/// Wrappers, bare file references and acknowledgement-only turns are not task summaries.
+pub fn make_presentation_excerpt(text: &str, role: ExcerptRole) -> Option<Excerpt> {
+    let normalized = trim_ws(text);
+    let lower = normalized.to_ascii_lowercase();
+    if ["<system", "<environment_context", "<command", "<local-command", "<image", "[image", "<tool_result"]
+        .iter().any(|prefix| lower.starts_with(prefix)) { return None; }
+    if matches!(lower.as_str(), "ok" | "okay" | "yes" | "no" | "continue" | "thanks" | "好的" | "继续" | "谢谢" | "可以") {
+        return None;
+    }
+    if (normalized.starts_with('/') || normalized.starts_with("~/") || normalized.starts_with("file://"))
+        && !normalized.contains(char::is_whitespace) { return None; }
+    make_excerpt(normalized, role)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

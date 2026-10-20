@@ -236,3 +236,28 @@
 .city-repair-audit li { display: flex; justify-content: space-between; gap: 6px; align-items: flex-start; line-height: 1.4; }
 .city-repair-audit li.city-repair-error b { color: #ffb4a8; }
 .city-repair-audit li.city-repair-warning b { color: #ffd98a; }
+
+.city-data-places { display: grid; gap: 8px; margin-block: 16px; }
+.city-data-places button { min-height: 52px; display: grid; gap: 4px; text-align: left; }
+.city-data-places button span { font-size: 0.86em; line-height: 1.5; opacity: 0.8; }
+.city-data-facility { z-index: 35; overflow-wrap: anywhere; }
+.city-data-facility button { min-height: 44px; margin-block: 4px; }
+.city-data-facility h2 { padding-inline-end: 32px; text-wrap: balance; }
+.city-facility-eyebrow { font-size: 0.82em; letter-spacing: 0.03em; opacity: 0.8; }
+.city-facility-window { font-size: 0.8em; line-height: 1.5; opacity: 0.75; }
+.city-facility-list { padding: 0; list-style: none; display: grid; gap: 12px; }
+.city-facility-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; }
+.city-facility-list li span { grid-column: 1; font-size: 0.82em; overflow-wrap: anywhere; }
+.city-facility-list li b { grid-column: 2; grid-row: 1 / 3; align-self: center; }
+.city-facility-models { padding-inline-start: 20px; line-height: 1.7; }
+.city-facility-table-wrap { overflow-x: auto; max-height: 320px; overflow-y: auto; }
+.city-facility-table-wrap table { width: 100%; border-collapse: collapse; font-size: 0.82em; font-variant-numeric: tabular-nums; }
+.city-facility-table-wrap th, .city-facility-table-wrap td { padding: 8px 6px; text-align: end; border-bottom: 1px solid currentColor; }
+.city-facility-table-wrap th:first-child { text-align: start; white-space: nowrap; }
+.city-facility-status { padding-block: 8px; }
+.city-legend .city-data-places button { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; font-size: 13px; }
+.city-legend .city-data-places button > span { width: auto; height: auto; margin: 0; }
+@media (max-width: 700px) {
+  .city-legend { display: block; left: 16px; right: 16px; width: auto; z-index: 20; }
+}
+.city-data-facility .city-close { min-width: 44px; min-height: 44px; }

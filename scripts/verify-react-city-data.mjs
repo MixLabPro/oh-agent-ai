@@ -89,3 +89,38 @@ windowStub.__TAURI__ = { core: { async invoke(command, { request }) {
 await assert.rejects(tauriCityDataProvider.getProjection({ windowDays: 30 }), /provider_unavailable/,
   "Embedded failures must not silently return synthetic sessions");
 console.log("City data provider: versioned windows, standalone fixtures, redacted DTO and no embedded fixture fallback passed.");
+
+// v3: a changed snapshot discards the entire staged city; pages never rebuild the scene independently.
+locationStub.search = "?cityData=v3";
+let overviewReads = 0;
+let forcedRevision = false;
+const stages = [];
+const fromMs = Date.parse("2026-09-01T00:00:00Z"), toMs = fromMs + 30*86400000;
+function responseV3(epoch, offset, count) {
+  return { protocol: "city:v3", source: "local", generated_at: new Date(toMs).toISOString(), data_revision: epoch,
+    query_semantics: "city-window-v3.1", snapshot: `sr_${String(epoch).repeat(32)}`, context: `sr_${"c".repeat(32)}`,
+    window: { days:30,from_ms:fromMs,to_ms:toMs,from:new Date(fromMs).toISOString(),to:new Date(toMs).toISOString(),timezone:"UTC",calendar_mode:"rolling",boundary:"half_open" },
+    harnesses:[{id:"codex",display_name:"Codex",capabilities:{session_statistics:{available:true},findings:{available:true,reason:null}}}],
+    modules:{overview:{state:"ready",supported:true,data:{session_count:501,usage_event_count:501,tokens:{input:30060,output:20040,total:50100},models:{model_ids:["example"]}}},
+      activity:{state:"empty",supported:true,data:{days:[],busiest_day:null}}},
+    page:{sessions:Array.from({length:count},(_,i)=>{const index=offset+i; return {
+      id:`sr_${index.toString(16).padStart(32,"0")}`,asset_ref:`ca_${index.toString(16).padStart(32,"0")}`,layout_order:501-index,
+      harness:"codex",title:epoch===1?"stale":"current",first_event_at:new Date(fromMs).toISOString(),last_event_at:new Date(toMs-1).toISOString(),
+      tokens:{input:60,output:40,total:100}};}),next_cursor:offset===0?"cursor-next":null,
+      coverage:{matched:501,returned:count,offset,has_more:offset===0}} };
+}
+windowStub.__TAURI__.core.invoke = async (command,{request}) => {
+  let result;
+  if (request.payload.operation === "overview") { overviewReads++; result=responseV3(overviewReads,0,500); }
+  else if (!forcedRevision) { forcedRevision=true; return {version:1,requestId:request.requestId,ok:false,error:{code:"revision_changed"}}; }
+  else result=responseV3(overviewReads,500,1);
+  return {version:1,requestId:request.requestId,ok:true,result};
+};
+const paged=await tauriCityDataProvider.getProjection({windowDays:30,onStage:(stage)=>stages.push(stage)});
+assert.equal(overviewReads,2);
+assert.equal(paged.sessions.length,501);
+assert(paged.sessions.every((s)=>s.title==="current"));
+assert.equal(paged.sessions[0].id,`sr_${(500).toString(16).padStart(32,"0")}`);
+assert.equal(paged.summary.tokens.total,50100);
+assert.deepEqual(stages,["reading_summary","reading_sessions","reading_summary","reading_sessions","ready"]);
+console.log("City v3: staged pages, deterministic layout order, whole-window totals and revision restart passed.");

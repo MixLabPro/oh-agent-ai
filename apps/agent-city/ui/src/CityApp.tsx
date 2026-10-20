@@ -93,8 +93,11 @@ export function CityApp() {
 
   useEffect(() => {
     let active = true;
+    const loading = new AbortController();
     setStatus("正在更新 City 插槽数据…");
-    tauriCityDataProvider.getProjection({ windowDays }).then((data) => {
+    tauriCityDataProvider.getProjection({ windowDays, signal: loading.signal, onStage: (stage) => {
+      if (active && stage !== "ready") setStatus(stage === "reading_summary" ? "正在读取全窗口统计…" : "正在读取会话建筑…");
+    } }).then((data) => {
       if (!active) return;
       setProjection(data);
       setDataLoaded(true);
@@ -106,7 +109,7 @@ export function CityApp() {
       setDataLoaded(true);
       setStatus("City 数据暂不可用");
     });
-    return () => { active = false; };
+    return () => { active = false; loading.abort(); };
   }, [windowDays, refresh]);
 
   useEffect(() => {
@@ -145,16 +148,17 @@ export function CityApp() {
       last_event_at: session.last_event_at,
       event_count: session.event_count ?? 1,
       peak_tokens: session.tokens.total,
-      model_ids: [],
+      model_ids: session.model_ids ?? [],
       tokens: {
-        uncached_input_tokens: session.tokens.input,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
+        uncached_input_tokens: session.tokens.uncached_input ?? session.tokens.input,
+        cache_read_tokens: session.tokens.cache_read ?? 0,
+        cache_write_tokens: session.tokens.cache_write ?? 0,
         output_tokens: session.tokens.output,
         total: session.tokens.total,
       },
-      cost_minor: null,
-      cost_status: { state: "unavailable", reason: "cost_not_projected", has_unresolved: true },
+      cost_minor: session.cost_minor && ["metered_actual", "metered_estimate", "fixed_subscription", "api_equivalent", "other"].includes(session.cost_minor.basis)
+        ? session.cost_minor as CitySessionRow["cost_minor"] : null,
+      cost_status: session.cost_status ?? { state: "unavailable", reason: "cost_not_projected", has_unresolved: true },
     }));
     const model = buildCityModel({
       harnessNames: Object.fromEntries(projection.harnesses.map((h) => [h.id, h.display_name])),
