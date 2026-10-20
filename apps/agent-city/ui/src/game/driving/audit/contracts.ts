@@ -48,7 +48,7 @@ export interface RoutePilot {
   input(state: Readonly<DrivingState>, tick: number): Readonly<DrivingInputState>;
 }
 export type Observation = Readonly<{
-  status: "continue" | "complete" | "route-deviation" | "simulation-invalid";
+  status: "continue" | "complete" | "route-deviation" | "simulation-invalid" | "budget-exhausted";
   /** Monotone legal corridor progress, not distance travelled or wheel spin. */
   progress: number;
   /** Planned stops only; cannot exempt a case from its global tick limit. */
@@ -64,7 +64,9 @@ export type StaticUnitEvidence = Readonly<{
   /** Required for blocked; a failed path search alone cannot provide a witness. */
   witness: string | null;
 }>;
-export type StepValidation = "valid" | "route-deviation" | "simulation-invalid";
+/** budget-exhausted: the kernel stopped a step because its collision query ran out of budget — the world was
+ * not decided there, so the case is unconfirmed, not a simulation defect. */
+export type StepValidation = "valid" | "route-deviation" | "simulation-invalid" | "budget-exhausted";
 export interface AuditWorldValidator {
   validateStart(state: Readonly<DrivingState>): StepValidation;
   /** Independent corridor, layer, support and penetration validation. Mandatory. */

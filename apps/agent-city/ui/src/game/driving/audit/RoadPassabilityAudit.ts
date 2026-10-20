@@ -40,7 +40,7 @@ import type { AuditEvidenceSink } from "./AuditEvidenceStore";
 import { GateAuditObserver } from "./GateAuditObserver";
 import type { AuditCause, AuditKey, AuditVerdict, AuditWorldValidator, DirectedGate, RoadAuditCase, RoadAuditCaseResult, RoutePilot, StaticUnitEvidence, StepValidation } from "./contracts";
 
-export const ROAD_PASSABILITY_AUDIT_VERSION = 4; // 3: gate-plane crossings far from the gate are not the gate; 4: continuous run loads only the solids its corridor can reach
+export const ROAD_PASSABILITY_AUDIT_VERSION = 5; // 3: gate-plane crossings far from the gate are not the gate; 4: continuous run loads only the solids its corridor can reach; 5: collision-budget stops are budget-exhausted, not simulation-invalid
 
 type P = Readonly<{ x: number; z: number }>;
 type Ready = Extract<SurfaceRegionsBuild, { status: "ready" }>;

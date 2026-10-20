@@ -235,7 +235,7 @@ if(process.argv.includes("--cities")) {
     const m=await loadCity({"engine/cityPlan.ts":["createCityPlan"],"engine/surface/compileSurface.ts":["compileCitySurface"],"game/driving/citySolids.ts":["cityCollisionIndex"]});
     const kit=await import("./city-kit/index.mjs");return {...m,cachedPlan:kit.cachedPlan};
   })();
-  let runs=0,ticks=0,contacts=0,uncertain=0;
+  let runs=0,ticks=0,contacts=0,uncertain=0,budgetChecked=false;
   for(const seed of [1,7,42,2026,65537])for(const tier of [1,2,3]) {
     const layout=cachedPlan(createCityPlan,seed,tier),compilation=compileCitySurface(layout);
     const surface={...compilation.surface,revision:`C:${seed}/${tier}`};
@@ -254,14 +254,23 @@ if(process.argv.includes("--cities")) {
       const kernel=k.createContinuousDrivingKernel(environment,{worldRevision:surface.revision,vehicleConfigHash:"C-city-explicit-collider",kernelBuildId:"C-city-test"});
       for(let tick=0;tick<60;tick++) {
         const next=kernel.step(state,forward);
-        if(next.motion.queryStatus==="unresolved") {assert.equal(validator.validate(state,next),"simulation-invalid");uncertain++;break;}
+        // 预算用尽且原地停下 → budget-exhausted（未判定）；其余 unresolved 仍是 simulation-invalid。
+        if(next.motion.queryStatus==="unresolved") {assert.equal(validator.validate(state,next),/(^|:)budget$/.test(next.motion.reason??"")&&next.state.x===state.x&&next.state.z===state.z?"budget-exhausted":"simulation-invalid");uncertain++;break;}
         assert.equal(validator.validate(state,next),"valid",`${seed}/${tier}: ${next.motion.reason}`);
         ticks++;if(next.motion.contact)contacts++;state=next.state;
+      }
+      // 同一起点、碰撞测试预算压到 1：内核原地停下报 continuous-collision:budget，验证器给 budget-exhausted 而不是 simulation-invalid。
+      if(!budgetChecked){
+        const starved=new k.ContinuousDrivingEnvironment(regions,{surfaceRevision:surface.revision,worldRevision:surface.revision,solidRevision:surface.revision,solids:solidIndex.solids(),dimensions:{halfLength:1.4,halfHeight:0.35,halfWidth:0.7},centerHeight:0.7,isCurrent:()=>true},undefined,undefined,{maxTests:1});
+        const s0={...k.initialDrivingState(x,z,heading,point.regionId),y:support.y,pitch:support.pitch,roll:support.roll};
+        const step=k.createContinuousDrivingKernel(starved,{worldRevision:surface.revision,vehicleConfigHash:"C-city-explicit-collider",kernelBuildId:"C-city-test"}).step(s0,forward);
+        if(step.motion.queryStatus==="unresolved"&&/(^|:)budget$/.test(step.motion.reason??"")){assert.equal(new k.ContinuousWorldValidator(starved,q=>q.distance).validate(s0,step),"budget-exhausted","a collision-budget stop is unconfirmed, not a simulation defect");budgetChecked=true;}
       }
       runs++;if(++sceneRuns===2)break;
     }
     console.log(`C city ${seed}/${tier}: ${sceneRuns} valid spawns, all committed pieces independently checked`);
   }
+  assert.ok(budgetChecked,"a starved collision budget was exercised at least once");
   assert.ok(runs>=15&&ticks>=runs*10,JSON.stringify({runs,ticks,contacts,uncertain}));
   console.log(`C structural city matrix: ${runs} runs, ${ticks} verified ticks, ${contacts} contact ticks, ${uncertain} explicit uncertainties; no road release.`);
 }

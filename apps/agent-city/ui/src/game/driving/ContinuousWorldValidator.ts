@@ -11,6 +11,11 @@ export class ContinuousWorldValidator implements AuditWorldValidator {
   }
   validate(previous:Readonly<DrivingState>,step:KernelStep):StepValidation {
     const state=step.state,path=step.motion.trajectory;
+    // 碰撞求解预算用尽（2026-10-20）：内核原地停下并报 queryStatus "unresolved"，曾一律判 simulation-invalid——
+    // 1000/7 窄桥斜接处车身连续擦桥面板侧面，切向滑移耗尽测试预算，审计报成「模拟缺陷」。预算不足是未判定，不是缺陷：
+    // 只有停在原位（无行程、航向不变）时才这样归类，带着位移的 unresolved 仍是 simulation-invalid。
+    if(step.motion.queryStatus==="unresolved"&&/(^|:)budget$/.test(step.motion.reason??"")&&validDrivingState(previous)&&validDrivingState(state)&&
+      state.x===previous.x&&state.z===previous.z&&state.heading===previous.heading)return "budget-exhausted";
     if(!validDrivingState(previous)||!validDrivingState(state)||step.motion.queryStatus!=="resolved"||!path||
       !this.environment.validateTrajectory(previous,state,path))return "simulation-invalid";
     // 里程按内核的计费口径（3D 弧长减接缝支撑跳变，ContinuousDrivingEnvironment.travelCharge）：曾自算 3D 弧长，

@@ -53,7 +53,7 @@ export class DrivingRouteRunner {
       try { validation = this.observer.begin(this.current); }
       catch { this.finish("unconfirmed"); return this.terminal; }
       if (validation !== "valid") {
-        this.finish(validation === "simulation-invalid" ? "simulation-invalid" : "route-deviation");
+        this.finish(validation === "simulation-invalid" || validation === "budget-exhausted" ? validation : "route-deviation");
         return this.terminal;
       }
     }
@@ -77,7 +77,7 @@ export class DrivingRouteRunner {
       catch { this.finish("unconfirmed"); break; }
       this.current = next.state;
       if (!Number.isFinite(observation.progress)) { this.finish("simulation-invalid"); break; }
-      if (observation.status === "route-deviation" || observation.status === "simulation-invalid") {
+      if (observation.status === "route-deviation" || observation.status === "simulation-invalid" || observation.status === "budget-exhausted") {
         this.finish(observation.status); break;
       }
       if (observation.status === "complete") { this.finish("none"); break; }
