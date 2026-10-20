@@ -49,24 +49,20 @@ export class KeyboardInput<Input extends object> {
     document.removeEventListener("beforeinput", this.beforeInput, true);
   }
   private focusTarget(): HTMLElement | null { return this.options.focusTarget?.() ?? null; }
-  private readonly focusIn = (event: FocusEvent) => {
-    const target = event.target;
-    // HUD controls (range, select, button, checkbox) are ordinary UI focus.
-    // Pull editable text targets out of the canvas-owned gameplay context.
-    if (!(target instanceof HTMLElement) || !this.isTextEntryTarget(target)) return;
-    event.stopImmediatePropagation();
-    target.blur();
-    this.focusTarget()?.focus({ preventScroll: true });
+  private readonly focusIn = () => {
+    // HUD controls can take focus without blurring the window. Drop held game
+    // keys on that transition, while leaving the control and text input alone.
+    if (!this.options.isFocused()) this.clear();
   };
   private readonly composition = (event: CompositionEvent) => {
+    // The source stays attached while a game is paused. Only handle events
+    // while the game canvas owns focus so ordinary text fields remain usable.
     if (!this.options.isFocused()) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    this.clear();
   };
   private readonly beforeInput = (event: InputEvent) => {
-    if (!this.options.isFocused()) return;
-    if (!event.inputType.startsWith("insert")) return;
+    if (!this.options.isFocused() || !event.inputType.startsWith("insert")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   };
@@ -86,12 +82,22 @@ export class KeyboardInput<Input extends object> {
   }
   private readonly down = (event: KeyboardEvent) => {
     const target = event.target;
+    if (target instanceof HTMLElement && this.isTextEntryTarget(target)) return;
     if (event.isComposing || event.keyCode === 229) {
       if (!this.options.isFocused()) return;
-      event.preventDefault(); event.stopImmediatePropagation(); this.clear(); return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      const key = this.options.keys[event.code];
+      // During IME composition, character-level key values are unreliable, but
+      // a mapped physical code (for example KeyW) still gives games a usable
+      // control. Unknown/IME-only keys are never allowed to leave a held input.
+      if (key === undefined || event.metaKey || event.ctrlKey || event.altKey) { this.clear(); return; }
+      if (event.repeat) return;
+      this.held.add(event.code);
+      this.state[key] = true as Input[keyof Input];
+      this.options.onInput?.(this.snapshot());
+      return;
     }
-    if (event.metaKey || event.ctrlKey || event.altKey ||
-      target instanceof HTMLElement && this.isTextEntryTarget(target)) return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (this.options.onCommand?.(event)) return;
     const key = this.options.keys[event.code];
     if (key === undefined || event.repeat || !this.options.isFocused()) return;

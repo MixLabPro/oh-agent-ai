@@ -2427,8 +2427,23 @@ fn is_safe_session_ref(value: &str) -> bool {
 /// 只是通知，pull 是最终仲裁。命令与菜单分发共用这一条路径，语义只写一处。
 fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
     app.state::<FocusTarget>().set(target);
-    show_workbench(app);
-    let _ = app.emit("focus-target", ());
+    // Plugin requests run as async Tauri commands on a Tokio worker. `show_workbench`
+    // reaches AppKit (`NSApplication` / `NSWindow::makeKeyAndOrderFront`), which must
+    // only run on the main thread or macOS traps with “Must only be used from the main
+    // thread”. Marshal every caller (plugin IPC, commands, and tray callbacks) through
+    // the same main-thread hop; keep the target stored first so the workbench can pull
+    // it even if it is not visible yet.
+    let app = app.clone();
+    let app_for_dispatch = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        show_workbench(&app_for_dispatch);
+        let _ = app_for_dispatch.emit("focus-target", ());
+    }) {
+        agent_vitals_runtime::logging::log_warn(
+            "workbench",
+            &format!("session focus dispatch to main thread failed: {error}"),
+        );
+    }
 }
 
 /// 工作台前端请求当前 overview —— 与托盘菜单同一份数据源，前端只渲染。

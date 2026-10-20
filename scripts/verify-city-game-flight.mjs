@@ -336,7 +336,9 @@ const flatLayout = {
   key("KeyS", Object.assign(Object.create(HTMLElement.prototype), { tagName: "INPUT", isContentEditable: false }));
   assert.equal(input.snapshot().throttleDown, false, "输入框内的按键不进入游戏");
   key("KeyS", null, { isComposing: true });
-  assert.equal(input.snapshot().throttleDown, false, "输入法组合期间的按键不进入游戏");
+  assert.equal(input.snapshot().throttleDown, true, "输入法组合期间仍按物理 KeyS 驱动飞机");
+  keyUp("KeyS");
+  assert.equal(input.snapshot().throttleDown, false, "组合期间的物理按键释放仍会清除飞行输入");
   // 焦点离开画布后的 keyup 仍要清除（不粘键）。
   canvasFocused = false;
   keyUp("KeyW");
