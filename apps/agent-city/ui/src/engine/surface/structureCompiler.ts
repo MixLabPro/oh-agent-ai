@@ -619,7 +619,12 @@ export function culDeSacBulbRadius(roadWidth: number): number {
 }
 export type CulDeSacDisc = Readonly<{ x: number; z: number; radius: number; base: number; gx: number; gz: number }>;
 /** Cul-de-sac discs: centre, radius, base height and the central-difference slope the renderer tilts by. */
-export function culDeSacDiscs(layout: Pick<CityLayout, "culDeSacEnds" | "roadEdges" | "terrain">): CulDeSacDisc[] {
+/** Disc top above the rendered road top at its centre: above it (no z-fighting with the road ribbon) but well
+ * inside the surface alias tolerance 0.1 so the bulb and its road are one drivable region. */
+export const CUL_DE_SAC_TOP_LIFT = 0.04;
+/** Cylinder: bottom at base + 0.02, height 0.12 (roadSystem.buildCulDeSacBulbs, culDeSacTopCap). */
+const CUL_DE_SAC_TOP_ABOVE_BASE = 0.14;
+export function culDeSacDiscs(layout: Pick<CityLayout, "culDeSacEnds" | "roadEdges" | "terrain"> & Partial<Pick<CityLayout, "extent">>): CulDeSacDisc[] {
   const ends = layout.culDeSacEnds ?? [];
   const widthAt = new Map<string, number>();
   for (const edge of renderRoadEdges(layout.roadEdges)) {
@@ -629,9 +634,28 @@ export function culDeSacDiscs(layout: Pick<CityLayout, "culDeSacEnds" | "roadEdg
   const height = layout.terrain.height;
   return ends.map((end: Vec2) => {
     const radius = culDeSacBulbRadius(widthAt.get(`${end.x}:${end.z}`) ?? 9);
-    const base = Math.max(0, height(end.x, end.z));
-    const gx = (height(end.x + radius, end.z) - height(end.x - radius, end.z)) / (2 * radius);
-    const gz = (height(end.x, end.z + radius) - height(end.x, end.z - radius)) / (2 * radius);
+    // 回车圈顶面对齐路面（2026-10-20）：曾取 terrain.height 真值为基准，顶面 = 地形 + 0.14，而路面 = 地形三角化 + ROAD_LIFT(0.04)，
+    // 两者差 ≈0.10，正卡在 surfaceRegions 的别名容差 0.1 上——七城 25 个回车圈有 10 个与宿主路判成两个区域，重叠处
+    // ambiguous-region 封闭，车开到圈边就停（1000/7 桥头引道 structure:bridge:*:off pilot-failed）。现以渲染路面顶为准。
+    const roadTop = Number.isFinite(layout.extent) ? terrainSurfaceHeight(layout as Pick<CityLayout, "extent" | "terrain">, end.x, end.z) + ROAD_LIFT : null;
+    const base = roadTop === null ? Math.max(0, height(end.x, end.z)) : roadTop + CUL_DE_SAC_TOP_LIFT - CUL_DE_SAC_TOP_ABOVE_BASE;
+    // 倾斜同样要贴合它覆盖的那段路面（2026-10-20）：按 terrain.height 真值做 ±radius 中心差分，0/42 的 247.03:388.68
+    // 尽端外地形下坡 0.5 而路一侧是平的，平均出的 −0.03 倾斜让圆盘离圆心 6 处比路面高 0.22，仍与路判成两个区域。
+    // 现以宿主路为准：沿路方向只取路一侧的单边差分（尽端以外不是路），横向在路宽内做中心差分，都用路面的高度函数。
+    let gx: number, gz: number;
+    const host = roadTop === null ? undefined : renderRoadEdges(layout.roadEdges).find((e) => !e.bridge && e.structure !== "deck" && (e.from === `${end.x}:${end.z}` || e.to === `${end.x}:${end.z}`));
+    if (host && roadTop !== null) {
+      const surfaceAt = (x: number, z: number) => terrainSurfaceHeight(layout as Pick<CityLayout, "extent" | "terrain">, x, z);
+      const pts = host.from === `${end.x}:${end.z}` ? host.points : [...host.points].reverse();
+      const q = pts[1]; const l = Math.hypot(q.x - end.x, q.z - end.z) || 1; const ux = (q.x - end.x) / l, uz = (q.z - end.z) / l, nx = -uz, nz = ux;
+      const r = Math.min(radius, l), w = Math.min(radius, host.width / 2);
+      const along = (surfaceAt(end.x + ux * r, end.z + uz * r) - surfaceAt(end.x, end.z)) / r;
+      const across = (surfaceAt(end.x + nx * w, end.z + nz * w) - surfaceAt(end.x - nx * w, end.z - nz * w)) / (2 * w);
+      gx = along * ux + across * nx; gz = along * uz + across * nz;
+    } else {
+      gx = (height(end.x + radius, end.z) - height(end.x - radius, end.z)) / (2 * radius);
+      gz = (height(end.x, end.z + radius) - height(end.x, end.z - radius)) / (2 * radius);
+    }
     return Object.freeze({ x: end.x, z: end.z, radius, base, gx, gz });
   });
 }

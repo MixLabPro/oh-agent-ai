@@ -173,8 +173,9 @@ const drive = (regions, x0, z, x1) => {
   const end = { x: 60, z: 0 };
   const { c, regions } = build(city([edge(W, end)], () => 2, { culDeSacEnds: [end] }));
   assert.equal(c.counts.culDeSacs, 1);
-  const bulb = regions.classify(62, 4.5, "ground"); assert.equal(bulb.status, "drivable"); close(bulb.y, 2.14, 1e-4, "disc top");
-  assert.equal(bulb.regionId, regions.classify(30, 0, "ground").regionId, "a 0.10 lip is within the seam tolerance");
+  const bulb = regions.classify(62, 4.5, "ground"); assert.equal(bulb.status, "drivable"); close(bulb.y, 2.08, 1e-4, "disc top = road top 2.04 + 0.04");
+  assert.equal(bulb.regionId, regions.classify(30, 0, "ground").regionId, "a 0.04 lip is within the seam tolerance");
+  const overlap = regions.classify(57, 0, "ground"); assert.equal(overlap.status, "drivable", "where disc and road overlap the car is on one region, not ambiguous");
 }
 {
   // Host snapshot port: lazy compile + SHA-256 revision, cached per source, invalidation and cancellation.

@@ -23,8 +23,10 @@ installCanvasShim();
 globalThis.window ??= globalThis;
 globalThis.devicePixelRatio ??= 1;
 
-const { THREE, buildCityModel, layoutCity, CityParts, MIAMI_COASTAL, diagnoseNetwork } = await loadCity({
+const { THREE, buildCityModel, layoutCity, CityParts, MIAMI_COASTAL, diagnoseNetwork, terrainSurfaceHeight, CUL_DE_SAC_TOP_LIFT } = await loadCity({
   "pkg:three": ["* as THREE"],
+  "engine/surface/terrainSampling.ts": ["terrainSurfaceHeight"],
+  "engine/surface/structureCompiler.ts": ["CUL_DE_SAC_TOP_LIFT"],
   "cityModel.ts": ["buildCityModel"],
   "engine/cityLayout.ts": ["layoutCity"],
   "engine/cityParts.ts": ["CityParts"],
@@ -103,8 +105,10 @@ for (const count of [380, 1600]) {
     assert.equal(rim.length, 1, `${count} sessions: expected exactly one bulb rim at (${end.x}, ${end.z}), found ${rim.length}`);
     // (c) 半径与路宽协调、高度贴地形取样、描边在盘面上。
     assert.ok(hit[0].radius >= 6 - EPSILON && hit[0].radius <= 9 + EPSILON, `${count} sessions: bulb radius ${hit[0].radius} at (${end.x}, ${end.z}) outside 6–9`);
-    const ground = Math.max(0, layout.terrain.height(end.x, end.z)) + 0.02;
-    assert.ok(Math.abs(hit[0].y - ground) < 0.05, `${count} sessions: bulb disc y ${hit[0].y} does not follow terrain (expected ~${ground.toFixed(2)}) at (${end.x}, ${end.z})`);
+    // 盘面顶 = 路面顶（三角化地形 + 0.04）+ CUL_DE_SAC_TOP_LIFT；盘体底在顶下 0.12。曾按 terrain.height 真值 + 0.14 取顶，
+    // 比路面高 ≈0.10，卡在驾驶面别名容差上，七城 10/25 个回车圈与宿主路不连通（2026-10-20）。
+    const top = terrainSurfaceHeight(layout, end.x, end.z) + 0.04 + CUL_DE_SAC_TOP_LIFT;
+    assert.ok(Math.abs(hit[0].y + 0.12 - top) < 1e-3, `${count} sessions: bulb disc top ${hit[0].y + 0.12} is not ${CUL_DE_SAC_TOP_LIFT} above the road top (expected ${top.toFixed(3)}) at (${end.x}, ${end.z})`);
     assert.ok(rim[0].y - hit[0].y > 0.1 && rim[0].y - hit[0].y < 0.2, `${count} sessions: bulb rim must hover just above the disc (got ${rim[0].y - hit[0].y})`);
     taken.add(`${end.x}:${end.z}`);
   }
