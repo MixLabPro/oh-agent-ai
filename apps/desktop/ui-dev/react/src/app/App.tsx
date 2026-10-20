@@ -258,7 +258,7 @@ export function App() {
       </div>
     </header>
     <aside id="workbench-sidebar" className="sidebar" aria-label={message("nav.label", language)} hidden={sidebarCollapsed}>
-      <div className="brand"><span className="brand-mark" aria-hidden="true">av</span><div><strong>agent-vitals</strong><span>{message("sidebar.workspace", language)}</span></div></div>
+      <div className="brand"><span className="brand-mark" aria-hidden="true">OA</span><div><strong>Oh Agent</strong><span>{message("sidebar.workspace", language)}</span></div></div>
       <nav className="nav-list">
         {navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? "nav-item-active" : ""}`} aria-current={page === item.id ? "page" : undefined} type="button" onClick={() => navigate(item.id)}><span>{pageName(item)}</span></button>)}
       </nav>
