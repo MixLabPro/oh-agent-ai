@@ -21,7 +21,7 @@ import { buildSurfaceIndex } from "../../../engine/surface/SurfaceIndex";
 import { buildSurfaceRegions } from "../../../engine/surface/surfaceRegions";
 import type { RegionBoundarySegment, SurfaceRegionsBuild } from "../../../engine/surface/surfaceRegions";
 import { CITY_SOLID_COMPILER_VERSION, MOUNTABLE_POLICY_VERSION, type MountablePolicy } from "../staticSolidContracts";
-import { initialDrivingState, type DrivingInputState, type DrivingState } from "../../DrivingSimulation";
+import { DRIVING_DT, DRIVING_PARAMS, initialDrivingState, type DrivingInputState, type DrivingState } from "../../DrivingSimulation";
 import { boxPoly, buildCollisionIndex, type CollisionIndex } from "../CollisionIndex";
 import { DrivingKernel, type KernelStep } from "../DrivingKernel";
 import { structureSolids } from "../citySolids";
@@ -40,7 +40,7 @@ import type { AuditEvidenceSink } from "./AuditEvidenceStore";
 import { GateAuditObserver } from "./GateAuditObserver";
 import type { AuditCause, AuditKey, AuditVerdict, AuditWorldValidator, DirectedGate, RoadAuditCase, RoadAuditCaseResult, RoutePilot, StaticUnitEvidence, StepValidation } from "./contracts";
 
-export const ROAD_PASSABILITY_AUDIT_VERSION = 3; // 3: gate-plane crossings far from the gate are not the gate
+export const ROAD_PASSABILITY_AUDIT_VERSION = 4; // 3: gate-plane crossings far from the gate are not the gate; 4: continuous run loads only the solids its corridor can reach
 
 type P = Readonly<{ x: number; z: number }>;
 type Ready = Extract<SurfaceRegionsBuild, { status: "ready" }>;
@@ -137,6 +137,9 @@ export type PassabilityOptions = Readonly<{
   staticOnly?: boolean;
   /** Dynamic engine: C's continuous kernel (default) or the legacy whole-step-rejection environment. */
   engine?: "continuous" | "legacy";
+  /** Continuous run's solid set: the route corridor's reach (default, corridorSolids) or the whole world
+   * (differential check only — large cities exceed the continuous-world budget). */
+  solidScope?: "corridor" | "world";
   collider?: AuditCollider;
   /** Explicit curb/island policy; defaults to strict disabled for both kernel and independent validator. */
   mountablePolicy?: MountablePolicy;
@@ -174,6 +177,30 @@ function segDist(a: P, b: P, c: P, d: P): number {
   const o = (p: P, q: P, r: P) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
   if (o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0) return 0;
   return Math.min(pd(a, c, d), pd(b, c, d), pd(c, a, b), pd(d, a, b));
+}
+/** 按路线走廊局部载入碰撞体（2026-10-20）：整城一次装进连续世界，1000 会话以上的城市超过百万元素预算，
+ * 每个用例都 continuous-world-budget 未确认。局部载入不改变任何被接受的运动：CorridorValidator 只接受车心
+ * 在走廊（路线 ± halfWidth）内的状态，内核每步从这样的状态出发、水平行程 ≤ maxForward·dt（独立验证器同一上界），
+ * 车身（含俯仰侧倾）离车心不超过三半轴的合长 bodyRadius——所以一步里车身能碰到的点都在路线 halfWidth + 行程 + bodyRadius 之内。
+ * 保留与这个距离（再加 margin）内有交集的固体，内核与验证器看到的碰撞就与整城相同；更远的固体只会让一个
+ * 已经偏出走廊、本来就判 route-deviation 的运动换个结局。按 XZ 包围盒与路线段的距离判断（保守：盒比固体大）。 */
+export function corridorSolids<S extends Readonly<{ minX: number; maxX: number; minZ: number; maxZ: number }>>(solids: readonly S[], path: readonly P[], reach: number): S[] {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const p of path) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z); }
+  const out: S[] = [];
+  for (const s of solids) {
+    if (s.maxX < x0 - reach || s.minX > x1 + reach || s.maxZ < z0 - reach || s.minZ > z1 + reach) continue;
+    const corners: P[] = [{ x: s.minX, z: s.minZ }, { x: s.maxX, z: s.minZ }, { x: s.maxX, z: s.maxZ }, { x: s.minX, z: s.maxZ }];
+    let near = false;
+    for (let i = 1; i < path.length && !near; i++) {
+      const a = path[i - 1], b = path[i];
+      // 端点在盒内，或与盒的四条边之一相距 ≤ reach。
+      if ((a.x >= s.minX && a.x <= s.maxX && a.z >= s.minZ && a.z <= s.maxZ) || (b.x >= s.minX && b.x <= s.maxX && b.z >= s.minZ && b.z <= s.maxZ)) { near = true; break; }
+      for (let k = 0; k < 4 && !near; k++) if (segDist(a, b, corners[k], corners[(k + 1) % 4]) <= reach) near = true;
+    }
+    if (near) out.push(s);
+  }
+  return out;
 }
 /** Parameter u ∈ [0,1] on the cut a→b where segment s crosses it (proper or touching), or null. */
 function crossParam(a: P, b: P, s: RegionBoundarySegment): number | null {
@@ -372,7 +399,8 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
     let env: ContinuousDrivingEnvironment;
     try {
       env = new ContinuousDrivingEnvironment(regions, { surfaceRevision: regions.revision, worldRevision: world.worldRevision, solidRevision: world.worldRevision,
-        solids: world.dynamic.solids(), dimensions: collider.dimensions, centerHeight: collider.centerHeight, isCurrent: world.runCurrent }, footprint, params, {}, {mountablePolicy});
+        solids: options.solidScope === "world" ? world.dynamic.solids() : corridorSolids(world.dynamic.solids(), route.path, route.halfWidth + Math.hypot(collider.dimensions.halfLength, collider.dimensions.halfWidth, collider.dimensions.halfHeight) + DRIVING_PARAMS.maxForward * DRIVING_DT + 1),
+        dimensions: collider.dimensions, centerHeight: collider.centerHeight, isCurrent: world.runCurrent }, footprint, params, {}, {mountablePolicy});
     } catch (error) { return finish("inconclusive", "unconfirmed", `continuous-world:${error instanceof Error ? error.message : "error"}`, witness, null, "passed", witness ? "blocked" : "passed"); }
     validatorFor = () => new CorridorValidator(new ContinuousWorldValidator(env, polylineProgress(route.path)), route.path, route.halfWidth);
     kernelFor = () => createContinuousDrivingKernel(env, { worldRevision: world.worldRevision, vehicleConfigHash: key.vehicleConfigHash, kernelBuildId: key.kernelBuildId });
