@@ -55,6 +55,10 @@ fn load(path: &std::path::Path) -> Result<Option<(u64, Value)>, &'static str> {
 /// 串行化保证 check-and-commit 原子（乐观并发的前提）。
 pub fn handle(allowed_keys: &[String], data_home: &std::path::Path, plugin_id: &str, method: &str, payload: &Value) -> Result<Value, &'static str> {
     let _serialized = state_lock();
+    if payload["key"].as_str()==Some("game-links:v1") {
+        if plugin_id!="city" || !allowed_keys.iter().any(|key|key=="game-links:v1") { return Err("state_key_denied"); }
+        return agent_vitals_runtime::query::city_assets::game_links_state(data_home,method,payload);
+    }
     match method {
         "plugin.state.read" => read(allowed_keys, data_home, plugin_id, payload),
         "plugin.state.write" => write(allowed_keys, data_home, plugin_id, payload),
@@ -117,6 +121,18 @@ mod tests {
 
     const KEYS: &[&str] = &["flight-profile:v1"];
     fn keys() -> Vec<String> { KEYS.iter().map(|key| key.to_string()).collect() }
+
+    #[test]
+    fn game_links_require_city_identity_and_declared_key() {
+        let home=temp_home().join("game-links");
+        let payload=json!({"key":"game-links:v1"});
+        assert_eq!(handle(&keys(),&home,"city","plugin.state.read",&payload),Err("state_key_denied"));
+        let allowed=vec!["game-links:v1".to_owned()];
+        assert_eq!(handle(&allowed,&home,"other","plugin.state.read",&payload),Err("state_key_denied"));
+        assert_eq!(handle(&allowed,&home,"city","plugin.state.read",&payload).unwrap()["revision"],0);
+        assert_eq!(handle(&allowed,&home,"city","plugin.state.write",&json!({"key":"game-links:v1","revision":0,"value":{"schemaVersion":1,"assetRefs":[]}})).unwrap()["revision"],1);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn round_trip_with_revision_and_allowlist() {

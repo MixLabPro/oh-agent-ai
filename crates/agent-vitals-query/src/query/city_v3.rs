@@ -170,7 +170,7 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
                     "activity":match app_local::activity(db.conn(),from,to,&timezone) {Ok(v)=>state(v,&generated),Err(reason)=>json!({"state":"unavailable","supported":true,"reason":reason})},
                     "findings":{"state":"unavailable","supported":true,"reason":"load_on_demand"},
                     "skills":{"state":"ready","supported":true,"load":"on_demand"},
-                    "workflow":{"state":"unsupported","supported":false,"reason":"projection_not_registered"}});
+                    "workflow":{"state":"ready","supported":true,"load":"on_demand"}});
                 result["harnesses"]=json!(super::app_harnesses::public_identities(&identities));
             }
         }
@@ -205,7 +205,15 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
             result["scope"]=json!({"harness":harness});
             result["module"]=json!(module);
             result["result"]=match module {
-                "workflow"=>json!({"state":"unsupported","supported":false,"reason":"projection_not_registered"}),
+                "workflow"=>{
+                    let mut rows=stats::workflow_activity(db.conn(),from,end.saturating_add(1),harness).map_err(|_|"module_unavailable")?;
+                    let truncated=rows.len()>200; rows.truncate(200);
+                    let empty=rows.is_empty();
+                    let mut module=state(json!({"events":rows,"truncated":truncated,"limit":200,
+                        "coverage":"observed_workflow_events_only","outcome_scope":"unpaired_events"}),&generated);
+                    if empty { module["state"]=json!("empty"); }
+                    module
+                },
                 "skills"=>{
                     let mut rows=stats::skill_activity(db.conn(),from,end.saturating_add(1),harness).map_err(|_|"module_unavailable")?;
                     let truncated=rows.len()>200; rows.truncate(200);

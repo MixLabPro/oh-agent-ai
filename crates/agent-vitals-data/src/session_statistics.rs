@@ -148,3 +148,19 @@ pub fn skill_activity(conn: &Connection, from: i64, to: i64, harness: Option<&st
         "failed_events":r.get::<_,i64>(6)?,"succeeded_events":r.get::<_,i64>(7)?})))?;
     Ok(rows.collect::<Result<Vec<_>,_>>()?)
 }
+
+/// Bounded event-family totals. Finishes are observations, never inferred paired outcomes.
+pub fn workflow_activity(conn: &Connection, from: i64, to: i64, harness: Option<&str>) -> Result<Vec<Value>, AuthorityError> {
+    let mut stmt=conn.prepare("SELECT s.harness,w.event_type,COUNT(*),COUNT(DISTINCT w.session_key),
+        MAX(w.event_ts_ms),SUM(CASE WHEN w.outcome='failed' THEN 1 ELSE 0 END)
+        FROM workflow_events w JOIN sessions s ON s.session_key=w.session_key
+        WHERE w.event_ts_ms>=?1 AND w.event_ts_ms<?2 AND (?3 IS NULL OR s.harness=?3)
+        AND s.deleted_at_ms IS NULL
+        AND w.event_type IN ('task_started','task_finished','skill_invoked','skill_finished',
+            'tool_invoked','tool_finished','model_switched','approval_denied')
+        GROUP BY s.harness,w.event_type ORDER BY s.harness,w.event_type LIMIT 201")?;
+    let rows=stmt.query_map(params![from,to,harness],|r|Ok(json!({"harness":r.get::<_,String>(0)?,
+        "event_type":r.get::<_,String>(1)?,"events":r.get::<_,i64>(2)?,"sessions":r.get::<_,i64>(3)?,
+        "last_event_at_ms":r.get::<_,i64>(4)?,"failed_events":r.get::<_,i64>(5)?})))?;
+    Ok(rows.collect::<Result<Vec<_>,_>>()?)
+}

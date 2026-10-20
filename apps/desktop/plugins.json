@@ -7,7 +7,7 @@
       "entry": "plugins/AgentCity.plugin/ui/index.html",
       "commandNamespace": "city",
       "dataProjections": ["city:v2", "city:v3", "city-settings:v1", "harnesses:v1"],
-      "stateKeys": ["flight-profile:v1"],
+      "stateKeys": ["flight-profile:v1", "game-links:v1"],
       "allowLocalExports": true,
       "navigationTargets": ["session"],
       "source": "apps/agent-city/ui",

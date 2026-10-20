@@ -17,6 +17,7 @@ import { PlanRepairPanel } from "./planRepair/PlanRepairPanel";
 import type { PlanRepairUi } from "./planRepair/usePlanRepair";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { GameHud } from "./game/GameHud";
+import { BuildingBookmark } from "./BuildingBookmark";
 import { CityDataFacility } from "./CityDataFacility";
 import { CITY_DATA_PLACES, cityDataPlaceForDecor, type CityDataPlaceId } from "./cityDataPlaces";
 import { gameText } from "./game/gameCopy";
@@ -529,6 +530,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {detailState === "unavailable" && <p role="status">详情暂不可用；数据可能已更新，请刷新城市后重试。</p>}
         {session.excerpt_scope === "session_lifetime_not_window" && <p>摘录来自整个会话，可能早于当前统计窗口。</p>}
         <p>会话定位号（可能变化）：{session.id}</p>
+        {session.asset_ref && <BuildingBookmark key={session.asset_ref} assetRef={session.asset_ref} language={language} windowDays={ui.projection!.window.days} />}
         {session.asset_ref && <><p>楼号：{session.asset_ref}</p><button onClick={() => { void navigator.clipboard?.writeText(session.asset_ref!).catch(() => setDetailState("unavailable")); }}>复制楼号</button></>}
         {session.cost_breakdown && session.cost_breakdown.length > 0 && <><h3>分项估价（按币种和依据）</h3>
           {session.cost_breakdown.map((part) => <p key={`${part.currency}:${part.basis}`}>{costLabel({ ...session, cost_minor: part,

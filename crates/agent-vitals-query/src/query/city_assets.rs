@@ -1,4 +1,4 @@
-//! City-owned asset identity registry, separate from analytical authority and GameSave.
+//! City-owned asset identity registry and bounded bookmark save, separate from analytical authority.
 //! No title, excerpt, path, native id or reward is persisted here.
 use std::{collections::BTreeMap, path::Path};
 use rusqlite::{Connection, params};
@@ -86,6 +86,50 @@ pub fn retain_save_refs(home: &Path, save_id: &str, refs: &[String]) -> Result<(
         params![save_id,json!(refs).to_string()]).map_err(|_| "asset_state_unavailable")?;
     db.execute_batch("COMMIT").map_err(|_| "asset_state_unavailable")?;
     Ok(())
+}
+
+/// Host-only bounded building bookmarks. Document and resolve grants commit together.
+/// No analytical text, currency or inferred rewards enter this save.
+pub fn game_links_state(home: &Path, method: &str, payload: &Value) -> Result<Value, &'static str> {
+    let db=registry(home)?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS game_links(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL,document TEXT NOT NULL)")
+        .map_err(|_|"asset_state_unavailable")?;
+    if method=="plugin.state.read" {
+        use rusqlite::OptionalExtension;
+        let saved=db.query_row("SELECT revision,substr(document,1,16385) FROM game_links WHERE id=1",[],|r|Ok((r.get::<_,u64>(0)?,r.get::<_,String>(1)?)))
+            .optional().map_err(|_|"asset_state_unavailable")?;
+        return match saved {
+            None=>Ok(json!({"revision":0,"value":null})),
+            Some((revision,document))=>{
+                if revision>9_007_199_254_740_991 || document.len()>16384 { return Err("asset_state_unavailable"); }
+                let value=serde_json::from_str::<Value>(&document).map_err(|_|"asset_state_unavailable")?;
+                let object=value.as_object().filter(|v|v.len()==2 && v.get("schemaVersion")==Some(&json!(1))).ok_or("asset_state_unavailable")?;
+                let refs=object.get("assetRefs").and_then(Value::as_array).filter(|v|v.len()<=200).ok_or("asset_state_unavailable")?;
+                if refs.iter().any(|v|!v.as_str().is_some_and(|s|s.len()==35 && s.starts_with("ca_") && s[3..].bytes().all(|c|c.is_ascii_hexdigit()))) { return Err("asset_state_unavailable"); }
+                if refs.iter().filter_map(Value::as_str).collect::<std::collections::BTreeSet<_>>().len()!=refs.len() { return Err("asset_state_unavailable"); }
+                Ok(json!({"revision":revision,"value":value}))
+            },
+        };
+    }
+    if method!="plugin.state.write" { return Err("method_unavailable"); }
+    let value=payload["value"].as_object().ok_or("invalid_state_value")?;
+    if value.len()!=2 || value.get("schemaVersion")!=Some(&json!(1)) { return Err("invalid_state_value"); }
+    let refs=value.get("assetRefs").and_then(Value::as_array).filter(|v|v.len()<=200).ok_or("invalid_asset_request")?
+        .iter().map(|v|v.as_str().filter(|s|s.len()==35 && s.starts_with("ca_") && s[3..].bytes().all(|c|c.is_ascii_hexdigit())).map(str::to_owned).ok_or("invalid_asset_request"))
+        .collect::<Result<std::collections::BTreeSet<_>,_>>()?;
+    let revision=payload["revision"].as_u64().filter(|v|*v<9_007_199_254_740_991).ok_or("revision_required")?;
+    db.execute_batch("BEGIN IMMEDIATE").map_err(|_|"asset_state_unavailable")?;
+    let current=db.query_row("SELECT COALESCE((SELECT revision FROM game_links WHERE id=1),0)",[],|r|r.get::<_,u64>(0)).map_err(|_|"asset_state_unavailable")?;
+    if current!=revision { return Err("revision_conflict"); }
+    let encoded=json!(refs).to_string();
+    let known=db.query_row("SELECT COUNT(*) FROM assets WHERE asset_ref IN (SELECT value FROM json_each(?1))",[&encoded],|r|r.get::<_,usize>(0)).map_err(|_|"asset_state_unavailable")?;
+    if known!=refs.len() { return Err("asset_unavailable"); }
+    let document=json!({"schemaVersion":1,"assetRefs":refs}).to_string();
+    db.execute("INSERT OR REPLACE INTO game_links VALUES(1,?1,?2)",params![revision+1,document]).map_err(|_|"asset_state_unavailable")?;
+    db.execute("DELETE FROM save_refs WHERE save_id='city-primary'",[]).map_err(|_|"asset_state_unavailable")?;
+    db.execute("INSERT INTO save_refs SELECT 'city-primary',value FROM json_each(?1)",[encoded]).map_err(|_|"asset_state_unavailable")?;
+    db.execute_batch("COMMIT").map_err(|_|"asset_state_unavailable")?;
+    Ok(json!({"revision":revision+1}))
 }
 
 pub(crate) fn resolve(home: &Path, authority: &Connection, save_id: &str, refs: &[String], from: i64, to: i64) -> Result<Value, &'static str> {

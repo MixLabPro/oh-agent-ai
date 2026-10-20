@@ -91,6 +91,16 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate, 
       {loaded.module.state === "unsupported" && <div className="city-facility-status"><h3>{cityText("数据尚未接入", language)}</h3>
         <p>{cityText("这个模块尚未注册 City 数据投影。不会把安装数量、token 或缺失记录显示成使用次数 0。", language)}</p></div>}
       {(loaded.module.state === "unavailable" || loaded.module.state === "stale") && <p role="status">{cityText("数据暂不可用，或城市快照已经更新。", language)}</p>}
+      {id === "workflow" && ["ready", "empty"].includes(loaded.module.state) && <>
+        <h3>{en ? "Observed workflow events" : "已观测工作流事件"}</h3>
+        <p>{en ? "Recorded events only. Starts and finishes are not paired; these counts do not measure success rate or running tasks." : "仅统计已记录事件。开始与结束未逐次配对，不能据此计算成功率或运行中任务数。"}</p>
+        <ul className="city-facility-list city-skill-list">{rows(loaded.module.data?.events).map((row, index) => <li key={index}>
+          <strong>{String(row.event_type)} · {projection.harnesses.find((h) => h.id === row.harness)?.display_name ?? String(row.harness)}</strong>
+          <p>{en ? "Events / sessions / failed events" : "事件 / 涉及会话 / 失败事件"}: {number(row.events)} / {number(row.sessions)} / {number(row.failed_events)}</p>
+        </li>)}</ul>
+        {!rows(loaded.module.data?.events).length && <p>{en ? "No recorded workflow events in this scope; source coverage may be incomplete." : "当前范围没有已记录的工作流事件；数据源覆盖可能不完整。"}</p>}
+        {loaded.module.data?.truncated === true && <p>{en ? "Limited to 200 environment/event combinations." : "最多显示 200 个执行环境与事件类型组合。"}</p>}
+      </>}
       {id === "skills" && ["ready", "empty"].includes(loaded.module.state) && <>
         <h3>{cityText("已观测技能活动", language)}</h3>
         <p>{cityText("仅统计窗口内有记录的技能调用；不是已安装技能清单，缺少记录不代表没有使用。", language)}</p>

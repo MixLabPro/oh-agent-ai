@@ -179,12 +179,19 @@ export async function readCityModule(projection: CityProjectionV1, module: "find
         skills: projection.harnesses.filter((item) => !harness || item.id === harness).map((item) => ({ harness: item.id,
           skill: "demo-code-review", invocations: 3, sessions: 2, finished_events: 2, failed_events: 1, succeeded_events: 1,
           last_invoked_at_ms: Date.parse(projection.window.to) - 60000 })) } }
-      : { state: "unsupported", supported: false, reason: "projection_not_registered" } };
+      : { state: "ready", supported: true, data: { coverage: "synthetic_fixture", truncated: false, outcome_scope: "unpaired_events",
+        events: projection.harnesses.filter((item) => !harness || item.id === harness).map((item) => ({ harness: item.id,
+          event_type: "tool_finished", events: 3, sessions: 2, failed_events: 1, last_event_at_ms: Date.parse(projection.window.to) - 60000 })) } } };
   const context = (fresh ? undefined : projection.v3_context) ?? await readV3({ operation: "overview", windowDays: projection.window.days,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, page_size: 1 }, signal);
   const response = await readV3({ ...continuation(context), operation: "module.read", module, ...(harness ? { harness } : {}) }, signal);
   if (harness && (response as unknown as { scope?: { harness?: string } }).scope?.harness !== harness) throw new Error("city_module_scope_mismatch");
   return response;
+}
+/** Resolve only references already persisted by the trusted host save handler. */
+export async function resolveSavedCityAssets(windowDays: number, assetRefs: string[]) {
+  const context = await readV3({ operation: "overview", windowDays, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, page_size: 1 });
+  return readV3({ ...continuation(context), operation: "assets.resolve", save_id: "city-primary", asset_refs: assetRefs });
 }
 export const tauriCityDataProvider: CityDataProvider = {
   async getProjection({ windowDays, signal, onStage }) {

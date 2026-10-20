@@ -267,3 +267,43 @@ fn school_skills_are_windowed_scoped_and_do_not_infer_paired_success() {
     for forbidden in ["other-skill","outside-window","end-exclusive","/private/home","school-codex"] { assert!(!encoded.contains(forbidden)); }
     assert_eq!(response["result"]["data"]["outcome_scope"],"unpaired_finish_events");
 }
+
+#[test]
+fn workflow_events_are_scoped_windowed_and_redacted() {
+    let f=Fixture::new(); f.session("workflow-a"); f.session("workflow-b");
+    f.db.conn().execute("UPDATE sessions SET harness='claude-code' WHERE session_key='workflow-b'",[]).unwrap();
+    for (id,key,at,kind) in [("a","workflow-a",f.now-1,"tool_finished"),
+        ("b","workflow-b",f.now-1,"tool_finished"),
+        ("old","workflow-a",f.now-31*86_400_000,"tool_invoked"),
+        ("end","workflow-a",f.now,"tool_invoked")] {
+        f.db.conn().execute("INSERT INTO workflow_events(event_id,session_key,event_ts_ms,event_type,capability_id,outcome,ingested_run_id,created_at_ms)
+            VALUES(?1,?2,?3,?4,'/private/secret-tool','failed','fixture',?3)",rusqlite::params![id,key,at,kind]).unwrap();
+    }
+    let first=f.overview(200);
+    let response=city_v3::read(&f.home,&f.next(&first,json!({"operation":"module.read","module":"workflow","harness":"codex"})),f.now).unwrap();
+    assert_eq!(response["result"]["state"],"ready");
+    let rows=response["result"]["data"]["events"].as_array().unwrap();
+    assert_eq!(rows.len(),1); assert_eq!(rows[0]["events"],1);
+    assert_eq!(rows[0]["event_type"],"tool_finished"); assert_eq!(rows[0]["failed_events"],1);
+    assert_eq!(response["result"]["data"]["outcome_scope"],"unpaired_events");
+    for forbidden in ["/private","workflow-a","workflow-b","claude-code","tool_invoked"] { assert!(!response.to_string().contains(forbidden)); }
+}
+
+#[test]
+fn game_links_commit_reference_grants_and_revision_together() {
+    use agent_vitals_query::query::city_assets::game_links_state;
+    let f=Fixture::new(); f.session("saved"); f.fact("saved","usage",Some(f.now-1),None,"delta");
+    let first=f.overview(200);
+    let asset=first["page"]["sessions"][0]["asset_ref"].as_str().unwrap();
+    let write=|revision,refs:Value| json!({"revision":revision,"value":{"schemaVersion":1,"assetRefs":refs}});
+    assert_eq!(game_links_state(&f.home,"plugin.state.read",&json!({})).unwrap()["revision"],0);
+    game_links_state(&f.home,"plugin.state.write",&write(0,json!([asset]))).unwrap();
+    let resolve=|refs:Value| city_v3::read(&f.home,&f.next(&first,json!({"operation":"assets.resolve","save_id":"city-primary","asset_refs":refs})),f.now);
+    assert_eq!(resolve(json!([asset])).unwrap()["result"]["assets"][0]["state"],"present");
+    assert_eq!(game_links_state(&f.home,"plugin.state.write",&write(0,json!([]))),Err("revision_conflict"));
+    assert_eq!(game_links_state(&f.home,"plugin.state.write",&write(1,json!(["ca_00000000000000000000000000000000"]))),Err("asset_unavailable"));
+    assert_eq!(game_links_state(&f.home,"plugin.state.read",&json!({})).unwrap()["revision"],1);
+    game_links_state(&f.home,"plugin.state.write",&write(1,json!([]))).unwrap();
+    assert_ne!(resolve(json!([asset])).unwrap()["result"]["state"],"ready");
+    assert_eq!(game_links_state(&f.home,"plugin.state.write",&json!({"revision":2,"value":{"schemaVersion":1,"assetRefs":[],"raw":"secret"}})),Err("invalid_state_value"));
+}
