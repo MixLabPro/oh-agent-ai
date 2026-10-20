@@ -70,7 +70,11 @@ const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasia
 
 /** Capacity is discontinuous when terrain/site/skeleton choices change. Never
  * extrapolate an almost-empty plan into a many-hundred-fold area expansion. */
-export const RADIUS_CALIBRATION_CONFIG = { version: 1, maxRetries: 4, maxAreaGrowth: 2, capacityMargin: 1.04 };
+/** unsupportedNudge（v2，2026-10-20）：一次尝试一个街区都没有（路网拓扑不成立：roadBlockReport road-faces-have-unresolved-topology）不是容量信号。
+ *  曾按 0 地块去外推半径（被 maxAreaGrowth 截成 ×√2），基线岛 1703366229/t2 在 773.45 处拓扑失败，下一次直接
+ *  长到 1094、4486 个地块（应 ~1900）。同半径下 dev 代码同样失败，是潜在的拓扑缺陷；这里只在拓扑失败时把半径
+ *  微调 1% 重试，避开坏点，正常的容量校正不变。 */
+export const RADIUS_CALIBRATION_CONFIG = { version: 2, maxRetries: 4, maxAreaGrowth: 2, capacityMargin: 1.04, unsupportedNudge: 1.01 };
 export function nextCalibrationRadius(radius: number, required: number, available: number): number {
   if (![radius, required, available].every(Number.isFinite) || radius <= 0 || required <= 0 || available < 0) throw new RangeError("invalid capacity calibration input");
   if (available >= required) return radius;
@@ -126,7 +130,7 @@ function createCityPlanDraft(seed: number, tier: number, config: CoastalConfig |
   for (let attempt = 0; attempt < RADIUS_CALIBRATION_CONFIG.maxRetries; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
-    radius = nextCalibrationRadius(radius, targetParcels(tier), parcels);
+    radius = plan.blocks.length === 0 ? radius * RADIUS_CALIBRATION_CONFIG.unsupportedNudge : nextCalibrationRadius(radius, targetParcels(tier), parcels);
     plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve, opts.memoizeTerrain === true, opts.legacyGridParcels === true);
     radiusAttempts += 1;
     radiusHistory.push({ attempt: radiusAttempts, radius, generatedParcels: plan.parcelGeneration.generated,
