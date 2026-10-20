@@ -1,6 +1,6 @@
 # City 路口、环岛与立交：代码分析
 
-更新时间：2026-10-20。代码基准：分支 `claude/city-visual-style-analysis-a9ddd6` 合并 `origin/dev`（`be220c39`）之后。
+更新时间：2026-10-20。代码基准：分支 `codex/city-driving-car-model` 的 `09558221`（生成器版本 5、路面几何版本 13、通行审计版本 4）。初稿写于 `claude/city-visual-style-analysis-a9ddd6` 合并 `origin/dev`（`be220c39`）之后。
 
 本文按**当前代码**说明四项路网能力的实现：高架出口接驳（闸道）、湾岸主干道过桥头、路口环岛、高架立交匝道。规格层面的路口类型表见 [CITY_ROAD_NETWORK_SPEC.md](CITY_ROAD_NETWORK_SPEC.md) §5；开发过程与验证记录见 [CITY_VISUAL_STYLE_TAKEOVER.md](CITY_VISUAL_STYLE_TAKEOVER.md)。
 
@@ -27,14 +27,15 @@
 
 | 顺序 | 工序 | 位置 | 说明 |
 |---|---|---|---|
-| 1 | 骨架：主干放射、环线高架、**高架出口接驳** | [cityPlan.ts:329](../apps/agent-city/ui/src/engine/cityPlan.ts:329) → [skeleton.ts:301](../apps/agent-city/ui/src/engine/planner/skeleton.ts:301) | 出口在这里定形，后续所有工序看到的都是平滑接驳后的高架折线 |
-| 2 | 环岛滨海路 + **河岸路过桥头** | [cityPlan.ts:357](../apps/agent-city/ui/src/engine/cityPlan.ts:357) → [coastalRingRoad.ts:78](../apps/agent-city/ui/src/engine/planner/coastalRingRoad.ts:78) | 岸路与引道的交叉在此拆出 T 口 |
+| 1 | 骨架：主干放射、环线高架、**高架出口接驳** | [cityPlan.ts:341](../apps/agent-city/ui/src/engine/cityPlan.ts:341) → [skeleton.ts:301](../apps/agent-city/ui/src/engine/planner/skeleton.ts:301) | 出口在这里定形，后续所有工序看到的都是平滑接驳后的高架折线 |
+| 2 | 环岛滨海路 + **河岸路过桥头** | [cityPlan.ts:363](../apps/agent-city/ui/src/engine/cityPlan.ts:363) → [coastalRingRoad.ts:78](../apps/agent-city/ui/src/engine/planner/coastalRingRoad.ts:78) | 岸路与引道的交叉在此拆出 T 口 |
+| 2a | **高架落地端低段预留**（版本 5） | [cityPlan.ts:387](../apps/agent-city/ui/src/engine/cityPlan.ts:387) → [rampLowZone.ts](../apps/agent-city/ui/src/engine/planner/rampLowZone.ts) | 并进连接器的 `reservations`，之后加的地面路绕开低段（§3.1） |
 | 3 | 街网、缝合、连通、尽端环路…… | — | 本文不涉及 |
-| 4 | 桥头落地环 | [cityPlan.ts:639](../apps/agent-city/ui/src/engine/cityPlan.ts:639) | 既有能力；环岛要避开它（`bridgeClear`） |
-| 5 | **路口环岛** | [cityPlan.ts:655](../apps/agent-city/ui/src/engine/cityPlan.ts:655) → [junctionRings.ts](../apps/agent-city/ui/src/engine/planner/junctionRings.ts) | 在 solve 之前：solve 的修复与校验看到的是带环的路网 |
-| 6 | solve（修复循环） | [cityPlan.ts:678](../apps/agent-city/ui/src/engine/cityPlan.ts:678) | — |
-| 7 | **立交匝道选址** | [cityPlan.ts:680](../apps/agent-city/ui/src/engine/cityPlan.ts:680) → [highwayRamps.ts](../apps/agent-city/ui/src/engine/planner/highwayRamps.ts) | 在 solve 之后：落地的干道已经定型，不会被修复删掉 |
-| 8 | 派生收尾：路面切块、生成地块 | [cityPlan.ts:709](../apps/agent-city/ui/src/engine/cityPlan.ts:709) | 环岛中心岛作为预留地（不切地块），匝道并入 `highways` 避让走廊 |
+| 4 | 桥头落地环（版本 5 起钉住高架出口节点） | [cityPlan.ts:653](../apps/agent-city/ui/src/engine/cityPlan.ts:653) → [landing.ts](../apps/agent-city/ui/src/engine/planner/landing.ts) | 既有能力；环岛要避开它（`bridgeClear`） |
+| 5 | **路口环岛** | [cityPlan.ts:672](../apps/agent-city/ui/src/engine/cityPlan.ts:672) → [junctionRings.ts](../apps/agent-city/ui/src/engine/planner/junctionRings.ts) | 在 solve 之前：solve 的修复与校验看到的是带环的路网 |
+| 6 | solve（修复循环） | [cityPlan.ts:686](../apps/agent-city/ui/src/engine/cityPlan.ts:686) | — |
+| 7 | **立交匝道选址** | [cityPlan.ts:691](../apps/agent-city/ui/src/engine/cityPlan.ts:691) → [highwayRamps.ts](../apps/agent-city/ui/src/engine/planner/highwayRamps.ts) | 在 solve 之后：落地的干道已经定型，不会被修复删掉 |
+| 8 | 派生收尾：路面切块、生成地块 | [cityPlan.ts:717](../apps/agent-city/ui/src/engine/cityPlan.ts:717) | 环岛中心岛作为预留地（不切地块），匝道并入 `highways` 避让走廊 |
 
 关键设计点：**所有形状都在地块生成之前确定**。地块离高架桥面的实际余量只有 1.1–1.7 单位（实测），任何在渲染期改动高架形状的做法都会压到地块——曾试过渲染期用贝塞尔曲线修出口，压到 51 个地块，已放弃。
 
@@ -59,6 +60,10 @@
 **接驳形状**：三次贝塞尔，起点切线 = 环线切线，终点切线 = 干道方向（取与行进同向的一侧），按 8 单位采样。控制柄依次试 0.45 → 0.3 → 0.18，任一段不可走、切近广场或压用地就换更贴近弦的曲线，最后退回直线弦（仍满足朝前）。
 
 **效果**（14 种子 × 2 档）：单点转角 >120° 的尖刺 32 → 0；首尾弦 >150 的长弦 23 → 8；剩余最大转角约 66°，出现在出口曲线被迫退回直线的情况。
+
+**落地端低段预留区**（版本 5，[rampLowZone.ts](../apps/agent-city/ui/src/engine/planner/rampLowZone.ts)）：开放高架两端按 `EXPRESSWAY_RAMP`（90）的 ease 剖面落地，落地后约 50 内桥面底离路面不到车辆净空。骨架阶段这段只压着自己的宿主路，但之后的扇区街网、缝合、入口路不知道它是低的——0/42 的高架 0 两端各被 2–3 条 5 宽支路压着，桥面板就是车道上的固体。`rampLowZoneDiscs` 对每条非闭合 `ringRun` 的两端，从落地端起 6 到 48、每 4 放一个半径 5.25（桥面半宽）的预留圆盘（`RAMP_LOW_ZONE`），在 [cityPlan.ts:387](../apps/agent-city/ui/src/engine/cityPlan.ts:387) 并进连接器的 `reservations`：连接器路线与 `commitFixedLink` 的地面段按它做用地净距，新地面路因此绕开低段，只能在高架够高处跨越。圆盘让开落地区（前 6）；骨架已提交的路（含宿主路）、用地与地块不受影响。
+
+**出口节点钉住**（版本 5，[landing.ts](../apps/agent-city/ui/src/engine/planner/landing.ts)）：`buildLandingCircles` 新增 `pinned`，[cityPlan.ts:654](../apps/agent-city/ui/src/engine/cityPlan.ts:654) 传入全部 `ringRuns` 首尾点所在的路网节点。落地环方案只要删除这些节点、或删除与之相连的边，就放弃该方案（原因 `pinned-exit`）——0/42 的落地环曾删掉高架 `to` 端所在的路，出口离最近路中线 2.29，路缘穿过落地区。路口环岛（§3.3）沿用同一组出口节点作为固定节点。
 
 ### 3.2 湾岸主干道过桥头——`planner/coastalRingRoad.ts`
 
@@ -156,9 +161,9 @@
 | 规划结构（含独立的 `infrastructure` 分区，记录 `junctionRings`/`highwayRamps`）与生成器版本绑定 | `verify-city-baseline`（30 岛）、`verify-city-scene-baseline` |
 | 每条最终匝道仍接触非桥地面宿主 | `verify-city-baseline` |
 | 展示裁剪保留市政路口与匝道落地宿主 | `verify-city-road-report` |
-| 跨档补丁重映射保留率 ≥80% | `verify-plan-remap`（当前 96% / 86%） |
+| 跨档补丁重映射保留率 ≥80% | [verify-plan-remap.mjs](../scripts/verify-plan-remap.mjs)（真实城市 380→420、1600→2000 两次跨档，各报「搬迁 + 已满足 / 总数」；**当前未达标**：最近实测 1600→2000 为 68%，始于 `ad697cfa`，其父提交为 86%，原因见 [CITY_DRIVING_COMPLETION_TRACKER.md](CITY_DRIVING_COMPLETION_TRACKER.md)「2026-10-19 收尾复核」；门槛未改；生成器 5 下待重测） |
 
-规划行为变化必须同提交递增 `CITY_GENERATOR_VERSION`（[generatorVersion.ts](../apps/agent-city/ui/src/engine/generatorVersion.ts)）：版本 3 引入本文四项能力，版本 4 加入长主干局部净距准入、匝道选址移到 solve 之后。
+规划行为变化必须同提交递增 `CITY_GENERATOR_VERSION`（[generatorVersion.ts](../apps/agent-city/ui/src/engine/generatorVersion.ts)）：版本 3 引入本文四项能力，版本 4 加入长主干局部净距准入、匝道选址移到 solve 之后。版本 5（`d3e3be73`）：高架落地端低段预留区（[rampLowZone.ts](../apps/agent-city/ui/src/engine/planner/rampLowZone.ts)，连接器预留 `rampLowZones`）、落地环钉住高架出口节点（[landing.ts](../apps/agent-city/ui/src/engine/planner/landing.ts) `pinned`）、`snapJunctions` 目标侧桥头、无街区时半径校准微调（[cityPlan.ts](../apps/agent-city/ui/src/engine/cityPlan.ts) `RADIUS_CALIBRATION_CONFIG` v2：一次尝试一个街区都没有是路网拓扑失败而非容量信号，半径只乘 `unsupportedNudge` 1.01 重试，不再按 0 地块外推）。规划基线在版本 5 重写（`7d71f94c`，30 岛中 24 岛变化，约束复核无新增违规）。
 
 ---
 
@@ -180,6 +185,8 @@
 
 ## 6. 实测数据（档 5，2000 会话量级）
 
+下表与 §1「当前状态」测于生成器版本 3/4；版本 5 改变了 24/30 个基线岛的规划，表中数字**待重测（生成器 5）**，未重跑前不应引用为当前值。
+
 | 种子 | 岸路段数（点数） | 高架 / 最大单点转角 | 主干环岛 | 支路小环 | 匝道 | 平交未成路口 |
 |---|---|---|---|---|---|---|
 | 1927 | 6（9/9/6/73/49/5） | 1 / 14° | 13 | 3 | 4 | 0 |
@@ -200,8 +207,9 @@ dev 预览（`?fixtureSessions=2000`，按用户生成的种子）实测：21 �
 5. **出口曲线的退化**。曲线擦到水边/山坡时会退回直线弦，出口处仍可能有约 60° 的折角（锥角上限）。
 6. **旧 `mini-roundabout` 路径未改**。它仍只作为 `acuteJunctions` 的修复档存在；新的 `runJunctionRing` 与它代码重复，后续可让前者成为后者的参数化特例（需验证基线不变）。
 7. **城区地标场地压路（已修复）**：场地曾按街区内地块的包围盒铺矩形，非矩形街区的角伸到路面（500 会话 / seed 2026 一个场景 7 个部件在路上）。`dev` 的 `6c202531` 用真实路面几何（`surface/roadClearance.ts::groundRoadClearance`，含路口扇形与渐变段）把场地矩形从压路的一侧往里收，离路 ≥ `LANDMARK_ROAD_CLEARANCE`（1.0）；裙楼放不下时退回布局验证过的 17 见方裙楼、不留前院；雨棚、台阶、树只放在场地内。由 `verify-city-road-obstructions`（15 场景清零）与 `verify-city-collision`（城区地标零压路断言）守住。本分支同期的另一种修法（按街区多边形裁剪）在合并时让位于该实现。
-8. **场景基线**：`verify-city-scene-baseline` 在 `dev` 上即不匹配（市政建筑、基础设施装饰等多组），与本文能力无关；护栏开口只额外改变有匝道场景的 `city-district-expressways`。
-9. **大城市连续世界预算**：会话数 1000 以上的城市（1000/7、1000/65537、2000/42）碰撞实体总元素超过 `ContinuousDrivingEnvironment` 的 100 万上限，结构过渡用例全部 `continuous-world-budget` 未确认（改动前即如此）。临时放宽预算诊断时，两座城的 8 个匝道过渡用例全部通过。
+8. **场景基线（已恢复通过）**：`verify-city-scene-baseline` 曾经不匹配，主因是时区——天气与天光按本机时区算当地时刻，基线在 +0800 机器上冻结，UTC 容器上同一份代码恒失配；守卫现在建场景前钉 `process.env.TZ = "Asia/Shanghai"`（[verify-city-scene-baseline.mjs](../scripts/verify-city-scene-baseline.mjs)）。其余差异是有意变更（版本 5 规划变化、与驾驶面共用的立交匝道几何），基线已在生成器 5 重新冻结（`7d71f94c`），现通过。
+9. **大城市连续世界预算（已改为走廊局部固体）**：会话数约 1000 以上的城市（1000/7、1000/65537、2000/42）整城碰撞实体超过 `ContinuousDrivingEnvironment` 的 100 万元素上限，结构过渡用例曾全部 `continuous-world-budget` 未确认。`09558221` 起连续审计只装入路线走廊够得着的固体（[RoadPassabilityAudit.ts](../apps/agent-city/ui/src/game/driving/audit/RoadPassabilityAudit.ts) `corridorSolids`）：`CorridorValidator` 只接受中心在路线 ± `halfWidth` 内、每步前进 ≤ `maxForward·dt` 的状态，所以保留 XZ 包围盒离路线 ≤ 半宽 + 车体半径 + 一步 + 1 的固体，被接受的运动与整城完全一致；更远的固体只会改变本来就判 `route-deviation` 的结局。`solidScope: "world"` 保留整城口径供差分对照。`ROAD_PASSABILITY_AUDIT_VERSION` 3 → 4，旧审计 key 失效。（此前在临时放宽预算下，1000/7 与 1000/65537 的 8 个匝道过渡用例全部通过，见 `ce486a20`。）
+   - 同类的大城市规模问题：5000/42 的路面合并曾栈溢出（`RangeError: Maximum call stack size exceeded`）——`buildRoadSurface` 用 `push(...layer.x)` 把整层展开成实参，一层的 run 属性就超出参数上限。`4d7e8af9` 改为逐元素追加（[roadSurfaceSystem.ts](../apps/agent-city/ui/src/engine/systems/roadSurfaceSystem.ts) `append()`），场景基线与路面着色不变。
 10. **既有失败（非本文能力引入）**：`2001361477/t3` 主干净距 1，原提交 `9e4a0ad4` 即存在（见接管记录）。本文写作时没有重跑完整套件，当前是否全绿以最近一次 `verify-city-suite.mjs` 结果为准。
 
 ---
@@ -219,4 +227,4 @@ node scripts/verify-plan-remap.mjs
 node scripts/verify-city-survey.mjs --set acceptance --tier 5
 ```
 
-完整套件：`node scripts/verify-city-suite.mjs`（82 项，约 25 分钟）。
+完整套件：`node scripts/verify-city-suite.mjs`——[verification-manifest.json](../scripts/city-kit/verification-manifest.json) 的 102 个守卫，另加 typecheck、verification-harness 与 build，共 105 项；耗时待重测（生成器 5）。
