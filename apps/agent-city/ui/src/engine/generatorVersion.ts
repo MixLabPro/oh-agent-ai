@@ -17,4 +17,5 @@
  */
 // 版本 3 = 湾岸主干交叉接线、高架出口曲线、主干/支路环岛与立交匝道；路网和避让地块有意重排。
 // 版本 4：长主干局部净距准入、修复后匝道选址。
-export const CITY_GENERATOR_VERSION = 4;
+// 版本 5：匝道低段预留区（rampLowZone）、落地环出口钉住、snapJunctions 目标侧桥头、无街区时半径校准微调。
+export const CITY_GENERATOR_VERSION = 5;
