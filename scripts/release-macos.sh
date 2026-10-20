@@ -90,13 +90,13 @@ case "$version" in
 esac
 
 mkdir -p "$dmg_dir"
-dmg="$dmg_dir/agent-vitals-$version-arm64.dmg"
-staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-vitals-dmg.XXXXXX")"
+dmg="$dmg_dir/oh-agent-$version-arm64.dmg"
+staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/oh-agent-dmg.XXXXXX")"
 trap 'rm -rf "$staging_dir"' EXIT
 
 echo "release-macos: creating fresh arm64 DMG"
 ditto "$app" "$staging_dir/agent-vitals.app"
-hdiutil create -ov -format UDZO -volname "agent-vitals" \
+hdiutil create -ov -format UDZO -volname "Oh Agent" \
   -srcfolder "$staging_dir" "$dmg"
 
 case "$notarization_mode" in

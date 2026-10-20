@@ -16,6 +16,8 @@ const checks = [
   ["Intel runner matrix", "runner: macos-15-intel"],
   ["Apple Silicon runner matrix", "runner: macos-14"],
   ["architecture-specific staging", "Stage architecture-specific artifacts"],
+  ["Oh Agent DMG staging name", 'oh-agent-${version}-${EXPECTED_ARCH}.dmg'],
+  ["Oh Agent DMG release name", 'oh-agent-${version}-${arch}.dmg'],
   ["architecture-specific artifact upload", "path: dist/${{ matrix.arch }}"],
   ["tag validation", "release tag must start with app-v"],
   ["pinned Tauri CLI", "tauri-cli --version 2.11.4 --locked"],

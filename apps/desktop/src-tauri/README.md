@@ -2,7 +2,7 @@
 
 当前产品介绍见[根 README](../../../README.md)。桌面应用包含托盘、React 工作台和
 Agent City 内置插件：本机历史可视化、用量与费用分析、会话证据，以及版本相关的探索玩法。
-对外品牌为 Oh Agent；CLI、数据目录、bundle identifier 和本地构建产物暂保留 `agent-vitals`。
+对外品牌为 Oh Agent；桌面应用 Bundle ID 为 `ai.ohagent.desktop`。CLI、数据目录和本地构建产物继续使用 `agent-vitals`，以保留现有数据与构建兼容性。
 
 - **后端**：Rust host 负责本机数据访问与受限投影，资源 CLI 随安装包分发。
   插件不直接查询 authority DB 或读取日志；计价和证据口径遵守仓库数据契约。

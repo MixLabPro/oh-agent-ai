@@ -170,7 +170,8 @@ jobs:
             "dist/$EXPECTED_ARCH/agent-vitals.app"
           dmg="$(find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
           [ -n "$dmg" ] || { echo "missing DMG for $EXPECTED_ARCH" >&2; exit 1; }
-          cp "$dmg" "dist/$EXPECTED_ARCH/agent-vitals-${RELEASE_TAG}-${EXPECTED_ARCH}.dmg"
+          version="${RELEASE_TAG#app-v}"
+          cp "$dmg" "dist/$EXPECTED_ARCH/oh-agent-${version}-${EXPECTED_ARCH}.dmg"
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
@@ -237,7 +238,8 @@ jobs:
             [ -n "$dmg" ] || { echo "missing $arch dmg artifact" >&2; exit 1; }
             ditto -c -k --sequesterRsrc --keepParent "$app" \
               "release/agent-vitals-${RELEASE_TAG}-${arch}.app.zip"
-            cp "$dmg" "release/agent-vitals-${RELEASE_TAG}-${arch}.dmg"
+            version="${RELEASE_TAG#app-v}"
+            cp "$dmg" "release/oh-agent-${version}-${arch}.dmg"
           done
           for extension in exe deb AppImage; do
             file="$(find platform-dist -type f -name "*.$extension" -print -quit)"
