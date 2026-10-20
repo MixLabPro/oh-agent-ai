@@ -602,5 +602,23 @@
     "file": "verify-city-static-world.mjs",
     "env": {},
     "shared": false
+  },
+  {
+    "id": "verify-city-continuous-driving",
+    "file": "verify-city-continuous-driving.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-driving-collision-differential",
+    "file": "verify-city-driving-collision-differential.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
+    "id": "verify-city-rotation-budget",
+    "file": "repro-city-tick181-rotation-budget.mjs",
+    "env": {},
+    "shared": false
   }
 ]

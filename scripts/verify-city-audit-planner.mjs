@@ -128,7 +128,7 @@ if (process.argv.includes("--cities")) {
         const { mkdirSync, writeFileSync } = await import("node:fs");
         mkdirSync(process.env.PLANNER_REPORT_DIR, { recursive: true });
         writeFileSync(`${process.env.PLANNER_REPORT_DIR}/${scene.replace("/", "-")}.json`, JSON.stringify({ scene, worldRevision: snap.revision, summary: report.summary,
-          notPassed: bad.map((r) => ({ routeId: r.routeId, kind: full.routes.find((x) => x.id === r.routeId)?.kind, verdict: r.verdict, cause: r.cause, detail: r.detail, witness: r.witness })) }, null, 1));
+          notPassed: bad.map((r) => ({ routeId: r.routeId, kind: full.routes.find((x) => x.id === r.routeId)?.kind, verdict: r.verdict, cause: r.cause, detail: r.detail, witness: r.witness, diagnostic: r.run?.diagnostic })) }, null, 1));
       }
       for (const r of bad.slice(0, 12)) console.log(`  ${r.routeId} ${r.verdict}:${r.cause} ${r.detail}`);
       // 局部载入碰撞体（corridorSolids）必须与整城载入逐字相同：结论、原因、试跑轨迹都一样。只在整城装得下的

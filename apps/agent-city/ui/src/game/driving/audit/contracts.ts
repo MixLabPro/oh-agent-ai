@@ -41,6 +41,9 @@ export type AuditCause = "none" | "topology-disconnected" | "geometry-blocked" |
 export type RoadAuditCaseResult = Readonly<{
   key: AuditKey; caseId: string; verdict: AuditVerdict; cause: AuditCause;
   coveredUnits: readonly string[]; simulatedTicks: number;
+  /** Local bounded diagnostics, never a substitute for blocking evidence. No raw exception text. */
+  diagnostic?: Readonly<{ stage: "kernel" | "observer"; reason: string; tick: number; x: number; y: number; z: number }>;
+
 }>;
 export type AuditRunState = "queued" | "running" | "complete" | "cancelled" | "stale";
 /** Pilot receives immutable snapshots and returns buttons only. */

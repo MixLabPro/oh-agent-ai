@@ -14,6 +14,7 @@ export class DrivingRouteRunner {
   private bestProgress = -Infinity;
   private runState: AuditRunState = "queued";
   private terminal: RoadAuditCaseResult | null = null;
+  private diagnostic: RoadAuditCaseResult["diagnostic"];
   private readonly identity: string;
   private capture:AuditEvidenceCapture|null=null;
   readonly key: AuditKey;
@@ -67,7 +68,12 @@ export class DrivingRouteRunner {
       }
       let next;
       try { next = this.kernel.step(this.current, input); }
-      catch { this.finish("simulation-invalid"); break; }
+      catch (error) {
+        const known = ["invalid-driving-state", "unexpected-position-jump", "unexpected-surface-distance-jump"];
+        const message = error && typeof error === "object" && "message" in error ? error.message : null;
+        this.recordDiagnostic("kernel", typeof message === "string" && known.includes(message) ? message : "kernel-exception");
+        this.finish("simulation-invalid"); break;
+      }
       this.ticks++;
       try{this.capture?.record(this.ticks,input,this.current,next.state);}catch{
         try{this.capture?.discard();}catch{/* diagnostics only */}this.capture=null;
@@ -78,6 +84,8 @@ export class DrivingRouteRunner {
       this.current = next.state;
       if (!Number.isFinite(observation.progress)) { this.finish("simulation-invalid"); break; }
       if (observation.status === "route-deviation" || observation.status === "simulation-invalid" || observation.status === "budget-exhausted") {
+        if (observation.status === "simulation-invalid" || observation.status === "budget-exhausted") this.recordDiagnostic("observer",
+          next.motion.queryStatus === "unresolved" ? (next.motion.reason === "continuous-collision:budget" ? "collision-query-budget" : "collision-query-unresolved") : "independent-validation-failed");
         this.finish(observation.status); break;
       }
       if (observation.status === "complete") { this.finish("none"); break; }
@@ -90,11 +98,15 @@ export class DrivingRouteRunner {
     }
     return this.terminal;
   }
+  private recordDiagnostic(stage: "kernel" | "observer", reason: string): void {
+    this.diagnostic = Object.freeze({ stage, reason, tick: this.ticks, x: this.current.x, y: this.current.y, z: this.current.z });
+  }
   private finish(cause: AuditCause, replace = false): void {
     if (this.terminal && !replace) return;
     this.terminal = Object.freeze({ key: this.key, caseId: this.test.id,
       verdict: cause === "none" ? "passed" : "inconclusive", cause,
-      coveredUnits: Object.freeze(cause === "none" ? [...this.test.units] : []), simulatedTicks: this.ticks });
+      coveredUnits: Object.freeze(cause === "none" ? [...this.test.units] : []), simulatedTicks: this.ticks,
+      ...(this.diagnostic && (cause === "simulation-invalid" || cause === "budget-exhausted") ? { diagnostic: this.diagnostic } : {}) });
     try{this.capture?.finish(this.terminal);}catch{try{this.capture?.discard();}catch{/* diagnostics only */}}
     this.capture=null;
     this.runState = "complete";

@@ -39,6 +39,23 @@ assert.equal(JSON.stringify(one.state), JSON.stringify(many.state));
 assert.ok(one.state.x > 4.4, "entire body, not just center, exits gate");
 let manual = test.start; for (let i = 0; i < r1.simulatedTicks; i++) manual = stepDriving(manual, forward, world);
 assert.equal(JSON.stringify(one.state), JSON.stringify(manual), "manual and audit must use identical physics");
+// Audit failures retain a bounded local fault location, without forwarding raw exceptions.
+for (const message of ["unexpected-position-jump", "private /home/user/log token=secret"]) {
+  const broken = { identity: key, step() { throw new Error(message); } };
+  const result = finish(runner(test, undefined, undefined, key, broken));
+  assert.equal(result.cause, "simulation-invalid");
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.diagnostic.stage, "kernel");
+  assert.equal(result.diagnostic.reason, message === "unexpected-position-jump" ? message : "kernel-exception");
+  assert.equal(result.diagnostic.x, test.start.x);
+  assert(!JSON.stringify(result).includes("secret"));
+}
+// Latest dev distinguishes an unresolved collision budget from a simulation defect.
+const budgetObserver = { begin: () => "valid", observe: () => ({ status: "budget-exhausted", progress: 0, plannedStop: false }) };
+const budgetKernel = { identity: key, step: (state) => ({ state, motion: { blocked: true, queryStatus: "unresolved", reason: "continuous-collision:budget" } }) };
+const budgetResult = finish(runner(test, undefined, budgetObserver, key, budgetKernel));
+assert.equal(budgetResult.cause, "budget-exhausted"); assert.equal(budgetResult.verdict, "inconclusive");
+assert.equal(budgetResult.diagnostic.reason, "collision-query-budget");
 assert.ok(Object.isFrozen(one.state));
 assert.throws(() => runner(test, undefined, undefined, { ...key, collisionVersion: 2 }), /kernel-audit-identity-mismatch/);
 const stalled = finish(runner(test, { input: () => idle })); assert.equal(stalled.cause, "pilot-failed"); assert.equal(stalled.verdict, "inconclusive"); assert.equal(stalled.coveredUnits.length, 0);

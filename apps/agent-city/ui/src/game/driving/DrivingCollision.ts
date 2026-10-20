@@ -4,7 +4,7 @@
  * convex collision proxies supplied by B, not arbitrary renderer meshes. */
 import { boxPoly, type Solid, type V3, type CollisionPose, type CollisionDimensions } from "./CollisionIndex";
 import { conservativeVehicleVerticalRadius, isValidMountableHeight, type MountablePolicy } from "./staticSolidContracts";
-export const DRIVING_COLLISION_VERSION = 5; // v5: explicit mountable policy + conservative tilted-body lower bound
+export const DRIVING_COLLISION_VERSION = 6; // v6: exact projection reuse and conservative separating-axis early exits
 export type BodyPose = CollisionPose;
 export type SweepLimits = Readonly<{skin:number;timeTolerance:number;maxTests:number;maxCandidates:number;maxIntervals:number;maxSourceSolids:number;maxPolyVertices:number;maxAxes:number}>;
 export type SweepOptions = Partial<SweepLimits> & Readonly<{ mountablePolicy?: MountablePolicy }>;
@@ -91,12 +91,28 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
         if(a.faces.length+solid.poly.faces.length+a.edges.length*solid.poly.edges.length>p.maxAxes)throw new Budget();
         return [...a.faces,...solid.poly.faces,...a.edges.flatMap(x=>solid.poly.edges.map(y=>cross(x,y)))];
       };
-      const project=(vertices:readonly V3[],n:V3)=>{let lo=Infinity,hi=-Infinity;for(const v of vertices){spend();const x=dot(v,n);lo=Math.min(lo,x);hi=Math.max(hi,x);}return [lo,hi] as const;};
+      // A frozen solid is projected onto the same fixed axes at many samples.
+      // Cache exact axis values only: no angular quantisation or omitted SAT axes.
+      const projections=new WeakMap<readonly V3[],Map<string,readonly [number,number]>>();
+      const project=(vertices:readonly V3[],n:V3)=>{
+        const key=`${n.x}:${n.y}:${n.z}`;
+        const cached=projections.get(vertices)?.get(key);if(cached)return cached;
+        let lo=Infinity,hi=-Infinity;for(const v of vertices){spend();const x=dot(v,n);lo=Math.min(lo,x);hi=Math.max(hi,x);}
+        const projected=[lo,hi] as const;
+        let axes=projections.get(vertices);if(!axes){axes=new Map();projections.set(vertices,axes);}
+        axes.set(key,projected);axes.set(`${-n.x}:${-n.y}:${-n.z}`,[-hi,-lo]);
+        return projected;
+      };
       const separation=(t:number)=>{
         const body=poly(interpolateBody(from,to,t),dimensions);let gap=-Infinity,normal:V3={x:1,y:0,z:0};
-        for(const axis of axes(body)){spend();const len=length(axis);if(len<1e-12)continue;const n=scale(axis,1/len),a=project(body.vertices,n),b=project(solid.poly.vertices,n);
+        for(const axis of axes(body)){spend();const len=length(axis);if(len<1e-12)continue;const n=scale(axis,1/len);
+          const a=project(body.vertices,n),b=project(solid.poly.vertices,n);
           const left=a[0]-b[1],right=b[0]-a[1],roundoff=64*Number.EPSILON*Math.max(1,...a.map(Math.abs),...b.map(Math.abs));
-          const g=Math.max(left,right)-roundoff;if(g>gap){gap=g;normal=scale(n,left>=right?1:-1);}}
+          const g=Math.max(left,right)-roundoff;if(g>gap){gap=g;normal=scale(n,left>=right?1:-1);}
+          // One separating axis certifies this sample. Its gap is a lower bound
+          // on separation, sufficient for the conservative interval certificates.
+          // Skin contact/overlap still visits every SAT axis before returning.
+          if(gap>p.skin)return {gap,normal,body};}
         return {gap,normal,body};
       };
       const planeGap=(body:ReturnType<typeof poly>,n:V3)=>{
@@ -172,7 +188,6 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
           if(best&&interval.a>best.timeUpper)continue;
           const {left,right:end}=interval,width=interval.b-interval.a;
           if(left.gap>p.skin+speed*width)continue; // certified clear entire interval
-          if(rotatingPlaneClear(interval.a,interval.b,left.body))continue;
           // A fixed separating plane bounds every intermediate vertex by its
           // endpoint chord plus M*h²/8. This includes interior rotation extrema,
           // while tangent translation no longer forces thousands of subdivisions.
@@ -180,6 +195,9 @@ export function sweepBody(solids:readonly Solid[],from:BodyPose,to:BodyPose,dime
           if(Math.min(left.gap,planeGap(end.body,left.normal))-deviation>p.skin||
             Math.min(end.gap,planeGap(left.body,end.normal))-deviation>p.skin)continue;
           if((left.gap+end.gap-speed*width)/2>p.skin)continue;
+          // If the sampled endpoint is already at the skin, a whole-interval
+          // clearance certificate is unnecessary: keep bisecting toward contact.
+          if(end.gap>p.skin&&rotatingPlaneClear(interval.a,interval.b,left.body))continue;
           if(interval.b-interval.a<=p.timeTolerance&&end.gap<=p.skin){
             contact={solidId:solid.id,time:interval.a,timeUpper:interval.b,normal:end.normal,kind:"rotation"};break;
           }
