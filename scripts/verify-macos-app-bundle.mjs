@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 
 const repo = path.resolve(import.meta.dirname, "..");
-const defaultApp = path.join(repo, "apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app");
+const defaultApp = path.join(repo, "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app");
 const args = process.argv.slice(2);
 const requireDeveloperId = args.includes("--require-developer-id");
 const requiredArchitecture = args.find((arg) => arg.startsWith("--require-architecture="))

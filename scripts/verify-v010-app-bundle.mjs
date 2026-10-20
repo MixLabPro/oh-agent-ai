@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const app = process.argv[2]
-  || `${root}/apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`;
+  || `${root}/apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app`;
 const plist = `${app}/Contents/Info.plist`;
 const appBin = `${app}/Contents/MacOS/agent-vitals-menubar`;
 const cliBin = `${app}/Contents/Resources/bin/agent-vitals`;

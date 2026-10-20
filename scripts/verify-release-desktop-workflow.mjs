@@ -5,6 +5,14 @@ import path from "node:path";
 
 const repo = path.resolve(import.meta.dirname, "..");
 const workflow = readFileSync(path.join(repo, ".github/workflows/release-desktop.yml"), "utf8");
+const config = JSON.parse(readFileSync(path.join(repo, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
+if (config.productName !== "Oh Agent") throw new Error("desktop productName must be Oh Agent");
+for (const file of ["scripts/release-macos.sh", "scripts/build-macos-app.sh", "scripts/build-macos-react-app.sh", "scripts/verify-macos-app-bundle.mjs", "scripts/verify-v010-app-bundle.mjs"]) {
+  const source = readFileSync(path.join(repo, file), "utf8");
+  if (!source.includes("macos/Oh Agent.app") || source.includes("macos/oh-agent.app") || source.includes("macos/agent-vitals.app")) {
+    throw new Error(`incorrect app bundle name in ${file}`);
+  }
+}
 const checks = [
   ["release commit CI preflight", "Require successful Verify run for release commit"],
   ["exact commit verification", '--workflow verify.yml --commit "$sha"'],
@@ -26,7 +34,8 @@ const checks = [
   ["React Tauri shadow candidate compile", "cargo tauri build --config tauri.react.conf.json --no-bundle --debug"],
   ["noninteractive build", "cargo tauri build --ci --bundles app,dmg"],
   ["build architecture check", "--require-architecture=$EXPECTED_ARCH"],
-  ["publish artifact path", "find dist -type d -path \"*-${arch}/agent-vitals.app\""],
+  ["publish artifact path", "find dist -type d -path \"*-${arch}/Oh Agent.app\""],
+  ["publish app zip name", "release/oh-agent-${RELEASE_TAG}-${arch}.app.zip"],
   ["strict signature check", "--require-developer-id"],
   ["notarization validation", "xcrun stapler validate"],
   ["artifact checksums", "shasum -a 256 *.zip *.dmg *.exe *.deb *.AppImage > SHA256SUMS"],

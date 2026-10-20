@@ -159,15 +159,15 @@ jobs:
             "--require-architecture=$EXPECTED_ARCH"
 
       - name: Verify notarization ticket
-        run: xcrun stapler validate apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app
+        run: xcrun stapler validate "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app"
 
       - name: Stage architecture-specific artifacts
         shell: bash
         run: |
           set -eu
           mkdir -p "dist/$EXPECTED_ARCH"
-          ditto apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app \
-            "dist/$EXPECTED_ARCH/agent-vitals.app"
+          ditto "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app" \
+            "dist/$EXPECTED_ARCH/Oh Agent.app"
           dmg="$(find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
           [ -n "$dmg" ] || { echo "missing DMG for $EXPECTED_ARCH" >&2; exit 1; }
           version="${RELEASE_TAG#app-v}"
@@ -208,7 +208,7 @@ jobs:
         run: |
           set -eu
           for arch in x86_64 arm64; do
-            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            app="$(find dist -type d -path "*-${arch}/Oh Agent.app" -print -quit)"
             [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
             node scripts/verify-macos-app-bundle.mjs "$app" \
               --require-developer-id \
@@ -220,7 +220,7 @@ jobs:
         run: |
           set -eu
           for arch in x86_64 arm64; do
-            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            app="$(find dist -type d -path "*-${arch}/Oh Agent.app" -print -quit)"
             [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
             xcrun stapler validate "$app"
           done
@@ -232,12 +232,12 @@ jobs:
           set -eu
           mkdir -p release
           for arch in x86_64 arm64; do
-            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            app="$(find dist -type d -path "*-${arch}/Oh Agent.app" -print -quit)"
             dmg="$(find dist -type f -path "*-${arch}/*.dmg" -print -quit)"
             [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
             [ -n "$dmg" ] || { echo "missing $arch dmg artifact" >&2; exit 1; }
             ditto -c -k --sequesterRsrc --keepParent "$app" \
-              "release/agent-vitals-${RELEASE_TAG}-${arch}.app.zip"
+              "release/oh-agent-${RELEASE_TAG}-${arch}.app.zip"
             version="${RELEASE_TAG#app-v}"
             cp "$dmg" "release/oh-agent-${version}-${arch}.dmg"
           done

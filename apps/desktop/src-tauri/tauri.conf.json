@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "agent-vitals",
+  "productName": "Oh Agent",
   "version": "1.0.0-beta.2",
   "identifier": "ai.ohagent.desktop",
   "build": {
