@@ -261,7 +261,9 @@ for (const seed of [1927, 42]) {
         const [a, b] = edge.points; const len = Math.hypot(b.x - a.x, b.z - a.z); if (len < 1e-6) continue;
         const ux = (b.x - a.x) / len; const uz = (b.z - a.z) / len;
         const along = (end.x - a.x) * ux + (end.z - a.z) * uz; const across = Math.abs((end.x - a.x) * -uz + (end.z - a.z) * ux);
-        if (along > 0.05 && along < len - 0.05 && across < edge.width / 2 - 0.12) { intrusions += 1; where.push(`${end.x.toFixed(1)},${end.z.toFixed(1)}`); break; }
+        // 实例矩阵是 float32：裁切在 float64 里正好切到 len − 0.05（与 pavementIndex.outside 同一边距），读回时坐标 ~200
+        // 的 float32 舍入会把端点向内挪 ~1e-5，被误判成「压在路面上」（2026-10-19 seed 42：slack −6.4e-6）。沿程边距加 1e-4。
+        if (along > 0.05 + 1e-4 && along < len - 0.05 - 1e-4 && across < edge.width / 2 - 0.12) { intrusions += 1; where.push(`${end.x.toFixed(1)},${end.z.toFixed(1)}`); break; }
       }
     }
   }
