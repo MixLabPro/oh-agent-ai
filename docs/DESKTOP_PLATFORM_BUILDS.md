@@ -69,3 +69,17 @@ Package checks verify CLI presence and execution, not full desktop UI acceptance
 Before declaring a platform release ready, test installation, tray/window behavior,
 sync, official plugins, and uninstall on a clean machine. macOS-only screenshot
 and system-proxy discovery features retain their existing limitations.
+
+
+## Brand and artifact contracts (2026-10-21)
+
+The app is `Oh Agent.app` with identifier `ai.ohagent.desktop`. Internal desktop
+and CLI names remain `agent-vitals-menubar` and `agent-vitals` (Windows: `.exe`).
+Download names use `oh-agent-<version>-arm64.dmg` or `oh-agent-<version>-x86_64.dmg`
+on macOS, and `oh-agent-<version>-<platform>-x86_64` plus the package extension
+(`-setup.exe` for Windows). Existing macOS app zip naming is retained.
+
+`desktop-release-artifacts.mjs` stages exactly one artifact per required format;
+missing or duplicate outputs fail before copying. CI checks Linux desktop entry
+and installed Windows product identity. Native builds/signing remain platform CI
+acceptance work, not established by local static checks.

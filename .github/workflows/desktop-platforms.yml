@@ -58,6 +58,7 @@ jobs:
         run: |
           node scripts/verify-desktop-platforms.mjs
           node scripts/test-run-npm.mjs
+          node scripts/test-desktop-release-artifacts.mjs
       - name: Install frontend dependencies
         run: npm ci --prefix apps/desktop/ui-dev
       - name: Install Tauri CLI
@@ -77,6 +78,9 @@ jobs:
           deb=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
           test -n "$deb"
           dpkg-deb -x "$deb" package-check
+          desktop=$(find package-check/usr/share/applications -name '*.desktop' -print -quit)
+          test -n "$desktop"
+          grep -Fx 'Name=Oh Agent' "$desktop"
           cli=$(find package-check/usr -path '*/bin/agent-vitals' ! -path '*/usr/bin/agent-vitals' -print -quit)
           test -n "$cli"
           test -x "$cli"
@@ -88,18 +92,20 @@ jobs:
         run: |
           $installer = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
           if (!$installer) { throw 'Missing NSIS installer' }
-          $installDir = Join-Path $env:RUNNER_TEMP 'Agent Vitals package check'
+          $installDir = Join-Path $env:RUNNER_TEMP 'Oh Agent package check'
           $process = Start-Process -FilePath $installer.FullName -ArgumentList "/S /D=$installDir" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          $app = Join-Path $installDir 'agent-vitals-menubar.exe'
+          if (!(Test-Path $app)) { throw 'Missing desktop executable' }
+          if ((Get-Item $app).VersionInfo.ProductName -ne 'Oh Agent') { throw 'Incorrect installed product name' }
           $cli = Join-Path $installDir 'bin/agent-vitals.exe'
           if (!(Test-Path $cli)) { throw 'Missing installed CLI resource' }
           & $cli --build-info
           if ($LASTEXITCODE -ne 0) { throw 'Installed CLI failed' }
+      - name: Stage branded installers
+        run: node scripts/desktop-release-artifacts.mjs stage ${{ matrix.platform }} x86_64 apps/desktop/src-tauri/target/release/bundle dist/${{ matrix.platform }}
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.platform }}-x86_64
           if-no-files-found: error
-          path: |
-            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
-            apps/desktop/src-tauri/target/release/bundle/deb/*.deb
-            apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          path: dist/${{ matrix.platform }}

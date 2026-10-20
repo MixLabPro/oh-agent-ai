@@ -214,6 +214,7 @@ jobs:
           node scripts/verify-release-desktop-workflow.mjs
           node scripts/verify-desktop-platforms.mjs
           node scripts/test-run-npm.mjs
+          node scripts/test-desktop-release-artifacts.mjs
 
   city_guards:
     name: City 专项守卫

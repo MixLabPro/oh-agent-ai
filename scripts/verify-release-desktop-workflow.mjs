@@ -13,7 +13,13 @@ for (const file of ["scripts/release-macos.sh", "scripts/build-macos-app.sh", "s
     throw new Error(`incorrect app bundle name in ${file}`);
   }
 }
+const platformWorkflow = readFileSync(path.join(repo, ".github/workflows/desktop-platforms.yml"), "utf8");
+for (const required of ["Stage branded installers", "Name=Oh Agent", "VersionInfo.ProductName", "test-desktop-release-artifacts.mjs"]) {
+  if (!platformWorkflow.includes(required)) throw new Error(`missing platform guard: ${required}`);
+}
 const checks = [
+  ["bounded macOS artifact staging", "node scripts/desktop-release-artifacts.mjs stage macos"],
+  ["unique platform artifacts", "expected one $extension installer"],
   ["release commit CI preflight", "Require successful Verify run for release commit"],
   ["exact commit verification", '--workflow verify.yml --commit "$sha"'],
   ["native platform package workflow", "uses: ./.github/workflows/desktop-platforms.yml"],

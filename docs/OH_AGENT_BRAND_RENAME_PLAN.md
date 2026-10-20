@@ -7,9 +7,11 @@
 
 ## 1. 修改目标与边界
 
+当前契约更新：2026-10-21。Bundle ID 固定为 `ai.ohagent.desktop`；应用包为 `Oh Agent.app`；下载文件用小写 `oh-agent` 前缀。以下为当前规则，不采用旧 worktree 的命名。
+
 统一用户看到的应用名称、工作台标题、安装器名称和官网下载文件名，消除新发行包对外显示的 `agent-vitals` 旧品牌。
 
-本轮保留系统身份、数据位置和内部命令，避免将品牌改名扩大为数据或安装身份迁移。不要全仓库替换 `agent-vitals`。
+本轮保留当前已注册的 `ai.ohagent.desktop` 身份、数据位置和内部命令，避免将品牌改名扩大为数据或安装身份迁移。不要全仓库替换 `agent-vitals`。
 
 | 对象 | 当前值 | 本轮目标 |
 | --- | --- | --- |
@@ -18,8 +20,8 @@
 | 兼容界面标题 | `agent-vitals 工作台（兼容界面）` | `Oh Agent 工作台（兼容界面）` |
 | macOS 应用目录 | `agent-vitals.app` | `Oh Agent.app` |
 | 官网名称 | 已使用 Oh Agent | 保持，并在验收后接入实际下载地址 |
-| 对外下载文件前缀 | `agent-vitals-` | `Oh-Agent-` |
-| Tauri identifier | `com.mixlabpro.agent-vitals` | 保留 |
+| 对外下载文件前缀 | `agent-vitals-` | `oh-agent-` |
+| Tauri identifier | `com.mixlabpro.agent-vitals` | `ai.ohagent.desktop`（当前已注册身份） |
 | 桌面可执行文件 / Cargo package | `agent-vitals-menubar` | 保留；Windows 自动带 `.exe` |
 | 内部 CLI | `agent-vitals` / `agent-vitals.exe` | 保留 |
 | CLI 资源路径 | `bin/agent-vitals` / `bin/agent-vitals.exe` | 保留 |
@@ -27,20 +29,20 @@
 | 发布 tag | `app-v*` | 保留 |
 | 隔离探针身份 | 独立 identifier | 保留隔离，不复用正式产品身份 |
 
-保留 identifier 只能减少身份变化，不能代替升级验证。安装目录、快捷方式、卸载项、macOS 菜单栏记录及授权状态仍需实机检查。若未来改用 `ai.ohagent.desktop`，另立系统身份迁移方案。
+保留 identifier 只能减少身份变化，不能代替升级验证。安装目录、快捷方式、卸载项、macOS 菜单栏记录及授权状态仍需实机检查。当前已采用 `ai.ohagent.desktop`；从旧身份升级的行为仍需实机验收。
 
 ## 2. 对外产物命名
 
-发布文件使用无空格名称；版本号取实际应用版本，不重复加入 tag 的 `app-v` 前缀。示例以 `1.0.0-beta.2` 为准：
+发布文件使用无空格名称；安装包版本号取实际应用版本，不重复加入 tag 的 `app-v` 前缀。macOS 应用 zip 暂保留既有 tag 命名，避免本轮扩大链接变更。示例以 `1.0.0-beta.2` 为准：
 
 | 平台 | 发布文件名 |
 | --- | --- |
-| macOS Apple Silicon | `Oh-Agent-1.0.0-beta.2-macos-arm64.dmg` |
-| macOS Intel | `Oh-Agent-1.0.0-beta.2-macos-x64.dmg` |
-| macOS 应用归档 | `Oh-Agent-1.0.0-beta.2-macos-arm64.app.zip`，Intel 用 `x64` |
-| Windows x64 | `Oh-Agent-1.0.0-beta.2-windows-x64-setup.exe` |
-| Linux x64 deb | `Oh-Agent-1.0.0-beta.2-linux-x64.deb` |
-| Linux x64 AppImage | `Oh-Agent-1.0.0-beta.2-linux-x64.AppImage` |
+| macOS Apple Silicon | `oh-agent-1.0.0-beta.2-arm64.dmg` |
+| macOS Intel | `oh-agent-1.0.0-beta.2-x86_64.dmg` |
+| macOS 应用归档 | `oh-agent-app-v1.0.0-beta.2-arm64.app.zip`，Intel 用 `x86_64` |
+| Windows x64 | `oh-agent-1.0.0-beta.2-windows-x86_64-setup.exe` |
+| Linux x64 deb | `oh-agent-1.0.0-beta.2-linux-x86_64.deb` |
+| Linux x64 AppImage | `oh-agent-1.0.0-beta.2-linux-x86_64.AppImage` |
 
 macOS 应用包内部仍为 `Oh Agent.app`。Linux 包管理器的包名与菜单显示名是不同字段：本轮保留既有内部包身份；应检查实际生成的 deb 元数据和 `.desktop` 内容，不能把外部文件重命名当作包身份迁移。Windows 同样检查实际生成的安装元数据，不假定 `productName` 覆盖所有内部字段。
 

@@ -20,6 +20,21 @@ if (!existsSync(app)) {
   process.exit(1);
 }
 
+// 品牌改名（docs/OH_AGENT_BRAND_RENAME_PLAN.md）：显示名与 bundle identifier 以 tauri.conf.json 为准；
+// 桌面可执行文件与内置 CLI 的内部文件名不随品牌改名。
+const tauriConfig = JSON.parse(readFileSync(path.join(repo, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
+const plist = path.join(app, "Contents/Info.plist");
+function plistValue(key) {
+  try { return execFileSync("plutil", ["-extract", key, "raw", "-o", "-", plist], { encoding: "utf8" }).trim(); }
+  catch (error) { fail(`cannot read ${key} from ${plist}: ${(error.stderr || error.message).trim()}`); return null; }
+}
+for (const [key, expected] of [["CFBundleName", tauriConfig.productName], ["CFBundleIdentifier", tauriConfig.identifier]]) {
+  const value = plistValue(key);
+  if (value === null) continue;
+  if (value === expected) ok(`${key}: ${value}`);
+  else fail(`${key} is ${value}, expected ${expected} (apps/desktop/src-tauri/tauri.conf.json)`);
+}
+
 const executable = path.join(app, "Contents/MacOS/agent-vitals-menubar");
 const cli = path.join(app, "Contents/Resources/bin/agent-vitals");
 const authoritySource = path.join(repo, "crates/agent-vitals-data/src/authority.rs");

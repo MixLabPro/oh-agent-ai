@@ -4437,12 +4437,12 @@ fn mcp_skill_markdown() -> String {
     }).collect::<Vec<_>>().join("\n");
     format!(r#"---
 name: agent-vitals-mcp
-description: Query the user's local Agent Vitals data over MCP — AI tool token usage, spend (bills vs subscriptions vs estimates), budgets, billing attribution, missing price cards, sessions and data quality. Use when the user asks how much they spent on AI coding tools, which provider or model costs most, whether a budget is exceeded, what usage is still unattributed or unpriced, or asks you to fill in price cards. 查询本机 Agent Vitals 的用量、花费、预算、归因与价卡；用户问「这个月 AI 工具花了多少」「哪家最贵」「预算超了没」「哪些用量还没归因/没价卡」「帮我补价卡」时使用。
+description: Query the user's local Oh Agent data over MCP — AI tool token usage, spend (bills vs subscriptions vs estimates), budgets, billing attribution, missing price cards, sessions and data quality. Use when the user asks how much they spent on AI coding tools, which provider or model costs most, whether a budget is exceeded, what usage is still unattributed or unpriced, or asks you to fill in price cards. 查询本机 Oh Agent 的用量、花费、预算、归因与价卡；用户问「这个月 AI 工具花了多少」「哪家最贵」「预算超了没」「哪些用量还没归因/没价卡」「帮我补价卡」时使用。
 ---
 
-# Agent Vitals MCP
+# Oh Agent MCP
 
-Agent Vitals runs on the user's machine and reads their AI coding tools' session logs (Claude Code, Codex, DeepSeek Harness, WorkBuddy) into a local SQLite authority. This skill talks to it over MCP. The server is local, zero-network, read-only by default.
+Oh Agent runs on the user's machine and reads their AI coding tools' session logs (Claude Code, Codex, DeepSeek Harness, WorkBuddy) into a local SQLite authority. This skill talks to it over MCP. The server is local, zero-network, read-only by default.
 
 ## Setup (once)
 
