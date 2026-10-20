@@ -1093,6 +1093,11 @@ export class CityEngine {
   catalogTarget(id: string): number[] | null {
     const L = this.layout; const P = this.parts; const model = this.model;
     if (!L || !P || !model) return null;
+    if (id.startsWith("district-service:")) {
+      const key = id.slice("district-service:".length);
+      const civic = L.civics.find((item) => `${item.districtId}:${item.kind}` === key);
+      return civic ? [civic.x, civic.y + 8, civic.z, 95] : null;
+    }
     const slots = new Map(L.districts.flatMap((district) => [...district.slots]));
     const pick = (pred: (b: CityModel["buildings"][number], s: { blockId: string }) => boolean) => {
       for (const building of model.buildings) {

@@ -33,7 +33,7 @@ export function describeDecor(id: string): DecorInfo | null {
     case "landmark":
       return { title: LANDMARK_NAMES[detail] ?? "地标", category: "致敬地标 · 装饰", body: "由岛屿种子挑选的城市地标。不代表任何会话，不随数据变化。" };
     case "civic":
-      return { title: CIVIC_NAMES[detail] ?? "城市配套", category: "城市配套 · 随规模增长", body: "会话越多，城市配套越多（约每 45 个会话一座）。它反映城市规模，不代表单个会话。" };
+      return { title: CIVIC_NAMES[detail] ?? "城市配套", category: "城区公共服务", body: "每个非空城区优先规划医院和学校，额外配套随本区规模增长。设施服务所属执行环境，不代表单个会话。" };
     case "site":
       if (detail && detail !== "civic") { return { title: siteClassOf(`public:${detail}`)?.title ?? "市政设施", category: "公共用地 · 装饰", body: "随岛屿规划生成的公共设施，不代表任何会话。" }; }
       return { title: "市政设施", category: "公共用地 · 装饰", body: "市政广场、车站、体育场、观景塔或港口。随岛屿规划生成，不代表任何会话。" };

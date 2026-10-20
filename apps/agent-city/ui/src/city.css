@@ -261,3 +261,9 @@
   .city-legend { display: block; left: 16px; right: 16px; width: auto; z-index: 20; }
 }
 .city-data-facility .city-close { min-width: 44px; min-height: 44px; }
+
+.city-legend .city-district-services button { display: block; padding-left: 20px; font-size: 13px; }
+
+.city-skill-list li { display: block; }
+.city-skill-list strong { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }
+.city-skill-list dl { margin: 0; }

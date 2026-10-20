@@ -4,11 +4,11 @@ import { readCityModule, type CityProjectionV1 } from "./data/provider";
 import { cityText } from "./i18n";
 import { CITY_DATA_PLACES, type CityDataPlaceId } from "./cityDataPlaces";
 
-type Props = { id: CityDataPlaceId; projection: CityProjectionV1; language: string; onClose(): void; onLocate(id: string): boolean };
+type Props = { harness?: string | null; id: CityDataPlaceId; projection: CityProjectionV1; language: string; onClose(): void; onLocate(id: string): boolean };
 const rows = (value: unknown): Array<Record<string, unknown>> => Array.isArray(value)
   ? value.filter((row) => row && typeof row === "object" && !Array.isArray(row)) : [];
 
-export function CityDataFacility({ id, projection, language, onClose, onLocate }: Props) {
+export function CityDataFacility({ id, projection, language, onClose, onLocate, harness }: Props) {
   const en = language === "en";
   const place = CITY_DATA_PLACES.find((item) => item.id === id)!;
   const panel = useRef<HTMLElement>(null);
@@ -26,7 +26,7 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate }
     setLoaded(null); setMissing(false); setVisibleDays(30);
     if (id === "overview" || id === "activity") { setPending(false); return; }
     const request = new AbortController(); setPending(true);
-    void readCityModule(projection, id, request.signal, retry > 0).then((response) => {
+    void readCityModule(projection, id, request.signal, retry > 0, harness ?? undefined).then((response) => {
       if (request.signal.aborted) return;
       const module = response.result as CityModuleV3 | undefined;
       if (!module || !["ready", "empty", "unsupported", "unavailable", "stale"].includes(module.state)) throw new Error("city_module_invalid");
@@ -37,7 +37,7 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate }
         from: projection.window.from, to: projection.window.to, generated: projection.generated_at, timezone: "UTC" });
     }).finally(() => { if (!request.signal.aborted) setPending(false); });
     return () => request.abort();
-  }, [id, projection, retry]);
+  }, [id, projection, retry, harness]);
   const number = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) ? value.toLocaleString(en ? "en-US" : "zh-CN") : "—";
   const summary = projection.summary;
   const stats = summary?.tokens;
@@ -51,6 +51,7 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate }
     onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
     <button className="city-close" aria-label={cityText("关闭数据设施", language)} onClick={onClose}>×</button>
     <p className="city-facility-eyebrow">{cityText("公共服务 · 数据窗口", language)}</p>
+    <p>{harness ? projection.harnesses.find((h) => h.id === harness)?.display_name ?? harness : cityText("全城", language)}</p>
     <h2 id="city-facility-heading">{en ? place.englishTitle : place.title}</h2>
     <p>{en ? place.englishDescription : place.description}</p>
     <p className="city-context-note">{projection.source === "fixture" ? cityText("合成演示数据", language) : cityText("本机只读数据", language)} · {loaded?.timezone ?? projection.activity?.timezone ?? "UTC"}</p>
@@ -90,6 +91,21 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate }
       {loaded.module.state === "unsupported" && <div className="city-facility-status"><h3>{cityText("数据尚未接入", language)}</h3>
         <p>{cityText("这个模块尚未注册 City 数据投影。不会把安装数量、token 或缺失记录显示成使用次数 0。", language)}</p></div>}
       {(loaded.module.state === "unavailable" || loaded.module.state === "stale") && <p role="status">{cityText("数据暂不可用，或城市快照已经更新。", language)}</p>}
+      {id === "skills" && ["ready", "empty"].includes(loaded.module.state) && <>
+        <h3>{cityText("已观测技能活动", language)}</h3>
+        <p>{cityText("仅统计窗口内有记录的技能调用；不是已安装技能清单，缺少记录不代表没有使用。", language)}</p>
+        {rows(loaded.module.data?.skills).length ? <ul className="city-facility-list city-skill-list">{rows(loaded.module.data?.skills).map((row, index) => <li key={index}>
+          <strong>{String(row.skill)} · {projection.harnesses.find((h) => h.id === row.harness)?.display_name ?? String(row.harness)}</strong>
+          <dl><dt>{cityText("调用记录", language)}</dt><dd>{number(row.invocations)}</dd>
+            <dt>{cityText("涉及会话", language)}</dt><dd>{number(row.sessions)}</dd>
+            <dt>{cityText("成功结束事件", language)}</dt><dd>{number(row.succeeded_events)}</dd>
+            <dt>{cityText("失败结束事件", language)}</dt><dd>{number(row.failed_events)}</dd>
+            <dt>{cityText("全部结束事件", language)}</dt><dd>{number(row.finished_events)}</dd>
+            <dt>{cityText("最近调用", language)}</dt><dd>{typeof row.last_invoked_at_ms === "number" ? new Date(row.last_invoked_at_ms).toLocaleString(en ? "en-US" : "zh-CN", { timeZone: loaded.timezone }) : "—"}</dd></dl>
+        </li>)}</ul> : <p>{cityText("当前范围没有已记录的技能事件；数据源可能尚未提供这类证据。", language)}</p>}
+        <p>{cityText("结束事件与调用未逐次配对，不能据此计算成功率；跨窗口结束也可能缺少本窗口调用。", language)}</p>
+        {loaded.module.data?.truncated === true && <p>{cityText("仅显示调用记录最多的前 200 个技能与执行环境组合。", language)}</p>}
+      </>}
       {id === "findings" && ["ready", "empty"].includes(loaded.module.state) && <>
         <h3>{cityText("当前未关闭积压", language)}</h3>{renderFindings(current)}
         <h3>{cityText("窗口内新增", language)}</h3>{renderFindings(added)}
@@ -105,7 +121,7 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate }
       {loaded.generated && <p className="city-context-note">{cityText("读取时间：", language)}{loaded.generated}</p>}
       <button onClick={() => setRetry((value) => value + 1)}>{cityText("重新读取", language)}</button>
     </>}
-    <button onClick={() => setMissing(!onLocate(place.catalogId))}>{cityText("定位场景建筑", language)}</button>
+    <button onClick={() => setMissing(!onLocate(harness ? `district-service:${harness}:${id === "findings" ? "hospital" : id === "skills" ? "school" : "workflow"}` : place.catalogId))}>{cityText("定位场景建筑", language)}</button>
     {missing && <p role="status">{cityText("当前规模尚未生成该设施，仍可在这里查看数据。", language)}</p>}
     <p className="city-context-note">{cityText("这里不会发放游戏收入、关闭真实问题或执行技能。", language)}</p>
     <button onClick={onClose}>{cityText("返回城市", language)}</button>

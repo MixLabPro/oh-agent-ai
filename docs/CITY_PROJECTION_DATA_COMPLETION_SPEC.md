@@ -178,7 +178,7 @@ A 可先实施；B 的身份部分应先于游戏持久经营。C 与 B 的接�
 
 ## 12. 实施状态（2026-10-20）
 
-首批已实现共享统计、批量费用查询、v2 兼容补全、v3 快照分页、稳定资产注册表、按需详情及 SDK 校验。市政厅、观测站、医院和会话楼已有实际展示入口；Skills/Workflow 明确 unsupported。空间映射与交互见 [数据设施方案](CITY_DATA_FACILITIES_PRESENTATION_SPEC.md)。
+首批已实现共享统计、批量费用查询、v2 兼容补全、v3 快照分页、稳定资产注册表、按需详情及 SDK 校验。市政厅、观测站、医院和会话楼已有实际展示入口；Skills 已新增按需事件聚合投影；Workflow 仍明确 unsupported。空间映射与交互见 [数据设施方案](CITY_DATA_FACILITIES_PRESENTATION_SPEC.md)。
 
 默认真实入口仍走 v2；v3 通过 `?cityData=v3` 验证。资产注册表提供受信宿主保存引用接口，真实 GameSave 尚未接线。原生 App、慢设备首次可用时间与真实存档迁移未验收，不能宣布第 11 节全部完成。浏览器验收使用合成演示数据。
 

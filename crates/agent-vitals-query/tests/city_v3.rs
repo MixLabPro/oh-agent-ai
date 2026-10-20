@@ -153,8 +153,8 @@ fn dst_day_buckets_and_unsupported_modules_are_explicit() {
     assert_eq!(days.iter().find(|d|d["date"]=="2026-03-08").unwrap()["event_count"],2);
     assert_eq!(days.iter().find(|d|d["date"]=="2026-03-09").unwrap()["event_count"],1);
     let skills=city_v3::read(&f.home,&f.next(&first,json!({"operation":"module.read","module":"skills"})),f.now).unwrap();
-    assert_eq!(skills["result"]["state"],"unsupported");
-    assert!(skills["result"].get("data").is_none());
+    assert_eq!(skills["result"]["state"],"empty");
+    assert_eq!(skills["result"]["data"]["inventory_included"],false);
 }
 
 #[test]
@@ -229,4 +229,41 @@ fn findings_backlog_and_window_new_have_different_denominators() {
     assert_eq!(response["result"]["data"]["current_backlog"][0]["count"],1);
     assert_eq!(response["result"]["data"]["window_new"][0]["count"],1);
     assert!(!response.to_string().contains("new-closed"));
+    let scoped=city_v3::read(&f.home,&f.next(&first,json!({"operation":"module.read","module":"findings","harness":"codex"})),f.now).unwrap();
+    assert_eq!(scoped["scope"]["harness"],"codex");
+    assert!(scoped["result"]["data"]["capabilities"].as_array().unwrap().iter().all(|row|row["id"]=="codex"));
+    let other=city_v3::read(&f.home,&f.next(&first,json!({"operation":"module.read","module":"findings","harness":"claude-code"})),f.now).unwrap();
+    assert!(other["result"]["data"]["current_backlog"].as_array().unwrap().is_empty());
+    assert_eq!(city_v3::read(&f.home,&f.next(&first,json!({"operation":"module.read","module":"findings","harness":"not-registered"})),f.now).unwrap_err(),"invalid_harness");
+
+}
+
+
+#[test]
+fn school_skills_are_windowed_scoped_and_do_not_infer_paired_success() {
+    let f=Fixture::new(); f.session("school-codex"); f.session("school-other");
+    f.db.conn().execute("UPDATE sessions SET harness='claude-code' WHERE session_key='school-other'",[]).unwrap();
+    for (id,key,at,kind,outcome,name) in [
+        ("call","school-codex",f.now-10,"skill_invoked","unknown","code-review"),
+        ("finish","school-codex",f.now-5,"skill_finished","failed","code-review"),
+        ("other","school-other",f.now-5,"skill_invoked","unknown","other-skill"),
+        ("old","school-codex",f.now-31*86_400_000,"skill_invoked","unknown","outside-window"),
+        ("edge","school-codex",f.now,"skill_invoked","unknown","end-exclusive"),
+        ("orphan","school-codex",f.now-5,"skill_finished","succeeded","finish-only"),
+        ("private","school-codex",f.now-5,"skill_invoked","unknown","/private/home/secret-skill"),
+    ] {
+        f.db.conn().execute("INSERT INTO workflow_events(event_id,session_key,event_ts_ms,event_type,capability_kind,capability_id,outcome,ingested_run_id,created_at_ms)
+            VALUES(?1,?2,?3,?4,'skill',?5,?6,'fixture',?3)",rusqlite::params![id,key,at,kind,name,outcome]).unwrap();
+    }
+    let first=f.overview(200);
+    let response=city_v3::read(&f.home,&f.next(&first,json!({"operation":"module.read","module":"skills","harness":"codex"})),f.now).unwrap();
+    let rows=response["result"]["data"]["skills"].as_array().unwrap();
+    assert_eq!(rows.len(),3);
+    let row=rows.iter().find(|row|row["skill"]=="code-review").unwrap();
+    assert_eq!(row["invocations"],1); assert_eq!(row["sessions"],1); assert_eq!(row["failed_events"],1);
+    let finish=rows.iter().find(|row|row["skill"]=="finish-only").unwrap();
+    assert_eq!(finish["invocations"],0); assert_eq!(finish["succeeded_events"],1);
+    let encoded=response.to_string();
+    for forbidden in ["other-skill","outside-window","end-exclusive","/private/home","school-codex"] { assert!(!encoded.contains(forbidden)); }
+    assert_eq!(response["result"]["data"]["outcome_scope"],"unpaired_finish_events");
 }

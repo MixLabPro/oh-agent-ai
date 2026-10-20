@@ -3,6 +3,28 @@ import { observeLocale, pluginLocale } from "./host";
 
 // Plugin-owned presentation catalog. Business DTOs and user excerpts are not translated.
 const english: Record<string, string> = {
+  "已观测技能活动": "Observed skill activity",
+  "仅统计窗口内有记录的技能调用；不是已安装技能清单，缺少记录不代表没有使用。": "Only recorded skill invocations in this window are counted. This is not an installed inventory; missing records do not establish no use.",
+  "调用记录": "Invocation records",
+  "涉及会话": "Sessions with invocations",
+  "成功结束事件": "Successful finish events",
+  "失败结束事件": "Failed finish events",
+  "全部结束事件": "All finish events",
+  "最近调用": "Last invocation",
+  "当前范围没有已记录的技能事件；数据源可能尚未提供这类证据。": "No skill events were recorded in this scope; the source may not provide this evidence.",
+  "结束事件与调用未逐次配对，不能据此计算成功率；跨窗口结束也可能缺少本窗口调用。": "Finish events are not paired to individual invocations, so no success rate is inferred. Finishes may relate to invocations outside this window.",
+  "仅显示调用记录最多的前 200 个技能与执行环境组合。": "Showing the top 200 skill and harness combinations by invocation records.",
+  "每个非空城区优先规划医院和学校，额外配套随本区规模增长。设施服务所属执行环境，不代表单个会话。": "Each nonempty district prioritizes a hospital and school; additional facilities grow with its size. Facilities serve their execution environment and do not represent a session.",
+
+  "医院已建成": "Hospital placed", "学校已建成": "School placed",
+  "医院缺建：用地受限": "Hospital unplaced: site constraints", "学校缺建：用地受限": "School unplaced: site constraints",
+
+  "城区公共服务": "District public services",
+  "本区诊断中心": "District diagnostics",
+  "本区技能学院": "District academy",
+  "本区工作流": "District workflow",
+  "全城": "Whole city",
+
   "汇总": "Summary",
   "此分类没有已记录问题。": "No recorded findings in this category.",
   "关闭数据设施": "Close data facility",

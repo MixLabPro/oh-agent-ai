@@ -126,3 +126,25 @@ pub fn daily_activity(conn: &Connection, boundaries: &Value) -> Result<Vec<Value
     }
     Ok(out)
 }
+
+/// Observed skill carriers, not installed inventory or inferred successful calls.
+/// Inner join provides harness ownership; unanchored events cannot be assigned to a district.
+pub fn skill_activity(conn: &Connection, from: i64, to: i64, harness: Option<&str>) -> Result<Vec<Value>, AuthorityError> {
+    let mut stmt=conn.prepare("SELECT s.harness,substr(w.capability_id,1,512),
+        SUM(CASE WHEN w.event_type='skill_invoked' THEN 1 ELSE 0 END),
+        COUNT(DISTINCT CASE WHEN w.event_type='skill_invoked' THEN w.session_key END),
+        MAX(CASE WHEN w.event_type='skill_invoked' THEN w.event_ts_ms END),
+        SUM(CASE WHEN w.event_type='skill_finished' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN w.event_type='skill_finished' AND w.outcome='failed' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN w.event_type='skill_finished' AND w.outcome='succeeded' THEN 1 ELSE 0 END)
+        FROM workflow_events w JOIN sessions s ON s.session_key=w.session_key
+        WHERE w.event_type IN ('skill_invoked','skill_finished') AND w.event_ts_ms>=?1 AND w.event_ts_ms<?2
+          AND (?3 IS NULL OR s.harness=?3) AND w.capability_id IS NOT NULL
+        GROUP BY s.harness,w.capability_id
+        ORDER BY 3 DESC,s.harness,w.capability_id LIMIT 201")?;
+    let rows=stmt.query_map(params![from,to,harness],|r|Ok(json!({"harness":r.get::<_,String>(0)?,
+        "skill":r.get::<_,String>(1)?,"invocations":r.get::<_,i64>(2)?,"sessions":r.get::<_,i64>(3)?,
+        "last_invoked_at_ms":r.get::<_,Option<i64>>(4)?,"finished_events":r.get::<_,i64>(5)?,
+        "failed_events":r.get::<_,i64>(6)?,"succeeded_events":r.get::<_,i64>(7)?})))?;
+    Ok(rows.collect::<Result<Vec<_>,_>>()?)
+}

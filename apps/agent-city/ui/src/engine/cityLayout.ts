@@ -57,8 +57,8 @@ export type DistrictLayout = {
 };
 /** 城区地标（S5「每区一个地标」）：落在离城区中心最近的空地块上，取区色；装饰，不代表会话。 */
 export type DistrictLandmark = { districtId: string; parcelId: string; x: number; z: number; yaw: number; y: number };
-/** 城市配套：学校 / 商场 / 医院。数量随会话规模增长（每 CIVIC_PER_SESSIONS 个会话一座），
- *  落成时刻 = 城市长到那个规模的时刻——回放时看得见「城市在发展」。纯装饰，不进统计、不可拾取。 */
+/** Each nonempty district requests a hospital and school before session placement.
+ * Additional services grow with district sessions; actual instances remain subject to site validation. */
 /** 小区中心花园：每个执行环境城区锚点处预留一个整街区（湖 + 假山 + 亭 + 环湖树），楼从四周向外长。 */
 export type GardenSite = Vec2 & { id: string; districtId: string; blockId: string; y: number; yaw: number; width: number; depth: number; seed: number };
 export type CivicKind = "school" | "mall" | "hospital";
@@ -77,7 +77,6 @@ export type ContextBuilding = Vec2 & { id: string; y: number; yaw: number; width
   /** F2：回放到这一刻才落成（按选址次序均匀铺在数据窗口前 85%）——回放起点是空地，城市随时间填满。 */
   appearAt: number };
 export const CIVIC_PER_SESSIONS = 45;
-const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
 
 export type BridgeLayout = { from: Vec2; to: Vec2; angle: number; length: number };
 export type PublicSite = Vec2 & { id: string; kind: "civic" | "station" | "stadium" | "park" | "tower" | "harbor"; radius: number; yaw: number; access?: import("./planner/jointSite").PlotAccess };
@@ -537,20 +536,9 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     recordLayoutPlacement(placementReport, `district-landmark:${district.id}`, "district-landmark", placed, reason, samples, attempted);
   }
 
-  // 为商场预留整块的商业/市中心街区：会话楼现在优先占好地段，曾把这些街区都占成「部分有楼」，商场找不到整块（布局守卫）。
-  // 配套仍在会话落楼之后按城区质心选址（placeCivics），落楼前锁住、选址前释放。
-  const civicTotal = model.buildings.length === 0 ? 0 : Math.max(2, Math.min(30, Math.floor(model.buildings.length / CIVIC_PER_SESSIONS)));
-  const mallCandidates = plan.blocks
-    .filter((block) => (block.zone === "commercial" || block.zone === "downtown") && block.parcels.length > 0 && block.parcels.every((p) => !used.has(p.id)))
-    .sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z) || a.id.localeCompare(b.id));
-  const mallReserve: CityBlock[] = [];
-  if (civicTotal) for (const block of mallCandidates) {
-    const proposal = findLayoutBlockLot(block, civicMinimumSize("mall")!, plan, occupiedParcels(), placementBudget);
-    if (proposal.ok) mallReserve.push(block);
-    else if (proposal.reason === "terrain-sample-budget-exhausted" || proposal.reason === "cancelled") break;
-    if (mallReserve.length >= Math.ceil(civicTotal / 3) + 1) break;
-  }
-  for (const block of mallReserve) for (const parcel of block.parcels) used.add(parcel.id);
+  // Reserve district services before assigning new session buildings.
+  for (const block of previousCivicBlocks) for (const parcel of block.parcels) used.delete(parcel.id);
+  const civics = placeCivics(model, parcels, used, previous ?? null, plan, placementReport, placementBudget, anchorOf);
 
   // 落楼：每个执行环境在自己的小区里按 (startedAt, −height, id) 从花园向外取地块——回放时看得见小区从中心长出来。
   // 小区装满（会话数相对配额偏多）才溢出到小区外最近的空地块；全城都满才进背景楼群。
@@ -609,9 +597,6 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     }
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
-  for (const block of mallReserve) for (const parcel of block.parcels) used.delete(parcel.id);
-  for (const block of previousCivicBlocks) for (const parcel of block.parcels) used.delete(parcel.id);
-  const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan, placementReport, placementBudget);
   // 海滨迈阿密是一个已经建成的城市，即使当前窗口只有少量会话也不应退化成
   // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架
   // /酒店海滨保留带；优先填充会话城区周围，再向城市核心扩散，不加入会话统计。
@@ -930,22 +915,17 @@ function orientCivicPlacement(plan: ReturnType<typeof createCityPlan>, block: Ci
   return { footprint: chosen, attempted, terrainSamples: budget.spent - before, reason };
 }
 
-function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, assigned: Map<string, Parcel>, previous: CityLayout | null,
-  plan: ReturnType<typeof createCityPlan>, placementReport: NonNullable<CityLayout["placementReport"]>, placementBudget: LayoutPlacementBudget): CivicSite[] {
-  const total = model.buildings.length;
-  const count = total === 0 ? 0 : Math.max(2, Math.min(30, Math.floor(total / CIVIC_PER_SESSIONS)));
-  if (!count) return [];
-  const times = model.buildings.map((building) => building.startedAt).sort((a, b) => a - b);
-  // 城区会话数 → 配额（最大余数法），保证多会话的城区配套多。
-  const weights = model.districts.map((district) => ({ id: district.id, n: model.buildings.filter((b) => b.districtId === district.id).length })).filter((d) => d.n > 0);
-  const sum = weights.reduce((acc, d) => acc + d.n, 0) || 1;
-  const quota = weights.map((d) => ({ id: d.id, exact: (d.n / sum) * count, take: Math.floor((d.n / sum) * count) }));
-  let left = count - quota.reduce((acc, q) => acc + q.take, 0);
-  [...quota].sort((a, b) => (b.exact - b.take) - (a.exact - a.take) || (a.id < b.id ? -1 : 1)).forEach((q) => { if (left > 0) { q.take += 1; left -= 1; } });
-  // 轮转顺序：按配额从多到少交错，第 i 座的落成时刻按全城规模走。
-  const sequence: string[] = [];
-  for (let round = 0; sequence.length < count; round += 1) {
-    for (const q of [...quota].sort((a, b) => b.take - a.take || (a.id < b.id ? -1 : 1))) if (round < q.take) sequence.push(q.id);
+function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, previous: CityLayout | null,
+  plan: ReturnType<typeof createCityPlan>, placementReport: NonNullable<CityLayout["placementReport"]>, placementBudget: LayoutPlacementBudget, anchors: Map<string, Vec2>): CivicSite[] {
+  const districts = model.districts.filter((district) => district.sessionCount > 0).sort((a, b) => a.id.localeCompare(b.id));
+  const demands = districts.flatMap((district) => ["hospital", "school"].map((kind) => ({
+    id: `civic:${district.id}:${kind}`, districtId: district.id, kind: kind as CivicKind, required: true,
+  })));
+  // Extra services grow within each district after its two required facilities.
+  for (const district of districts) for (let index = 0; index < Math.floor(district.sessionCount / CIVIC_PER_SESSIONS); index += 1) {
+    if (demands.length >= Math.max(30, districts.length * 2)) break;
+    const kind = (["mall", "school", "hospital"] as const)[index % 3];
+    demands.push({ id: `civic:${district.id}:extra:${index}:${kind}`, districtId: district.id, kind, required: false });
   }
   // 单个地块只有约 7×8，放不下学校/商场：配套占整个空街区（街区里没有任何会话楼）。
   type Lot = { id: string; x: number; z: number; yaw: number; width: number; depth: number; zone: Zone; block: CityBlock };
@@ -956,16 +936,16 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
   const old = new Map((previous?.civics ?? []).map((civic) => [civic.id, civic]));
   // 第一遍：先为所有仍能原地保留的配套占住原街区，否则编号更小的新配套会先抢走它（刷新不搬家）。
   const reservedFor = new Map<string, string>(); // blockId → civic id
-  sequence.forEach((_, index) => {
-    const keep = old.get(`civic:${index}`);
+  demands.forEach(({ id }) => {
+    const keep = old.get(id);
     const block = keep && freeBlocks.find((block) => block.id === keep.parcelId);
     const envelope = keep && civicEnvelopeSize(keep.kind, keep.width, keep.depth);
-    if (keep && block && envelope && inspectLayoutPlacement({ ...environment(), block, footprint: { ...keep, ...envelope } }, placementBudget).ok) reservedFor.set(keep.parcelId, `civic:${index}`);
+    if (keep && block && envelope && inspectLayoutPlacement({ ...environment(), block, footprint: { ...keep, ...envelope } }, placementBudget).ok) reservedFor.set(keep.parcelId, id);
   });
-  sequence.forEach((districtId, index) => {
-    const id = `civic:${index}`;
-    const kind = CIVIC_ORDER[index % CIVIC_ORDER.length];
-    const unlockAt = times[Math.min(times.length - 1, (index + 1) * CIVIC_PER_SESSIONS - 1)] ?? times[times.length - 1];
+  demands.forEach(({ id, districtId, kind, required }) => {
+    const districtTimes = model.buildings.filter((b) => b.districtId === districtId).map((b) => b.startedAt).sort((a, b) => a - b);
+    const extraIndex = Number(id.split(":extra:")[1]?.split(":")[0] ?? 0);
+    const unlockAt = districtTimes[required ? 0 : Math.min(districtTimes.length - 1, (extraIndex + 1) * CIVIC_PER_SESSIONS - 1)];
     const keep = old.get(id);
     let samples = 0, attempted = 0, reason = "no legal unoccupied real face";
     const minimumSize = civicMinimumSize(kind);
@@ -988,15 +968,15 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     // 曾因此让 civic:7 换了城区、搬去新城区找地（刷新不搬家契约被打破）。
     const owner = districtId;
     if (!parcel) {
-      const own = model.buildings.filter((b) => b.districtId === districtId).map((b) => assigned.get(b.id)).filter((p): p is Parcel => !!p);
-      if (!own.length) { recordLayoutPlacement(placementReport, id, "civic", false, "no assigned session anchors", samples, attempted); return; }
-      const cx = own.reduce((acc, p) => acc + p.x, 0) / own.length;
-      const cz = own.reduce((acc, p) => acc + p.z, 0) / own.length;
+      const anchor = anchors.get(districtId);
+      if (!anchor) { recordLayoutPlacement(placementReport, id, "civic", false, "district anchor unavailable", samples, attempted); return; }
+      const cx = anchor.x;
+      const cz = anchor.z;
       // 按服务半径铺开（SPEC §4.4）：离已有配套越远越好（封顶 150），同时不要离本城区中心太远；
       // 学校偏居住区、商场偏商业/市中心、医院偏市中心与商业区。曾只取「离城区质心最近的空街区」，
       // 配套全挤在城区中心，一座岛上五座学校互相挨着。
       const preferred: Record<CivicKind, Zone[]> = { school: ["residential"], mall: ["downtown", "commercial", "waterfront"], hospital: ["downtown", "commercial", "residential"] };
-      const rankedBlocks = freeBlocks.filter((block) => !taken.has(block.id) && (!reservedFor.has(block.id) || reservedFor.get(block.id) === id))
+      const rankedBlocks = freeBlocks.filter((block) => [...anchors].sort((a, b) => Math.hypot(a[1].x - block.x, a[1].z - block.z) - Math.hypot(b[1].x - block.x, b[1].z - block.z) || a[0].localeCompare(b[0]))[0]?.[0] === districtId && !taken.has(block.id) && (!reservedFor.has(block.id) || reservedFor.get(block.id) === id))
         .map((block) => {
           const nearestCivic = Math.min(150, ...out.map((c) => Math.hypot(c.x - block.x, c.z - block.z)));
           const rank = preferred[kind].indexOf(block.zone), zonePenalty = rank < 0 ? 60 : rank * 15;
@@ -1021,7 +1001,7 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     out.push({ id, kind, districtId: owner, parcelId: parcel.id, ...oriented, y: plan.terrain.height(oriented.x, oriented.z), unlockAt });
     recordLayoutPlacement(placementReport, id, "civic", true, "accepted renderer rectangle", samples, attempted);
   });
-  return out;
+  return out.sort((a, b) => a.unlockAt - b.unlockAt || a.id.localeCompare(b.id));
 }
 
 /** 豪宅岛（Vice City 的 Starfish Island 母题）：湾心小岛的场地层（环路/支路/棕榈）+ 一圈海湾豪宅 + 北侧大宅，

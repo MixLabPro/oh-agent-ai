@@ -172,13 +172,19 @@ export async function readCitySessionDetail(projection: CityProjectionV1, id: st
   return { ...detail, cost_minor: detail.cost.cost_minor, cost_breakdown: detail.cost.breakdown, cost_complete: detail.cost.complete,
     cost_status: { state: detail.cost.status, reason: detail.cost.reason, has_unresolved: detail.cost.has_unresolved } };
 }
-export async function readCityModule(projection: CityProjectionV1, module: "findings" | "skills" | "workflow", signal?: AbortSignal, fresh = false) {
+export async function readCityModule(projection: CityProjectionV1, module: "findings" | "skills" | "workflow", signal?: AbortSignal, fresh = false, harness?: string) {
   if (projection.source !== "local") return { source: "fixture" as const, window: projection.window, generated_at: projection.generated_at,
-    result: module === "findings" ? { state: "ready", supported: true, data: { current_backlog: projection.findings, window_new: [], detail_state: "unsupported" } }
+    result: module === "findings" ? { state: "ready", supported: true, data: { current_backlog: projection.findings.filter((row) => !harness || row.harness === harness), window_new: [], detail_state: "unsupported" } }
+      : module === "skills" ? { state: "ready", supported: true, data: { coverage: "synthetic_fixture", inventory_included: false, truncated: false,
+        skills: projection.harnesses.filter((item) => !harness || item.id === harness).map((item) => ({ harness: item.id,
+          skill: "demo-code-review", invocations: 3, sessions: 2, finished_events: 2, failed_events: 1, succeeded_events: 1,
+          last_invoked_at_ms: Date.parse(projection.window.to) - 60000 })) } }
       : { state: "unsupported", supported: false, reason: "projection_not_registered" } };
   const context = (fresh ? undefined : projection.v3_context) ?? await readV3({ operation: "overview", windowDays: projection.window.days,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, page_size: 1 }, signal);
-  return readV3({ ...continuation(context), operation: "module.read", module }, signal);
+  const response = await readV3({ ...continuation(context), operation: "module.read", module, ...(harness ? { harness } : {}) }, signal);
+  if (harness && (response as unknown as { scope?: { harness?: string } }).scope?.harness !== harness) throw new Error("city_module_scope_mismatch");
+  return response;
 }
 export const tauriCityDataProvider: CityDataProvider = {
   async getProjection({ windowDays, signal, onStage }) {

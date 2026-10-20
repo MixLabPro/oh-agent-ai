@@ -265,6 +265,8 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     seed, seedDraft, setSeedDraft, seedBusy, confirmSeed, applySeed, reseed, cursor, playing, speed, setSpeed,
     cut, setCut, backdrop, setBackdrop, film, photoBusy, busy, error, setError, stats, card, progress, seek, replay, live, previewRef,
     describe, photo, exportFilm, refreshSelection, openHostSession, projection,
+    districtServices: (id: string) => engine.current?.currentLayout?.civics.filter((c) => c.districtId === id).map((c) => c.kind) ?? [],
+    serviceDistrict: (id: string | null) => engine.current?.currentLayout?.civics.find((c) => c.id === id?.split("#")[1])?.districtId ?? null,
     focusDistrict: (id: string) => engine.current?.focusDistrict(id),
     focusCatalog: (id: string) => engine.current?.focusCatalog(id) ?? false,
     lockSelection: (id: string) => engine.current?.lockSelection(id) };
@@ -295,8 +297,10 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   }, [disabled, ui.model, landingPreview]);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [dataPlace, setDataPlace] = useState<CityDataPlaceId | null>(null);
+  const [dataDistrict, setDataDistrict] = useState<string | null>(null);
   const [dataPlaceFromDirectory, setDataPlaceFromDirectory] = useState(false);
-  const openDataPlace = (id: CityDataPlaceId | null, fromDirectory = false) => {
+  const openDataPlace = (id: CityDataPlaceId | null, fromDirectory = false, districtId: string | null = null) => {
+    setDataDistrict(districtId);
     setDataPlaceFromDirectory(fromDirectory); setDataPlace(id);
     if (fromDirectory) setSummaryOpen(false);
   };
@@ -385,11 +389,14 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         </button>)}
       </nav>
       <h2>执行环境城区</h2>
-      {(model?.districts ?? []).map((district) => <button key={district.id} disabled={locked} onClick={() => ui.focusDistrict(district.id)}>
+      {(model?.districts ?? []).map((district) => <div key={district.id}><button disabled={locked} onClick={() => ui.focusDistrict(district.id)}>
         <span aria-hidden="true" style={{ background: paletteFor(district.id).accent }} /><strong>{district.label}</strong>
         <span className="city-district-meta">{district.sessionCount} 会话 · {district.activeCount} 活跃</span>
         {district.anomaly && <span className="city-district-meta">{district.anomaly.severity} · {district.anomaly.count} 条异常（部分投影）</span>}
-      </button>)}
+      </button><nav className="city-district-services" aria-label={cityText("城区公共服务", language)}>
+        <button onClick={() => openDataPlace("findings", true, district.id)}>{district.label} · {cityText("本区诊断中心", language)}</button>
+        <button onClick={() => openDataPlace("skills", true, district.id)}>{district.label} · {cityText("本区技能学院", language)}</button>
+      </nav></div>)}
       <p className="city-context-note">灰调背景楼为城市氛围 · 不计入会话</p>
       <p>会话楼高表示 token 规模；施工状态和生长进度是可视化估算，不代表任务完成度。</p>
       <p>{ui.projection?.source === "local" ? "本机只读投影 · 不上传数据" : "本地演示数据 · 尚未接入真实数据源"}</p>
@@ -458,6 +465,12 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         <p>城区地标 · 执行环境城区</p><h2>{district.label}</h2>
         <dl><dt>会话</dt><dd>{district.sessionCount}</dd><dt>今日活跃</dt><dd>{district.activeCount}</dd>
           {district.anomaly && <><dt>异常</dt><dd>{district.anomaly.severity} · {district.anomaly.count} 条（部分投影）</dd></>}</dl>
+        <p>{cityText("城区公共服务", language)} · {ui.districtServices(district.id).includes("hospital") ? cityText("医院已建成", language) : cityText("医院缺建：用地受限", language)} · {ui.districtServices(district.id).includes("school") ? cityText("学校已建成", language) : cityText("学校缺建：用地受限", language)}</p>
+        <nav className="city-district-services" aria-label={cityText("城区公共服务", language)}>
+          <button onClick={() => openDataPlace("findings", false, district.id)}>{cityText("本区诊断中心", language)}</button>
+          <button onClick={() => openDataPlace("skills", false, district.id)}>{cityText("本区技能学院", language)}</button>
+          <button onClick={() => openDataPlace("workflow", false, district.id)}>{cityText("本区工作流", language)}</button>
+        </nav>
         <p>地标高度随本区会话数增长：会话越多，地标越高。</p>
         <button disabled={locked} onClick={() => ui.focusDistrict(district.id)}>聚焦城区</button>
         {decorCamera}
@@ -470,7 +483,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
         <p>{info.category}</p><h2>{info.title}</h2>
         <p>{info.body}</p>
-        {cityDataPlaceForDecor(ui.selected) && <button onClick={() => openDataPlace(cityDataPlaceForDecor(ui.selected))}>打开设施数据</button>}
+        {cityDataPlaceForDecor(ui.selected) && <button onClick={() => openDataPlace(cityDataPlaceForDecor(ui.selected), false, ui.serviceDistrict(ui.selected))}>打开设施数据</button>}
         <p>这不是会话楼：没有 token、时间或会话详情可钻取。</p>
         {decorCamera}
       </aside>;
@@ -526,7 +539,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       </div>
       <div className="city-dialog-actions"><button disabled={ui.projection?.source !== "local"} onClick={() => void ui.openHostSession()}>在宿主打开完整会话详情</button></div>
     </dialog>
-    {dataPlace && ui.projection && !cinema && !gameActive && <CityDataFacility id={dataPlace} projection={ui.projection} language={language}
+    {dataPlace && ui.projection && !cinema && !gameActive && <CityDataFacility id={dataPlace} harness={dataDistrict} projection={ui.projection} language={language}
       onClose={() => { setDataPlace(null); if (dataPlaceFromDirectory) { setSummaryOpen(true); summaryButton.current?.focus(); } }} onLocate={ui.focusCatalog} />}
     <dialog className="city-dialog" ref={settingsRef} onCancel={(event) => { event.preventDefault(); event.stopPropagation(); ui.setOptions(false); }} onClose={() => ui.setOptions(false)} aria-label="城市设置">
       <header className="city-dialog-header"><h2>城市设置</h2><button className="city-close" aria-label="关闭城市设置" onClick={() => ui.setOptions(false)}>×</button></header>

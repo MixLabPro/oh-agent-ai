@@ -85,7 +85,7 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
         allowed.extend(["expected_revision","snapshot","context","query_semantics","window"]);
         allowed.extend(match operation {
             "sessions.page"=>vec!["page_size","cursor"], "session.detail"=>vec!["id","include_excerpts"],
-            "module.read"=>vec!["module"], "assets.resolve"=>vec!["save_id","asset_refs"], _=>vec![],
+            "module.read"=>vec!["module","harness"], "assets.resolve"=>vec!["save_id","asset_refs"], _=>vec![],
         });
     }
     if request.as_object().ok_or("invalid_request")?.keys().any(|key| !allowed.contains(&key.as_str())) { return Err("invalid_parameter"); }
@@ -169,7 +169,7 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
                 result["modules"]=json!({"overview":overview_module,
                     "activity":match app_local::activity(db.conn(),from,to,&timezone) {Ok(v)=>state(v,&generated),Err(reason)=>json!({"state":"unavailable","supported":true,"reason":reason})},
                     "findings":{"state":"unavailable","supported":true,"reason":"load_on_demand"},
-                    "skills":{"state":"unsupported","supported":false,"reason":"projection_not_registered"},
+                    "skills":{"state":"ready","supported":true,"load":"on_demand"},
                     "workflow":{"state":"unsupported","supported":false,"reason":"projection_not_registered"}});
                 result["harnesses"]=json!(super::app_harnesses::public_identities(&identities));
             }
@@ -198,15 +198,36 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
         }
         "module.read" => {
             let module=request["module"].as_str().ok_or("invalid_module")?;
+            let harness=match request.get("harness") {
+                None=>None,
+                Some(value)=>Some(value.as_str().filter(|id|identities.contains_key(*id)).ok_or("invalid_harness")?),
+            };
+            result["scope"]=json!({"harness":harness});
             result["module"]=json!(module);
             result["result"]=match module {
-                "skills"|"workflow"=>json!({"state":"unsupported","supported":false,"reason":"projection_not_registered"}),
+                "workflow"=>json!({"state":"unsupported","supported":false,"reason":"projection_not_registered"}),
+                "skills"=>{
+                    let mut rows=stats::skill_activity(db.conn(),from,end.saturating_add(1),harness).map_err(|_|"module_unavailable")?;
+                    let truncated=rows.len()>200; rows.truncate(200);
+                    for row in &mut rows {
+                        let name=row["skill"].as_str().unwrap_or("");
+                        let safe=if name.starts_with('/') || name.contains('\\') { None } else {
+                            agent_vitals_domain::enrichment::make_presentation_excerpt(name, agent_vitals_domain::enrichment::ExcerptRole::UserTurn).map(|value|value.text)
+                        };
+                        row["skill"]=json!(safe.unwrap_or_else(||"<redacted>".to_owned()));
+                    }
+                    let mut module=state(json!({"skills":rows,"truncated":truncated,"limit":200,
+                        "coverage":"observed_workflow_events_only","outcome_scope":"unpaired_finish_events",
+                        "inventory_included":false}),&generated);
+                    if rows.is_empty() { module["state"]=json!("empty"); }
+                    module
+                }
                 "findings"=>{
-                    let available=|rows:Vec<Value>| rows.into_iter().filter(|r| identities.get(r["harness"].as_str().unwrap_or("")).is_some_and(|id|id.findings)).collect::<Vec<_>>();
+                    let available=|rows:Vec<Value>| rows.into_iter().filter(|r| harness.map_or(true,|id|r["harness"].as_str()==Some(id)) && identities.get(r["harness"].as_str().unwrap_or("")).is_some_and(|id|id.findings)).collect::<Vec<_>>();
                     let backlog=available(stats::finding_counts(db.conn(),from,end,"current_backlog").map_err(|_|"module_unavailable")?);
                     let new=available(stats::finding_counts(db.conn(),from,end,"window_new").map_err(|_|"module_unavailable")?);
                     let mut module=state(json!({"current_backlog":backlog,"window_new":new,
-                        "capabilities":super::app_harnesses::public_identities(&identities),"detail_state":"unsupported"}),&generated);
+                        "capabilities":super::app_harnesses::public_identities(&identities).into_iter().filter(|row|harness.map_or(true,|id|row["id"].as_str()==Some(id))).collect::<Vec<_>>(),"detail_state":"unsupported"}),&generated);
                     if backlog.is_empty() && new.is_empty() { module["state"]=json!("empty"); }
                     module
                 }
