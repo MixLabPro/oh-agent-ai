@@ -128,6 +128,16 @@ if (process.argv.includes("--cities")) {
           notPassed: bad.map((r) => ({ routeId: r.routeId, kind: full.routes.find((x) => x.id === r.routeId)?.kind, verdict: r.verdict, cause: r.cause, detail: r.detail, witness: r.witness })) }, null, 1));
       }
       for (const r of bad.slice(0, 12)) console.log(`  ${r.routeId} ${r.verdict}:${r.cause} ${r.detail}`);
+      // 局部载入碰撞体（corridorSolids）必须与整城载入逐字相同：结论、原因、试跑轨迹都一样。只在整城装得下的
+      // 小城上能比；PLANNER_SCOPE_DIFF=0 关掉（大城整城必超预算）。
+      if (process.env.PLANNER_SCOPE_DIFF !== "0" && !kinds) {
+        const sample = (r) => full.routes.indexOf(r) % Math.max(1, Math.ceil(full.routes.length / 40)) === 0;
+        const local = kit.executeAuditPlan(world, plan, keyFor, { only: sample }).results;
+        const whole = kit.executeAuditPlan(world, plan, keyFor, { only: sample, solidScope: "world" }).results;
+        assert.equal(local.length, whole.length);
+        for (let i = 0; i < local.length; i++) assert.equal(JSON.stringify(local[i]), JSON.stringify(whole[i]), `${scene} ${local[i].routeId}: corridor solids change the result`);
+        console.log(`Audit planner: ${scene}: corridor-local solids reproduce the whole-world run on ${local.length} sampled cases.`);
+      }
       assert.ok(report.results.every((r) => r.verdict !== "blocked" || r.witness), "blocked always carries a witness");
     } finally { lease.release(); }
   }
