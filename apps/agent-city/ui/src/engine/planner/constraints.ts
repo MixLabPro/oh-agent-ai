@@ -16,7 +16,7 @@
 import type { createCityPlan } from "../cityPlan";
 import type { Vec2 } from "../cityLayout";
 import { declaredGroundRoadClear } from "./modelEnvelope";
-import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
+import { bridgeheadStubEnds, bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
 import { WATER_LEVEL, wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
 import { pointInPolygon, siteFootprint, siteFootprintSeparation, siteRoadClear, worldFootprintSamples } from "../planFootprint";
 import { componentOf, primaryComponentId } from "./intent";
@@ -241,7 +241,7 @@ export const looseInlandRoadEnds: Constraint = {
     // 豁免改用语义判定（planner/endpoints.ts，网络优先设计批次 1）：旧 height ≥ 2.5 是「靠水断头=合法」的
     // 地形代理，把平岛的内陆断头全部藏进盲区（四档 75–90% 的岛至少 1 个，2026-10-08 实测）。
     const world = {
-      bridgeLandings: bridgeLandingNodes(plan.roadEdges),
+      bridgeLandings: bridgeLandingNodes(plan.roadEdges), bridgeheadStubs: bridgeheadStubEnds(plan.roadEdges),
       sites: planSites(plan),
       boulevardEnds: (plan.seaside?.samples ?? []).filter((s: Site) => s.valid && s.boulevard).map((s: Site) => s.boulevard),
       // 海段 + 河岸段（批次 3-2 清偿切片分歧：曾只看海段，宽河 run 端 >40 时修复豁免、检测计违例）

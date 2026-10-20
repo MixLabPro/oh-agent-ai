@@ -210,8 +210,8 @@ console.log("Structure surface: THREE-exact BOX/cylinder tops, level/sloped/roll
 if (process.argv.includes("--cities")) {
   const baselineFile = JSON.parse(readFileSync(new URL("../fixtures/city-driving/structure-render-baseline.json", import.meta.url), "utf8"));
   const baseline = baselineFile.plans; const correctedPlans = baselineFile.corrected.plans;
-  const totals = { bridges: 0, landings: 0, connected: 0, crossings: 0, crossable: 0, ramps: 0, rampsConnected: 0, rampsUp: 0, rampsDown: 0 };
-  const reasons = {}; const failures = []; const rampFailures = [];
+  const totals = { bridges: 0, landings: 0, connected: 0, crossings: 0, routedCrossings: 0, crossable: 0, ramps: 0, rampsConnected: 0, rampsUp: 0, rampsDown: 0 };
+  const reasons = {}; const failures = []; const rampFailures = []; const axisOnly = [];
   for (const seed of [1, 7, 42, 2026, 65537]) for (const tier of [1, 2, 3]) {
     const plan = cachedPlan(kit.createCityPlan, seed, tier);
     const digests = await structureRenderDigests(kit, plan);
@@ -250,6 +250,7 @@ if (process.argv.includes("--cities")) {
       }
       return "timeout";
     };
+    const drivePath = makeRoutePilot(kit, key);
     for (const id of new Set(connectivity.map((x) => x.landing.structureId))) {
       const ends = connectivity.filter((x) => x.landing.structureId === id);
       if (ends.length !== 2 || !ends.every((x) => x.connected)) continue;
@@ -258,10 +259,29 @@ if (process.argv.includes("--cities")) {
       const reach = 1.4 + 0.25 + 0.2; // half car length + deck overhang + margin
       assert.equal(run(from, ux, uz, reach + 1, len - reach - 1, from.layerId), "ok", `seed ${seed} tier ${tier} ${id}: the open span itself is drivable`);
       const full = run(from, ux, uz, -1.5, len + reach);
-      if (full === "ok") totals.crossings++; else failures.push(`${seed}/${tier} ${id.slice(0, 28)} ${full}`);
+      if (full === "ok") { totals.crossings++; continue; }
+      // 斜接引道：直线跟不了拐弯（7/2 桥尾两条引道都拐 50° 以上，直行必压人行道），改沿真实地面引道开一遍。
+      // 两端各取与「离桥方向」最一致的地面边，最多走 6；仍不通才算桥头故障。直线结果照样记在日志里。
+      const leg = (l) => {
+        const node = `${l.x}:${l.z}`; let best = null, bestDot = -Infinity;
+        for (const e of plan.roadEdges) {
+          if (e.bridge || (e.from !== node && e.to !== node)) continue;
+          const pts = e.from === node ? e.points : [...e.points].reverse();
+          const d = Math.hypot(pts[1].x - pts[0].x, pts[1].z - pts[0].z) || 1;
+          const dot = ((pts[1].x - pts[0].x) * l.outX + (pts[1].z - pts[0].z) * l.outZ) / d;
+          if (dot > bestDot) { bestDot = dot; best = { pts, d }; }
+        }
+        if (!best) return null;
+        const t = Math.min(6, best.d * 0.8) / best.d;
+        return { x: best.pts[0].x + (best.pts[1].x - best.pts[0].x) * t, z: best.pts[0].z + (best.pts[1].z - best.pts[0].z) * t };
+      };
+      const a = leg(from), b = leg(to);
+      const routed = a && b ? drivePath(regions, [a, { x: from.x, z: from.z }, { x: to.x, z: to.z }, b]).result : "no-approach-leg";
+      assert.ok(!routed.startsWith("invalid"), routed);
+      if (routed === "ok") { totals.crossings++; totals.routedCrossings++; axisOnly.push(`${seed}/${tier} ${id.slice(0, 28)} axis ${full}`); }
+      else failures.push(`${seed}/${tier} ${id.slice(0, 28)} axis ${full}; routed ${routed}`);
     }
     // Expressway ramps (cross-layer portals): road → ramp → elevated deck, and back down.
-    const drivePath = makeRoutePilot(kit, key);
     for (const x of kit.landingConnectivity(c, regions).filter((x) => x.landing.structureId.startsWith("expressway:"))) {
       const l = x.landing; const run = plan.highways[Number(l.structureId.split(":")[1])];
       const upPath = [{ x: l.x + l.outX * 4, z: l.z + l.outZ * 4 }, ...(l.end === "from" ? run : [...run].reverse())];
@@ -287,6 +307,7 @@ if (process.argv.includes("--cities")) {
   // crossed approach → approach on the axis. Lower numbers mean the deck/landing geometry regressed.
   assert.ok(totals.crossings >= 7, `approach-to-approach crossings regressed (${totals.crossings}/${totals.crossable}): ${failures.join("; ")}`);
   if (failures.length) console.log(`Structure surface: landing-zone failures (reported, not opened): ${failures.join("; ")}`);
+  if (axisOnly.length) console.log(`Structure surface: crossed along the real (angled) approach, not on the axis: ${axisOnly.join("; ")}`);
   // Floors measured 2026-10-16 (landed + densified ramps, v4 portals): all 14 ramp ends connect, 13
   // climb to the deck (one pilot start sits on a footprint-blocked approach), all 14 descend to the road.
   // 2026-10-19 重测：ad697cfa（junction rings / highway interchange planning）后这 15 个规划里高架只剩

@@ -45,8 +45,32 @@ export function isOwnedIslandGate(nodeId: string, sites: readonly IslandGateOwne
 /** 近水终止带宽：沿海/河岸路中心线离水 14–22，端头与 run 端邻域再放宽。 */
 export const WATER_STOP_MARGIN = 40;
 
+/** 桥头残桩上限：贴在桥头节点上、比这还短的断头边不是任何人的入口路，只是桥接残留。 */
+export const BRIDGEHEAD_STUB_MAX = 6;
+/** 桥头残桩的断头端（2026-10-20）：度为 1 的地面边短于 BRIDGEHEAD_STUB_MAX、另一端是连续桥头且该桥头还有
+ *  ≥2 条别的地面边。它们会落进「用地门前 r+12 / 近水」等豁免圈而被当成计划内终点——7/2 桥
+ *  -16.57:295.97/58.1:308.1 桥尾正前方 2.0 长的残桩就是这样留下的：直行下桥 3 个单位压上人行道，
+ *  审计规划器选「最对齐的引道」也选中它。检测（constraints.looseInlandRoadEnds）与删除（pruneShortSpurs）
+ *  同用本集合；接驳/延长类修复不传它，免得把残桩反向接长。 */
+export function bridgeheadStubEnds(edges: readonly RoadEdge[]): Set<string> {
+  const ground = new Map<string, RoadEdge[]>();
+  for (const edge of edges) if (!edge.bridge) for (const id of [edge.from, edge.to]) (ground.get(id) ?? ground.set(id, []).get(id)!).push(edge);
+  const landings = bridgeLandingNodes(edges);
+  const out = new Set<string>();
+  for (const [id, list] of ground) {
+    if (list.length !== 1) continue;
+    const edge = list[0]; const other = edge.from === id ? edge.to : edge.from;
+    if (!landings.has(other) || (ground.get(other)?.length ?? 0) < 3) continue;
+    let length = 0; for (let k = 1; k < edge.points.length; k += 1) length += Math.hypot(edge.points[k].x - edge.points[k - 1].x, edge.points[k].z - edge.points[k - 1].z);
+    if (length < BRIDGEHEAD_STUB_MAX) out.add(id);
+  }
+  return out;
+}
+
 export type PlannedEndInputs = {
   bridgeLandings?: ReadonlySet<string>;
+  /** bridgeheadStubEnds：这些断头端不享受任何计划内终点豁免（只有检测与 pruneShortSpurs 传入）。 */
+  bridgeheadStubs?: ReadonlySet<string>;
   sites: Array<{ x: number; z: number; radius: number }>;
   /** 滨海大道合法断点（plan.seaside.samples[].boulevard，仅 valid 采样）。 */
   boulevardEnds: Vec2[];
@@ -73,6 +97,7 @@ const polylineDistance = (pts: Vec2[], p: Vec2): number => {
 
 /** 度为 1 的路端是否属于计划内终点（见模块头）。除 node 外全部是只读数据，无随机。 */
 export function isPlannedRoadEnd(node: Vec2 & { id?: string }, world: PlannedEndInputs): boolean {
+  if (world.bridgeheadStubs?.has(node.id ?? `${node.x}:${node.z}`)) return false;
   if (world.bridgeLandings?.has(node.id ?? `${node.x}:${node.z}`)) return true;
   if (world.boulevardEnds.some((b) => Math.hypot(b.x - node.x, b.z - node.z) < 1)) return true;
   if (world.sites.some((s) => Math.hypot(s.x - node.x, s.z - node.z) < s.radius + 12)) return true;

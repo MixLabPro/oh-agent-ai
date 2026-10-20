@@ -4,7 +4,7 @@ import type { RoadEdge, Vec2 } from "../cityLayout";
 import { addNetworkEdge, keyOf } from "./network";
 import { crosses, polylineDistance, safeRoadLink } from "./footprint";
 import type { RepairContext } from "./context";
-import { bridgeLandingNodes, isPlannedRoadEnd, type PlannedEndInputs } from "./endpoints";
+import { bridgeheadStubEnds, bridgeLandingNodes, isPlannedRoadEnd, type PlannedEndInputs } from "./endpoints";
 import { runConnection, runMiniRoundabout, type ConnectorWorld, type ConnectionStrategy } from "./connect";
 import { mergeCoincidentJunctionLegs } from "./snapJunctions";
 import { groundJunctionCorridorFailure } from "./civicClearance";
@@ -305,8 +305,10 @@ export function resolveAcuteJunctions(ctx: RepairContext): number {
 export function pruneShortSpurs(ctx: RepairContext): number {
   let removed = 0;
   const sites = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius);
-  const plannedWorld = plannedEndWorld(ctx, sites);
+  const baseWorld = plannedEndWorld(ctx, sites);
   for (let pass = 0; pass < 4; pass += 1) {
+    // 桥头残桩不享受计划内终点豁免（endpoints.bridgeheadStubEnds，与 looseInlandRoadEnds 检测同口径）。
+    const plannedWorld = { ...baseWorld, bridgeheadStubs: bridgeheadStubEnds([...ctx.network.edges.values()]) };
     const deg = new Map<string, RoadEdge[]>();
     for (const e of ctx.network.edges.values()) if (!e.bridge) for (const id of [e.from, e.to]) (deg.get(id) ?? deg.set(id, []).get(id)!).push(e);
     let changed = 0;
@@ -323,7 +325,12 @@ export function pruneShortSpurs(ctx: RepairContext): number {
       }
       if (!ok || len >= 60 || (deg.get(cur)?.length ?? 0) < 3) continue;
       // 非桥度数会把桥头唯一引道误当短枝；删链必须同时保留桥头的地面邻接。
-      if (chain.some((e) => [...ctx.network.edges.values()].some((b) => b.bridge && [b.from, b.to].some((id) => id === e.from || id === e.to)))) continue;
+      // 只保护「删完桥头就没有地面边」的链（与 landing.ts::groundChainAtRisk 同口径：桥头恰一条地面边）。
+      // 曾是碰到桥头一律不删，桥头旁另有引道时贴桥头的断头残桩也删不掉（7/2，见 endpoints.bridgeheadStubEnds）。
+      const chainIds = new Set(chain.map((e) => e.id));
+      if (chain.some((e) => [e.from, e.to].some((end) =>
+        [...ctx.network.edges.values()].some((b) => b.bridge && (b.from === end || b.to === end)) &&
+        !(deg.get(end) ?? []).some((g) => !chainIds.has(g.id) && ctx.network.edges.has(g.id))))) continue;
       if (!chain.every((e) => keepsSiteDoors(ctx, e) && !onCarPath(ctx, e))) continue;
       for (const e of chain) dropEdge(ctx, e);
       removed += chain.length; changed += 1;
