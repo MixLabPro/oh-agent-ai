@@ -258,14 +258,17 @@ if (process.argv.includes("--cities")) {
       const [from, to] = ends.map((x) => x.landing); const ux = -from.outX, uz = -from.outZ; const len = Math.hypot(to.x - from.x, to.z - from.z);
       const reach = 1.4 + 0.25 + 0.2; // half car length + deck overhang + margin
       assert.equal(run(from, ux, uz, reach + 1, len - reach - 1, from.layerId), "ok", `seed ${seed} tier ${tier} ${id}: the open span itself is drivable`);
-      const full = run(from, ux, uz, -1.5, len + reach, from.layerId);
-      let crossed = full === "ok";
+      // This run starts OUTSIDE the deck on the ground approach; only the span-only
+      // run above starts on the bridge layer. Entry/transition failures stay visible.
+      const full = run(from, ux, uz, -1.5, len + reach, "ground");
+      const crossed = full === "ok";
       if (seed === 7 && tier === 2 && id === "bridge:-16.57:295.97/58.1:308.1") {
         // This bank is a junction, not a straight continuation: its axis-aligned 2m stub ends at
         // a sidewalk, while one real branch turns away from the bridge. Keep the straight-run
         // rejection as evidence and validate the actual road-network turn with the same kernel.
-        assert.match(full, /unsupported-footprint:curb:sidewalk/, "the nonexistent straight continuation remains blocked by the sidewalk");
         const landing = ends.find((x) => Math.hypot(x.landing.x + 16.57, x.landing.z - 295.97) < 0.02).landing;
+        const axisExit = run(landing, landing.outX, landing.outZ, -8, reach, landing.layerId);
+        assert.match(axisExit, /unsupported-footprint:curb:sidewalk/, "the nonexistent straight continuation remains blocked by the sidewalk");
         const node = `${landing.x.toFixed(2)}:${landing.z.toFixed(2)}`;
         const start = { x: landing.x - landing.outX * 8, z: landing.z - landing.outZ * 8 };
         const startSurface = regions.classify(start.x, start.z, landing.layerId);
@@ -284,8 +287,9 @@ if (process.argv.includes("--cities")) {
         const openBranch = branchRuns.filter((x) => x.result === "ok");
         assert.deepEqual(openBranch.map((x) => x.edge), ["-16.57:295.97/-21.33:302.1"],
           `only the connected, drivable junction branch should carry the bridge route: ${JSON.stringify(branchRuns)}`);
-        crossed = true;
-        console.log(`Structure surface: seed 7 tier 2 ${id}: axis continuation stays sidewalk-blocked (${full}); actual junction branch ${openBranch[0].edge} driven through the landing.`);
+        // This proves the junction exit, not the whole approach-to-approach run.
+        // Keep `crossed` tied to `full` so a failed opposite entry is not hidden.
+        console.log(`Structure surface: seed 7 tier 2 ${id}: axis exit stays sidewalk-blocked (${axisExit}); whole-axis approach result ${full}; actual junction branch ${openBranch[0].edge} driven through the landing.`);
       }
       if (crossed) totals.crossings++; else failures.push(`${seed}/${tier} ${id.slice(0, 28)} ${full}`);
     }

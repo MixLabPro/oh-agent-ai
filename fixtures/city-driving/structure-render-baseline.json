@@ -550,66 +550,66 @@
     }
   },
   "bridgeLandingBlend": {
-    "note": "2026-10-20: landed bridge decks follow the rendered terrain surface within a bounded 3m landing zone, sampled in <=0.5m pieces; conflict and slope tolerances are unchanged.",
+    "note": "2026-10-20: landed bridge decks follow the rendered terrain surface within a bounded 3m landing zone, sampled in <=0.5m pieces; conflict and slope tolerances are unchanged. Independent review: the recorded infrastructure digests preceded the final landed-end split selection in 80a1b536. Replaying that earlier selection reproduces all 15 old digests; only buildInfrastructure changes with the final selection, while curbs and all other systems stay byte-identical. These rendering digests are not driving admission evidence; large-city topology/collision failures remain tracked.",
     "plans": {
       "1/1": {
-        "buildInfrastructure": "e5e7c919ec197a18e3eff87cbc7c736bed7b31d9293444f5565a616ebdf4ac52",
+        "buildInfrastructure": "176d6bec4de132e2bbee4b5dbbafc945006a3fe00e20a6576f1da2ca68b1edbd",
         "buildTrussBridges": "cbbf2663cc5202abe97c1e0e332d52abc896972d05223b3050d1dd39d0dcbf59"
       },
       "1/2": {
-        "buildInfrastructure": "e5e7c919ec197a18e3eff87cbc7c736bed7b31d9293444f5565a616ebdf4ac52",
+        "buildInfrastructure": "176d6bec4de132e2bbee4b5dbbafc945006a3fe00e20a6576f1da2ca68b1edbd",
         "buildTrussBridges": "cbbf2663cc5202abe97c1e0e332d52abc896972d05223b3050d1dd39d0dcbf59"
       },
       "1/3": {
-        "buildInfrastructure": "a8ed9e86a59dcd5f19789340e46a9c41c6bf2e4bdb1ffbdf49d60a73e8e53bb0",
+        "buildInfrastructure": "35416ae44ccb0581b4b1cdd2c8df530794a4dec658dc17e2ad3aa4f93383c501",
         "buildTrussBridges": "ab82e63f24c036a81a3fb178189bf7baf5eb4b8bc87d63d222371b5563c5228b"
       },
       "7/1": {
-        "buildInfrastructure": "577a7489197d501f204b639170955ba466e34a84a57d458613a222ef672f6f86",
+        "buildInfrastructure": "207a5697957408203a9332a2c66a0252dc8c824d248596df99a845f32df4a520",
         "buildTrussBridges": "170181698bf7894a62f9ecaa4ecb37387de0a57d767959dd3fdacb9b9011e82a"
       },
       "7/2": {
-        "buildInfrastructure": "1c715ec67430bfddadf0f7758fdd2acfa25ad3d219b80e4236e63c02f24cadb5",
+        "buildInfrastructure": "bdceabbcde259a702213459f5ddebcfa850538e3c175e6c2c4bcfef4ee6face7",
         "buildTrussBridges": "4cba8e353bb2930f06ca5a5a14c72d88607865f296157910dd90a81638c6d59d"
       },
       "7/3": {
-        "buildInfrastructure": "6db9eb61d67463a178f70d3341b923e5cccac5214396340207c1410172ae0340",
+        "buildInfrastructure": "a96b27650d963774103d754d3cbfd89930d761fd1e795d8f8448b679bee291e8",
         "buildTrussBridges": "bf235dc807557afee5ac7bb6863af723151d7b844afa2b78800b6384f2f39ce2"
       },
       "42/1": {
-        "buildInfrastructure": "2161c33cc9ebb454be24b662cd1c240b1c502af53948afc93c9956e0f6762960",
+        "buildInfrastructure": "73a031f5d93b7ae5af0af43f59eb634f987a91f92b6677a87e572cd8ada2e080",
         "buildTrussBridges": "dd2a3649e9ab10151efb147df6e1c72af5f5fcfaab387d8a5762d4e7823ee8da"
       },
       "42/2": {
-        "buildInfrastructure": "da9bc3b5a75e88ee6ee422c1bfab7bf804fff2e09d520cc529731b7e8b81392f",
+        "buildInfrastructure": "fbb3239e650614dfae3a4bdabc2fb7187e120d0abb4248341654b1cdd27914b3",
         "buildTrussBridges": "d40c87fa795b4914bfd62c7018b185d77a645dfb2cfb5c09de6d6224df7c25f0"
       },
       "42/3": {
-        "buildInfrastructure": "e279b27cbaa1cc33cde73a81d141975bac123d752af1fa9b4af01e6a4058b831",
+        "buildInfrastructure": "49743d84bff1915f484b2caff4afa8ce28dcfc1917583eda805c8eb84782c865",
         "buildTrussBridges": "ad10864a3d3f5b36b138a2e932e82e2ecbe94fb1d665fbedad53f3c75fcb073e"
       },
       "2026/1": {
-        "buildInfrastructure": "774134d449efc43c883c07e5c4ac78e1c64435bfc26bc52c3b7db8da50080c00",
+        "buildInfrastructure": "3de4638a5f24070c2cf07fc6193effc8a0780c8277a006f498ee72713e3751e8",
         "buildTrussBridges": "dc8b5ee3e9b87570c331299488c22c640a9ff9ce7c6ec3fe28c542798192d67d"
       },
       "2026/2": {
-        "buildInfrastructure": "4b7020e83b86ed1ea2dbb880b8a5e28d5c8c85c3e156641697f0507ef850dba8",
+        "buildInfrastructure": "51e89073fd5a420cb9e2b8b4720a45ae84e1211333d9ce2e1aadbacb849b0c91",
         "buildTrussBridges": "f6d68995b18b0b9be88a59f65f971b1f4a15733db6388c5630327b655f55c36f"
       },
       "2026/3": {
-        "buildInfrastructure": "991efba0b4d9d82e3996906f78aa38fc0caecfd8f8d1e5c59242890daaf85d2a",
+        "buildInfrastructure": "18cceb532a7a81bc73526e5dc4a9afd26f7cd5f7670dd396c7f4728752a103b8",
         "buildTrussBridges": "93b3771362b844d878f3e099f70b09dfa1ca74485ead1e5fe2b77d932a6fde37"
       },
       "65537/1": {
-        "buildInfrastructure": "aa6e1e163eaa594e4d99021ab5923f896d072133f1db9b0757072d496c154f88",
+        "buildInfrastructure": "1643b83c4a5365ab5d0986f7ead2466c0f11d8cc9e73198679bee892a46fc777",
         "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "65537/2": {
-        "buildInfrastructure": "83b1f8369fde9deec616950b73c2eedc6597b59dbe347dc97df39e568007260b",
+        "buildInfrastructure": "c2a192c39ae0f7769f425dc665d6d681ba52ab5fa10bbc3ad491a87042253a05",
         "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "65537/3": {
-        "buildInfrastructure": "beb625a124464f4954064b66f7a4c57df60f1a57bdb543ebd496c6378cce31ea",
+        "buildInfrastructure": "0865c987af5c0c6cce1a8b551383927f29bbe276a383183ee2975094f07018e1",
         "buildTrussBridges": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       }
     }
