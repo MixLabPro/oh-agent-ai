@@ -91,32 +91,38 @@ esac
 
 mkdir -p "$dmg_dir"
 dmg="$dmg_dir/oh-agent-$version-arm64.dmg"
-staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/oh-agent-dmg.XXXXXX")"
-trap 'rm -rf "$staging_dir"' EXIT
-
-echo "release-macos: creating fresh arm64 DMG"
-ditto "$app" "$staging_dir/Oh Agent.app"
-hdiutil create -ov -format UDZO -volname "Oh Agent" \
-  -srcfolder "$staging_dir" "$dmg"
-
-case "$notarization_mode" in
+submit_for_notarization() {
+  local target="$1"
+  case "$notarization_mode" in
   keychain-profile)
-    echo "release-macos: submitting DMG with notarytool keychain profile"
-    xcrun notarytool submit "$dmg" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
+    xcrun notarytool submit "$target" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
     ;;
   apple-id)
-    echo "release-macos: submitting DMG with Apple ID credentials"
-    xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+    xcrun notarytool submit "$target" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
       --team-id "$APPLE_TEAM_ID" --wait
     ;;
   none) ;;
   *) die "internal error: unknown notarization mode: $notarization_mode" ;;
-esac
+  esac
+}
 
 if [ "$notarization_mode" != "none" ]; then
-  echo "release-macos: stapling and validating notarization tickets"
+  # The copy inside the installer carries its own offline notarization ticket.
+  notary_dir="$(mktemp -d "${TMPDIR:-/tmp}/oh-agent-notary.XXXXXX")"
+  trap 'rm -rf "$notary_dir"' EXIT
+  ditto -c -k --sequesterRsrc --keepParent "$app" "$notary_dir/app.zip"
+  echo "release-macos: notarizing app before embedding it in the DMG"
+  submit_for_notarization "$notary_dir/app.zip"
   xcrun stapler staple "$app"
   xcrun stapler validate "$app"
+fi
+
+echo "release-macos: creating fresh arm64 DMG"
+bash "$repo_root/scripts/create-macos-dmg.sh" "$app" "$dmg"
+
+if [ "$notarization_mode" != "none" ]; then
+  echo "release-macos: notarizing DMG and validating tickets"
+  submit_for_notarization "$dmg"
   xcrun stapler staple "$dmg"
   xcrun stapler validate "$dmg"
   spctl --assess --type execute --verbose=4 "$app"

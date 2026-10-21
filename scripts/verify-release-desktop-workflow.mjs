@@ -18,6 +18,11 @@ for (const required of ["Stage branded installers", "Name=Oh Agent", "VersionInf
   if (!platformWorkflow.includes(required)) throw new Error(`missing platform guard: ${required}`);
 }
 const signingScript = readFileSync(path.join(repo, "scripts/sign-notarize-macos.sh"), "utf8");
+for (const source of [signingScript, readFileSync(path.join(repo, "scripts/release-macos.sh"), "utf8")]) {
+  if (!source.includes('bash "$repo_root/scripts/create-macos-dmg.sh" "$app" "$dmg"')) {
+    throw new Error("local and CI releases must share the drag-to-Applications DMG builder");
+  }
+}
 for (const required of ['--timestamp "$cli"', '--timestamp "$app"', "get('status') != 'Accepted'", 'stapler validate "$dmg"']) {
   if (!signingScript.includes(required)) throw new Error(`missing signing boundary: ${required}`);
 }
