@@ -484,6 +484,12 @@
     "shared": false
   },
   {
+    "id": "verify-city-minimap",
+    "file": "verify-city-minimap.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-plan-repair-bridgehead",
     "file": "verify-plan-repair-bridgehead.mjs",
     "env": {},

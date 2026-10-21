@@ -267,3 +267,19 @@
 .city-skill-list li { display: block; }
 .city-skill-list strong { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }
 .city-skill-list dl { margin: 0; }
+
+/* 小地图（2026-10-21）：路网与路况，左下角，在时间回放条之上。 */
+.city-minimap { position: absolute; left: 24px; max-width: 240px; box-sizing: border-box; bottom: calc(var(--city-timeline-height, 48px) + 30px); z-index: 4; padding: 8px; background: var(--city-surface); border: 1px solid var(--city-border); border-radius: 12px; font-size: 11px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); }
+.city-minimap header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.city-minimap header b { font-size: 12px; }
+.city-minimap header span { flex: 1; font-variant-numeric: tabular-nums; }
+.city-minimap header span.is-bad { color: #ff6a5c; }
+.city-minimap header span.is-ok { color: #6fd08c; }
+.city-minimap header button { border: 0; background: none; color: inherit; font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.city-minimap canvas { display: block; border-radius: 6px; cursor: crosshair; }
+.city-minimap-note { margin: 6px 0 4px; color: var(--city-muted); line-height: 1.35; }
+.city-minimap-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0; padding: 0; list-style: none; color: var(--city-muted); }
+.city-minimap-legend i { display: inline-block; width: 10px; height: 4px; margin-right: 4px; vertical-align: middle; border-radius: 2px; }
+.city-minimap-legend i.is-camera { width: 0; height: 0; border-radius: 0; background: none; border-left: 8px solid #4dd2ff; border-top: 4px solid transparent; border-bottom: 4px solid transparent; }
+.city-minimap-toggle { position: absolute; left: 24px; bottom: calc(var(--city-timeline-height, 48px) + 30px); z-index: 4; width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--city-border); background: var(--city-surface); font-size: 18px; cursor: pointer; }
+@media (max-width: 720px) { .city-minimap { left: 12px; transform: scale(0.8); transform-origin: left bottom; } .city-minimap-toggle { left: 12px; } }
