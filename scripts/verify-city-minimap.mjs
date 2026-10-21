@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 globalThis.window ??= globalThis;
-const { minimapModel, auditLayout } = await loadCity({ "minimap/roadConditions.ts": ["minimapModel"], "engine/planAudit.ts": ["auditLayout"] });
+const { minimapModel, auditLayout, trafficModel, trafficLevel } = await loadCity({ "minimap/roadConditions.ts": ["minimapModel"], "engine/planAudit.ts": ["auditLayout"], "minimap/traffic.ts": ["trafficModel", "trafficLevel"] });
 const wet = (x) => x > 200 && x < 240;
 const height = (x, z) => (wet(x) ? -1 : z > 40 && x > -60 && x < -40 ? 2 + (z - 40) * 0.5 : z > 40 && x > -100 && x < -80 ? 2 + (z - 40) * 0.25 : 2);
 const terrain = { height, slope: () => 0, buildable: (x) => !wet(x), center: { x: 0, z: 0 }, radius: 400, coastRadius: () => 400, hasRiver: true };
@@ -36,4 +36,24 @@ const { cols, rows, water } = model.water;
 const at = (x, z) => water[Math.floor(((z - model.bounds.minZ) / (model.bounds.maxZ - model.bounds.minZ)) * rows) * cols + Math.floor(((x - model.bounds.minX) / (model.bounds.maxX - model.bounds.minX)) * cols)];
 assert.equal(at(220, 0), 1, "the river is water"); assert.equal(at(0, 0), 0, "the bank is land");
 assert.equal(minimapModel(layout), model, "cached per layout object");
-console.log("City minimap: steep roads red, near-limit roads amber, oblique bridgehead decks red, flat roads plain; spots match the repair audit's road rules one for one; water sampled from terrain; cached per layout.");
+assert.ok(model.blocked.has("-50:40/-50:100") && model.blocked.has("197:0/243:0") && !model.blocked.has("-90:40/-90:100"), "blocked = the red roads, exactly");
+
+// 道路审计的车流估算：两片市中心之间只有一条窄路 → 拥堵；加一条平行主干道 → 车流分走、窄路不再堵；
+// 窄路开不过去（blocked）且没有别的路 → 不进路网，两片之间的出行记作「到不了」，而不是悄悄消失。
+const flat = { ...terrain, height: () => 2, buildable: () => true };
+const block = (id, x, z) => ({ id, districtId: "d", x, z, width: 40, depth: 40, zone: "downtown", polygon: [], parcels: [{ id: `${id}p`, blockId: id, x, z, yaw: 0, zone: "downtown", width: 40, depth: 40 }] });
+const city = (extra) => { const es = [road({ x: 0, z: 0 }, { x: 400, z: 0 }), ...extra];
+  return { ...layout, terrain: flat, roadEdges: es, roadNodes: [...new Set(es.flatMap((e) => [e.from, e.to]))].map((id) => { const [x, z] = id.split(":").map(Number); return { id, x, z }; }),
+    blocks: [block("a", -10, 10), block("b", 410, 10)], contextBuildings: [] }; };
+const none = new Set(); const narrow = city([]); const one = trafficModel(narrow, none);
+const link = one.edges.get("0:0/400:0");
+assert.ok(one.trips > 0 && link.volume > 0, "trips are generated from block land use and routed");
+assert.equal(link.level, "jam", `a single narrow link between two downtowns jams (v/c ${link.vc.toFixed(2)})`);
+assert.equal(one.hotspots[0].id, "0:0/400:0"); assert.ok(one.hotspots[0].text.zh.includes("拥堵") && one.hotspots[0].text.en.includes("Jammed"));
+const relieved = trafficModel(city([road({ x: 0, z: 0 }, { x: 200, z: 120 }, 12), road({ x: 200, z: 120 }, { x: 400, z: 0 }, 12)]), new Set());
+assert.ok(relieved.edges.get("0:0/400:0").vc < link.vc * 0.7, "a parallel arterial takes traffic off the narrow link (assignment reroutes by congested time)");
+const cut = trafficModel(narrow, new Set(["0:0/400:0"]));
+assert.ok(!cut.edges.has("0:0/400:0") && cut.unreachable > 0, "an impassable road leaves the network and the trips it carried count as unreachable");
+assert.equal(trafficModel(narrow, none), one, "cached per layout and blocked set (the minimap passes model.blocked, one Set per layout)");
+assert.deepEqual([0.2, 0.5, 0.85, 1.3].map(trafficLevel), ["free", "busy", "slow", "jam"]);
+console.log("City minimap: steep roads red, near-limit roads amber, oblique bridgehead decks red, flat roads plain; spots match the repair audit's road rules one for one; water sampled from terrain; cached per layout. Traffic: a lone narrow link jams, a parallel arterial relieves it, an impassable road strands its trips as unreachable.");

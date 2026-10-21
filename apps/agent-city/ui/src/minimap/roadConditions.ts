@@ -25,6 +25,8 @@ export type MinimapModel = {
   highways: readonly (readonly Vec2[])[];
   issues: readonly MinimapIssue[];
   counts: { blocked: number; steep: number };
+  /** 车开不过去的路（红）：车流估算把它们排除在路网外（traffic.ts）。 */
+  blocked: ReadonlySet<string>;
 };
 
 const cache = new WeakMap<CityLayout, MinimapModel>();
@@ -59,7 +61,7 @@ export function minimapModel(layout: CityLayout): MinimapModel {
   const pad = 20;
   const bounds = Number.isFinite(minX) ? { minX: minX - pad, maxX: maxX + pad, minZ: minZ - pad, maxZ: maxZ + pad }
     : { minX: -layout.extent, maxX: layout.extent, minZ: -layout.extent, maxZ: layout.extent };
-  const cols = 128, rows = Math.max(16, Math.round(cols * (bounds.maxZ - bounds.minZ) / Math.max(1, bounds.maxX - bounds.minX)));
+  const cols = 256, rows = Math.max(16, Math.round(cols * (bounds.maxZ - bounds.minZ) / Math.max(1, bounds.maxX - bounds.minX)));
   const water = new Uint8Array(cols * rows);
   for (let r = 0; r < rows; r += 1) for (let c = 0; c < cols; c += 1) {
     const x = bounds.minX + ((c + 0.5) / cols) * (bounds.maxX - bounds.minX), z = bounds.minZ + ((r + 0.5) / rows) * (bounds.maxZ - bounds.minZ);
@@ -68,6 +70,7 @@ export function minimapModel(layout: CityLayout): MinimapModel {
   const model: MinimapModel = {
     bounds, coast: layout.coast ?? [], water: { cols, rows, water }, roads, highways: layout.highways ?? [], issues,
     counts: { blocked: issues.filter((issue) => issue.severity === "blocked").length, steep: issues.filter((issue) => issue.severity === "steep").length },
+    blocked: new Set(roads.filter((road) => road.condition === "blocked").map((road) => road.id)),
   };
   cache.set(layout, model);
   return model;
