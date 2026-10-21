@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+
+# Astro generated files
+.astro/
+
+# Environment
+.env
+.env.local
+.env.*.local

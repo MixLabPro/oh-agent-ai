@@ -72,8 +72,8 @@ export const sidebar = [
     label: 'More',
     translations: { 'zh-CN': '更多' },
     items: [
-      // External links to landing pages (P0 in the sitemap plan; currently 404 until built).
-      { label: 'FAQ', translations: { 'zh-CN': '常见问题' }, link: 'https://ohagent.ai/faq', attrs: { target: '_self' } },
+      // External links to landing page anchors (ohagent.ai current deployment)
+      { label: 'FAQ', translations: { 'zh-CN': '常见问题' }, link: 'https://ohagent.ai/#faq', attrs: { target: '_self' } },
       { label: 'GitHub', link: 'https://github.com/MixLabPro/oh-agent-ai' },
     ],
   },

@@ -137,4 +137,4 @@ No. Credentials are never saved in anything Oh Agent owns. Some test features ca
 - [Claude Code data source](/docs/data-sources/claude-code) · [Codex data source](/docs/data-sources/codex)
 - [FAQ](/faq)
 '''
-open('src/content/docs/privacy-and-data.md','w').write(md)
+open('../src/content/docs/privacy-and-data.md','w').write(md)
