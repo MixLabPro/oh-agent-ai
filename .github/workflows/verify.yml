@@ -238,6 +238,8 @@ jobs:
       - name: City 专项守卫
         working-directory: apps/desktop/ui-dev
         run: npm run verify:city
+      - name: City initial data-loading feedback
+        run: node scripts/verify-city-initial-loading.mjs
       - name: 术语与命名边界守卫
         working-directory: apps/desktop/ui-dev
         run: npm run verify:terminology

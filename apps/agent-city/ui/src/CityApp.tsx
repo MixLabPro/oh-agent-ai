@@ -214,7 +214,9 @@ export function CityApp() {
 
   const dataAvailable = projection !== null && projection.status !== "unavailable";
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
-  const cityLoading = dataLoaded && dataAvailable && projection?.status !== "empty" && !sceneUnavailable && !firstModelFrame;
+  // The host projection request precedes model/planning progress. Keep the same
+  // loading shell visible from the first render, including a slow summary query.
+  const cityLoading = !sceneUnavailable && (!dataLoaded || (dataAvailable && projection?.status !== "empty" && !firstModelFrame));
   const roadAuditEnabled = sceneReady && !driving.active && !game.active && !cinema && !experience.busy && !experience.film && !planRepair.state.active;
   const roadAudit = useRoadAudit(engineRef, roadAuditEnabled);
   const toolbarReady = true; // UI/command channel ready; scene actions stay disabled until the first model frame.
@@ -287,13 +289,13 @@ export function CityApp() {
       {cityLoading && <div className="city-loading" role="status" aria-live="polite">
         <div className="city-loading-card"><div className="city-loading-mark" aria-hidden="true"><span /><span /><span /><i /></div>
           <p className="city-loading-kicker">AGENT CITY</p>
-          <h2>{cityLoad.stage === "model" ? "整理城市数据" : cityLoad.stage === "planning" ? "规划道路与街区" : cityLoad.stage === "mounting" ? "装配城市" : "等待城市首帧"}</h2>
-          <p>{cityLoad.stage === "model" ? "正在组织会话与建筑数据" : cityLoad.stage === "planning" ? cityLoad.work === null ? "正在计算道路、地形与街区" : `规划器已完成 ${cityLoad.work.toLocaleString()} 项工作单元` : cityLoad.stage === "mounting" ? "正在创建三维场景对象" : "城市即将就绪"}</p>
+          <h2>{cityLoad.stage === "data" ? "读取城市数据" : cityLoad.stage === "model" ? "整理城市数据" : cityLoad.stage === "planning" ? "规划道路与街区" : cityLoad.stage === "mounting" ? "装配城市" : "等待城市首帧"}</h2>
+          <p>{cityLoad.stage === "data" ? status : cityLoad.stage === "model" ? "正在组织会话与建筑数据" : cityLoad.stage === "planning" ? cityLoad.work === null ? "正在计算道路、地形与街区" : `规划器已完成 ${cityLoad.work.toLocaleString()} 项工作单元` : cityLoad.stage === "mounting" ? "正在创建三维场景对象" : "城市即将就绪"}</p>
           <div className="city-loading-track" aria-hidden="true"><span /></div>
           <small>{cityLoad.stage === "planning" && cityLoad.work !== null ? "显示规划器实际完成的工作量，不代表百分比" : "复杂城市需要一些时间，请稍候"}</small>
         </div>
       </div>}
-      {sceneMessage && !game.active && <p className="city-scene-message" role="status">{sceneMessage}</p>}
+      {sceneMessage && !cityLoading && !game.active && <p className="city-scene-message" role="status">{sceneMessage}</p>}
       {!embedded() && <header className="city-header">
         <div className="city-local-toolbar">{tools.map((tool) => tool.kind === "select"
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>

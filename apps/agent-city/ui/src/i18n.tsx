@@ -118,6 +118,7 @@ const english: Record<string, string> = {
   "数据设施": "Data facilities", "打开全窗口统计": "Open full-window statistics", "打开诊断中心": "Open diagnostics", "打开设施数据": "Open facility data",
   "全窗口 token": "Tokens in full window", "问题统计尚未载入，请打开诊断中心。": "Findings have not loaded; open Diagnostics.",
   "全窗统计包含所有匹配会话；建筑与回放只包含已载入部分。": "Window statistics include all matching sessions; buildings and replay cover the loaded subset.",
+  "读取城市数据": "Reading city data",
   "正在读取全窗口统计…": "Reading statistics for the full window…", "正在读取会话建筑…": "Reading session buildings…",
   "正在读取会话详情…": "Reading session details…", "详情暂不可用；数据可能已更新，请刷新城市后重试。": "Details unavailable. Data may have changed; refresh the city and retry.",
   "摘录来自整个会话，可能早于当前统计窗口。": "Excerpts cover the whole session and may predate this statistics window.",
