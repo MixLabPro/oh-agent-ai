@@ -125,4 +125,4 @@ macOS 可能会请你允许读取这些目录。**待确认**：首个公开版�
 - [Claude Code 数据来源](/docs/zh/data-sources/claude-code) · [Codex 数据来源](/docs/zh/data-sources/codex)
 - [常见问题](/zh/faq)
 '''
-open('src/content/docs/zh/privacy-and-data.md','w').write(md)
+open('../src/content/docs/zh/privacy-and-data.md','w').write(md)
