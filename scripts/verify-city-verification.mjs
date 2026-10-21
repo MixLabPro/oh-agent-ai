@@ -16,7 +16,8 @@ assert(manifest.some((s) => s.file === "verify-city-solve.mjs" && !s.shared));
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
 // 88（驾驶线）+ 视觉风格线 3 个（junction-rings / highway-ramps / world-scale）。计数锁防的是悄悄增减，
 // 有意登记就同步改这里，并在下面断言它们确实挂进了 planning 组——否则登记了却不跑。
-assert.equal(manifest.length, 111);
+assert.equal(manifest.length, 112);
+assert(selectStages("module", "display").some(stage => stage.id === "verify-city-coastal-receivers"));
 for (const id of ["verify-city-road-audit-ui", "verify-city-road-audit-worker", "verify-city-road-audit-history"]) {
   assert(manifest.some((stage) => stage.id === id), `${id} must be registered`);
   assert(selectStages("module", "game").some((stage) => stage.id === id), `${id} must run in the game group`);

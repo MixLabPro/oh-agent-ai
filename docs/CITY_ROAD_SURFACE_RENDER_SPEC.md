@@ -90,3 +90,13 @@
 - 渠化喇叭（`buildChannelizedJunctions`）仍是纯色、无细节贴图，与新路面在近景能看出质感差。
 - 场景基线：本次只新增 `city-road-surface` / `city-road-surface-base` 两个分区的哈希并重算 `all`；
   其余约 190 个分区的既有漂移（基线分支上就有，与路无关）原样保留。逐分区对比上一提交：只多出这两个分区。
+
+## 2026-10-22 沙滩、道路与桥头的层次修复
+
+沙滩曾使用原始 `terrain.height + 0.05` 的大三角面，高于道路的 `ROAD_SURFACE_LIFT=0.04`，并与实际渲染地形发生穿插；它会盖住桥头沥青、露出三角形水面，不能只归结为深度精度不足。沙滩现沿地形三角剖分裁剪，采用 `terrainSurfaceHeight + ROAD_SURFACE_LIFT/4`。道路和桥梁的高度/物理契约未改，沙滩仍低于道路，保留现有分层 polygon offset，不关闭深度测试。
+
+`verify-city-coastal-receivers` 检查沙滩三角形内部贴合、沙层低于道路参考面、落地桥端与道路共用高度参考，已登记到 display/full 验证链。类型检查、前端构建及该守卫通过。380/1600 会话昼夜场景仅 `city-beach` 分区变化，审核后更新场景基线。浏览器演示城已检查近景、俯视及小幅转动视角，所见沿岸道路/桥头未复现覆盖闪烁；这不代表全城所有机位或驾驶连通性已验收。
+
+另一次尝试运行旧 `verify-city-road-terrain` 在已有坐标 `(158.7,429.1)` 的 `drivable` 断言失败，新增海岸测试已独立登记，未改动或放宽该旧断言。
+
+补跑 `verify-city-ground-surface` 也在既有 straight fixture 的 pre-refactor geometry digest 比较失败（actual `5df8cb02…`，expected `713dda6d…`）。该守卫只加载本轮未改动的 CPU 道路编译器及夹具，不能通过更新沙滩场景 golden 将其视为已修复；本轮未更新该夹具基线，未宣称全量道路守卫通过。

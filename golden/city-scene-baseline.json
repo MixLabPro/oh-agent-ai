@@ -1,8 +1,8 @@
 {
  "380/day": {
-  "all": "8c05d465fdbc5b52",
+  "all": "1ddd12142cb5e8ca",
   "sections": {
-   "city-beach": "1:1a3fbe0c3ae6",
+   "city-beach": "1:944722f410bf",
    "city-beach-furniture": "3:aabd8546bcee",
    "city-beach-people": "2:d757193d45ee",
    "city-channel-flares": "1:133d05f4c848",
@@ -69,9 +69,9 @@
   }
  },
  "380/night": {
-  "all": "6f59724daefe30a1",
+  "all": "f710a491e247d4d2",
   "sections": {
-   "city-beach": "1:1a3fbe0c3ae6",
+   "city-beach": "1:944722f410bf",
    "city-beach-furniture": "3:aabd8546bcee",
    "city-beach-people": "2:d757193d45ee",
    "city-channel-flares": "1:133d05f4c848",
@@ -138,9 +138,9 @@
   }
  },
  "1600/day": {
-  "all": "ef3591a00e89f02b",
+  "all": "15bb94cbf445ee55",
   "sections": {
-   "city-beach": "1:b78cbe5fde39",
+   "city-beach": "1:9c86895925bb",
    "city-beach-furniture": "3:4dda9432ea9a",
    "city-beach-people": "2:2ef56905c0e7",
    "city-channel-flares": "1:20d1e3e2143e",
@@ -216,9 +216,9 @@
   }
  },
  "1600/night": {
-  "all": "e12dbdcb1025e51d",
+  "all": "fc2c90e88d180ce6",
   "sections": {
-   "city-beach": "1:b78cbe5fde39",
+   "city-beach": "1:9c86895925bb",
    "city-beach-furniture": "3:4dda9432ea9a",
    "city-beach-people": "2:2ef56905c0e7",
    "city-channel-flares": "1:20d1e3e2143e",

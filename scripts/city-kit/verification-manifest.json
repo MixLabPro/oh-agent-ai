@@ -652,5 +652,9 @@
     "file": "repro-city-tick181-rotation-budget.mjs",
     "env": {},
     "shared": false
+  },
+  {
+    "id": "verify-city-coastal-receivers",
+    "file": "verify-city-coastal-receivers.mjs"
   }
 ]

@@ -42,6 +42,7 @@ groups.sites.push(...newGeometryStages);
 groups.display.push("verify-city-layout-envelopes", "verify-city-layout-placement", "verify-city-parcel-frontage", "verify-city-block-placement", "verify-city-block-lot-candidates");
 groups.planning.push("verify-city-layout-placement");
 groups.sites.push("verify-city-layout-placement");
+groups.display.push("verify-city-coastal-receivers");
 export function selectStages(mode, group) {
   if (mode === "full") return manifest;
   if (mode === "fast") return manifest.filter((s) => synthetic.includes(s.id));
