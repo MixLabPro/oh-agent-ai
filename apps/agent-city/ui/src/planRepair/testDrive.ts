@@ -14,6 +14,7 @@
 import type { CityLayout, Vec2 } from "../engine/cityLayout";
 import { bridgeChain, bridgeChainPolyline, edgeLocked } from "../engine/planPatch";
 import { compileCitySurface } from "../engine/surface/compileSurface";
+import { channelizedGeometry } from "../engine/surface/structureCompiler";
 import { buildSurfaceIndex } from "../engine/surface/SurfaceIndex";
 import { buildSurfaceRegions, type SurfaceRegionsBuild } from "../engine/surface/surfaceRegions";
 import { DRIVING_DT, initialDrivingState, type DrivingState } from "../game/DrivingSimulation";
@@ -113,6 +114,47 @@ export function testDriveTarget(layout: CityLayout, edgeId: string): TestDriveTa
   return { kind: "road", edgeIds: [edge.id], width: edge.width, path: trimmed(edge.points, ROAD_END_CLEARANCE, length - ROAD_END_CLEARANCE) };
 }
 
+/**
+ * 绕开渠化导流岛（司机靠右从岛边过）：玩家画路接到现有路上，可能生成渠化 T 口——喇叭口展宽、口里一座导流岛压在路中线上。
+ * 固定的右车道偏移（5 宽路 1.25）正好让车身内侧压上岛（玩家式编辑抽样一半「挡住」都是这个，而喇叭口在岛旁留着 2.4–3.5 的车道）。
+ * 锐角汇入（< 50°，渠化的条件）时支路的岛尖离主臂中线只有 ~2.8，伸进主臂的右车道——生成器自己的 15 个渠化口里 12 个
+ * 主臂单向「挡住」，几何截面证明旁边有车宽的空当：司机会往左让开，不是路不通。
+ * 路线按 1 一步重采样，岛附近的点推到岛空着的一侧（岛缘 + 半车宽 + 0.3），前后 2 内取最大值（再宽就推出喇叭口、压上人行道）。
+ */
+function keepRightOfIslands(path: readonly Vec2[], islands: ReadonlyArray<{ ring: readonly Vec2[] }>): Vec2[] {
+  if (!islands.length || path.length < 2) return [...path];
+  const pts: Vec2[] = []; const dirs: Vec2[] = [];
+  for (let i = 1; i < path.length; i += 1) {
+    const a = path[i - 1], b = path[i]; const len = Math.hypot(b.x - a.x, b.z - a.z); if (len <= 0) continue;
+    const u = { x: (b.x - a.x) / len, z: (b.z - a.z) / len };
+    for (let s = 0; s < len; s += 1) { pts.push({ x: a.x + u.x * s, z: a.z + u.z * s }); dirs.push(u); }
+  }
+  pts.push(path[path.length - 1]); dirs.push(dirs[dirs.length - 1]);
+  const hw = DRIVING_FOOTPRINT.halfWidth, hl = DRIVING_FOOTPRINT.halfLength;
+  const need = pts.map((p, i) => {
+    const u = dirs[i]; const n = { x: -u.z, z: u.x }; let shift = 0; // n 与 rightLane 的偏移方向一致
+    for (const island of islands) {
+      let lo = Infinity, hi = -Infinity;
+      for (const q of island.ring) {
+        const along = (q.x - p.x) * u.x + (q.z - p.z) * u.z; if (Math.abs(along) > hl + 1) continue;
+        const lat = (q.x - p.x) * n.x + (q.z - p.z) * n.z; lo = Math.min(lo, lat); hi = Math.max(hi, lat);
+      }
+      if (lo === Infinity) continue;
+      if (!(hi > -(hw + 0.3) && lo < hw + 0.3)) continue; // 车身横向范围与岛不相交
+      // 从岛空着的一侧过：岛偏右（主臂被锐角支路贴着汇入时，支路的岛尖伸进主臂右车道）就往左让，否则往右让。
+      const toLeft = lo - hw - 0.3, toRight = hi + hw + 0.3;
+      const want = (lo + hi) / 2 > 0 ? toLeft : toRight;
+      if (Math.abs(want) > Math.abs(shift)) shift = want;
+    }
+    return shift;
+  });
+  return pts.map((p, i) => {
+    let shift = 0; for (let k = Math.max(0, i - 2); k <= Math.min(pts.length - 1, i + 2); k += 1) if (Math.abs(need[k]) > Math.abs(shift)) shift = need[k];
+    const n = { x: -dirs[i].z, z: dirs[i].x };
+    return shift ? { x: p.x + n.x * shift, z: p.z + n.z * shift } : p;
+  });
+}
+
 /** 路线向右平移到车道中心（按行驶方向）。 */
 function rightLane(path: readonly Vec2[], offset: number): Vec2[] {
   return path.map((p, i) => {
@@ -159,8 +201,9 @@ export function testDrive(layout: CityLayout, edgeId: string, whole = false): Te
   const regions = drivingRegions(layout, target.path, whole);
   // 桥沿中线开（窄桥两侧是护栏，车在 5 宽的桥上靠中走；偏到右车道，桥头接缝处车轮会探出桥面）；路沿右车道开（避开导流岛）。
   const lane = target.kind === "bridge" ? 0 : Math.max(0, Math.min(target.width / 4, target.width / 2 - DRIVING_FOOTPRINT.halfWidth - 0.3));
-  const forward = driveLeg(regions, rightLane(target.path, lane));
-  const back = driveLeg(regions, rightLane([...target.path].reverse(), lane));
+  const islands = channelizedGeometry(windowAround(layout, target.path)).islands;
+  const forward = driveLeg(regions, keepRightOfIslands(rightLane(target.path, lane), islands));
+  const back = driveLeg(regions, keepRightOfIslands(rightLane([...target.path].reverse(), lane), islands));
   const verdict = forward.result === "blocked" || back.result === "blocked" ? "blocked" : forward.result === "ok" && back.result === "ok" ? "passed" : "undetermined";
   return { target, forward, back, verdict };
 }
