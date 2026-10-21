@@ -257,6 +257,15 @@ uniform float uPoolFadeOn;`)
   const poolMesh = new THREE.Mesh(poolGeometry, pools);
   poolMesh.name = "street-light-pools";
   poolMesh.renderOrder = 2;
+  // GTAO replaces transparent materials with an opaque normal/depth material.
+  // A pool is emitted light, not a physical receiver/occluder: drawing its full
+  // polygon there creates black discs (and it has no surface normals).
+  // Like the plume's override guard, skip the draw and restore after each pass.
+  // Reset on every normal draw too, so an interrupted override cannot hide it.
+  poolMesh.onBeforeRender = (_renderer, scene) => {
+    poolGeometry.setDrawRange(0, scene.overrideMaterial ? 0 : poolData.indices.length);
+  };
+  poolMesh.onAfterRender = () => poolGeometry.setDrawRange(0, poolData.indices.length);
   host.group.add(poolMesh);
   host.disposables.push(poolGeometry);
   // 高架灯带：沿环线两侧护栏上沿的发光细条（桥面高 8.2，护栏在 ±5.1）。

@@ -77,3 +77,33 @@ assert.match(nightSource,/depthTest: true/);
 assert.match(nightSource,/depthWrite: false/);
 assert.match(nightSource,/streetLightPoolGeometry\(host.layout, plan\)/);
 console.log("Street pools: curved-terrain interior clearance, upward winding, UVs and elevated-layer isolation passed.");
+
+// Exercise the actual pool mesh created by buildNightLights. GTAO's override
+// ignores alpha/blending; emitting even one pool triangle pollutes its G-buffer.
+const {installCanvasShim}=await import("./city-kit/scene-hash.mjs");
+installCanvasShim();
+const night=await loadCity({"pkg:three":["* as THREE"],"engine/render/nightLighting.ts":["buildNightLights","setNightGlow"]});
+const T=night.THREE;
+const host={layout:{...layout,roadEdges:[],highways:[],publicSites:[{kind:"park",x:0,z:0,radius:10}]},
+ group:new T.Group(),disposables:[],matrix:new T.Matrix4(),color:new T.Color(),nightGlow:0,nightHour:20,
+ facadeUniforms:[],terrainUniforms:null,waterAssetUniforms:null,heroParts:null,landmarkWindows:[],
+ lifeguardGlowMaterial:null,signageNeonMaterial:null,applyNightOverlay(){},
+ compose(x,y,z,yaw,sx,sy,sz){this.matrix.compose(new T.Vector3(x,y,z),new T.Quaternion().setFromAxisAngle(new T.Vector3(0,1,0),yaw),new T.Vector3(sx,sy,sz));},
+ makeInstanced(g,m,n){const mesh=new T.InstancedMesh(g,m,n);this.group.add(mesh);this.disposables.push(g,m);return mesh;}};
+host.nightLights=night.buildNightLights(host);
+const pool=host.group.getObjectByName("street-light-pools");
+assert(pool?.isMesh);assert(pool.geometry.index.count>0);
+const scene=new T.Scene(), override=new T.MeshNormalMaterial();
+const before=()=>pool.onBeforeRender(null,scene,null,pool.geometry,pool.material,null);
+const after=()=>pool.onAfterRender(null,scene,null,pool.geometry,pool.material,null);
+for(const glow of [0,1,0,1]){
+ night.setNightGlow(host,glow);
+ assert.equal(pool.material.visible,glow===1,"day/night controls remain intact");
+ scene.overrideMaterial=override;before();assert.equal(pool.geometry.drawRange.count,0,"no opaque pool in GTAO normal/depth pass");after();
+ assert.equal(pool.geometry.drawRange.count,pool.geometry.index.count,"restore after override");
+ scene.overrideMaterial=null;before();assert.equal(pool.geometry.drawRange.count,pool.geometry.index.count,"normal additive pass retains the complete pool");after();
+}
+scene.overrideMaterial=override;before(); // Simulate an interrupted pass without after.
+scene.overrideMaterial=null;before();assert.equal(pool.geometry.drawRange.count,pool.geometry.index.count,"the next color pass recovers even after an interrupted override");
+for(const resource of new Set(host.disposables))resource.dispose();override.dispose();
+console.log("Street pool GTAO regression: zero override triangles, additive restoration, interrupted-pass recovery and day/night toggles passed.");
