@@ -12,7 +12,8 @@
  *     实测叠套会报 missing-node/missing-edge，契约收窄为如实的样子。buildingMoves 叠套仍是 no-op
  *     （layoutCity 的 pins 先把楼放到目标地块，套用时命中「已在目标」分支）；
  *   - 失效条目（对象不存在 / 边锁定 / 地块被占 / 节点撞车 / 跨档位）不套用、进 stale 清单如实上报，不静默吞；
- *   - 桥（bridge/deck/ground-approach）与滨海段（purpose=waterfront）锁定不可编辑（SPEC §7.2）。
+ *   - 桥面不能单独改：擦桥面 = 擦整座桥（`bridgeChain`，登记同步撤掉，悬索桥的塔与缆一起拆）；桥面不能改路型、
+ *     连着桥面的路口不能拖（SPEC §15，2026-10-21 放开「整座擦」）。
  *
  * **道路编辑是操作日志（roadOps），按顺序重放**：每个操作引用「执行当时的当前 id」。节点/路段 id 全由坐标推出
  * （`x:z` / `from/to`），所以同一底层布局 + 同一日志的重放是确定的，不需要把 id 翻回原始 id。
@@ -25,11 +26,11 @@
  * constraints.ts 导出稳定后再接（SPEC §0 重估条款）。
  */
 import { hashSeed, type CityBuilding, type CityModel } from "../cityModel";
-import { clearsHighways, roadNodeId } from "./cityPlan";
+import { clearsHighways, roadNodeId, segmentDistance } from "./cityPlan";
 import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 import { CITY_GENERATOR_VERSION } from "./generatorVersion";
 import { applySiteOps, type SiteOp } from "./planSites";
-import { buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan, curvePoints } from "./planGeometry";
+import { bridgeChain, buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan, curvePoints } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
 
@@ -182,7 +183,7 @@ export function hashPlanPatch(patch: PlanPatchV1): string {
 }
 
 
-export { edgeLocked, clearanceRoads, parcelIndex, reservedParcelIds, reservedParcelIdsShared, slotIndex, rectClearOfEdges, rectClearOfRoads, edgesNear, buildingRect, rectsOverlap, quantize, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, type BuildingRect } from "./planGeometry";
+export { bridgeChain, bridgeChainPolyline, deckUnderLandmark, edgeLocked, clearanceRoads, parcelIndex, reservedParcelIds, reservedParcelIdsShared, slotIndex, rectClearOfEdges, rectClearOfRoads, edgesNear, buildingRect, rectsOverlap, quantize, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, type BuildingRect } from "./planGeometry";
 
 /** 编辑前校验（SPEC §7.3）：blockers 非空必须拒绝提交；warnings 只提示。
  *  `layout` 是当前 effective 布局（已套补丁），校验看的是用户眼前的城市。 */
@@ -414,10 +415,16 @@ function replayRoadOps(layout: CityLayout, ops: readonly RoadOp[], stale: PatchS
     if (op.t === "drop") {
       const edge = trial.edges.find((candidate) => candidate.id === op.edge);
       if (!edge) { stale.push({ kind: "road-drop", id: label, reason: "missing-edge", detail: `路段 ${op.edge} 不存在（规划已重算或前序操作已改动）` }); return; }
-      if (edgeLocked(edge)) { stale.push({ kind: "road-drop", id: label, reason: "locked-edge", detail: "骨架/桥/滨海段不可删" }); return; }
-      trial.edges = trial.edges.filter((candidate) => candidate !== edge);
+      // 擦桥面 = 擦整座桥（bridgeChain）；桥头的引道失去桥后就是普通地面路（不再提示「擦掉引道桥会断开」）。
+      const dropped = new Set(bridgeChain(trial.edges, edge));
+      trial.edges = trial.edges.filter((candidate) => !dropped.has(candidate));
+      const touched = new Set([...dropped].flatMap((candidate) => [candidate.from, candidate.to]));
+      const onDeck = new Set(trial.edges.filter(edgeLocked).flatMap((candidate) => [candidate.from, candidate.to]));
+      if (dropped.size > 1 || edgeLocked(edge)) trial.edges = trial.edges.map((candidate) => candidate.structure === "ground-approach"
+        && [candidate.from, candidate.to].some((id) => touched.has(id)) && ![candidate.from, candidate.to].some((id) => onDeck.has(id))
+        ? { ...candidate, structure: "ground-road" as const } : candidate);
       const kept = new Set(trial.edges.flatMap((candidate) => [candidate.from, candidate.to]));
-      trial.nodes = trial.nodes.filter((node) => kept.has(node.id) || (node.id !== edge.from && node.id !== edge.to));
+      trial.nodes = trial.nodes.filter((node) => kept.has(node.id) || !touched.has(node.id));
     } else if (op.t === "restyle") {
       const edge = trial.edges.find((candidate) => candidate.id === op.edge);
       if (!edge) { stale.push({ kind: "road-restyle", id: label, reason: "missing-edge", detail: `路段 ${op.edge} 不存在（规划已重算或前序操作已改动）` }); return; }
@@ -713,10 +720,21 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   const roadEdges = replayed ? replayed.edges : layout.roadEdges;
   const highways = patch.highwayOps?.length ? replayHighwayOps(layout.highways ?? [], patch.highwayOps, stale) : layout.highways;
   const coastRoads = replayed ? deriveCoastRoads(layout, roadEdges) : layout.coastRoads;
-  // 画路生成的地面桥登记进 bridges（渲染层的桁架装饰读它，与生成器的跨河桥同构；桥面锁定、不会被删）。
+  // 画路生成的地面桥登记进 bridges（渲染层的桁架装饰读它，与生成器的跨河桥同构）；整座擦掉的桥从登记里撤掉——
+  // 登记与桥面段不一一对应（生成器的桥面可被路口重绑拆段），按「登记的桥中点下面还有没有桥面」判定。
   const baseIds = new Set(layout.roadEdges.map((edge) => edge.id));
   const newDecks = replayed ? roadEdges.filter((edge) => edge.bridge && !baseIds.has(edge.id)) : [];
-  const bridges = newDecks.length ? [...(layout.bridges ?? []), ...newDecks.map((edge) => {
+  const decks = replayed ? roadEdges.filter(edgeLocked) : [];
+  const deckIds = new Set(decks.map((edge) => edge.id));
+  const decksDropped = replayed ? layout.roadEdges.some((edge) => edgeLocked(edge) && !deckIds.has(edge.id)) : false;
+  const under = (bridge: { from: Vec2; to: Vec2 }, over: readonly RoadEdge[]) => {
+    const mid = { x: (bridge.from.x + bridge.to.x) / 2, z: (bridge.from.z + bridge.to.z) / 2 };
+    return over.some((edge) => edge.points.some((p, i) => i > 0 && segmentDistance(mid, edge.points[i - 1], p) <= edge.width / 2 + 1));
+  };
+  // 只撤「补丁前下面有桥面、补丁后没了」的：登记若本来就没压在桥面上（几何对不上），擦别的桥不该连带撤掉它。
+  const baseDecks = decksDropped ? layout.roadEdges.filter(edgeLocked) : [];
+  const erasedSpan = (bridge: { from: Vec2; to: Vec2 }) => decksDropped && under(bridge, baseDecks) && !under(bridge, decks);
+  const bridges = newDecks.length || decksDropped ? [...(layout.bridges ?? []).filter((bridge) => !erasedSpan(bridge)), ...newDecks.map((edge) => {
     const [from, to] = [edge.points[0], edge.points[edge.points.length - 1]];
     return { from, to, angle: Math.atan2(to.z - from.z, to.x - from.x), length: Math.hypot(to.x - from.x, to.z - from.z) };
   })] : layout.bridges;
@@ -783,5 +801,8 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     ? layout.activityKey // 叠套时不重复追加指纹
     : `${layout.activityKey ?? ""}${suffix}`;
 
-  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}), ...(bridges !== layout.bridges ? { bridges } : {}) }, stale, patchHash };
+  // 悬索桥是「最长过河桥」的塔架与主缆（地标）：它下面的桥被整座擦掉，塔与缆一起拆（校验提示 erases-suspension-bridge）。
+  const unhung = (l: CityLayout["landmarks"][number]) => l.kind === "suspension-bridge" && !!l.to && erasedSpan({ from: l, to: l.to });
+  const landmarks = decksDropped && (view.landmarks ?? []).some(unhung) ? view.landmarks.filter((l) => !unhung(l)) : view.landmarks;
+  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}), ...(bridges !== layout.bridges ? { bridges } : {}), ...(landmarks !== view.landmarks ? { landmarks } : {}) }, stale, patchHash };
 }

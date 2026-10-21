@@ -26,6 +26,7 @@
 //   (t) 改路型（路线图 P1-4）：目标状态幂等、id 不变、kind 随宽度、滨海景观带随 purpose 增撤、桥面/缺失如实失效、存档读回、
 //       「一整段」沿度 2 路口走、遇岔路/换路型停；校验 unchanged/locked/提示码；
 //   (u) 地面桥（路线图 P1-5）：一笔跨一段河 → 引道 + 桥面（bridge/deck）+ 引道，桥登记进 bridges；端点在水里/连跨两河 → road-in-water；
+//       擦桥面 = 整座擦（多段桥面一起走、登记撤掉、引道变普通路；悬索桥塔缆一起拆）；画的桥两端到最近路口的直引道 ≥ 喇叭口伸出量且不陡；
 //       水面太宽 → bridge-too-long；桥上不能有路口；桥面锁定；校验与重放同一个判定；
 //   (v) 弧线路：起点 → 经过点 → 终点，铺成过经过点的折线（与校验同一条 curvePoints）；穿过现有路自动开路口并断开；
 //       弯太急（按路型的最小半径）拒绝、过水拒绝（过河用直线架桥）；存档读回 via。
@@ -36,11 +37,11 @@ globalThis.window ??= globalThis;
 const {
   applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
   pruneStalePatch, patchGeneratorVersion, patchMatchesLayout, CITY_GENERATOR_VERSION,
-  appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
+  appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, validateEdgeDrop, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
   curvePoints, polylineMinRadius, minCurveRadius, auditLayout, tagAuditOrigins, buildCityModel, createCityPlan, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
   "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP", "pruneStalePatch", "patchGeneratorVersion", "patchMatchesLayout", "CITY_GENERATOR_VERSION"],
-  "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "roadRun", "validateRestyle"],
+  "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "validateEdgeDrop", "roadRun", "validateRestyle"],
   "engine/planGeometry.ts": ["curvePoints", "polylineMinRadius", "minCurveRadius"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_WIDTH", "EXPRESSWAY_RAMP"],
   "engine/planAudit.ts": ["auditLayout", "tagAuditOrigins"],
@@ -169,7 +170,7 @@ const snap = (layout) => JSON.stringify({
   assert.deepEqual(stale.map((s) => `${s.kind}:${s.reason}`).sort(), ["building-move:missing-parcel", "building-move:unknown-building"], "stale reasons must be exact");
 }
 
-// (d) 锁定口径（放权后 §15）：只锁桥面——桥端点不可移、桥面不可删、不能从桥面中间接路；
+// (d) 锁定口径（放权后 §15）：只锁桥面——桥端点不可移、不能从桥面中间接路（桥面可以整座擦，见 (u)）；
 //     滨海路曾经一起锁，用户实测「很多东西都不能改」，现在可删可移。
 {
   assert.ok(edgeLocked(E2), "a bridge deck is locked by construction");
@@ -177,11 +178,10 @@ const snap = (layout) => JSON.stringify({
   const patch = fresh();
   patch.roadOps = [
     { t: "move", node: "100:0", to: { x: 120, z: 0 } },   // 100:0 连桥面 → 锁定
-    { t: "drop", edge: "100:0/200:0" },                     // 桥面 → 锁定
     { t: "add", from: { x: 150, z: 0 }, to: { x: 150, z: 40 }, width: 5 }, // 起点落在桥面中间 → 锁定
   ];
   const { layout, stale } = applyPlanPatch(makeLayout(), patch);
-  assert.equal(stale.length, 3, "every bridge-deck operation must be reported");
+  assert.equal(stale.length, 2, "every bridge-deck operation must be reported");
   assert.ok(stale.every((s) => s.reason === "locked-edge"));
   const base = makeLayout();
   assert.deepEqual(layout.roadNodes, base.roadNodes, "locked operations must not mutate nodes");
@@ -228,16 +228,16 @@ const snap = (layout) => JSON.stringify({
   assert.deepEqual(layout.culDeSacEnds, [{ x: 120, z: 120 }], "the moved dead-end must remain a cul-de-sac at its new position");
 }
 
-// (f) 删路段：车流过滤、孤立节点清除、缺失边 stale、锁定边 stale。
+// (f) 删路段：车流过滤、孤立节点清除、缺失边 stale（擦桥面是整座擦，见 (u)）。
 {
   const patch = fresh();
-  patch.roadOps = [{ t: "drop", edge: "100:0/100:100" }, { t: "drop", edge: "100:0/200:0" }, { t: "drop", edge: "nope" }];
+  patch.roadOps = [{ t: "drop", edge: "100:0/100:100" }, { t: "drop", edge: "nope" }];
   const { layout, stale } = applyPlanPatch(makeLayout(), patch);
   assert.ok(!layout.roadEdges.some((e) => e.id === "100:0/100:100"), "the dropped local edge must be gone");
   assert.ok(!layout.roadNodes.some((n) => n.id === "100:100"), "the orphaned dead-end node must be pruned");
   assert.deepEqual(layout.culDeSacEnds, [], "the cul-de-sac of a dropped road must vanish");
   assert.equal(layout.districts[0].carPaths.length, 1, "car paths along dropped edges must be filtered");
-  assert.deepEqual(stale.map((s) => s.reason).sort(), ["locked-edge", "missing-edge"]);
+  assert.deepEqual(stale.map((s) => s.reason).sort(), ["missing-edge"]);
 }
 
 // (g) 编辑校验：blockers 硬阻止。
@@ -633,7 +633,8 @@ const snap = (layout) => JSON.stringify({
 // (u) 地面桥。在合成城市里挖一条南北向的河：x∈(200,240)（另一条在 x∈(300,320)，再远处一条 260 宽的海峡 x∈(-380,-120)）。
 {
   const wet = (x) => (x > 200 && x < 240) || (x > 300 && x < 320) || (x > -380 && x < -120);
-  const river = () => { const l = makeLayout(); l.terrain = { ...l.terrain, buildable: (x, z) => Math.hypot(x, z) < 380 && !wet(x) }; l.bridges = []; return l; };
+  // 水按地形高判（wetSpan 的 WATER_LEVEL）：河里地面 -1；岸上照旧。
+  const river = () => { const l = makeLayout(); l.terrain = { ...l.terrain, height: (x, z) => (wet(x) ? -1 : height(x, z)), buildable: (x, z) => Math.hypot(x, z) < 380 && !wet(x) }; l.bridges = []; return l; };
   const add = (from, to, width = 8) => { const patch = fresh(); patch.roadOps = [{ t: "add", from, to, width }]; return applyPlanPatch(river(), patch); };
   const crossed = add({ x: 150, z: -100 }, { x: 280, z: -100 });
   assert.equal(crossed.stale.length, 0, `a stroke over one river replays cleanly — ${JSON.stringify(crossed.stale)}`);
@@ -651,13 +652,55 @@ const snap = (layout) => JSON.stringify({
   assert.deepEqual(validateRoadAdd(river(), model, { x: 150, z: -100 }, { x: 340, z: -100 }, 8).blockers, ["road-in-water"], "two rivers in one stroke are refused (draw two strokes)");
   assert.deepEqual(validateRoadAdd(river(), model, { x: -100, z: -60 }, { x: -390 + 5, z: -60 }, 8).blockers.length > 0, true);
   assert.deepEqual(validateRoadAdd(river(), model, { x: -100, z: -60 }, { x: -110, z: -60 }, 8).blockers, [], "a short dry stroke is fine");
-  const strait = river(); strait.terrain = { ...strait.terrain, buildable: (x, z) => Math.hypot(x, z) < 380 && !(x > -300 && x < -120) };
+  const strait = river(); strait.terrain = { ...strait.terrain, height: (x, z) => (x > -300 && x < -120 ? -1 : height(x, z)), buildable: (x, z) => Math.hypot(x, z) < 380 && !(x > -300 && x < -120) };
   assert.deepEqual(validateRoadAdd(strait, model, { x: -100, z: -60 }, { x: -320, z: -60 }, 8).blockers, ["bridge-too-long"], "water wider than 160 asks for a viaduct");
   const forked = river(); forked.roadNodes = [...forked.roadNodes, { id: "220:-150", x: 220, z: -150 }, { id: "220:-50", x: 220, z: -50 }];
   forked.roadEdges = [...forked.roadEdges, { id: "220:-150/220:-50", from: "220:-150", to: "220:-50", width: 5, kind: "local", points: [{ x: 220, z: -150 }, { x: 220, z: -50 }], structure: "ground-road" }];
   assert.ok(validateRoadAdd(forked, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers.includes("junction-on-bridge"), "no junctions on a bridge");
+  // 整座擦桥（2026-10-21）：坏桥头修不了就擦掉重画——桥面、登记一起撤，两端引道变回普通地面路（断头）。
   const dropDeck = fresh(); dropDeck.roadOps = [{ t: "add", from: { x: 150, z: -100 }, to: { x: 280, z: -100 }, width: 8 }, { t: "drop", edge: deck.id }];
-  assert.deepEqual(applyPlanPatch(river(), dropDeck).stale.map((x) => x.reason), ["locked-edge"], "the new deck cannot be erased");
+  const erased = applyPlanPatch(river(), dropDeck);
+  assert.deepEqual(erased.stale, [], "erasing a bridge deck erases the whole bridge");
+  const left = erased.layout.roadEdges.filter((e) => e.points.every((q) => q.z === -100));
+  assert.deepEqual(left.map((e) => [e.structure, !!e.bridge]), [["ground-road", false], ["ground-road", false]], "…its approaches stay as plain ground roads");
+  assert.equal(erased.layout.bridges.length, 0, "…and the bridge leaves the truss registry");
+  assert.ok(!erased.layout.roadNodes.some((n) => n.id === deck.from) || erased.layout.roadEdges.some((e) => e.from === deck.from || e.to === deck.from), "no orphan bridgehead node");
+  const erasedVerdict = validateEdgeDrop(crossed.layout, model, deck.id);
+  assert.deepEqual(erasedVerdict.blockers, [], `validation agrees — ${erasedVerdict.blockers}`);
+  assert.ok(erasedVerdict.warnings.includes("erases-bridge") && erasedVerdict.warnings.includes("creates-dead-end"), `…and warns: ${erasedVerdict.warnings}`);
+  // 一座桥多段桥面（中间是只连桥面的节点）：擦任一段整座都走。
+  const split = river(); const mid = { x: 220, z: 60 };
+  split.roadNodes = [...split.roadNodes, { id: "190:60", x: 190, z: 60 }, { id: "196:60", x: 196, z: 60 }, { id: "220:60", ...mid }, { id: "244:60", x: 244, z: 60 }, { id: "250:60", x: 250, z: 60 }];
+  const seg = (a, b, extra) => ({ id: `${a.x}:${a.z}/${b.x}:${b.z}`, from: `${a.x}:${a.z}`, to: `${b.x}:${b.z}`, width: 8, kind: "arterial", points: [a, b], ...extra });
+  const deckProps = { bridge: true, structure: "deck" };
+  split.roadEdges = [...split.roadEdges, seg({ x: 190, z: 60 }, { x: 196, z: 60 }, { structure: "ground-approach" }), seg({ x: 196, z: 60 }, mid, deckProps), seg(mid, { x: 244, z: 60 }, deckProps), seg({ x: 244, z: 60 }, { x: 250, z: 60 }, { structure: "ground-approach" })];
+  split.bridges = [{ from: { x: 196, z: 60 }, to: { x: 244, z: 60 }, angle: 0, length: 48 }];
+  const dropHalf = fresh(); dropHalf.roadOps = [{ t: "drop", edge: "220:60/244:60" }];
+  const halved = applyPlanPatch(split, dropHalf);
+  assert.ok(!halved.layout.roadEdges.some((e) => e.bridge && e.points.every((q) => q.z === 60)), "both deck pieces go");
+  assert.ok(!halved.layout.roadNodes.some((n) => n.id === "220:60"), "the mid-bridge node goes with them");
+  assert.equal(halved.layout.bridges.length, 0, "the registered span goes too");
+  assert.equal(halved.layout.roadEdges.filter((e) => e.points.every((q) => q.z === 60)).length, 2, "the two approaches stay");
+  // 悬索桥（7/2 的坏桥头正是它）：整座擦掉时塔与缆（地标）一起拆，别的地标不动。
+  const suspended = split; suspended.landmarks = [{ id: "landmark:suspension-bridge", kind: "suspension-bridge", x: 196, z: 60, to: { x: 244, z: 60 }, yaw: 0, radius: 0 }, { id: "landmark:arch", kind: "arch", x: 0, z: 0, yaw: 0, radius: 8 }];
+  const unhung = applyPlanPatch(suspended, dropHalf);
+  assert.deepEqual(unhung.stale, [], "a suspension bridge can be erased too");
+  assert.deepEqual(unhung.layout.landmarks.map((l) => l.id), ["landmark:arch"], "…and its towers and cables go with it, nothing else");
+  assert.deepEqual(applyPlanPatch(suspended, fresh()).layout.landmarks.length, 2, "an empty patch keeps the landmark");
+  const unhungVerdict = validateEdgeDrop(suspended, model, "220:60/244:60");
+  assert.deepEqual(unhungVerdict.blockers, []);
+  assert.ok(unhungVerdict.warnings.includes("erases-suspension-bridge"), `the user is told the towers go too: ${unhungVerdict.warnings}`);
+  // 画的桥：两端各要 ≥6 的直引道（桥端直接压在路口/落笔点上是 7/2 桥头缺陷的形状），岸坡不能比车的爬坡能力陡。
+  assert.deepEqual(validateRoadAdd(river(), model, { x: 195, z: -100 }, { x: 280, z: -100 }, 8).blockers, ["bridge-approach-short"], "a stroke starting at the water's edge leaves no approach");
+  assert.deepEqual(validateRoadAdd(river(), model, { x: 150, z: -100 }, { x: 255, z: -100 }, 8).blockers, ["bridge-approach-short"], "…same on the far bank (an 8-wide road needs 16 of approach: its junction mouth reaches that far)");
+  assert.deepEqual(validateRoadAdd(river(), model, { x: 150, z: -100 }, { x: 260, z: -100 }, 8).blockers, [], "…and 17 is enough");
+  // 引道量到最近的路口：笔画在桥尾 4 处横穿一条现有路（自动开路口）也算太短。
+  const crossedNear = river(); crossedNear.roadNodes = [...crossedNear.roadNodes, { id: "245:-150", x: 245, z: -150 }, { id: "245:-50", x: 245, z: -50 }];
+  crossedNear.roadEdges = [...crossedNear.roadEdges, { id: "245:-150/245:-50", from: "245:-150", to: "245:-50", width: 5, kind: "local", points: [{ x: 245, z: -150 }, { x: 245, z: -50 }], structure: "ground-road" }];
+  assert.deepEqual(validateRoadAdd(crossedNear, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers, ["bridge-approach-short"], "a crossing right behind the bridgehead is a junction at the bridgehead");
+  assert.deepEqual(validateRoadAdd(crossedNear, model, { x: 140, z: -100 }, { x: 245, z: -100 }, 8).blockers, ["bridge-approach-short"], "…same when the stroke ends on that road");
+  const cliff = river(); const flat = cliff.terrain.height; cliff.terrain = { ...cliff.terrain, height: (x, z) => (x > 240 && x < 250 ? flat(x, z) + (250 - x) * 0.6 : flat(x, z)) };
+  assert.deepEqual(validateRoadAdd(cliff, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers, ["bridge-approach-steep"], "a bank steeper than the car can climb is refused");
 }
 
 // (v) 弧线路。

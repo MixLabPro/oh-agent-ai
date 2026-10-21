@@ -8,7 +8,7 @@
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, tagAuditOrigins, type PlanIssue } from "../engine/planAudit";
-import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, patchGeneratorVersion, patchMatchesLayout, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
+import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, bridgeChain, bridgeChainPolyline, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, patchGeneratorVersion, patchMatchesLayout, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
 import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
 import { worldBox, worldOverhead, worldParts } from "../engine/planFootprint";
@@ -354,7 +354,9 @@ export class PlanRepairSession {
   edgeAt(x: number, z: number): { id: string; points: Vec2[]; width: number; locked: boolean } | null {
     const layout = this.engine.currentLayout;
     const edge = layout ? nearestEdgeAt(layout, x, z) : null;
-    return edge ? { id: edge.id, points: edge.points, width: edge.width, locked: edge.bridge === true || edge.structure === "deck" || edge.structure === "ground-approach" || edge.purpose === "waterfront" } : null;
+    // 桥面：橡皮擦擦的是整座桥，悬停高亮整座（bridgeChain，与校验/重放同一口径）。
+    const points = edge && edgeLocked(edge) ? bridgeChainPolyline(bridgeChain(layout!.roadEdges, edge)) : edge?.points;
+    return edge ? { id: edge.id, points: points!, width: edge.width, locked: edge.bridge === true || edge.structure === "deck" || edge.structure === "ground-approach" || edge.purpose === "waterfront" } : null;
   }
 
   validateDrop(edgeId: string): RoadVerdict {

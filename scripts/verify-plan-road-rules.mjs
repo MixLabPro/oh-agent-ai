@@ -69,7 +69,8 @@ function makeLayout(overrides = {}) {
   assert.deepEqual(validateEdgeDrop(wide, model, "0:0/100:0").blockers, [], "an arterial can be erased");
   assert.ok(validateEdgeDrop(wide, model, "0:0/100:0").warnings.includes("erases-arterial"), "…with a warning");
   const bridge = makeLayout({ edges: [edge("0:0", "100:0", 5, { bridge: true, structure: "deck" }), edge("100:0", "100:100")] });
-  assert.deepEqual(validateEdgeDrop(bridge, model, "0:0/100:0").blockers, ["locked-edge"]);
+  assert.deepEqual(validateEdgeDrop(bridge, model, "0:0/100:0").blockers, [], "a whole bridge can be erased (2026-10-21: the only way to fix a bad bridgehead)");
+  assert.ok(validateEdgeDrop(bridge, model, "0:0/100:0").warnings.includes("erases-bridge"), "…with a warning");
   const waterfront = makeLayout({ edges: [edge("0:0", "100:0", 5, { purpose: "waterfront" }), edge("100:0", "100:100")] });
   assert.deepEqual(validateEdgeDrop(waterfront, model, "0:0/100:0").blockers, [], "a waterfront road can be erased");
   assert.ok(validateEdgeDrop(waterfront, model, "0:0/100:0").warnings.includes("erases-waterfront"));
@@ -221,7 +222,8 @@ function makeLayout(overrides = {}) {
     const t0 = performance.now();
     const verdict = validateEdgeDrop(layout, real, e.id);
     slowest = Math.max(slowest, performance.now() - t0);
-    if (isLocked(e)) assert.ok(verdict.blockers.includes("locked-edge"), `locked edge ${e.id} must be rejected`);
+    // 桥面：整座擦（提示 erases-bridge；悬索桥提示 erases-suspension-bridge，塔缆一起拆）。
+    if (isLocked(e)) assert.ok(verdict.blockers.length === 0 && verdict.warnings.some((w) => w === "erases-bridge" || w === "erases-suspension-bridge"), `deck ${e.id} must erase as a whole bridge: ${verdict.blockers} / ${verdict.warnings}`);
     count(tally.edge, verdict);
   }
   const tries = [{ dx: 12, dz: 0 }, { dx: 0, dz: 12 }];

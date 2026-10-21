@@ -106,7 +106,7 @@ export function listSites(layout: CityLayout): SiteInfo[] {
   const ground = (x: number, z: number) => Math.max(0, layout.terrain.height(x, z));
   for (const landmark of layout.landmarks ?? []) {
     if (!landmark.radius) continue;
-    const locked = landmark.kind === "suspension-bridge" ? "悬索桥不是建筑，是路网里的一段桥面（由桥梁模型绑定），不能单独搬或拆" : undefined;
+    const locked = landmark.kind === "suspension-bridge" ? "悬索桥不是建筑，是路网里的一段桥面（由桥梁模型绑定），不能单独搬或拆——要拆就用橡皮擦整座擦掉这座桥" : undefined;
     const footprint = footprintFor(landmark.kind, landmark.id, landmark.radius, !!landmark.shore);
     const box = worldBox(footprint, landmark, landmark.yaw);
     out.push({ id: landmark.id, kind: "landmark", landmarkKind: landmark.kind, x: landmark.x, z: landmark.z, yaw: landmark.yaw, width: box.width, depth: box.depth, height: Math.max(30, landmark.radius * 2.5), y: ground(landmark.x, landmark.z), level: "free", slotId: "", radius: landmark.radius, footprint, box, ...(locked ? { locked } : {}) });

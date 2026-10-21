@@ -478,6 +478,12 @@
     "shared": false
   },
   {
+    "id": "verify-plan-repair-bridgehead",
+    "file": "verify-plan-repair-bridgehead.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-city-import-boundary",
     "file": "verify-city-import-boundary.mjs",
     "env": {},
