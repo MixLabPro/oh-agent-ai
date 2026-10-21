@@ -42,30 +42,50 @@ assert.ok(C.endClear >= 90, "merge points must be above the existing highway end
     positionVector: new THREE.Vector3(), euler: new THREE.Euler(), quaternion: new THREE.Quaternion(), scaleVector: new THREE.Vector3(),
     matrix: new THREE.Matrix4(), color: new THREE.Color() };
   buildHighwayRamps(host);
-  const mesh = host.group.getObjectByName("city-highway-ramps"), matrix = new THREE.Matrix4();
-  assert.ok(mesh && mesh.count > 0, "the accepted geometry is rendered");
-  mesh.getMatrixAt(0, matrix);
-  assert.ok(Math.abs(matrix.elements[13] - EXPRESSWAY_DECK_Y) < 1e-5, "merge deck stays level with the highway instead of sinking into it");
-  const position = new THREE.Vector3(), rotation = new THREE.Quaternion(), scale = new THREE.Vector3();
-  let rails = 0;
-  for (let i = 0; i < mesh.count; i += 1) {
-    mesh.getMatrixAt(i, matrix); matrix.decompose(position, rotation, scale);
-    if (Math.abs(scale.y - 0.9) < 1e-5) {
-      const distance = Math.min(...run.slice(1).map((b, j) => segmentDistance({ x: position.x, z: position.z }, run[j], b)));
-      if (distance < (10.5 + result.ramps[0].width) / 2 + 0.5) {
-        assert.ok(Math.abs(position.y - EXPRESSWAY_DECK_Y) < 1e-5, "overlapping ramp cross sections must stay at main deck height");
-      }
+  // 匝道是连续网格（2026-10-21）：桥面板 / 护栏 / 车道边线各一张网格，墩柱仍是实例盒子。
+  const deck = host.group.getObjectByName("city-highway-ramp-deck"), railMesh = host.group.getObjectByName("city-highway-ramp-rails"), lineMesh = host.group.getObjectByName("city-highway-ramp-lines");
+  assert.ok(deck && railMesh && lineMesh, "the accepted geometry is rendered as deck, rails and edge lines");
+  const tris = (mesh) => { const pos = mesh.geometry.getAttribute("position"); const out = [];
+    for (let i = 0; i < pos.count; i += 3) out.push([0, 1, 2].map((k) => ({ x: pos.getX(i + k), y: pos.getY(i + k), z: pos.getZ(i + k) }))); return out; };
+  const centroid = (t) => ({ x: (t[0].x + t[1].x + t[2].x) / 3, y: (t[0].y + t[1].y + t[2].y) / 3, z: (t[0].z + t[1].z + t[2].z) / 3 });
+  const toHighway = (p) => Math.min(...run.slice(1).map((b, j) => segmentDistance({ x: p.x, z: p.z }, run[j], b)));
+  const flat = (t) => Math.abs((t[1].x - t[0].x) * (t[2].z - t[0].z) - (t[1].z - t[0].z) * (t[2].x - t[0].x)) > 1e-6; // 有水平投影面积 = 顶/底面
+  const deckTris = tris(deck); const deckTop = Math.max(...deckTris.flat().map((p) => p.y));
+  // 顶面 = 桥面高 + 板厚；坡度转折处的接缝按驾驶面同一规则抬 RIBBON_LIFT（0.03）。
+  assert.ok(deckTop >= EXPRESSWAY_DECK_Y + 0.9 - 1e-4 && deckTop <= EXPRESSWAY_DECK_Y + 0.9 + 0.03 + 1e-4, `merge deck stays level with the highway instead of sinking into it (top ${deckTop})`);
+  for (const t of deckTris) if (flat(t) && toHighway(centroid(t)) < (10.5 + result.ramps[0].width) / 2 + 0.5)
+    assert.ok([EXPRESSWAY_DECK_Y + 0.9, EXPRESSWAY_DECK_Y + 0.93, EXPRESSWAY_DECK_Y].some((y) => Math.abs(Math.max(...t.map((p) => p.y)) - y) < 1e-4), `overlapping ramp cross sections must stay at main deck height (${Math.max(...t.map((p) => p.y))})`);
+  // 每条标线是一块薄实体（12 个三角形：顶、底、两侧、两端）——按实体中心判断，与旧的「按盒子中心」同口径。
+  const lineTris = tris(lineMesh);
+  for (let i = 0; i < lineTris.length; i += 12) { const c = centroid(lineTris.slice(i, i + 12).map(centroid)); assert.ok(toHighway(c) > 10.5 / 2 + 0.39, "ramp edge markings must not cross the main highway lanes"); }
+  const end = result.ramps[0].points.at(-1); const railTris = tris(railMesh);
+  assert.ok(railTris.length > 0, "the descent retains protective rails between open ends");
+  for (let i = 0; i < railTris.length; i += 12) { const c = centroid(railTris.slice(i, i + 12).map(centroid)); assert.ok(Math.hypot(c.x - end.x, c.z - end.z) > 9.5, "ramp rails must leave the ground junction open"); }
+  // 截图缺陷：弯道上相邻桥板之间张开楔形裂口。沿匝道两条外缘（离中线 半宽 − 0.05）每 0.5 取一点，都要落在某块桥面顶面三角形里。
+  const inside = (p, t) => { const d = (a, b, c) => (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x); const d1 = d(t[0], t[1], p), d2 = d(t[1], t[2], p), d3 = d(t[2], t[0], p);
+    return !((d1 < -1e-9 || d2 < -1e-9 || d3 < -1e-9) && (d1 > 1e-9 || d2 > 1e-9 || d3 > 1e-9)); };
+  const topTris = deckTris.filter((t) => flat(t) && Math.min(...t.map((p) => p.y)) > Math.max(...t.map((p) => p.y)) - 1.5 && t.every((p) => p.y >= 0));
+  const pts = result.ramps[0].points; let probes = 0, holes = 0;
+  for (let i = 1; i < pts.length; i += 1) {
+    const a = pts[i - 1], b = pts[i], len = Math.hypot(b.x - a.x, b.z - a.z), ux = (b.x - a.x) / len, uz = (b.z - a.z) / len;
+    for (let s = 0; s <= len; s += 0.5) for (const side of [-1, 1]) {
+      const p = { x: a.x + ux * s - uz * side * (result.ramps[0].width / 2 - 0.05), z: a.z + uz * s + ux * side * (result.ramps[0].width / 2 - 0.05) };
+      probes += 1; if (!topTris.some((t) => inside(p, t))) holes += 1;
     }
-    if (Math.abs(scale.y - 0.05) < 1e-5) {
-      const distance = Math.min(...run.slice(1).map((b, j) => segmentDistance({ x: position.x, z: position.z }, run[j], b)));
-      assert.ok(distance > 10.5 / 2 + 0.39, "ramp edge markings must not cross the main highway lanes");
-    }
-    if (Math.abs(scale.y - 0.55) > 1e-5) continue;
-    rails += 1;
-    const end = result.ramps[0].points.at(-1);
-    assert.ok(Math.hypot(position.x - end.x, position.z - end.z) > 10, "ramp rails must leave the ground junction open");
   }
-  assert.ok(rails > 0, "the descent retains protective rails between open ends");
+  // 弯道外角：在每个内部顶点沿前后两段法线之间扫一圈——楔形裂口正在这里（沿各段自己的法线取点会从它旁边漏过去；
+  // 15 个规划的 8 条匝道上，旧的逐段盒子在这里漏 94 个探针、连续网格 0 个）。
+  for (let i = 1; i + 1 < pts.length; i += 1) {
+    const p0 = pts[i - 1], v = pts[i], p1 = pts[i + 1];
+    const a0 = Math.atan2(v.z - p0.z, v.x - p0.x), a1 = Math.atan2(p1.z - v.z, p1.x - v.x);
+    let da = a1 - a0; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+    const outer = da > 0 ? -1 : 1;
+    for (let k = 0; k <= 8; k += 1) {
+      const ang = a0 + (da * k) / 8; const p = { x: v.x - Math.sin(ang) * outer * (result.ramps[0].width / 2 - 0.05), z: v.z + Math.cos(ang) * outer * (result.ramps[0].width / 2 - 0.05) };
+      probes += 1; if (!topTris.some((t) => inside(p, t))) holes += 1;
+    }
+  }
+  assert.equal(holes, 0, `the ramp deck has no wedge gaps along its outer edges or bend corners (${holes}/${probes} edge probes uncovered)`);
   for (const disposable of host.disposables) disposable.dispose();
 }
 // 主桥护栏在匝道合流处开口：dev 把高架几何抽进 structureCompiler 时丢过这条，合并后护栏又横截匝道。

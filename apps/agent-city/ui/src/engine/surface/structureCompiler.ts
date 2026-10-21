@@ -517,6 +517,136 @@ export function highwayRampPieces(layout: RampLayout & Partial<Pick<CityLayout, 
   });
   return pieces;
 }
+type Tri = readonly [RibbonPoint, RibbonPoint, RibbonPoint];
+export type DeckRibbonMesh = Readonly<{ deck: readonly Tri[]; decorations: Readonly<Record<string, readonly Tri[]>> }>;
+/**
+ * 桥面板连续网格（2026-10-21，用户截图：弯道匝道一块块桥板之间张开楔形裂口、护栏和标线跟着断）。
+ * 旧画法逐段一个旋转盒子、只加长 0.4–0.5：弯内侧重叠、弯外侧张开（15 个规划的 8 条匝道、2 条高架在弯道外角共漏 229 个探针）；
+ * 驾驶面早已用 ribbonFaces 斜接成一条带，画面与车脚下的路面是两份几何。这里用同一个 ribbonFaces（同一组接缝、同一套退路
+ * 规则）铺桥面板（顶、底、两侧、两端），护栏与标线按各自的盒子还原横向偏移 / 宽 / 高 / 段内区间，在两条半宽的斜接带之间
+ * 截条带——缺口规则（rampRailRuns、匝道合流口）不变，接缝处与桥面同一条斜接线。
+ * `deck` 是一条连续桥面的盒子（按段序），`decorations` 是落在这些段上的护栏/标线盒子（segment 同号）。
+ */
+export function deckRibbonMesh(deck: readonly (BoxPart & { segment: number })[], decorations: readonly (BoxPart & { segment: number })[], overhang: number): DeckRibbonMesh {
+  const lift = (p: RibbonPoint, dy: number): RibbonPoint => ({ x: p.x, y: p.y + dy, z: p.z });
+  const quadTris = (a: RibbonPoint, b: RibbonPoint, c: RibbonPoint, d: RibbonPoint): Tri[] => [[a, b, c], [a, c, d]];
+  const lerp = (p: RibbonPoint, q: RibbonPoint, t: number): RibbonPoint => ({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, z: p.z + (q.z - p.z) * t });
+  // 顶面四边形 [start −side, end −side, end +side, start +side] 拉成实体：顶、底、两侧、两端。
+  const solid = (faces: readonly (readonly RibbonPoint[])[], down: number, up: number): Tri[] => {
+    const tris: Tri[] = [];
+    faces.forEach((f, i) => {
+      const t = f.map((p) => lift(p, up)), b = f.map((p) => lift(p, down));
+      tris.push(...quadTris(t[0], t[3], t[2], t[1]), ...quadTris(b[0], b[1], b[2], b[3]), ...quadTris(b[0], t[0], t[1], b[1]), ...quadTris(b[3], b[2], t[2], t[3]));
+      if (i === 0) tris.push(...quadTris(b[0], b[3], t[3], t[0]));
+      if (i === faces.length - 1) tris.push(...quadTris(b[1], t[1], t[2], b[2]));
+    });
+    return tris;
+  };
+  if (!deck.length) return Object.freeze({ deck: Object.freeze([]), decorations: Object.freeze({}) });
+  const ribbons = new Map<number, RibbonPoint[][]>();
+  const ribbon = (half: number) => { const key = Math.round(half * 1000) / 1000; let r = ribbons.get(key); if (!r) { r = ribbonFaces(deck, key, overhang); ribbons.set(key, r); } return r; };
+  const deckTris = solid(ribbon(deck[0].sz / 2), -deck[0].sy, 0);
+  const bySegment = new Map(deck.map((piece, k) => [piece.segment, k] as const));
+  const decor: Record<string, Tri[]> = {};
+  for (const d of decorations) {
+    const k = bySegment.get(d.segment); if (k === undefined) continue;
+    const slab = deck[k];
+    // 装饰盒子在这段上的位置：段轴向（水平）区间 [t0, t1]、横向偏移、宽、高——全从盒子本身还原。
+    const c0 = boxPoint(slab, 0, 0, 0), ax = boxPoint(slab, 0.5, 0, 0), sd = boxPoint(slab, 0, 0, 0.5);
+    let ux = ax.x - c0.x, uz = ax.z - c0.z; const ul = Math.hypot(ux, uz) || 1; ux /= ul; uz /= ul;
+    let nx = sd.x - c0.x, nz = sd.z - c0.z; const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+    const run = (slab.sx - overhang) * Math.cos(slab.rz); // 这段真长的水平投影
+    const dc = boxPoint(d, 0, 0, 0); const along = (dc.x - c0.x) * ux + (dc.z - c0.z) * uz; const offset = (dc.x - c0.x) * nx + (dc.z - c0.z) * nz;
+    const half = (d.sx * Math.cos(d.rz)) / 2;
+    const t0 = Math.max(0, 0.5 + (along - half) / run), t1 = Math.min(1, 0.5 + (along + half) / run);
+    if (t1 - t0 < 1e-6) continue;
+    const inner = Math.abs(offset) - d.sz / 2, outer = Math.abs(offset) + d.sz / 2;
+    let f: RibbonPoint[];
+    if (inner <= 1e-6) { // 跨中线（中央标线）：整条窄带
+      const g = ribbon(outer)[k]; f = [lerp(g[0], g[1], t0), lerp(g[0], g[1], t1), lerp(g[3], g[2], t1), lerp(g[3], g[2], t0)];
+    } else {
+      const gi = ribbon(inner)[k], go = ribbon(outer)[k];
+      const edge = (g: RibbonPoint[]) => (offset < 0 ? [g[0], g[1]] : [g[3], g[2]]);
+      const [i0, i1] = edge(gi), [o0, o1] = edge(go);
+      f = offset < 0 ? [lerp(o0, o1, t0), lerp(o0, o1, t1), lerp(i0, i1, t1), lerp(i0, i1, t0)] : [lerp(i0, i1, t0), lerp(i0, i1, t1), lerp(o0, o1, t1), lerp(o0, o1, t0)];
+    }
+    (decor[d.role] ??= []).push(...solid([f], 0, d.sy));
+  }
+  return Object.freeze({ deck: Object.freeze(deckTris), decorations: Object.freeze(Object.fromEntries(Object.entries(decor).map(([k, v]) => [k, Object.freeze(v)]))) });
+}
+
+/** 匝道的连续网格：deckRibbonMesh 套在 highwayRampPieces 上（墩柱仍是盒子；碰撞仍读盒子——碰撞体只支持平行六面体，
+ *  桥面板是驾驶带下面可越过的板）。 */
+export function highwayRampMeshes(layout: RampLayout & Partial<Pick<CityLayout, "highwayRamps">>): Array<DeckRibbonMesh & { ramp: number }> {
+  const pieces = highwayRampPieces(layout);
+  return (layout.highwayRamps ?? []).map((_, ramp) => {
+    const own = pieces.filter((p) => p.ramp === ramp);
+    return { ramp, ...deckRibbonMesh(own.filter((p) => p.role === "ramp-deck").sort((a, b) => a.segment - b.segment), own.filter((p) => p.role === "ramp-rail" || p.role === "ramp-lane-line"), 0.4) };
+  }).filter((m) => m.deck.length > 0);
+}
+
+/** 高架（区界高架与编辑器画的高架）的连续网格：同一个 deckRibbonMesh（桥墩/盖梁仍是盒子）。 */
+export function expresswayMeshes(layout: Parameters<typeof expresswayPieces>[0]): Array<DeckRibbonMesh & { highway: number }> {
+  const pieces = expresswayPieces(layout);
+  return (layout.highways ?? []).map((_, highway) => {
+    const own = pieces.filter((p) => p.highway === highway && p.segment >= 0);
+    return { highway, ...deckRibbonMesh(own.filter((p) => p.role === "expressway-deck").sort((a, b) => a.segment - b.segment), own.filter((p) => p.role === "expressway-rail" || p.role === "expressway-lane-line"), 0.5) };
+  }).filter((m) => m.deck.length > 0);
+}
+
+/** Lift of an expressway ribbon's interior seams above the higher slab top (keeps slabs below the drivable surface). */
+export const RIBBON_LIFT = 0.03;
+type RibbonPoint = { x: number; y: number; z: number };
+/** 自 compileSurface 搬来（2026-10-21）：渲染层（buildHighwayRamps）与驾驶面共用同一条斜接带——两边各算一份，接缝就会对不上。 */
+/** Drivable ribbon over a run of deck slabs (expressways and interchange ramps): interior seams are shared
+ * between neighbours — the higher of both slab tops at the true segment end, lifted RIBBON_LIFT where the
+ * pitch changes — and mitred sideways; the run's two end edges stay the first/last slab's full top edge. */
+export function ribbonFaces(deck: readonly BoxPart[], half: number, overhang: number): RibbonPoint[][] {
+  const tops = deck.map((piece) => boxTopFace(piece, half));
+  // Centre of the top face at the piece's true segment end: slabs are `overhang` longer than their segment
+  // (expressways slant + 0.5, ramps slant + 0.4) so neighbouring render slabs close their gaps.
+  const endAt = (i: number, sign: number) => { const piece = deck[i]; const f = sign * Math.max(0, (piece.sx - overhang) / 2) / piece.sx; return boxPoint(piece, f, 1, 0); };
+  const sideOf = (i: number) => { const t = tops[i]; const sx = t[3].x - t[0].x, sz = t[3].z - t[0].z; const l = Math.hypot(sx, sz) || 1; return { x: sx / l, z: sz / l }; };
+  const seamAt = (i: number): [RibbonPoint, RibbonPoint] | null => {
+    const lift = Math.abs(deck[i - 1].rz - deck[i].rz) > 1e-9 ? RIBBON_LIFT : 0;
+    const a = endAt(i - 1, 1), b = endAt(i, -1); const c = { x: (a.x + b.x) / 2, y: Math.max(a.y, b.y) + lift, z: (a.z + b.z) / 2 };
+    const s0 = sideOf(i - 1), s1 = sideOf(i); let mx = s0.x + s1.x, mz = s0.z + s1.z; const ml = Math.hypot(mx, mz);
+    if (ml < 1e-9) return null; mx /= ml; mz /= ml;
+    const cos = mx * s0.x + mz * s0.z; if (cos < 0.5) return null; // sharper than 120°: keep the slab tops there
+    const w = half / cos;
+    return [{ x: c.x - mx * w, y: c.y, z: c.z - mz * w }, { x: c.x + mx * w, y: c.y, z: c.z + mz * w }];
+  };
+  const seams = deck.map((_, i) => (i === 0 ? null : seamAt(i)));
+  // boxTopFace order: [start −side, end −side, end +side, start +side].
+  const faceOf = (i: number): RibbonPoint[] => {
+    const t = tops[i]; const start = seams[i], end = i + 1 < deck.length ? seams[i + 1] : null;
+    return [start ? start[0] : t[0], end ? end[0] : t[1], end ? end[1] : t[2], start ? start[1] : t[3]];
+  };
+  // 斜接不得把短段折叠（2026-10-20）：弯内侧的斜接点比接缝中心后退 half·tan(θ/2)，短段（高架落地处 1.9–2.4 长、
+  // 紧接 ~65° 转弯）上它越过了这段另一端的接缝，面片自交成蝴蝶结，边界提取失败 → 面片 boundary-unresolved 被排除，
+  // 1000/7、1000/65537 的 expressway:0 from 端落地后第一块驾驶面不存在（structure:expressway:0:from:* 无法连通）。
+  // 侧边恒平行于段轴，未折叠的四边形必为凸——非凸即折叠：该段两端的接缝退回板顶（与 >120° 的退路相同），直到全部为凸。
+  const convex = (q: readonly RibbonPoint[]) => {
+    let sign = 0;
+    for (let k = 0; k < 4; k++) {
+      const a = q[k], b = q[(k + 1) % 4], c = q[(k + 2) % 4];
+      const cr = (b.x - a.x) * (c.z - b.z) - (b.z - a.z) * (c.x - b.x);
+      if (Math.abs(cr) < 1e-9) return false;
+      if (sign === 0) sign = Math.sign(cr); else if (Math.sign(cr) !== sign) return false;
+    }
+    return true;
+  };
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let i = 0; i < deck.length; i++) {
+      if (convex(faceOf(i))) continue;
+      if (seams[i]) { seams[i] = null; changed = true; }
+      if (i + 1 < deck.length && seams[i + 1]) { seams[i + 1] = null; changed = true; }
+    }
+  }
+  return deck.map((_, i) => faceOf(i));
+}
+
 /** A ramp rail lower than this above the terrain is a solid on whatever ground road it lies on. */
 export const RAMP_RAIL_HEADROOM = 2.6;
 /** 匝道落地端护栏退让（2026-10-19）：匝道在地面路中间落地，0/65537 的最后一段（8.24→10.2）与 12 宽的南北向
