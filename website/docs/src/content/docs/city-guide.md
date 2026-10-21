@@ -118,7 +118,7 @@ No. The city is a visual interpretation of recorded activity, not a productivity
 
 ## Related
 
-- [Agent City overview](/city)
+- [Agent City overview](https://ohagent.ai/#city)
 - [Claude Code data source](/docs/data-sources/claude-code) · [Codex data source](/docs/data-sources/codex)
 - [Does Oh Agent upload my sessions?](/docs/privacy-and-data)
-- [FAQ](/faq)
+- [FAQ](https://ohagent.ai/#faq)

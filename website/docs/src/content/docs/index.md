@@ -86,7 +86,7 @@ It's open source (MIT). See the [Agent Vitals engine](/docs/vitals/overview) for
 
 ## Is my data private?
 
-Yes. Sessions are analyzed on your machine and never uploaded. The app only goes online for a few public, data-free requests such as price tables and update checks. Full details: [Does Oh Agent upload my sessions?](/docs/privacy-and-data) and the [privacy policy](/privacy).
+Yes. Sessions are analyzed on your machine and never uploaded. The app only goes online for a few public, data-free requests such as price tables and update checks. Full details: [Does Oh Agent upload my sessions?](/docs/privacy-and-data) and the [privacy policy](https://ohagent.ai/#privacy).
 
 ## How do I install it?
 
@@ -94,7 +94,7 @@ The public installer is still being prepared. See [Install](/docs/install) for s
 
 ## More
 
-- [Agent City overview](/city) · [Download](/download) · [FAQ](/faq)
+- [Agent City overview](https://ohagent.ai/#city) · [Download](https://ohagent.ai/#download) · [FAQ](https://ohagent.ai/#faq)
 - Brand note: the public name is **Oh Agent**. The desktop app is `Oh Agent.app`; the CLI and data folders still use the internal name `agent-vitals`, and you don't need to rename anything.
 
 <!-- source: README.md ("Oh Agent is the public brand. Repository names, CLI commands ... still use agent-vitals") -->

@@ -116,7 +116,7 @@ m    = max(0, log10(tokens) − 1)
 
 ## 相关页面
 
-- [Agent City 介绍](/zh/city)
+- [Agent City 介绍](https://ohagent.ai/#city)
 - [Claude Code 数据来源](/docs/zh/data-sources/claude-code) · [Codex 数据来源](/docs/zh/data-sources/codex)
 - [Oh Agent 会上传我的会话吗？](/docs/zh/privacy-and-data)
-- [常见问题](/zh/faq)
+- [常见问题](https://ohagent.ai/#faq)

@@ -76,7 +76,7 @@ head:
 
 - 在 [GitHub](https://github.com/MixLabPro/oh-agent-ai) 上订阅 Releases（Watch → Custom → Releases）。
 - 在 X 上关注 [@ohagentai](https://x.com/ohagentai)。
-- 留意[下载页](/zh/download)。
+- 留意[下载区](https://ohagent.ai/#download)。
 
 <!-- source: apps/desktop/src-tauri/SUPPORT_MATRIX.md（正式发布条件） -->
 
@@ -130,4 +130,4 @@ Oh Agent 会直接读取各个 Agent 已有的日志，不用注册账号，也�
 - [Claude Code 数据来源](/docs/zh/data-sources/claude-code) · [Codex 数据来源](/docs/zh/data-sources/codex)
 - [Agent City 里的楼代表什么](/docs/zh/city-guide)
 - [Oh Agent 会上传我的会话吗？](/docs/zh/privacy-and-data)
-- [常见问题](/zh/faq)
+- [常见问题](https://ohagent.ai/#faq)

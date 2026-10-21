@@ -100,4 +100,4 @@ No. Oh Agent reads files Claude Code already wrote. It needs no Anthropic API ke
 - [See your Claude Code history as a 3D city](/claude-code)
 - [Codex data source](/docs/data-sources/codex)
 - [What each building in Agent City means](/docs/city-guide)
-- [Install](/docs/install) · [FAQ](/faq)
+- [Install](/docs/install) · [FAQ](https://ohagent.ai/#faq)

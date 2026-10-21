@@ -72,4 +72,4 @@ No. It reads the files Codex already saved. No API key and no Oh Agent account a
 - [See your Codex history as a 3D city](/codex)
 - [Claude Code data source](/docs/data-sources/claude-code)
 - [What each building in Agent City means](/docs/city-guide)
-- [Install](/docs/install) · [FAQ](/faq)
+- [Install](/docs/install) · [FAQ](https://ohagent.ai/#faq)

@@ -83,7 +83,7 @@ head:
       }
 ---
 
-不会。Oh Agent 在你的 Mac 上分析 Agent 历史，会话、日志和分析结果都不会上传。这一页逐条说明：应用读取什么、哪几种情况会联网、接入 MCP 或导出时边界有什么变化。法律意义上的条款见[隐私政策](/zh/privacy)。
+不会。Oh Agent 在你的 Mac 上分析 Agent 历史，会话、日志和分析结果都不会上传。这一页逐条说明：应用读取什么、哪几种情况会联网、接入 MCP 或导出时边界有什么变化。法律意义上的条款见[隐私政策](https://ohagent.ai/#privacy)。
 
 <!-- source: README.md（“Your history stays on your machine”）；AGENTS.md（“Data Retention & Serving-Face Policy (2026-09-19)”） -->
 
@@ -174,7 +174,7 @@ macOS 可能会请你允许读取这些目录。**待确认**：首个公开版�
 
 ## 相关页面
 
-- [隐私政策](/zh/privacy)
+- [隐私政策](https://ohagent.ai/#privacy)
 - [Agent City 里的楼代表什么](/docs/zh/city-guide)
 - [Claude Code 数据来源](/docs/zh/data-sources/claude-code) · [Codex 数据来源](/docs/zh/data-sources/codex)
-- [常见问题](/zh/faq)
+- [常见问题](https://ohagent.ai/#faq)

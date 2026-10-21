@@ -97,4 +97,4 @@ Oh Agent 已经导入过的会话，在 Claude Code 删除日志文件后仍保�
 - [把 Claude Code 历史变成 3D 城市](/zh/claude-code)
 - [Codex 数据来源](/docs/zh/data-sources/codex)
 - [Agent City 里的楼代表什么](/docs/zh/city-guide)
-- [安装](/docs/zh/install) · [常见问题](/zh/faq)
+- [安装](/docs/zh/install) · [常见问题](https://ohagent.ai/#faq)

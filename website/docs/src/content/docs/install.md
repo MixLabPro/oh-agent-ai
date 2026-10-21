@@ -78,7 +78,7 @@ No universal macOS binary is declared.
 
 - Watch releases on [GitHub](https://github.com/MixLabPro/oh-agent-ai) (Watch → Custom → Releases).
 - Follow [@ohagentai](https://x.com/ohagentai) on X.
-- Check the [download page](/download).
+- Check the [download section](https://ohagent.ai/#download).
 
 <!-- source: apps/desktop/src-tauri/SUPPORT_MATRIX.md (正式发布条件: Developer ID, notarization, 干净机安装/升级/恢复) -->
 
@@ -134,4 +134,4 @@ Oh Agent reads your agents' existing logs. You need no account and no API key. T
 - [Claude Code data source](/docs/data-sources/claude-code) · [Codex data source](/docs/data-sources/codex)
 - [What each building in Agent City means](/docs/city-guide)
 - [Does Oh Agent upload my sessions?](/docs/privacy-and-data)
-- [FAQ](/faq)
+- [FAQ](https://ohagent.ai/#faq)

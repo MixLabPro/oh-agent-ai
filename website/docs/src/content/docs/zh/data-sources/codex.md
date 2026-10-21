@@ -72,4 +72,4 @@ Codex 把每次会话存成一个 rollout 文件（`rollout-*.jsonl`），放在
 - [把 Codex 历史变成 3D 城市](/zh/codex)
 - [Claude Code 数据来源](/docs/zh/data-sources/claude-code)
 - [Agent City 里的楼代表什么](/docs/zh/city-guide)
-- [安装](/docs/zh/install) · [常见问题](/zh/faq)
+- [安装](/docs/zh/install) · [常见问题](https://ohagent.ai/#faq)

@@ -82,7 +82,7 @@ head:
       }
 ---
 
-No. Oh Agent analyzes your agent history on your Mac and never uploads sessions, logs or analysis results. This page explains exactly what the app reads, the few times it goes online, and where the boundaries change (MCP and export). For the legal policy, see the [privacy policy](/privacy).
+No. Oh Agent analyzes your agent history on your Mac and never uploads sessions, logs or analysis results. This page explains exactly what the app reads, the few times it goes online, and where the boundaries change (MCP and export). For the legal policy, see the [privacy policy](https://ohagent.ai/#privacy).
 
 <!-- source: README.md ("Your history stays on your machine"); AGENTS.md ("Data Retention & Serving-Face Policy (2026-09-19)") -->
 
@@ -178,7 +178,7 @@ No. Credentials are never saved in anything Oh Agent owns. Some test features ca
 
 ## Related
 
-- [Privacy policy](/privacy)
+- [Privacy policy](https://ohagent.ai/#privacy)
 - [What each building in Agent City means](/docs/city-guide)
 - [Claude Code data source](/docs/data-sources/claude-code) · [Codex data source](/docs/data-sources/codex)
-- [FAQ](/faq)
+- [FAQ](https://ohagent.ai/#faq)
