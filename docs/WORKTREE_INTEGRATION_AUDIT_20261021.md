@@ -58,3 +58,17 @@
 额外发现：verify-workbench-overview-contract.mjs 的 declarations 夹具断言失败；在未修改 HEAD 的隔离文件副本复现相同错误，判为既有失败，未放宽测试。本轮不宣称全套测试全绿。未重新执行原生全平台打包、签名/公证、UI 目视验收或隔离探针运行；原 worktree 仍保留，未清理。
 
 补充验证：Tauri 平台合并配置解析测试通过，确认 mainBinaryName 字段可解析且各平台资源映射正确；工作流 YAML 与 Bash 语法检查通过。
+
+## 第二轮远端融合
+
+main `44da5d3d` 与 origin/dev `240881d7` 已合并为 `7e5e2be1`。origin/codex/city-repair-upgrade 同为240881d7；car-model的88e55bcc已被dev包含。本轮合入桥头/坡度审计、整桥擦除与重画方案、双向试驾、局部路面安全网、生成器6和通知品牌补全。
+
+11个冲突逐项解决，保留main最新签名公证、权限保真归档、DMG命名及平台配置；City验证清单109项，保留全部原有驾驶/审计守卫，增加2项规划守卫。结构守卫保留斜桥合成夹具和地面起步条件，加入完整实际引道路线验证。
+
+已通过：City typecheck/build、验证清单、plan-patch、road-rules、repair-controller、repair-copy、bridgehead、drivability、导入边界、英文目录、CCD差分与连续驾驶；桌面发布/平台、签名合约及App归档权限测试。规划基线30岛匹配（生成器6），未刷新golden。结构15城渲染一致：27桥54桥端、39端连通，两端接续的12条路线有11条完整驶过；4条匝道上/下行通过。100次合法绘路编辑99次双向试驾通过。7/2两座问题桥均可擦除，其中1座可重画并双向通过，另一座明确无方案。
+
+仍有缺口：7/2原桥头closed:no-surface/wheel-twist未消除；新试驾只验证路面，不包含场景固体。场景基线失败：380/1600楼昼夜的city-infrastructure-decorative四项哈希与golden不同，与合并前日志`/tmp/ohagent-release-city-remaining.log`的四项差异完全相同，本轮未刷新golden。未宣称最终全套CI或原生验收通过。
+
+旧Skill发布分支493ac71d独立融合：删除release.yml（skill-v标签发布）、package-clawhub.yml及对应打包测试，保留桌面release-desktop.yml与当前提交Verify门禁；源码分类、CLI版本口径保留。本轮仅本地融合，不push、不Release，不覆盖或清理旧worktree。
+
+旧发布流程清理后，Python源码分类8项、regressions 88项均通过；桌面发布工作流守卫再次通过。

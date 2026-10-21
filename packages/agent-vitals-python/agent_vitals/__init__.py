@@ -6,8 +6,8 @@
 # 0.1.0，于是装了 1.0.6 的用户跑 `--version` 看到的是 0.1.0 —— 报 bug 时引用的
 # 版本号全是错的，没法对应到任何一次发布。
 #
-# 现在 package-clawhub.yml 在发布前校验 tag 与这里一致，不一致就中止。要发新版，
-# 先改这一行，再打同名 tag。
+# 曾由 package-clawhub.yml 在发布前校验 tag 与这里一致；2026-10 起 skill 体检不再
+# 从本仓库 CI 发布（后续迁出），该工作流已删，这一行仍是 `--version` 的来源。
 #
 # 与 SCHEMA_VERSION（在 cli.py）无关：工具可以升版而 JSON schema 不变。
 # rust 分支上 Cargo.toml 的 version 必须跟这里一致，否则两个实现无法用同一条
