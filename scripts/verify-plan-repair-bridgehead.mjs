@@ -14,6 +14,7 @@ const kit = await loadCity({
   "cityModel.ts": ["buildCityModel"],
   "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "bridgeChain"],
   "engine/planRoadRules.ts": ["validateRoadAdd", "validateEdgeDrop", "snapPoint"],
+  "engine/planAudit.ts": ["auditLayout"],
   "engine/surface/compileSurface.ts": ["compileCitySurface", "landingConnectivity"],
   "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
   "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
@@ -91,6 +92,11 @@ for (const deck of decks) {
 console.log(`${seed}/${tier}: ${decks.length} deck edges, ${seen.size ? new Set([...seen]).size : 0} in chains; ${bad.length} bridge(s) not drivable straight along the axis`);
 for (const x of bad) console.log(`  ${x.deck.id.slice(0, 32)} w${x.deck.width} len ${x.len.toFixed(1)} forward ${x.forward} back ${x.back}`);
 
+// 体检列得出坏桥头：7/2 悬索桥斜接（它是玩家要修的那座）。
+const audited = kit.auditLayout(base, model).filter((i) => i.rule.startsWith("bridgehead"));
+console.log(`audit: ${audited.map((i) => `${i.rule} @${i.id.split(":").slice(1).join(":")}`).join(", ") || "none"}`);
+if (seed === 7 && tier === 2) assert.ok(audited.some((i) => i.rule === "bridgeheadOblique" && i.entities.includes("-16.57:295.97/58.1:308.1")), "the audit lists the 7/2 suspension bridge as an oblique bridgehead");
+
 // ── 2. 擦掉每座坏桥：校验放行、补丁干净、桥面与登记一起消失 ──
 let fixed = 0; const report = [];
 for (const x of bad) {
@@ -152,6 +158,9 @@ for (const x of bad) {
   assert.ok(!forward.startsWith("invalid") && !back.startsWith("invalid"), `${forward} / ${back}`);
   const ok = forward === "ok" && back === "ok";
   if (ok) fixed++;
+  // 体检（P0-A）：修之前列出这座桥的桥头问题，修好之后不再列。
+  const flagged = (layout) => kit.auditLayout(layout, model).filter((i) => i.rule.startsWith("bridgehead") && i.entities.some((id) => x.chain.some((c) => c.id === id)));
+  if (ok) assert.deepEqual(flagged(repaired.layout), [], `${x.deck.id}: the repaired bridge leaves no bridgehead issue`);
   report.push(`  ${x.deck.id.slice(0, 32)}: erased; redrawn ${drawn.verdict.warnings.find((w) => w.startsWith("bridge:"))} from ${drawn.from.x.toFixed(1)}:${drawn.from.z.toFixed(1)} → forward ${forward} back ${back}`);
 }
 for (const line of report) console.log(line);

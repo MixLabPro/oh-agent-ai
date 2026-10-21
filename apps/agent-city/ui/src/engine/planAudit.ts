@@ -1,12 +1,13 @@
 /**
  * 规划体检（docs/CITY_PLAN_MANUAL_REPAIR_SPEC.md §6，M1 首批）：只读扫描布局层违例，
- * 产出可定位的问题清单。规则 id 与 planner/constraints.ts 的约束同语言——plan 级
+ * 产出可定位的问题清单（2026-10-21 起含道路规则：桥头斜接/桥头过陡/陡路——车开不过去的地方）。规则 id 与 planner/constraints.ts 的约束同语言——plan 级
  * （roadThroughSite/looseInlandRoadEnds/...）在 city-opt 的 constraints 导出稳定后接入，
  * 本批只落布局级规则；plan 级诊断可先用 `scripts/diagnose-city-residuals.mjs` 补位。
  */
 import type { CityBuilding, CityModel } from "../cityModel";
 import type { CityLayout, Parcel, Vec2 } from "./cityLayout";
 import { buildingRect, clearanceRoads, rectClearOfRoads, rectsOverlap, type BuildingRect, type PatchStaleEntry } from "./planPatch";
+import { bridgeheadDefects, polylineMaxGrade, ROAD_MAX_GRADE, ROAD_STEEP_GRADE } from "./planGeometry";
 
 export type PlanIssueSeverity = "error" | "warning" | "info";
 
@@ -105,6 +106,24 @@ export function auditLayout(layout: CityLayout, model: CityModel, stale: readonl
         issues.push({ id: `orphanedBlock:${block.id}`, severity: "warning", rule: "orphanedBlock", at: { x: block.x, z: block.z }, detail: `街区 ${block.id} 有楼但离最近道路 ${Math.round(gap)}（> ${ORPHAN_DISTANCE}）`, entities: [block.id] });
       }
     }
+  }
+
+  // 道路能不能开（修复升级 P0-A）：生成器留下的、车开不过去的路——玩家看得到才修得了。
+  // bridgeheadOblique / bridgeheadSteep：口径同桥头统计（bridgeheadDefects）；修法：橡皮擦整座擦桥，再用画路工具画一座直桥。
+  for (const defect of bridgeheadDefects(layout)) {
+    const where = `${defect.at.x.toFixed(1)}:${defect.at.z.toFixed(1)}`;
+    if (defect.kind === "oblique") issues.push({ id: `bridgeheadOblique:${where}`, severity: "error", rule: "bridgeheadOblique", at: defect.at, entities: defect.deckIds,
+      detail: `桥头斜接：下桥最顺的一条路也要转 ${Math.round(defect.skewDeg)}°（> 45°），车下桥就得急转、车身会越出桥面——用橡皮擦整座擦掉这座桥，再画一座直桥` });
+    else issues.push({ id: `bridgeheadSteep:${where}`, severity: "error", rule: "bridgeheadSteep", at: defect.at, entities: defect.deckIds,
+      detail: `桥头岸坡太陡：坡比 ${defect.grade.toFixed(2)}（车的爬坡上限 ${ROAD_MAX_GRADE}），车上不了桥——擦掉这座桥，在岸坡缓的地方重画` });
+  }
+  // roadSteep：地面路沿线坡比。> 上限：车开不上去（error）；> 0.2：很陡（warning）。
+  for (const edge of groundRoads) {
+    const { grade, at } = polylineMaxGrade(layout, edge.points);
+    if (grade > ROAD_MAX_GRADE && at) issues.push({ id: `roadSteep:${edge.id}`, severity: "error", rule: "roadSteep", at, entities: [edge.id],
+      detail: `这段路坡比 ${grade.toFixed(2)}，超过车的爬坡上限 ${ROAD_MAX_GRADE}，车开不上去——擦掉它，绕缓坡重画` });
+    else if (grade > ROAD_STEEP_GRADE && at) issues.push({ id: `roadSteep:${edge.id}`, severity: "warning", rule: "roadSteep", at, entities: [edge.id],
+      detail: `这段路坡比 ${grade.toFixed(2)}，接近车的爬坡上限 ${ROAD_MAX_GRADE}` });
   }
 
   // patchStale：补丁失效条目如实上报（info：不是城市的问题，是补丁追不上城市）。

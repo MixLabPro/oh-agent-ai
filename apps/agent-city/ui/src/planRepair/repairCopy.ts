@@ -29,7 +29,7 @@ export const EXACT: Record<string, string> = {
   "点两下画一段直路；从路尽头拐弯自动倒圆，过河自动架桥": "Click twice for a straight road; turns off a road end are rounded, river crossings become bridges",
   "点起点、路要经过的点、终点，画一段弧线路；弯的急缓有下限（按路型）": "Click start, a point the road passes through, then the end; minimum curve radius depends on road type",
   "撤销（⌘Z）": "Undo (⌘Z)", "重做（⇧⌘Z）": "Redo (⇧⌘Z)",
-  "检查楼压路、楼重叠、坡地等布局问题": "Check layout problems: buildings on roads, overlaps, slopes",
+  "检查楼压路、楼重叠、坡地等布局问题，以及车开不过去的桥头与陡路": "Check layout problems (buildings on roads, overlaps, slopes) and roads cars can't get through (bad bridgeheads, steep roads)",
   "丢弃全部修改，回到生成的样子（可撤销）": "Discard all edits and return to the generated city (undoable)",
   "退出修复（Esc 先逐级取消）": "Exit repair (Esc cancels step by step first)",
   "退出修复规划": "Exit repair",
@@ -39,8 +39,9 @@ export const EXACT: Record<string, string> = {
   "知道了": "Got it", "清除失效修改": "Clear stale edits", "定位": "Locate", "完成": "Finish", "拆除": "Demolish", "擦掉": "Erase",
   "回车": "Enter", "拆除选中的设施（Delete）": "Demolish the selected site (Delete)", "一次擦掉，撤销可恢复": "Erase all at once; undo restores them",
   "逆时针转 90°（[）": "Rotate 90° counter-clockwise ([)", "顺时针转 90°（]）": "Rotate 90° clockwise (])",
-  "收起体检": "Hide audit", "体检通过：没有发现布局问题": "Audit passed: no layout problems found",
+  "收起体检": "Hide audit", "体检通过：没有发现布局或道路问题": "Audit passed: no layout or road problems found",
   "楼压路": "Building on road", "楼重叠": "Buildings overlap", "坡地/不可建": "Slope / unbuildable", "街区无路": "Block without road", "补丁失效": "Stale edit",
+  "桥头斜接": "Oblique bridgehead", "桥头过陡": "Steep bridgehead", "陡路": "Steep road",
   "错误": "Error", "警告": "Warning", "提示": "Note",
   "选中：": "Selected: ", "不可行：": "Not possible: ", "注意：": "Note: ", "指向：": "Pointing at: ", "（点击选中）": " (click to select)",
   "计数:移楼": "Buildings moved", "计数:画路": "Roads drawn", "计数:擦路": "Roads erased", "计数:高架": "Viaducts", "计数:改路口": "Junctions moved", "计数:改设施": "Site edits", "条已失效": "stale",
@@ -206,6 +207,13 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray, t: Translate) => string]> =
   [/^会话楼 (.+) 与 (.+) 的占地相交$/, (m) => `Session buildings ${m[1]} and ${m[2]} overlap`],
   [/^街区 (.+) 有楼但离最近道路 (\d+)（> (\d+)）$/, (m) => `Block ${m[1]} has buildings but is ${m[2]} from the nearest road (> ${m[3]})`],
   [/^补丁条目失效（(.+)）：(.+)$/, (m) => `Edit is stale (${m[1]}): ${m[2]}`],
+  [/^桥头斜接：下桥最顺的一条路也要转 (\d+)°（> 45°），车下桥就得急转、车身会越出桥面——用橡皮擦整座擦掉这座桥，再画一座直桥$/, (m) =>
+    `Oblique bridgehead: even the straightest road off the bridge turns ${m[1]}° (> 45°), so cars must swerve and run off the deck — erase the whole bridge with the eraser and draw a straight one`],
+  [/^桥头岸坡太陡：坡比 ([\d.]+)（车的爬坡上限 ([\d.]+)），车上不了桥——擦掉这座桥，在岸坡缓的地方重画$/, (m) =>
+    `Steep bridgehead: bank grade ${m[1]} (cars climb at most ${m[2]}), cars can't get onto the bridge — erase it and redraw where the bank is gentler`],
+  [/^这段路坡比 ([\d.]+)，超过车的爬坡上限 ([\d.]+)，车开不上去——擦掉它，绕缓坡重画$/, (m) =>
+    `This road has grade ${m[1]}, above the ${m[2]} cars can climb — erase it and redraw along a gentler slope`],
+  [/^这段路坡比 ([\d.]+)，接近车的爬坡上限 ([\d.]+)$/, (m) => `This road has grade ${m[1]}, close to the ${m[2]} cars can climb`],
 ];
 
 /** 呈现期翻译一棵元素树里的字符串子节点与 title / aria-label（同 i18n.tsx::cityView，但走本模块的对照表）。 */

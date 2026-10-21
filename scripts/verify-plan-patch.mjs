@@ -699,6 +699,24 @@ const snap = (layout) => JSON.stringify({
   crossedNear.roadEdges = [...crossedNear.roadEdges, { id: "245:-150/245:-50", from: "245:-150", to: "245:-50", width: 5, kind: "local", points: [{ x: 245, z: -150 }, { x: 245, z: -50 }], structure: "ground-road" }];
   assert.deepEqual(validateRoadAdd(crossedNear, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers, ["bridge-approach-short"], "a crossing right behind the bridgehead is a junction at the bridgehead");
   assert.deepEqual(validateRoadAdd(crossedNear, model, { x: 140, z: -100 }, { x: 245, z: -100 }, 8).blockers, ["bridge-approach-short"], "…same when the stroke ends on that road");
+  // 道路体检（修复升级 P0-A）：斜接桥头、陡岸桥头、陡路都进体检，修掉后消失。
+  const oblique = river(); oblique.roadNodes = [...oblique.roadNodes, { id: "190:-60", x: 190, z: -60 }, { id: "197:-60", x: 197, z: -60 }, { id: "243:-60", x: 243, z: -60 }, { id: "250:-60", x: 250, z: -60 }, { id: "197:-90", x: 197, z: -90 }];
+  const road = (a, b, extra = {}) => ({ id: `${a.x}:${a.z}/${b.x}:${b.z}`, from: `${a.x}:${a.z}`, to: `${b.x}:${b.z}`, width: 5, kind: "local", points: [a, b], structure: "ground-road", ...extra });
+  oblique.roadEdges = [...oblique.roadEdges, road({ x: 197, z: -60 }, { x: 243, z: -60 }, { bridge: true, structure: "deck" }), road({ x: 243, z: -60 }, { x: 250, z: -60 }), road({ x: 197, z: -60 }, { x: 197, z: -90 })];
+  // 合成城市 x=50 处地面高差 1（换地重算用的台阶），基础路段横跨它——只看本例加的路。
+  const fixtureEdge = (issue) => makeLayout().roadEdges.some((e) => issue.entities.includes(e.id));
+  const rules = (layout) => auditLayout(layout, model).filter((i) => (i.rule.startsWith("bridgehead") || i.rule === "roadSteep") && !fixtureEdge(i)).map((i) => `${i.rule}:${i.severity}`);
+  assert.deepEqual(rules(oblique), ["bridgeheadOblique:error"], "a bridge whose only road off the west end turns 90° is an oblique bridgehead; the straight east end is fine");
+  const obliqueFixed = fresh(); obliqueFixed.roadOps = [{ t: "drop", edge: "197:-60/243:-60" }];
+  assert.deepEqual(rules(applyPlanPatch(oblique, obliqueFixed).layout), [], "erasing the bridge clears it");
+  const banked = river(); const riverHeight = banked.terrain.height; banked.terrain = { ...banked.terrain, height: (x, z) => (x > 240 && x < 250 ? 3 + (250 - x) * 0.6 : riverHeight(x, z)) };
+  banked.roadNodes = oblique.roadNodes; banked.roadEdges = [...river().roadEdges, road({ x: 197, z: -60 }, { x: 243, z: -60 }, { bridge: true, structure: "deck" }), road({ x: 243, z: -60 }, { x: 250, z: -60 }), road({ x: 190, z: -60 }, { x: 197, z: -60 })];
+  assert.ok(rules(banked).includes("bridgeheadSteep:error"), `a 0.6 bank at the bridge's east end is a steep bridgehead: ${rules(banked)}`);
+  const hill = makeLayout(); hill.terrain = { ...hill.terrain, height: (x, z) => (Math.hypot(x, z) < 400 ? 2 + Math.max(0, z) * (x > -60 && x < -40 ? 0.5 : 0) : -1) };
+  hill.roadNodes = [...hill.roadNodes, { id: "-50:0", x: -50, z: 0 }, { id: "-50:60", x: -50, z: 60 }, { id: "-30:0", x: -30, z: 0 }, { id: "-30:60", x: -30, z: 60 }];
+  hill.roadEdges = [...hill.roadEdges, road({ x: -50, z: 0 }, { x: -50, z: 60 }), road({ x: -30, z: 0 }, { x: -30, z: 60 })];
+  assert.ok(auditLayout(makeLayout(), model).some((i) => i.rule === "roadSteep" && fixtureEdge(i)), "the fixture's own 1-unit step at x=50 is itself a road a car can't climb (and the audit says so)");
+  assert.deepEqual(auditLayout(hill, model).filter((i) => i.rule === "roadSteep" && !fixtureEdge(i)).map((i) => `${i.id}:${i.severity}`), ["roadSteep:-50:0/-50:60:error"], "a road straight up a 0.5 slope is too steep for cars; the one beside it on flat ground is fine");
   const cliff = river(); const flat = cliff.terrain.height; cliff.terrain = { ...cliff.terrain, height: (x, z) => (x > 240 && x < 250 ? flat(x, z) + (250 - x) * 0.6 : flat(x, z)) };
   assert.deepEqual(validateRoadAdd(cliff, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers, ["bridge-approach-steep"], "a bank steeper than the car can climb is refused");
 }

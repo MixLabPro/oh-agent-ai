@@ -193,6 +193,70 @@ export function bridgeApproachProblem(layout: CityLayout, a: Vec2, b: Vec2, span
   return null;
 }
 
+// ── 道路能不能开（修复升级 P0-A/B，docs/CITY_REPAIR_UPGRADE_PLAN.md）──
+
+/** 车的爬坡上限 tan(0.3 rad)：坡比超过它的路车开不上去（与桥头引道同一个数）。 */
+export const ROAD_MAX_GRADE = BRIDGE_APPROACH_MAX_GRADE;
+/** 坡比超过它只提示「路很陡」：车开得上去，但已接近上限。 */
+export const ROAD_STEEP_GRADE = 0.2;
+const GRADE_STEP = 0.5;
+
+/** 折线沿线最大坡比（0.5 一步）。`from`/`to` 是沿线弧长区间，缺省整条。 */
+export function polylineMaxGrade(layout: CityLayout, points: readonly Vec2[], from = 0, to = Infinity): { grade: number; at: Vec2 | null } {
+  let worst = 0; let at: Vec2 | null = null; let base = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1], b = points[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
+    if (len > 0) {
+      const ux = (b.x - a.x) / len, uz = (b.z - a.z) / len;
+      for (let s = Math.max(0, from - base); s + GRADE_STEP <= Math.min(len, to - base) + 1e-9; s += GRADE_STEP) {
+        const p = { x: a.x + ux * s, z: a.z + uz * s };
+        const grade = Math.abs(layout.terrain.height(p.x + ux * GRADE_STEP, p.z + uz * GRADE_STEP) - layout.terrain.height(p.x, p.z)) / GRADE_STEP;
+        if (grade > worst) { worst = grade; at = p; }
+      }
+    }
+    base += len;
+  }
+  return { grade: worst, at };
+}
+
+export type BridgeheadDefect = { kind: "oblique" | "steep"; at: Vec2; deckIds: string[]; width: number; grade: number; skewDeg: number };
+
+/**
+ * 生成城市里的坏桥头（体检 bridgeheadOblique / bridgeheadSteep）。口径同桥头统计（45 规划 431 个地面桥端：43 斜接、5 过陡）：
+ * - 斜接：桥端的地面去路里没有一条与桥轴夹角 ≤ 45°（车下桥就得急转，窄桥车身越出桥面——7/2 悬索桥）；
+ * - 过陡：任一去路自桥端起 8 内坡比 > 车的爬坡上限。
+ * 桥端没有地面路（通往水中设施的桥尾）不算桥头缺陷。
+ */
+export function bridgeheadDefects(layout: CityLayout): BridgeheadDefect[] {
+  const decks = layout.roadEdges.filter(isDeck);
+  const ground = new Map<string, RoadEdge[]>();
+  for (const edge of layout.roadEdges) if (!isDeck(edge)) for (const id of [edge.from, edge.to]) (ground.get(id) ?? ground.set(id, []).get(id)!).push(edge);
+  const out: BridgeheadDefect[] = []; const seen = new Set<RoadEdge>();
+  for (const deck of decks) {
+    if (seen.has(deck)) continue;
+    const chain = bridgeChain(layout.roadEdges, deck); for (const piece of chain) seen.add(piece);
+    const degree = new Map<string, number>();
+    for (const piece of chain) for (const id of [piece.from, piece.to]) degree.set(id, (degree.get(id) ?? 0) + 1);
+    for (const piece of chain) for (const [id, point, inner] of [[piece.from, piece.points[0], piece.points[1]], [piece.to, piece.points[piece.points.length - 1], piece.points[piece.points.length - 2]]] as Array<[string, Vec2, Vec2]>) {
+      if (degree.get(id) !== 1) continue; // 桥中间的节点
+      const legs = ground.get(id) ?? [];
+      if (!legs.length) continue;
+      const len = Math.hypot(point.x - inner.x, point.z - inner.z) || 1; const ux = (point.x - inner.x) / len, uz = (point.z - inner.z) / len;
+      let minSkew = 180; let grade = 0;
+      for (const leg of legs) {
+        const pts = leg.from === id ? leg.points : [...leg.points].reverse();
+        const d = Math.hypot(pts[1].x - pts[0].x, pts[1].z - pts[0].z) || 1;
+        minSkew = Math.min(minSkew, Math.acos(Math.max(-1, Math.min(1, ((pts[1].x - pts[0].x) * ux + (pts[1].z - pts[0].z) * uz) / d))) * 180 / Math.PI);
+        grade = Math.max(grade, polylineMaxGrade(layout, pts, 0, BRIDGE_APPROACH_GRADE_REACH).grade);
+      }
+      const deckIds = chain.map((piece) => piece.id);
+      if (minSkew > 45) out.push({ kind: "oblique", at: point, deckIds, width: piece.width, grade, skewDeg: minSkew });
+      if (grade > BRIDGE_APPROACH_MAX_GRADE) out.push({ kind: "steep", at: point, deckIds, width: piece.width, grade, skewDeg: minSkew });
+    }
+  }
+  return out;
+}
+
 /** 楼的净空要避开的路：地面路（非桥）。体检与编辑校验共用这一个口径——
  *  曾经校验查全部路段、体检只查地面路，编辑器会拦下体检根本不报的落位（「三者同源」被破坏）。 */
 export function clearanceRoads(layout: CityLayout): RoadEdge[] {
