@@ -109,7 +109,8 @@ apps/desktop/src-tauri/     # 菜单栏 app（Tauri 2，**独立 workspace**，P
                             #   SqlSummaryRepository（冻结 DTO；Phase 4.3 后是唯一实现），不长第四份拷贝
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
-.github/workflows/          # verify.yml, release.yml, package-clawhub.yml
+.github/workflows/          # verify.yml, package-clawhub.yml, release-desktop.yml, …（skill 二进制的 release.yml 已删：
+                            #   skill 体检不单独发 GitHub Release，后续迁出本仓库）
 ```
 
 **两个子树的分界**（`tests/test_classification.py` 用显式清单钉死）：`skills/` 是
