@@ -3,9 +3,9 @@ import type { CityEngine } from "../../engine/CityEngine";
 import type { RoadAuditSnapshot } from "../useRoadAudit";
 import { buildRoadAuditViewRows } from "../RoadAuditView";
 
-export function RoadAuditPanel({ snapshot, run, cancel, engineRef, locale, canRun }: {
+export function RoadAuditPanel({ snapshot, run, cancel, engineRef, locale, canRun, close }: {
   snapshot: RoadAuditSnapshot; run: () => void; cancel: () => void;
-  engineRef: React.RefObject<CityEngine | null>; locale: "en" | "zh-Hans"; canRun: boolean;
+  engineRef: React.RefObject<CityEngine | null>; locale: "en" | "zh-Hans"; canRun: boolean; close: () => void;
 }) {
   const [visibleCount, setVisibleCount] = useState(60);
   const en = locale === "en";
@@ -27,6 +27,7 @@ export function RoadAuditPanel({ snapshot, run, cancel, engineRef, locale, canRu
       borderRadius: 10, color: "#edf3fc", background: "rgba(12, 22, 36, 0.94)", backdropFilter: "blur(10px)" }}>
     <header><strong>{en ? "Local road audit" : "本地道路审计"}</strong><span role="status">{statusText}</span></header>
     <div className="city-road-audit-actions">
+      <button type="button" onClick={close}>{en ? "Close" : "关闭"}</button>
       <button type="button" disabled={!canRun || snapshot.status === "running" || snapshot.status === "capturing"} onClick={run}>{en ? "Run audit" : "运行审计"}</button>
       {(snapshot.status === "running" || snapshot.status === "capturing") && <button type="button" onClick={cancel}>{en ? "Cancel" : "取消"}</button>}
       {(snapshot.status === "running" || snapshot.status === "complete") && <button type="button" onClick={cancel}>{en ? "Release snapshot" : "释放快照"}</button>}

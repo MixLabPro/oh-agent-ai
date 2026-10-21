@@ -54,6 +54,7 @@ export function CityApp() {
   const [quality, setQuality] = useState<EngineQualityMode>("auto");
   const [labels, setLabels] = useState(true);
   const [cinema, setCinema] = useState(false);
+  const [roadAuditOpen, setRoadAuditOpen] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const experience = useCityExperience(engineRef, projection);
   // 飞机与汽车共用宿主运行时；当前城市的自由驾驶从工具栏进入。
@@ -219,7 +220,7 @@ export function CityApp() {
   // loading shell visible from the first render, including a slow summary query.
   const cityLoading = !sceneUnavailable && (!dataLoaded || (dataAvailable && projection?.status !== "empty" && !firstModelFrame));
   const roadAuditEnabled = sceneReady && !driving.active && !game.active && !cinema && !experience.busy && !experience.film && !planRepair.state.active;
-  const roadAudit = useRoadAudit(engineRef, roadAuditEnabled);
+  const roadAudit = useRoadAudit(engineRef, roadAuditEnabled && roadAuditOpen);
   const toolbarReady = true; // UI/command channel ready; scene actions stay disabled until the first model frame.
   const tools: Tool[] = [
     // 时间范围、显示标签移入城市设置（用户：这两个应放设置里）；画质同样在设置里。city.window / city.labels 命令仍保留给宿主与自动化。
@@ -228,6 +229,7 @@ export function CityApp() {
     { id: "cinema", commandId: "city.cinema", label: cinema ? "停止航拍" : "航拍", kind: "button", enabled: sceneReady && !experience.busy && !game.active },
     { id: "photo", commandId: "city.photo", label: experience.photoBusy ? "正在拍照" : "拍照", kind: "button", enabled: sceneReady && !cinema && !game.active && !experience.busy && !experience.film },
     { id: "film", commandId: "city.film", label: experience.film ? `取消导出 · ${Math.round(experience.film.frame / experience.film.total * 100)}%` : "导出视频", kind: "button", enabled: !!experience.film || (sceneReady && !cinema && !game.active && !experience.busy && supportsBackgroundFilm()) },
+    { id: "road-audit", commandId: "city.road-audit", label: roadAuditOpen ? "关闭道路审计" : "道路审计", kind: "button", enabled: roadAuditEnabled },
     { id: "settings", commandId: "city.settings", label: "城市设置", kind: "button", enabled: !cinema && !game.active },
     // 游戏模式（开发开关门控）：平时「驾驶飞机」直接进自由练习（挑战仍在城市设置）；
     // 游戏中变「退出游戏」——即计划 §3 要求的宿主级通用退出入口。上限 8→9 见 host 校验器。
@@ -258,6 +260,9 @@ export function CityApp() {
         break;
       case "city.photo": void experience.photo(); break;
       case "city.film": void experience.exportFilm(); break;
+      case "city.road-audit":
+        if (!roadAuditEnabled) throw new Error("audit_unavailable");
+        setRoadAuditOpen(!roadAuditOpen); break;
       case "city.settings": experience.setOptions(!experience.options); break;
       case "city.catalog": experience.setCatalog(!experience.catalog); break;
       case "city.repair":
@@ -281,7 +286,7 @@ export function CityApp() {
   useEffect(() => connect((command) => executeRef.current(command.commandId, command.value)), []);
   // Publishing the first toolbar acknowledges the responsive plugin shell, not
   // scene completion. Planning runs on a local worker while scene tools stay disabled.
-  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, game.active, driving.active, planRepair.state.active, experience.busy, experience.film?.frame, experience.film?.total]);
+  useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, roadAuditOpen, sceneReady, sceneUnavailable, game.active, driving.active, planRepair.state.active, experience.busy, experience.film?.frame, experience.film?.total]);
   const sceneMessage = sceneUnavailable ? "当前环境无法显示三维城市，仍可查看会话摘要。"
     : !dataAvailable || projection.status === "empty" ? status : null;
   return cityView((
@@ -312,8 +317,8 @@ export function CityApp() {
         actions={{ clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,
           resume: driving.resume, openUiContext: driving.openUiContext }}
         locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />
-      {roadAuditEnabled && <RoadAuditPanel snapshot={roadAudit.snapshot} run={() => { void roadAudit.run(); }} cancel={() => roadAudit.cancel()}
-        engineRef={engineRef} locale={language === "en" ? "en" : "zh-Hans"} canRun={roadAuditEnabled} />}
+      {roadAuditEnabled && roadAuditOpen && <RoadAuditPanel snapshot={roadAudit.snapshot} run={() => { void roadAudit.run(); }} cancel={() => roadAudit.cancel()}
+        engineRef={engineRef} locale={language === "en" ? "en" : "zh-Hans"} canRun={roadAuditEnabled} close={() => setRoadAuditOpen(false)} />}
     </section>
   ), language);
 }
