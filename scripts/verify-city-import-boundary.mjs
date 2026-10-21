@@ -27,7 +27,7 @@ const engine = path.join(srcRoot, "engine");
 if (!fs.existsSync(engine)) throw new Error(`engine/ not found under ${srcRoot}`);
 
 // 规则 4 的白名单：编辑器（engine/plan[A-Z]*.ts 与 planRepair/）当前对 engine/planner/ 的全部值导入。
-// 实测目前为空——编辑器只在注释里提到 planner/constraints.ts（planRoadRules.ts 的 ACUTE_LIMIT 手工同步）。
+// 实测目前为空——编辑器只在注释里提到 planner/constraints.ts（planRoadRules.ts 的路口夹角下限改用渲染层的 CHANNEL_T_GAP，不再同步）。
 // 这是「当前允许的表面」：要新增就必须在这里显式加一行 "导入方文件 -> planner 内目标文件" 并说明理由
 // （R3 计划让 planRoadRules 导入 constraints.ts 的阈值常量，到时在此登记）。
 const EDITOR_PLANNER_WHITELIST = new Set([

@@ -95,6 +95,7 @@ export const EXACT: Record<string, string> = {
   "桥面由桥梁模型绑定，不能单独编辑（橡皮擦可以整座擦掉）": "Bridge decks are bound to the bridge model and can't be edited alone (the eraser removes the whole bridge)",
   "桥头离路口或落笔点太近：桥两端各要一段直引道（小路 14、次干道 16、主干道 18）——把起点/终点往岸上多拉一点，别在桥头附近穿过别的路": "The bridgehead is too close to a junction or the stroke end: each end needs a straight approach (14 for local, 16 for secondary, 18 for main roads) — pull the start/end further inland and don't cross other roads near the bridgehead",
   "桥头岸坡太陡，车开不上桥——换个岸坡缓的地方过河": "The bank at the bridgehead is too steep for cars — cross where the bank is gentler",
+  "路口夹角太小（小于 50°）：车拐不过来——请接近直角接入，或先接到别处再拐": "The junction angle is too sharp (under 50°): cars can't make the turn — join closer to a right angle, or join elsewhere and turn",
   "太陡了：坡比超过车的爬坡上限 0.31，车开不上去——换条缓一点的线，或用弧线绕着坡走": "Too steep: the grade exceeds the 0.31 cars can climb — pick a gentler line, or curve around the slope",
   "这条路很陡（坡比超过 0.2），车开得上去但很吃力": "This road is steep (grade above 0.2): cars can climb it, but only just",
   "点一条路或一座桥试驾：车沿它来回各开一遍，告诉你开不开得过去": "Click a road or a bridge to test-drive it: a car drives it both ways and tells you whether it gets through",

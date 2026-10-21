@@ -168,6 +168,7 @@ const BLOCKER_TEXT: Record<string, string> = {
   "road-over-building": "会穿过建筑、配套或花园",
   "crosses-road": "与现有道路交叉——请在交叉点连接",
   "acute-junction": "路口夹角太小（小于 30°）",
+  "junction-too-sharp": "路口夹角太小（小于 50°）：车拐不过来——请接近直角接入，或先接到别处再拐",
   "edge-exists": "这里已经有路了",
   degenerate: "起点和终点是同一个路口",
   "node-collision": "目标处已有路口",

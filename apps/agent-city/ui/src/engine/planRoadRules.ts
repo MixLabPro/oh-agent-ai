@@ -17,12 +17,16 @@ import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
 import { bridgeChain, buildingRect, deckUnderLandmark, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
 import { bridgeApproachProblem, curvePoints, polylineMaxGrade, ROAD_MAX_GRADE, ROAD_STEEP_GRADE, minCurveRadius, polylineLength, polylineMinRadius, wetSpan } from "./planGeometry";
 import { polygonDistance, roadNodeId } from "./cityPlan";
+import { CHANNEL_T_GAP } from "./cityRoadPaint";
 import { listSites, siteBox } from "./planSites";
 import { frontEntrance, segmentPolygonDistance, worldOverhead, type Polygon } from "./planFootprint";
 
 export type RoadVerdict = { blockers: string[]; warnings: string[] };
 
-const ACUTE_LIMIT = (30 * Math.PI) / 180; // 同 planner/constraints.ts::acuteJunctions
+/** 编辑造出的路口夹角下限（2026-10-21，用户拍板「拦」）：< 50° 的三岔口渲染层会做渠化喇叭口（cityRoadPaint.CHANNEL_T_GAP），
+ *  导流岛尖伸进主路车道，车在口里拐不过来——玩家式编辑抽样里，锐角接路只有约四成试驾通过，正常接路九成以上。
+ *  曾经只有 < 30°（planner/constraints.ts::acuteJunctions 的口径）给提示、30–50° 连提示都没有。 */
+const SHARP_LIMIT = CHANNEL_T_GAP;
 const MIN_EDGE_LENGTH = 6;
 const NODE_CLEARANCE = 1;       // 目标点距任何别的路口 < 1 视为撞车
 const FAR_MOVE = 80;
@@ -44,7 +48,7 @@ function distanceToPolyline(p: Vec2, points: readonly Vec2[]): number {
   return best;
 }
 
-/** 某节点处是否存在 < 30° 的相邻路夹角（≥3 路才算，同 acuteJunctions）。 */
+/** 某节点处是否存在 < SHARP_LIMIT 的相邻路夹角（≥3 路才算，同 channelizedTPlan 的测角）。 */
 function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boolean {
   const incident = edges.filter((edge) => edge.from === nodeId || edge.to === nodeId);
   if (incident.length < 3) return false;
@@ -54,7 +58,7 @@ function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boole
   }).sort((a, b) => a - b);
   for (let k = 0; k < angles.length; k += 1) {
     const gap = (k + 1 < angles.length ? angles[k + 1] : angles[0] + Math.PI * 2) - angles[k];
-    if (gap < ACUTE_LIMIT) return true;
+    if (gap < SHARP_LIMIT) return true;
   }
   return false;
 }
@@ -196,13 +200,13 @@ export function validateNodeMove(layout: CityLayout, model: CityModel, nodeId: s
   const afterEdges = layout.roadEdges.map((edge) => moved.find(({ before }) => before === edge)?.after ?? edge);
   const nodes = new Map<string, Vec2>(layout.roadNodes.map((candidate) => [candidate.id, candidate]));
   const neighbours = new Set(incident.map((edge) => (edge.from === nodeId ? edge.to : edge.from)));
-  // 锐角只提示（SimCity 也允许难看的路口）。
+  // 锐角路口拦下（车拐不过来）；本来就锐角的路口不算新违例。
   let acute = hasAcuteAt(afterEdges, nodeId, target) && !hasAcuteAt(layout.roadEdges, nodeId, node);
   for (const id of neighbours) {
     const at = nodes.get(id);
     if (at && hasAcuteAt(afterEdges, id, at) && !hasAcuteAt(layout.roadEdges, id, at)) acute = true;
   }
-  if (acute) warnings.push("acute-junction");
+  if (acute) blockers.push("junction-too-sharp");
   if (Math.hypot(target.x - node.x, target.z - node.z) > FAR_MOVE) warnings.push("far-move");
   return { blockers, warnings };
 }
@@ -485,12 +489,12 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
   // 滨海大道离海太远：景观带仍会铺，但铺在离海近的一侧的陆地上——提示，不拦（SimCity 也不管你把海滨大道修在哪）。
   if (purpose === "waterfront" && layout.coast?.length && Math.abs(polygonDistance({ x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 }, layout.coast)) > FAR_FROM_COAST) warnings.push("far-from-coast");
 
-  // 锐角：只拦新引入的（接到的路口本来就锐角的不算新违例）。
+  // 锐角（< 50°）：只拦新引入的（接到的路口本来就锐角的不算新违例）。
   const dirAB = Math.atan2(b.z - a.z, b.x - a.x); const dirBA = Math.atan2(a.z - b.z, a.x - b.x);
   for (const [end, at, dir] of [[ea, a, dirAB], [eb, b, dirBA]] as const) {
     const existing = directionsAt(layout, end, at);
     if (existing.length + 1 < 3) continue;
-    if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
+    if (minGap([...existing, dir]) < SHARP_LIMIT && !(existing.length >= 3 && minGap(existing) < SHARP_LIMIT)) { blockers.push("junction-too-sharp"); break; }
   }
   return { blockers, warnings };
 }
@@ -530,7 +534,7 @@ function validateCurveAdd(layout: CityLayout, model: CityModel, from: Vec2, via:
   for (const [end, at, dir] of [[ea, a, dirA], [eb, b, dirB]] as const) {
     const existing = directionsAt(layout, end, at);
     if (existing.length + 1 < 3) continue;
-    if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
+    if (minGap([...existing, dir]) < SHARP_LIMIT && !(existing.length >= 3 && minGap(existing) < SHARP_LIMIT)) { blockers.push("junction-too-sharp"); break; }
   }
   return { blockers, warnings };
 }

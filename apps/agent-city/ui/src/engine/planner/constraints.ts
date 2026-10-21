@@ -253,8 +253,8 @@ export const looseInlandRoadEnds: Constraint = {
   },
 };
 
-/** 锐角路口阈值（相邻两条路夹角下限）。导出是为了让编辑器（planRoadRules.ts::ACUTE_LIMIT）直接导入，
- *  不再靠注释「同步」两份魔数；表达式保持 `(30 * Math.PI) / 180` 原样，浮点结果逐位不变。
+/** 锐角路口阈值（相邻两条路夹角下限）。生成器的口径；编辑器（planRoadRules.ts::SHARP_LIMIT）自 2026-10-21 起改用更严的
+ *  50°（渲染层渠化阈值 CHANNEL_T_GAP，玩家造出的锐角口车拐不过来），不再与这里同步。表达式保持 `(30 * Math.PI) / 180` 原样，浮点结果逐位不变。
  *  改值是产品决策（会改变所有种子布局，见 CITY_PLANNER_REFACTOR_SPEC R3/R6），不在此随手改。 */
 export const ACUTE_JUNCTION_RAD = (30 * Math.PI) / 180;
 
