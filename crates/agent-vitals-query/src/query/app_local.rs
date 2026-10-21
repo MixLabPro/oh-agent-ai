@@ -124,7 +124,7 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
     let mut rows = stats::session_page(db.conn(),from,now,SESSION_CAP,0).map_err(|_| "data_unavailable")?;
     rows.sort_by(|a,b| a["window_first_ms"].as_i64().cmp(&b["window_first_ms"].as_i64()).then_with(|| a["session_key"].as_str().cmp(&b["session_key"].as_str())));
     let keys: Vec<String> = rows.iter().filter_map(|r| r["session_key"].as_str().map(str::to_string)).collect();
-    let buckets = billing::sessions_billing_buckets_in_window(db.conn(),&keys,Some((from,now))).map_err(|_| "data_unavailable")?;
+    let buckets = billing::sessions_billing_buckets_with_reference_in_window(db.conn(),&keys,Some((from,now))).map_err(|_| "data_unavailable")?;
     let excerpt_rows = stats::excerpt_candidates(db.conn(),&keys).map_err(|_| "data_unavailable")?;
     let mut models_by_key: std::collections::BTreeMap<&str,Vec<Value>> = std::collections::BTreeMap::new();
     for model in &models { if let Some(key)=model["session_key"].as_str() { models_by_key.entry(key).or_default().push(model.clone()); } }
@@ -141,6 +141,7 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
         session["cost_minor"] = cost["cost_minor"].clone();
         session["cost_breakdown"] = cost["breakdown"].clone();
         session["cost_complete"] = cost["complete"].clone();
+        if let Some(reference) = cost.get("reference_prices") { session["cost_reference_prices"] = reference.clone(); }
         session["cost_status"] = json!({"state":cost["status"],"reason":cost["reason"],"has_unresolved":cost["has_unresolved"]});
         session["task_excerpts"] = json!(clean_excerpts(excerpts_by_key.get(key).map(Vec::as_slice).unwrap_or(&[])));
         sessions.push(session);

@@ -323,6 +323,11 @@ fn city_detail_prices_pre_snapshot_usage_as_dated_reference_only() {
     assert_eq!(cost["cost_minor"]["basis"],"metered_estimate");
     assert_eq!(cost["has_unresolved"],true);
     assert_eq!(cost["reference_prices"],json!([{"pricing_version":"later-local-card","captured_at_ms":f.now}]));
+    let v2=app_local::city_projection(&f.home,30,f.now).unwrap();
+    let session=&v2["sessions"][0];
+    assert_eq!(session["cost_minor"]["amount_minor"],20);
+    assert_eq!(session["cost_reference_prices"],cost["reference_prices"]);
+    assert_eq!(session["cost_status"]["has_unresolved"],true);
     assert_eq!(agent_vitals_data::authority_query::session_cost_view(f.db.conn(),"reference").unwrap()["reason"],"no-pricing-snapshot");
     f.fact("reference","unpriced-fact",Some(f.now-500),Some("unpriced-model"),"delta");
     let overview=f.overview(200);
