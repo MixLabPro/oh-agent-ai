@@ -17,14 +17,15 @@ import type { CityLayout } from "../engine/cityLayout";
 import { minimapModel, type MinimapModel } from "./roadConditions";
 import { trafficModel, type TrafficLevel, type TrafficModel } from "./traffic";
 
-const SIZE = 208;
+const SIZE = 184;
 const FOLLOW_SPAN = 320;
 const ROAD_COLOR = { main: "#ece8dc", secondary: "#cfcbc0", local: "#a29f97", bridge: "#8fb7d6" } as const;
 const CONDITION_COLOR = { blocked: "#ff4d3d", steep: "#ffb02e" } as const;
 const TRAFFIC_COLOR: Record<TrafficLevel, string> = { free: "#4fbf6a", busy: "#d8cf3f", slow: "#ff9a2e", jam: "#ff3b30" };
 const IMPASSABLE = "#c65cff";
 const HIGHWAY = "#4a4f55";
-const LAND = [111, 125, 90], WATER = [47, 111, 143];
+/** 陆/水半透明（不透明度 0–255）：静止时 3D 场景透过来，小地图不挡视线；悬停时面板底色变实，地图跟着「变实」。 */
+const LAND = [30, 40, 34, 120], WATER = [34, 92, 130, 170];
 const STORAGE = { open: "city-minimap-open", tab: "city-minimap-tab" } as const;
 
 type Tab = "routes" | "audit";
@@ -47,7 +48,7 @@ function waterTile(model: MinimapModel): HTMLCanvasElement {
   const g = tile.getContext("2d");
   if (g) {
     const image = g.createImageData(cols, rows);
-    for (let i = 0; i < water.length; i += 1) { const c = water[i] ? WATER : LAND; image.data.set([c[0], c[1], c[2], 255], i * 4); }
+    for (let i = 0; i < water.length; i += 1) { const c = water[i] ? WATER : LAND; image.data.set(c, i * 4); }
     g.putImageData(image, 0, 0);
   }
   waterTiles.set(model, tile);
@@ -57,8 +58,11 @@ function waterTile(model: MinimapModel): HTMLCanvasElement {
 /** 画底图（水陆 + 高架 + 路网），路的颜色随看法变。cull：跟随视图只画视窗里的路。 */
 function drawMap(g: CanvasRenderingContext2D, model: MinimapModel, traffic: TrafficModel | null, mode: Mode, v: View, cull: boolean): void {
   const s = scaleOf(v);
-  g.fillStyle = `rgb(${LAND.join(",")})`; g.fillRect(0, 0, SIZE, SIZE);
   const b = model.bounds; const o = toCanvas(v, b.minX, b.minZ);
+  g.clearRect(0, 0, SIZE, SIZE); // 跟随视图反复画在同一张底图上，半透明的陆地不先清会一层层叠成不透明
+  // 城市范围外（正方形补出来的边）按海画：城外本来就是海，按陆地画会在两侧留两条深色竖带。
+  g.fillStyle = `rgba(${WATER[0]},${WATER[1]},${WATER[2]},${WATER[3] / 255})`; g.fillRect(0, 0, SIZE, SIZE);
+  g.clearRect(o.x, o.y, (b.maxX - b.minX) * s, (b.maxZ - b.minZ) * s);
   g.imageSmoothingEnabled = true; g.drawImage(waterTile(model), o.x, o.y, (b.maxX - b.minX) * s, (b.maxZ - b.minZ) * s);
   g.lineCap = "round"; g.lineJoin = "round";
   const half = v.span / 2 + 20;
@@ -107,20 +111,21 @@ function arrow(g: CanvasRenderingContext2D, x: number, y: number, angle: number,
 
 const COPY = {
   zh: {
-    title: "小地图", tabs: { routes: "路线", audit: "道路审计" }, drive: "路况", follow: "跟随", whole: "全城", close: "收起小地图", open: "展开小地图",
+    title: "小地图", tabs: { routes: "路线", audit: "拥堵估算" }, drive: "路况", follow: "跟随", whole: "全城", close: "收起小地图", open: "展开小地图",
     routes: (roads: number, bridges: number) => `${roads} 段路 · ${bridges} 座桥`,
     computing: "正在估算高峰车流…",
-    audit: (t: TrafficModel, blocked: number) => `高峰估算：${t.counts.jam} 段拥堵 · ${t.counts.slow} 段偏慢${blocked ? ` · ${blocked} 段开不过去` : ""}${t.unreachable ? ` · ${Math.round((t.unreachable / Math.max(1, t.trips)) * 100)}% 出行到不了` : ""}`,
-    driveSummary: (m: MinimapModel) => (m.counts.blocked ? `${m.counts.blocked} 处开不过去` : "全城可通行") + (m.counts.steep ? ` · ${m.counts.steep} 处很陡` : ""),
+    // 摘要一行装得下：拥堵/偏慢/断路三个数，到不了的出行占比只在有时才加；「这是估算」写在悬停提示（title）与图例旁的标签页名里。
+    audit: (t: TrafficModel, blocked: number) => `拥堵 ${t.counts.jam} · 偏慢 ${t.counts.slow}${blocked ? ` · 断路 ${blocked}` : ""}${t.unreachable ? ` · ${Math.round((t.unreachable / Math.max(1, t.trips)) * 100)}% 到不了` : ""}`,
+    driveSummary: (m: MinimapModel) => (m.counts.blocked ? `开不过去 ${m.counts.blocked}` : "全城可通行") + (m.counts.steep ? ` · 很陡 ${m.counts.steep}` : ""),
     hint: { routes: "点地图，镜头飞过去。", audit: "估算：按街区用地生成高峰出行、按拥堵后的行程时间走最短路；高架不计入。紫色虚线的路车开不过去，修复城市里可以修。", drive: "红 = 开不过去，琥珀 = 很陡。三角是你的车。" },
     legend: { routes: ["主干道", "次干道", "小路", "桥", "高架", "镜头"], audit: ["畅通", "较忙", "偏慢", "拥堵", "开不过去"], drive: ["开不过去", "很陡", "正常路", "我的位置"] },
   },
   en: {
-    title: "Minimap", tabs: { routes: "Routes", audit: "Road audit" }, drive: "Road conditions", follow: "Follow", whole: "City", close: "Collapse minimap", open: "Expand minimap",
+    title: "Minimap", tabs: { routes: "Routes", audit: "Traffic est." }, drive: "Road conditions", follow: "Follow", whole: "City", close: "Collapse minimap", open: "Expand minimap",
     routes: (roads: number, bridges: number) => `${roads} roads · ${bridges} bridge${bridges === 1 ? "" : "s"}`,
     computing: "Estimating peak traffic…",
-    audit: (t: TrafficModel, blocked: number) => `Peak estimate: ${t.counts.jam} jammed · ${t.counts.slow} slow${blocked ? ` · ${blocked} can't be driven` : ""}${t.unreachable ? ` · ${Math.round((t.unreachable / Math.max(1, t.trips)) * 100)}% of trips can't arrive` : ""}`,
-    driveSummary: (m: MinimapModel) => (m.counts.blocked ? `${m.counts.blocked} spot${m.counts.blocked === 1 ? "" : "s"} cars can't pass` : "Every road drivable") + (m.counts.steep ? ` · ${m.counts.steep} steep` : ""),
+    audit: (t: TrafficModel, blocked: number) => `Jam ${t.counts.jam} · Slow ${t.counts.slow}${blocked ? ` · Cut ${blocked}` : ""}${t.unreachable ? ` · ${Math.round((t.unreachable / Math.max(1, t.trips)) * 100)}% stranded` : ""}`,
+    driveSummary: (m: MinimapModel) => (m.counts.blocked ? `Blocked ${m.counts.blocked}` : "All drivable") + (m.counts.steep ? ` · Steep ${m.counts.steep}` : ""),
     hint: { routes: "Click to fly the camera there.", audit: "Estimate: peak trips from block land use, routed by congested travel time; expressways not counted. Dashed purple roads can't be driven; fix them in Repair city.", drive: "Red = cars can't pass, amber = steep. The triangle is your car." },
     legend: { routes: ["Arterial", "Secondary", "Local", "Bridge", "Expressway", "Camera"], audit: ["Free", "Busy", "Slow", "Jammed", "Can't pass"], drive: ["Can't pass", "Steep", "Road", "You"] },
   },
@@ -241,28 +246,26 @@ export function CityMinimap({ engine, hidden, language = "zh", driving }: {
   const swatches: readonly string[] = mode === "routes" ? [ROAD_COLOR.main, ROAD_COLOR.secondary, ROAD_COLOR.local, ROAD_COLOR.bridge, HIGHWAY]
     : mode === "audit" ? [TRAFFIC_COLOR.free, TRAFFIC_COLOR.busy, TRAFFIC_COLOR.slow, TRAFFIC_COLOR.jam, IMPASSABLE] : [CONDITION_COLOR.blocked, CONDITION_COLOR.steep, ROAD_COLOR.secondary];
   const labels = copy.legend[mode];
+  // 静止时只有一块半透明的方图（右上角一个小点提示有问题）；悬停/键盘聚焦时面板变实，标签、摘要、图例才浮出来，都叠在图内，不加高面板。
   return <aside className={`city-minimap${open ? "" : " is-collapsed"}${drivingActive ? " is-driving" : ""}`} aria-label={copy.title}>
-    <div className="city-minimap-body" aria-hidden={!open}>
-      <header>
-        {mode === "drive" ? <>
-          <b>{copy.drive}</b>
-          <div className="city-minimap-tabs" role="group">
-            <button className={follow ? "is-on" : ""} aria-pressed={follow} onClick={() => setFollow(true)}>{copy.follow}</button>
-            <button className={follow ? "" : "is-on"} aria-pressed={!follow} onClick={() => setFollow(false)}>{copy.whole}</button>
-          </div>
-        </> : <div className="city-minimap-tabs" role="tablist">
-          {(["routes", "audit"] as const).map((id) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "is-on" : ""} onClick={() => setTab(id)}>{copy.tabs[id]}</button>)}
-        </div>}
-      </header>
+    <div className="city-minimap-frame" aria-hidden={!open}>
       <canvas ref={canvasRef} width={SIZE} height={SIZE} style={{ width: SIZE, height: SIZE, cursor: mode === "drive" ? "default" : "crosshair" }}
         onMouseMove={(event) => setHover(pointer(event).spot)} onMouseLeave={() => setHover(null)}
         onClick={(event) => { if (mode === "drive") return; const p = pointer(event); engine.current?.focusPoint(p.spot ? p.spot.at.x : p.x, p.spot ? p.spot.at.z : p.z); }} />
-      <p className={`city-minimap-summary ${bad ? "is-bad" : "is-ok"}`}>{summary}</p>
-      <ul className="city-minimap-legend" aria-hidden="true">
-        {swatches.map((color, i) => <li key={labels[i]}><i style={{ background: color }} className={mode === "audit" && i === 4 ? "is-dashed" : undefined} />{labels[i]}</li>)}
-        {(mode === "routes" || mode === "drive") && <li><i className="is-arrow" />{labels[labels.length - 1]}</li>}
-      </ul>
-      <p className="city-minimap-note">{hover ? (language === "en" ? hover.text.en : hover.text.zh) : copy.hint[mode]}</p>
+      {bad && <span className="city-minimap-alert" aria-hidden="true" />}
+      <div className="city-minimap-top city-minimap-tabs" role={mode === "drive" ? "group" : "tablist"}>
+        {mode === "drive" ? <>
+          <button className={follow ? "is-on" : ""} aria-pressed={follow} onClick={() => setFollow(true)}>{copy.follow}</button>
+          <button className={follow ? "" : "is-on"} aria-pressed={!follow} onClick={() => setFollow(false)}>{copy.whole}</button>
+        </> : (["routes", "audit"] as const).map((id) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "is-on" : ""} onClick={() => setTab(id)}>{copy.tabs[id]}</button>)}
+      </div>
+      <div className="city-minimap-bottom">
+        <p className={`city-minimap-summary ${hover ? "is-detail" : bad ? "is-bad" : "is-ok"}`} title={copy.hint[mode]}>{hover ? (language === "en" ? hover.text.en : hover.text.zh) : summary}</p>
+        <ul className="city-minimap-legend" aria-hidden="true">
+          {swatches.map((color, i) => <li key={labels[i]}><i style={{ background: color }} className={mode === "audit" && i === 4 ? "is-dashed" : undefined} />{labels[i]}</li>)}
+          {(mode === "routes" || mode === "drive") && <li><i className="is-arrow" />{labels[labels.length - 1]}</li>}
+        </ul>
+      </div>
     </div>
     <button className="city-minimap-handle" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={open ? copy.close : copy.open} title={open ? copy.close : copy.open}>
       <span aria-hidden="true">{open ? "‹" : "›"}</span>{!open && <em>{copy.title}</em>}
