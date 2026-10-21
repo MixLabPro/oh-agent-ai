@@ -147,7 +147,7 @@ export function CityMinimap({ engine, hidden, language = "zh", driving }: {
   const [layout, setLayout] = useState<CityLayout | null>(null);
   const [traffic, setTraffic] = useState<TrafficModel | null>(null);
   const [hover, setHover] = useState<Spot | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const viewRef = useRef<View | null>(null);
   const spotsRef = useRef<Spot[]>([]);
   const drivingActive = driving?.active ?? false;
@@ -176,7 +176,7 @@ export function CityMinimap({ engine, hidden, language = "zh", driving }: {
 
   useEffect(() => {
     if (hidden || !open || !model) return;
-    const canvas = canvasRef.current; if (!canvas) return;
+    if (!canvas) return;
     canvas.width = SIZE * ratio; canvas.height = SIZE * ratio;
     const g = canvas.getContext("2d"); if (!g) return;
     // 整城视图画一次存成位图，每帧只叠点与箭头；跟随视图每 ~80 ms 按车的位置重画（只画视窗里的路）。
@@ -230,7 +230,7 @@ export function CityMinimap({ engine, hidden, language = "zh", driving }: {
     };
     frame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(frame);
-  }, [engine, hidden, open, model, traffic, mode, follow, ratio]);
+  }, [canvas, engine, hidden, open, model, traffic, mode, follow, ratio]);
 
   if (hidden || !model) return null;
   const pointer = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -246,25 +246,26 @@ export function CityMinimap({ engine, hidden, language = "zh", driving }: {
   const swatches: readonly string[] = mode === "routes" ? [ROAD_COLOR.main, ROAD_COLOR.secondary, ROAD_COLOR.local, ROAD_COLOR.bridge, HIGHWAY]
     : mode === "audit" ? [TRAFFIC_COLOR.free, TRAFFIC_COLOR.busy, TRAFFIC_COLOR.slow, TRAFFIC_COLOR.jam, IMPASSABLE] : [CONDITION_COLOR.blocked, CONDITION_COLOR.steep, ROAD_COLOR.secondary];
   const labels = copy.legend[mode];
-  // 静止时只有一块半透明的方图（右上角一个小点提示有问题）；悬停/键盘聚焦时面板变实，标签、摘要、图例才浮出来，都叠在图内，不加高面板。
+  // Controls and status occupy their own rows; the square canvas stays unobscured.
+  // The color key is optional, and keyboard users can open it without hovering.
   return <aside className={`city-minimap${open ? "" : " is-collapsed"}${drivingActive ? " is-driving" : ""}`} aria-label={copy.title}>
     <div className="city-minimap-frame" aria-hidden={!open}>
-      <canvas ref={canvasRef} width={SIZE} height={SIZE} style={{ width: SIZE, height: SIZE, cursor: mode === "drive" ? "default" : "crosshair" }}
-        onMouseMove={(event) => setHover(pointer(event).spot)} onMouseLeave={() => setHover(null)}
-        onClick={(event) => { if (mode === "drive") return; const p = pointer(event); engine.current?.focusPoint(p.spot ? p.spot.at.x : p.x, p.spot ? p.spot.at.z : p.z); }} />
-      {bad && <span className="city-minimap-alert" aria-hidden="true" />}
       <div className="city-minimap-top city-minimap-tabs" role={mode === "drive" ? "group" : "tablist"}>
         {mode === "drive" ? <>
           <button className={follow ? "is-on" : ""} aria-pressed={follow} onClick={() => setFollow(true)}>{copy.follow}</button>
           <button className={follow ? "" : "is-on"} aria-pressed={!follow} onClick={() => setFollow(false)}>{copy.whole}</button>
         </> : (["routes", "audit"] as const).map((id) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "is-on" : ""} onClick={() => setTab(id)}>{copy.tabs[id]}</button>)}
       </div>
+      <canvas ref={setCanvas} width={SIZE} height={SIZE} style={{ width: SIZE, height: SIZE, cursor: mode === "drive" ? "default" : "crosshair" }}
+        onMouseMove={(event) => setHover(pointer(event).spot)} onMouseLeave={() => setHover(null)}
+        onClick={(event) => { if (mode === "drive") return; const p = pointer(event); engine.current?.focusPoint(p.spot ? p.spot.at.x : p.x, p.spot ? p.spot.at.z : p.z); }} />
       <div className="city-minimap-bottom">
         <p className={`city-minimap-summary ${hover ? "is-detail" : bad ? "is-bad" : "is-ok"}`} title={copy.hint[mode]}>{hover ? (language === "en" ? hover.text.en : hover.text.zh) : summary}</p>
-        <ul className="city-minimap-legend" aria-hidden="true">
+        <details className="city-minimap-key"><summary>{language === "en" ? "Legend" : "图例"}</summary>
+        <ul className="city-minimap-legend">
           {swatches.map((color, i) => <li key={labels[i]}><i style={{ background: color }} className={mode === "audit" && i === 4 ? "is-dashed" : undefined} />{labels[i]}</li>)}
           {(mode === "routes" || mode === "drive") && <li><i className="is-arrow" />{labels[labels.length - 1]}</li>}
-        </ul>
+        </ul></details>
       </div>
     </div>
     <button className="city-minimap-handle" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={open ? copy.close : copy.open} title={open ? copy.close : copy.open}>
