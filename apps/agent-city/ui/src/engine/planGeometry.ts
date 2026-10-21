@@ -26,6 +26,57 @@ export function edgeLocked(edge: RoadEdge): boolean {
   return edge.bridge === true || edge.structure === "deck";
 }
 
+const isDeck = (edge: RoadEdge) => edge.bridge === true || edge.structure === "deck";
+
+/**
+ * 整座桥（2026-10-21，用户：「玩家能不能用修复工具修掉坏桥头」）：从这段桥面沿「只连着桥面的路口」走出的整串桥面。
+ * 桥面不能单独擦（会留下悬空的半座桥），但**整座**擦掉是合法的——生成器的坏桥头（斜接、陡岸）锁死后玩家
+ * 只能绕开，删不掉也改不了；擦掉整座再用画路工具重画一座直桥，是修复工具里唯一能修桥头的路径。
+ * 桥上没有路口（生成器与画路同口径），相邻桥面段只在两端都是桥面的节点相接，按节点走就是整座。
+ */
+export function bridgeChain(edges: readonly RoadEdge[], edge: RoadEdge): RoadEdge[] {
+  if (!isDeck(edge)) return [edge];
+  const incident = new Map<string, RoadEdge[]>();
+  for (const candidate of edges) for (const id of [candidate.from, candidate.to]) (incident.get(id) ?? incident.set(id, []).get(id)!).push(candidate);
+  const chain = new Set<RoadEdge>([edge]); const stack = [edge.from, edge.to]; const seen = new Set<string>();
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const legs = incident.get(id) ?? [];
+    if (!legs.every(isDeck)) continue; // 桥头：有地面路接着，桥到此为止
+    for (const leg of legs) if (!chain.has(leg)) { chain.add(leg); stack.push(leg.from, leg.to); }
+  }
+  return edges.filter((candidate) => chain.has(candidate));
+}
+
+/** 整座桥按顺序连成一条折线（擦除预览画它）。链不是一条简单路径时（理论上没有）退回各段首尾相接。 */
+export function bridgeChainPolyline(chain: readonly RoadEdge[]): Vec2[] {
+  if (chain.length === 1) return [...chain[0].points];
+  const degree = new Map<string, number>();
+  for (const edge of chain) for (const id of [edge.from, edge.to]) degree.set(id, (degree.get(id) ?? 0) + 1);
+  let at = chain.find((edge) => degree.get(edge.from) === 1)?.from ?? chain.find((edge) => degree.get(edge.to) === 1)?.to;
+  const left = new Set(chain); const out: Vec2[] = [];
+  while (at !== undefined && left.size) {
+    const next = [...left].find((edge) => edge.from === at || edge.to === at);
+    if (!next) break;
+    left.delete(next);
+    const pts = next.from === at ? next.points : [...next.points].reverse();
+    out.push(...(out.length ? pts.slice(1) : pts));
+    at = next.from === at ? next.to : next.from;
+  }
+  return left.size ? chain.flatMap((edge) => edge.points) : out;
+}
+
+/** 悬索桥下的桥面：塔架与主缆是地标模型，桥面是它的一部分——整座擦掉时地标一起拆（不留悬在空中的塔与缆）。 */
+export function deckUnderLandmark(layout: CityLayout, edge: RoadEdge): boolean {
+  if (!isDeck(edge)) return false;
+  const a = edge.points[0], b = edge.points[edge.points.length - 1];
+  const midpoint = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+  return (layout.landmarks ?? []).some((landmark) => landmark.kind === "suspension-bridge" && !!landmark.to
+    && distanceToSegment(midpoint, landmark, landmark.to) < Math.max(2, edge.width / 2));
+}
+
 // ── 弧线路（游戏式曲线工具）──
 
 /** 弧线的最小转弯半径：与拐角倒圆同一口径——路宽 3 倍，夹在 12–36（小路能拐急弯，主干道要缓弯）。 */
@@ -69,6 +120,8 @@ export const polylineLength = (points: readonly Vec2[]): number => points.reduce
 export const MAX_GROUND_BRIDGE = 160;
 /** 桥台伸上岸的长度：桥面两端落在陆地上，不在水线上。 */
 export const BRIDGE_ABUTMENT = 3;
+/** 岸坡太陡时桥台最多伸到离水线这么远（P0-C）。 */
+export const BRIDGE_ABUTMENT_MAX = 20;
 /** 沿线采样水面的步长。 */
 const WET_STEP = 1;
 
@@ -77,10 +130,17 @@ export type WetSpan =
   | { kind: "bridge"; from: Vec2; to: Vec2; length: number }
   | { kind: "invalid"; reason: "end-in-water" | "multi-water" | "bridge-too-long" };
 
+/** 水面：地形高 ≤ 0.5（生成器连接器判桥跨的同一水位，connect.ts 的 `height <= 0.5`）。 */
+export const WATER_LEVEL = 0.5;
+export const isWater = (layout: CityLayout, x: number, z: number): boolean => layout.terrain.height(x, z) <= WATER_LEVEL;
+
 /**
- * 一段直路 a→b 跨不跨水：全程可建 → dry；中间恰好一段不可建、两端在陆地上、水面段（含两端桥台）≤ MAX_GROUND_BRIDGE
+ * 一段直路 a→b 跨不跨水：全程不碰水 → dry；中间恰好一段水、两端在陆地上、水面段（含两端桥台）≤ MAX_GROUND_BRIDGE
  * → bridge（桥面起止点，已量化）；其余（端点在水里、过两次水、太长）→ invalid。
  * 画路校验与补丁重放共用这一个判定——两边对「哪段是桥」必须一致。
+ * 水按地形高判，**不按 buildable**（2026-10-21）：buildable 离岸 12 内恒假，生成器的桥头和岸边路都铺在这段前滩上——
+ * 按 buildable 判，桥面会把整段前滩连同岸边路一起吞进「水面」（junction-on-bridge），落笔点也成了「在水里」，
+ * 7/2 擦掉坏桥后在原址附近一笔也画不出来。地面路仍要求可建（badSamples），只有桥跨按水位。
  */
 export function wetSpan(layout: CityLayout, a: Vec2, b: Vec2): WetSpan {
   const len = Math.hypot(b.x - a.x, b.z - a.z);
@@ -88,7 +148,7 @@ export function wetSpan(layout: CityLayout, a: Vec2, b: Vec2): WetSpan {
   const wet: boolean[] = [];
   for (let i = 0; i <= steps; i += 1) {
     const t = i / steps;
-    wet.push(!layout.terrain.buildable(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t));
+    wet.push(isWater(layout, a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t));
   }
   const first = wet.indexOf(true);
   if (first < 0) return { kind: "dry" };
@@ -96,12 +156,116 @@ export function wetSpan(layout: CityLayout, a: Vec2, b: Vec2): WetSpan {
   const last = wet.lastIndexOf(true);
   for (let i = first; i <= last; i += 1) if (!wet[i]) return { kind: "invalid", reason: "multi-water" };
   const at = (d: number) => quantize({ x: a.x + (b.x - a.x) * (d / len), z: a.z + (b.z - a.z) * (d / len) });
-  const start = Math.max(0, (first / steps) * len - BRIDGE_ABUTMENT);
-  const end = Math.min(len, (last / steps) * len + BRIDGE_ABUTMENT);
+  let start = Math.max(0, (first / steps) * len - BRIDGE_ABUTMENT);
+  let end = Math.min(len, (last / steps) * len + BRIDGE_ABUTMENT);
+  // 桥台延伸到缓坡（修复升级 P0-C）：岸坡比车的爬坡能力陡时，桥面沿笔画往岸上多伸，直到桥端外 8 内的坡缓下来，
+  // 离水线最多 BRIDGE_ABUTMENT_MAX——桥面是一块斜板，陡岸压在板下，车从缓坡上桥（生成器陡桥头 5 个的原地修法）。
+  const steepBeyond = (d: number, toward: Vec2) => polylineMaxGrade(layout, [at(d), toward], 0, BRIDGE_APPROACH_GRADE_REACH).grade > BRIDGE_APPROACH_MAX_GRADE;
+  const waterStart = (first / steps) * len, waterEnd = (last / steps) * len;
+  while (start - 1 >= 0 && waterStart - (start - 1) <= BRIDGE_ABUTMENT_MAX && steepBeyond(start, a)) start -= 1;
+  while (end + 1 <= len && (end + 1) - waterEnd <= BRIDGE_ABUTMENT_MAX && steepBeyond(end, b)) end += 1;
   const from = at(start); const to = at(end);
   const length = Math.hypot(to.x - from.x, to.z - from.z);
   if (length > MAX_GROUND_BRIDGE) return { kind: "invalid", reason: "bridge-too-long" };
   return { kind: "bridge", from, to, length };
+}
+
+/** 桥头引道（2026-10-21，与生成器 7/2 桥头缺陷同源）：桥面是刚体，下桥后要先有一段同线的地面路再接路口或转弯——
+ *  桥端直接压在路口上（斜接的路与桥面在一两米内对不上），窄桥下桥车身越出桥面侧边；岸坡比车的爬坡能力陡，车开不上桥。
+ *  生成器 45 个规划的 431 个桥端里 43 个斜接、5 个过陡；画路工具不能再画出同样的桥头。
+ *  最短长度 = 路口渠化喇叭口沿臂的伸出量 2.2 + 9 + 0.55·路宽（structureCompiler.channelizedGeometry，中间还有一座 4.4 起的
+ *  导流岛）：曾取 6，7/2 重画的桥离自动路口正好 6，喇叭口与导流岛压在桥头上。小路 14、次干道 16、主干道 18。 */
+export const bridgeApproachMin = (width: number): number => Math.ceil(2.2 + 9 + 0.55 * width);
+/** 引道坡比检查范围（自桥端起）与上限：车的爬坡上限 tan(0.3 rad)。 */
+export const BRIDGE_APPROACH_GRADE_REACH = 8;
+export const BRIDGE_APPROACH_MAX_GRADE = 0.31;
+
+/** 一笔直路 a→b 上的桥（wetSpan 的 bridge）两端引道是否合格：太短 → bridge-approach-short，太陡 → bridge-approach-steep。
+ *  引道量到**最近的路口**：落笔点，或这一笔与现有路的交点（重放时自动开路口）——7/2 擦桥后重画，新笔画在桥端 6 处
+ *  横穿旧桥的残路，自动路口连渠化岛正压在桥头，量到落笔点的 9.7 看着合格。 */
+export function bridgeApproachProblem(layout: CityLayout, a: Vec2, b: Vec2, span: { from: Vec2; to: Vec2 }, width: number, junctions: readonly Vec2[] = []): "bridge-approach-short" | "bridge-approach-steep" | null {
+  const len = Math.hypot(b.x - a.x, b.z - a.z), ux0 = (b.x - a.x) / len, uz0 = (b.z - a.z) / len;
+  const at = (p: Vec2) => (p.x - a.x) * ux0 + (p.z - a.z) * uz0;
+  const sFrom = at(span.from), sTo = at(span.to);
+  // 每侧最近的路口（沿笔画的弧长）：源侧取 < 桥头的最大者，对岸取 > 桥尾的最小者。
+  const nearA = Math.max(0, ...junctions.map(at).filter((s) => s < sFrom)), nearB = Math.min(len, ...junctions.map(at).filter((s) => s > sTo));
+  const point = (s: number) => ({ x: a.x + ux0 * s, z: a.z + uz0 * s });
+  const ends: Array<[Vec2, Vec2]> = [[span.from, point(nearA)], [span.to, point(nearB)]];
+  if (ends.some(([deck, end]) => Math.hypot(end.x - deck.x, end.z - deck.z) < bridgeApproachMin(width) - 1e-6)) return "bridge-approach-short";
+  // 桥面本身是一块斜板（两端各接路面高）：桥台伸上高岸后，板的坡比也不能超过车的爬坡上限。
+  const deckLength = Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z);
+  if (deckLength > 0 && Math.abs(layout.terrain.height(span.to.x, span.to.z) - layout.terrain.height(span.from.x, span.from.z)) / deckLength > BRIDGE_APPROACH_MAX_GRADE) return "bridge-approach-steep";
+  for (const [deck, end] of ends) {
+    const run = Math.hypot(end.x - deck.x, end.z - deck.z), ux = (end.x - deck.x) / run, uz = (end.z - deck.z) / run;
+    const h = (s: number) => layout.terrain.height(deck.x + ux * s, deck.z + uz * s);
+    for (let s = 0; s + 0.5 <= Math.min(BRIDGE_APPROACH_GRADE_REACH, run) + 1e-9; s += 0.5)
+      if (Math.abs(h(s + 0.5) - h(s)) / 0.5 > BRIDGE_APPROACH_MAX_GRADE) return "bridge-approach-steep";
+  }
+  return null;
+}
+
+// ── 道路能不能开（修复升级 P0-A/B，docs/CITY_REPAIR_UPGRADE_PLAN.md）──
+
+/** 车的爬坡上限 tan(0.3 rad)：坡比超过它的路车开不上去（与桥头引道同一个数）。 */
+export const ROAD_MAX_GRADE = BRIDGE_APPROACH_MAX_GRADE;
+/** 坡比超过它只提示「路很陡」：车开得上去，但已接近上限。 */
+export const ROAD_STEEP_GRADE = 0.2;
+const GRADE_STEP = 0.5;
+
+/** 折线沿线最大坡比（0.5 一步）。`from`/`to` 是沿线弧长区间，缺省整条。 */
+export function polylineMaxGrade(layout: CityLayout, points: readonly Vec2[], from = 0, to = Infinity): { grade: number; at: Vec2 | null } {
+  let worst = 0; let at: Vec2 | null = null; let base = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1], b = points[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
+    if (len > 0) {
+      const ux = (b.x - a.x) / len, uz = (b.z - a.z) / len;
+      for (let s = Math.max(0, from - base); s + GRADE_STEP <= Math.min(len, to - base) + 1e-9; s += GRADE_STEP) {
+        const p = { x: a.x + ux * s, z: a.z + uz * s };
+        const grade = Math.abs(layout.terrain.height(p.x + ux * GRADE_STEP, p.z + uz * GRADE_STEP) - layout.terrain.height(p.x, p.z)) / GRADE_STEP;
+        if (grade > worst) { worst = grade; at = p; }
+      }
+    }
+    base += len;
+  }
+  return { grade: worst, at };
+}
+
+export type BridgeheadDefect = { kind: "oblique" | "steep"; at: Vec2; deckIds: string[]; width: number; grade: number; skewDeg: number };
+
+/**
+ * 生成城市里的坏桥头（体检 bridgeheadOblique / bridgeheadSteep）。口径同桥头统计（45 规划 431 个地面桥端：43 斜接、5 过陡）：
+ * - 斜接：桥端的地面去路里没有一条与桥轴夹角 ≤ 45°（车下桥就得急转，窄桥车身越出桥面——7/2 悬索桥）；
+ * - 过陡：任一去路自桥端起 8 内坡比 > 车的爬坡上限。
+ * 桥端没有地面路（通往水中设施的桥尾）不算桥头缺陷。
+ */
+export function bridgeheadDefects(layout: CityLayout): BridgeheadDefect[] {
+  const decks = layout.roadEdges.filter(isDeck);
+  const ground = new Map<string, RoadEdge[]>();
+  for (const edge of layout.roadEdges) if (!isDeck(edge)) for (const id of [edge.from, edge.to]) (ground.get(id) ?? ground.set(id, []).get(id)!).push(edge);
+  const out: BridgeheadDefect[] = []; const seen = new Set<RoadEdge>();
+  for (const deck of decks) {
+    if (seen.has(deck)) continue;
+    const chain = bridgeChain(layout.roadEdges, deck); for (const piece of chain) seen.add(piece);
+    const degree = new Map<string, number>();
+    for (const piece of chain) for (const id of [piece.from, piece.to]) degree.set(id, (degree.get(id) ?? 0) + 1);
+    for (const piece of chain) for (const [id, point, inner] of [[piece.from, piece.points[0], piece.points[1]], [piece.to, piece.points[piece.points.length - 1], piece.points[piece.points.length - 2]]] as Array<[string, Vec2, Vec2]>) {
+      if (degree.get(id) !== 1) continue; // 桥中间的节点
+      const legs = ground.get(id) ?? [];
+      if (!legs.length) continue;
+      const len = Math.hypot(point.x - inner.x, point.z - inner.z) || 1; const ux = (point.x - inner.x) / len, uz = (point.z - inner.z) / len;
+      let minSkew = 180; let grade = 0;
+      for (const leg of legs) {
+        const pts = leg.from === id ? leg.points : [...leg.points].reverse();
+        const d = Math.hypot(pts[1].x - pts[0].x, pts[1].z - pts[0].z) || 1;
+        minSkew = Math.min(minSkew, Math.acos(Math.max(-1, Math.min(1, ((pts[1].x - pts[0].x) * ux + (pts[1].z - pts[0].z) * uz) / d))) * 180 / Math.PI);
+        grade = Math.max(grade, polylineMaxGrade(layout, pts, 0, BRIDGE_APPROACH_GRADE_REACH).grade);
+      }
+      const deckIds = chain.map((piece) => piece.id);
+      if (minSkew > 45) out.push({ kind: "oblique", at: point, deckIds, width: piece.width, grade, skewDeg: minSkew });
+      if (grade > BRIDGE_APPROACH_MAX_GRADE) out.push({ kind: "steep", at: point, deckIds, width: piece.width, grade, skewDeg: minSkew });
+    }
+  }
+  return out;
 }
 
 /** 楼的净空要避开的路：地面路（非桥）。体检与编辑校验共用这一个口径——

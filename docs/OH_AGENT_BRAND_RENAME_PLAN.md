@@ -3,7 +3,16 @@
 日期：2026-10-16  
 产品：**Oh Agent**  
 官网：<https://ohagent.ai/>  
-状态：待实施；本文件是修改方案，不代表已完成品牌改名或 Windows/Linux 打包验收。
+状态：源码改名已实施（2026-10-20）：显示名、窗口标题、`.app` 路径、发布文件名、通知标题，**以及 bundle identifier**
+（用户决定一并改为已在 Apple 登记的 App ID `ai.ohagent.desktop`，Team `EUKB6WHY6Z`；隔离探针为
+`ai.ohagent.desktop.isolation-probe`）。下表「Tauri identifier：保留」一行因此作废，其余边界不变。
+**尚未完成**：三平台原生构建与安装验收、macOS 签名公证、从旧包覆盖升级的实机验证、官网下载入口（§5 第 5–7 步）。
+
+identifier 改变的后果（实施时核对过源码）：用户数据（facts JSONL、SQL 权威库、计费声明、城市补丁与种子）在
+agent-vitals 数据目录，桌面端只用 Tauri 的 `resource_dir`，不按 identifier 取数据目录，因此不受影响。随
+identifier 变化的是 macOS 的应用身份：新包不覆盖旧 `agent-vitals.app`、两者可同时运行（两个菜单栏图标）；
+通知权限需重新授权；「系统设置 › 菜单栏」出现新条目；WebView 本地偏好（侧栏折叠、界面语言、城市背景）重置。
+升级说明见 `apps/desktop/src-tauri/README.md`。
 
 ## 1. 修改目标与边界
 

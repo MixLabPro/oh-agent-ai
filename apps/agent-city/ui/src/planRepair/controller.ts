@@ -19,9 +19,12 @@ import type { SnapPoint, RoadVerdict } from "../engine/planRoadRules";
 import type { Vec2 } from "../engine/cityLayout";
 import type { RepairRay } from "../engine/CityEngine";
 import type { SiteInfo, SiteTarget } from "../engine/planSites";
+import type { BridgeFixProposal, BridgeFixResult } from "../engine/planBridgeFix";
 import type { EditResult, ImpactPreview, NodeHandle, PlacementGhost, PlanRect, RepairCandidate, RoadPreview, RoadPurpose, SiteEditResult } from "./session";
 
-export type RepairTool = "build" | "draw" | "erase" | "restyle" | "site" | "node";
+export type RepairTool = "build" | "draw" | "erase" | "restyle" | "site" | "node" | "drive";
+/** 试驾结果（planRepair/testDrive.ts 的面板视图）。 */
+export type DriveReport = { verdict: "passed" | "blocked" | "undetermined"; path: Vec2[]; width: number; blockedAt: Vec2 | null; reason: string; kind: "bridge" | "road" };
 /** 画路的路型：地面路三档宽度 + 滨海大道 + 高架。 */
 export type RoadType = "local" | "secondary" | "main" | "waterfront" | "viaduct";
 export type DrawMode = "straight" | "curve";
@@ -36,6 +39,10 @@ export type RepairMessage = { kind: "hint" | "ok" | "warn" | "error"; text: stri
 /** 悬停预览（叠加层据此画色带/标记）。reason 非空时面板在消息下方显示。 */
 export type RepairPreview =
   | { kind: "erase"; points: Vec2[]; width: number; ok: boolean; reason: string | null; warning: string | null }
+  /** 一键修复方案（P1-D）：将擦掉的整座桥与残路（红）+ 将画的直桥（绿）。 */
+  | { kind: "proposal"; erase: Vec2[][]; draw: { from: Vec2; to: Vec2; width: number } }
+  /** 试驾：悬停的路/整座桥（蓝）；点过之后是试驾结果（通过绿 / 挡住处红点 / 未判定琥珀）。 */
+  | { kind: "drive"; points: Vec2[]; width: number; result: DriveReport["verdict"] | null; blockedAt: Vec2 | null }
   /** 改路型：鼠标下那条路的一整段（按目标宽度画）。 */
   | { kind: "restyle"; edges: Array<{ points: Vec2[]; width: number }>; ok: boolean; reason: string | null; warning: string | null; impact: ImpactPreview | null; waterfront: boolean }
   | { kind: "draw"; from: Vec2; to: Vec2; width: number; ok: boolean; reason: string | null; warning: string | null; snap: SnapPoint; impact: ImpactPreview | null; /** 实际铺成的折线（拐角倒圆）；null = 直线 from→to */ path: Vec2[] | null; waterfront: boolean }
@@ -64,6 +71,8 @@ export type RepairState = {
   dragNode: NodeHandle | null;
   /** 刚搬走的地标/市政用地在原址留下的断头接入路（面板给一键擦掉）。 */
   stranded: string[];
+  /** 正在预览的一键修复方案（P1-D）：采用前不写补丁；Esc / 换工具放弃。 */
+  proposal: BridgeFixProposal | null;
   roadType: RoadType;
   /** 高架：已点下、还没完成的折线点。 */
   viaduct: Vec2[];
@@ -102,6 +111,11 @@ export type RepairDeps = {
   restyleRoad(edgeId: string, width: number, purpose?: RoadPurpose): EditResult;
   dropEdge(edgeId: string): EditResult;
   dropEdges(edgeIds: readonly string[]): EditResult;
+  /** 试驾（P1-E）：沿这条路/整座桥双向各开一遍。null = 这里没有可试驾的路（太短）。 */
+  testDrive(edgeId: string): DriveReport | null;
+  /** 坏桥头的一键修复（P1-D）：候选方案（不写补丁）与采用（一步写入、一步撤销）。 */
+  proposeBridgeFix(deckId: string): BridgeFixResult;
+  applyBridgeFix(proposal: BridgeFixProposal): EditResult;
   // 路口
   nodeAt(x: number, z: number): NodeHandle | null;
   validateMove(nodeId: string, x: number, z: number, exact?: boolean): RoadPreview;
@@ -134,7 +148,7 @@ const BLOCKER_TEXT: Record<string, string> = {
   "missing-parcel": "地块不存在（城市已重排）",
   "unknown-building": "这栋楼不在当前城市里",
   // 道路
-  "locked-edge": "桥面由桥梁模型绑定，不能单独编辑",
+  "locked-edge": "桥面由桥梁模型绑定，不能单独编辑（橡皮擦可以整座擦掉）",
   "hits-locked-site": "会压到悬索桥（它是路网里的一段桥面）",
   "site-locked": "这座设施已锁定",
   "arterial-skeleton": "主干道是城市骨架，不能擦",
@@ -148,9 +162,14 @@ const BLOCKER_TEXT: Record<string, string> = {
   "road-in-water": "不能修到水面或岩岸上（起点或终点在水里，或一笔要跨两段水——地面桥一笔只跨一段水面）",
   "bridge-too-long": "水面太宽，地面桥最长 160——请改用高架",
   "junction-on-bridge": "桥上不能有路口：新路会在水面上和别的路交叉",
+  "bridge-approach-short": "桥头离路口或落笔点太近：桥两端各要一段直引道（小路 14、次干道 16、主干道 18）——把起点/终点往岸上多拉一点，别在桥头附近穿过别的路",
+  "bridge-approach-steep": "桥头岸坡太陡，车开不上桥——换个岸坡缓的地方过河",
+  "road-too-steep": "太陡了：坡比超过车的爬坡上限 0.31，车开不上去——换条缓一点的线，或用弧线绕着坡走",
   "road-over-building": "会穿过建筑、配套或花园",
   "crosses-road": "与现有道路交叉——请在交叉点连接",
   "acute-junction": "路口夹角太小（小于 30°）",
+  "surface-unresolved": "这样接会在路口留下一块车开不上去的路面（驾驶面解不出）——换个接入点或角度",
+  "junction-too-sharp": "路口夹角太小（小于 50°）：车拐不过来——请接近直角接入，或先接到别处再拐",
   "edge-exists": "这里已经有路了",
   degenerate: "起点和终点是同一个路口",
   "node-collision": "目标处已有路口",
@@ -177,6 +196,8 @@ const WARNING_TEXT: Record<string, string> = {
   "erases-arterial": "擦掉的是主干道",
   "erases-waterfront": "擦掉的是滨海路",
   "cuts-bridge": "擦掉桥头引道后，桥会和路网断开",
+  "erases-bridge": "将擦掉整座桥——桥头两侧的路留作断头，可以用画路工具重画一座直桥",
+  "erases-suspension-bridge": "将擦掉整座悬索桥（塔架与主缆一起拆）——桥头两侧的路留作断头，可以用画路工具重画一座直桥",
   "strands-buildings": "有楼会离最近的路超过 40（楼还在，只是没有路通到）",
   "disconnects-buildings": "有楼会和主路网断开",
   "isolated-road": "这段路两端都没接上路网",
@@ -189,6 +210,7 @@ const WARNING_TEXT: Record<string, string> = {
   "drops-waterfront": "改掉的是滨海路——沿路的滨海景观带会撤掉",
   "narrows-arterial": "主干道会变窄",
   "bridge-under-viaduct": "桥的上方有高架（净空请自己看一眼）",
+  "road-steep": "这条路很陡（坡比超过 0.2），车开得上去但很吃力",
 };
 /** 带数量的提示码（`code:N`）。 */
 const COUNTED_TEXT: Record<string, (n: number) => string> = {
@@ -224,7 +246,22 @@ const HINT: Record<RepairTool, RepairMessage> = {
   restyle: { kind: "hint", text: "先选路型，再把鼠标移到路上：整条街高亮，点一下就改成这个路型（变宽会推平/安置两侧的楼；桥面不能改）" },
   site: { kind: "hint", text: "点选任意非会话建筑（公共设施、花园、地标、市政用地、背景楼）；再点空地搬家，或点「拆除」" },
   node: { kind: "hint", text: "点一个路口拿起来，移动鼠标预览，再点一下放下；Esc 放回原处" },
+  drive: { kind: "hint", text: "点一条路或一座桥试驾：车沿它来回各开一遍，告诉你开不开得过去" },
 };
+
+const DRIVE_CAUSE: Array<[RegExp, string]> = [
+  [/unsupported-footprint|no-surface/, "车轮悬空：路面在这里接不上"],
+  [/excessive-step|wheel-twist|step/, "台阶太高或车轮别住：路面在这里有高差"],
+  [/curb|sidewalk|island/, "撞上路缘：路在这里太窄或拐得太急"],
+  [/grade|slope|climb/, "坡太陡：车爬不上去"],
+];
+const driveCause = (reason: string) => DRIVE_CAUSE.find(([pattern]) => pattern.test(reason))?.[1] ?? reason;
+function driveMessage(report: DriveReport): RepairMessage {
+  const what = report.kind === "bridge" ? "这座桥" : "这条路";
+  if (report.verdict === "passed") return { kind: "ok", text: `试驾通过：车沿${what}来回都开得过去` };
+  if (report.verdict === "blocked") return { kind: "error", text: `试驾挡住：车在红点处过不去（${driveCause(report.reason)}）——${report.kind === "bridge" ? "可以整座擦掉重画一座直桥" : "可以擦掉绕开重画"}` };
+  return { kind: "warn", text: `试驾未判定：这次没开完（${driveCause(report.reason)}），不代表路不通` };
+}
 
 // 名称表暂在这里（注册表 SPEC CITY_SITE_REGISTRY_SPEC.md B1 会把它们收进 siteClasses 单一来源）。
 const SITE_LABEL: Record<string, string> = { school: "学校", mall: "商场", hospital: "医院", garden: "城区花园与景观湖", "district-landmark": "城区地标", context: "背景楼" };
@@ -267,7 +304,7 @@ const HOVER_SETTLE_MS = 150;
 const ESTIMATE_NOTE = "（预估，鼠标停住后给出确切结果）"; // 地面点移动不到这么多就不重算预览（鼠标抖动）
 
 export class RepairController {
-  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], drawVia: null, drawMode: "straight", siteTurn: 0, preview: null, message: null };
+  private state: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], proposal: null, roadType: "local", viaduct: [], drawVia: null, drawMode: "straight", siteTurn: 0, preview: null, message: null };
   private readonly listeners = new Set<(state: RepairState) => void>();
   private lastGround: Vec2 | null = null;
   private lastRay: RepairRay | null = null;
@@ -309,7 +346,7 @@ export class RepairController {
     if (!this.state.active || this.state.tool === tool) return;
     this.deps.setSelected(null);
     this.lastGround = null;
-    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], viaduct: [], drawVia: null, preview: null, message: tool === "draw" && this.state.roadType === "viaduct" ? VIADUCT_HINT : HINT[tool] });
+    this.set({ tool, buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], proposal: null, viaduct: [], drawVia: null, preview: null, message: tool === "draw" && this.state.roadType === "viaduct" ? VIADUCT_HINT : HINT[tool] });
   }
 
   /** 换路型。地面路之间互换保留起点（接着画、只换宽度）；进出高架清掉进行中的笔画（两种画法不一样）。 */
@@ -343,6 +380,7 @@ export class RepairController {
   cancel(keepActive = false): void {
     const { active, tool, buildingId, drawStart } = this.state;
     if (!active) return;
+    if (this.state.proposal) { this.set({ proposal: null, preview: null, message: { kind: "hint", text: "已放弃修复方案" } }); return; }
     if (tool === "draw" && this.state.viaduct.length) {
       const viaduct = this.state.viaduct.slice(0, -1);
       this.set({ viaduct, message: viaduct.length ? { kind: "hint", text: `已撤回一个点（还有 ${viaduct.length} 个）` } : VIADUCT_HINT });
@@ -380,7 +418,7 @@ export class RepairController {
 
   /** 引擎的指针移动：ground = 射线与地形的交点，鼠标离开/朝天为 null。 */
   hover(ground: Vec2 | null, ray: RepairRay | null = null): void {
-    if (!this.state.active) return;
+    if (!this.state.active || this.state.proposal) return; // 预览方案时地图上只画方案
     if (!ground) { this.lastGround = null; this.lastRay = null; if (this.state.preview) this.set({ preview: null }); return; }
     if (this.lastGround && Math.hypot(ground.x - this.lastGround.x, ground.z - this.lastGround.z) < HOVER_EPS) return;
     this.lastGround = ground; this.lastRay = ray;
@@ -433,6 +471,14 @@ export class RepairController {
       this.set({ preview: { kind: "erase", points: edge.points, width: edge.width, ok: verdict.blockers.length === 0, reason: reasonOf(verdict.blockers), warning: noteOf(verdict.warnings) } });
       return;
     }
+    if (tool === "drive") {
+      const edge = this.deps.edgeAt(ground.x, ground.z);
+      // 刚试驾过的那条路保留结果，直到鼠标移到别的路上。
+      if (this.state.preview?.kind === "drive" && this.state.preview.result && edge && this.driveShown === edge.id) return;
+      this.driveShown = null;
+      this.set({ preview: edge ? { kind: "drive", points: edge.points, width: edge.width, result: null, blockedAt: null } : null });
+      return;
+    }
     if (tool === "restyle") {
       if (roadType === "viaduct") { if (this.state.preview) this.set({ preview: null }); return; }
       const spec = ROAD_SPEC[roadType];
@@ -479,6 +525,7 @@ export class RepairController {
     if (this.state.tool === "draw") { this.clickDraw(click.ground); return; }
     if (this.state.tool === "erase") { this.clickErase(click.ground); return; }
     if (this.state.tool === "restyle") { this.clickRestyle(click.ground); return; }
+    if (this.state.tool === "drive") { this.clickDrive(click.ground); return; }
     this.clickBuild(click);
   }
 
@@ -659,6 +706,50 @@ export class RepairController {
     const warnings = result.warnings.map(warningText);
     this.set({ message: { kind: warnings.length ? "warn" : "ok", text: warnings.length ? `已擦掉一段路（${warnings.join("；")}）` : "已擦掉一段路" } });
     this.recomputePreview();
+  }
+
+  /** 体检条目「修复方案」：给出擦桥 + 重画的候选，地图上预览，等玩家采用。 */
+  proposeBridgeFix(deckId: string): void {
+    if (!this.state.active) return;
+    const result = this.deps.proposeBridgeFix(deckId);
+    if (!result.ok) { this.set({ proposal: null, message: { kind: "warn", text: `找不到自动修复方案：${result.detail}——可以用橡皮擦整座擦掉这座桥，再自己画` } }); return; }
+    const { proposal } = result;
+    const extra = proposal.erase.length - 1;
+    const notes = proposal.warnings.map(warningText).filter(Boolean);
+    this.set({ proposal, preview: { kind: "proposal", erase: proposal.erasePolylines, draw: proposal.draw },
+      message: { kind: "hint", text: `修复方案：擦掉整座桥${extra ? `和 ${extra} 段岸边残路` : ""}，在绿色处画一座 ${proposal.draw.bridgeLength} 的直桥${notes.length ? `（${notes.join("；")}）` : ""}——点「采用」写入，Esc 放弃` } });
+  }
+
+  /** 采用方案：一步写入（一步撤销），接着沿新桥试驾一遍。 */
+  acceptProposal(): void {
+    const proposal = this.state.proposal;
+    if (!this.state.active || !proposal) return;
+    const result = this.deps.applyBridgeFix(proposal);
+    if (!result.ok) { this.set({ proposal: null, preview: null, message: { kind: "error", text: failText("方案写不进去", result) } }); return; }
+    const { from, to } = proposal.draw; const mid = { x: (from.x + to.x) / 2, z: (from.z + to.z) / 2 };
+    const deck = this.deps.edgeAt(mid.x, mid.z);
+    const report = deck ? this.deps.testDrive(deck.id) : null;
+    const drove = report ? `；${driveMessage(report).text}` : "";
+    this.set({ proposal: null, preview: report ? { kind: "drive", points: report.path, width: report.width, result: report.verdict, blockedAt: report.blockedAt } : null,
+      message: { kind: report && report.verdict !== "passed" ? "warn" : "ok", text: `已按方案重建这座桥（撤销可恢复）${drove}` } });
+    if (deck && report) this.driveShown = deck.id;
+  }
+
+  private driveShown: string | null = null;
+  private clickDrive(ground: Vec2 | null): void {
+    if (!ground) return;
+    this.lastGround = ground;
+    const edge = this.deps.edgeAt(ground.x, ground.z);
+    if (!edge) { this.set({ message: { kind: "warn", text: "这里没有道路可试驾" } }); return; }
+    const run = () => {
+      const report = this.deps.testDrive(edge.id);
+      if (!report) { this.set({ message: { kind: "warn", text: "这段路太短，试驾不了——点它连着的长一点的路" } }); return; }
+      this.driveShown = edge.id;
+      this.set({ preview: { kind: "drive", points: report.path, width: report.width, result: report.verdict, blockedAt: report.blockedAt }, message: driveMessage(report) });
+    };
+    this.set({ message: { kind: "hint", text: "试驾中…" } });
+    // 编译驾驶面要一两秒：先让「试驾中」画出来再跑（测试里没有 defer，同步跑）。
+    if (this.deps.defer) this.deps.defer(run, 30); else run();
   }
 
   private clickRestyle(ground: Vec2 | null): void {

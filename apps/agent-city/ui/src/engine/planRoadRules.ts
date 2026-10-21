@@ -14,15 +14,19 @@
  */
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
-import { buildingRect, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
-import { curvePoints, minCurveRadius, polylineLength, polylineMinRadius, wetSpan } from "./planGeometry";
+import { bridgeChain, buildingRect, deckUnderLandmark, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
+import { bridgeApproachProblem, curvePoints, polylineMaxGrade, ROAD_MAX_GRADE, ROAD_STEEP_GRADE, minCurveRadius, polylineLength, polylineMinRadius, wetSpan } from "./planGeometry";
 import { polygonDistance, roadNodeId } from "./cityPlan";
+import { CHANNEL_T_GAP } from "./cityRoadPaint";
 import { listSites, siteBox } from "./planSites";
 import { frontEntrance, segmentPolygonDistance, worldOverhead, type Polygon } from "./planFootprint";
 
 export type RoadVerdict = { blockers: string[]; warnings: string[] };
 
-const ACUTE_LIMIT = (30 * Math.PI) / 180; // 同 planner/constraints.ts::acuteJunctions
+/** 编辑造出的路口夹角下限（2026-10-21，用户拍板「拦」）：< 50° 的三岔口渲染层会做渠化喇叭口（cityRoadPaint.CHANNEL_T_GAP），
+ *  导流岛尖伸进主路车道，车在口里拐不过来——玩家式编辑抽样里，锐角接路只有约四成试驾通过，正常接路九成以上。
+ *  曾经只有 < 30°（planner/constraints.ts::acuteJunctions 的口径）给提示、30–50° 连提示都没有。 */
+const SHARP_LIMIT = CHANNEL_T_GAP;
 const MIN_EDGE_LENGTH = 6;
 const NODE_CLEARANCE = 1;       // 目标点距任何别的路口 < 1 视为撞车
 const FAR_MOVE = 80;
@@ -44,7 +48,7 @@ function distanceToPolyline(p: Vec2, points: readonly Vec2[]): number {
   return best;
 }
 
-/** 某节点处是否存在 < 30° 的相邻路夹角（≥3 路才算，同 acuteJunctions）。 */
+/** 某节点处是否存在 < SHARP_LIMIT 的相邻路夹角（≥3 路才算，同 channelizedTPlan 的测角）。 */
 function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boolean {
   const incident = edges.filter((edge) => edge.from === nodeId || edge.to === nodeId);
   if (incident.length < 3) return false;
@@ -54,7 +58,7 @@ function hasAcuteAt(edges: readonly RoadEdge[], nodeId: string, at: Vec2): boole
   }).sort((a, b) => a - b);
   for (let k = 0; k < angles.length; k += 1) {
     const gap = (k + 1 < angles.length ? angles[k + 1] : angles[0] + Math.PI * 2) - angles[k];
-    if (gap < ACUTE_LIMIT) return true;
+    if (gap < SHARP_LIMIT) return true;
   }
   return false;
 }
@@ -137,6 +141,15 @@ function applyImpact(impact: RoadImpact, blockers: string[], warnings: string[])
 }
 
 /** 非桥路段沿线采样，统计不可建/水面采样点数。 */
+/** 坡度（修复升级 P0-B）：新铺的地面路坡比 > 车的爬坡上限 → 阻断 road-too-steep（物理上开不上去，§15 口径）；> 0.2 → 提示 road-steep。
+ *  `before` 给出时只拦「改陡了」的（拖生成器本来就陡的路口不该被拦——体检的 roadSteep 已经列着它）。 */
+function gradeCheck(layout: CityLayout, polylines: readonly (readonly Vec2[])[], blockers: string[], warnings: string[], before = 0): void {
+  const grade = Math.max(0, ...polylines.map((points) => polylineMaxGrade(layout, points).grade));
+  if (grade <= before + 1e-6) return;
+  if (grade > ROAD_MAX_GRADE) blockers.push("road-too-steep");
+  else if (grade > ROAD_STEEP_GRADE) warnings.push("road-steep");
+}
+
 function badSamples(layout: CityLayout, edge: RoadEdge): number {
   if (edge.bridge) return 0;
   let bad = 0;
@@ -175,6 +188,7 @@ export function validateNodeMove(layout: CityLayout, model: CityModel, nodeId: s
   const badBefore = moved.reduce((sum, { before }) => sum + badSamples(layout, before), 0);
   const badAfter = moved.reduce((sum, { after }) => sum + badSamples(layout, after), 0);
   if (badAfter > badBefore) blockers.push("road-in-water");
+  gradeCheck(layout, moved.map(({ after }) => after.points), blockers, warnings, Math.max(0, ...moved.map(({ before }) => polylineMaxGrade(layout, before.points).grade)));
 
   // 压到的东西：只算这一拖**新**压到的（原来就压着的是生成器残余，不算这一笔的）。
   const list = obstacles(layout, model);
@@ -186,13 +200,13 @@ export function validateNodeMove(layout: CityLayout, model: CityModel, nodeId: s
   const afterEdges = layout.roadEdges.map((edge) => moved.find(({ before }) => before === edge)?.after ?? edge);
   const nodes = new Map<string, Vec2>(layout.roadNodes.map((candidate) => [candidate.id, candidate]));
   const neighbours = new Set(incident.map((edge) => (edge.from === nodeId ? edge.to : edge.from)));
-  // 锐角只提示（SimCity 也允许难看的路口）。
+  // 锐角路口拦下（车拐不过来）；本来就锐角的路口不算新违例。
   let acute = hasAcuteAt(afterEdges, nodeId, target) && !hasAcuteAt(layout.roadEdges, nodeId, node);
   for (const id of neighbours) {
     const at = nodes.get(id);
     if (at && hasAcuteAt(afterEdges, id, at) && !hasAcuteAt(layout.roadEdges, id, at)) acute = true;
   }
-  if (acute) warnings.push("acute-junction");
+  if (acute) blockers.push("junction-too-sharp");
   if (Math.hypot(target.x - node.x, target.z - node.z) > FAR_MOVE) warnings.push("far-move");
   return { blockers, warnings };
 }
@@ -267,17 +281,19 @@ export function validateEdgeDrop(layout: CityLayout, model: CityModel, edgeId: s
   const blockers: string[] = []; const warnings: string[] = [];
   const edge = layout.roadEdges.find((candidate) => candidate.id === edgeId);
   if (!edge) return { blockers: ["missing-edge"], warnings };
-  if (edgeLocked(edge)) return { blockers: ["locked-edge"], warnings };
+  // 擦桥面 = 擦整座桥（与重放同一个 bridgeChain）；影响按整座算。悬索桥下的桥也能擦（7/2 的坏桥头正是悬索桥），塔与缆一起拆。
+  const chain = bridgeChain(layout.roadEdges, edge); const dropped = new Set(chain);
+  if (edgeLocked(edge)) warnings.push(chain.some((piece) => deckUnderLandmark(layout, piece)) ? "erases-suspension-bridge" : "erases-bridge");
   if (edge.width >= ARTERIAL_WIDTH) warnings.push("erases-arterial");
   if (edge.structure === "ground-approach") warnings.push("cuts-bridge");
   if (edge.purpose === "waterfront") warnings.push("erases-waterfront");
 
-  const remaining = layout.roadEdges.filter((candidate) => candidate !== edge);
+  const remaining = layout.roadEdges.filter((candidate) => !dropped.has(candidate));
   const { slots, ids, before, comp: compBefore, main: mainBefore } = dropBase(layout, model);
   // 结果逐字不变：最近路段不是被擦的那条的楼，擦掉一条「更远或并列在后」的路不改变它的最近路段（取最小用严格 <，
   // 并列取先出现的）——只有最近路段恰是被擦那条的楼要重算。曾每次对全城楼 × 全城路重算两遍（4000 楼 0.7 秒/次悬停）。
   const nodes = new Map<string, Vec2>(layout.roadNodes.map((node) => [node.id, node]));
-  const after = before.map((access, i) => (access.edge === edge ? accessAt(nodes, remaining, slots[i]) : access));
+  const after = before.map((access, i) => (access.edge && dropped.has(access.edge) ? accessAt(nodes, remaining, slots[i]) : access));
 
   // 离路太远：原本在范围内、删后超出的楼。
   const stranded = ids.filter((_, i) => before[i].distance <= FRONTAGE_LIMIT && after[i].distance > FRONTAGE_LIMIT);
@@ -292,7 +308,7 @@ export function validateEdgeDrop(layout: CityLayout, model: CityModel, edgeId: s
   // 新断头：删后某端点度数落到 1（它连着别的路，只是少了一条）。
   const degree = new Map<string, number>();
   for (const other of remaining) if (!other.bridge) for (const id of [other.from, other.to]) degree.set(id, (degree.get(id) ?? 0) + 1);
-  if ([edge.from, edge.to].some((id) => degree.get(id) === 1)) warnings.push("creates-dead-end");
+  if (chain.flatMap((dead) => [dead.from, dead.to]).some((id) => degree.get(id) === 1)) warnings.push("creates-dead-end");
   return { blockers, warnings };
 }
 
@@ -448,15 +464,21 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
   // 地面桥（路线图 P1-5）：一笔恰好跨一段水、两端在陆地上、桥长 ≤ MAX_GROUND_BRIDGE → 水面段架成桥（重放时拆成 引道 + 桥面 + 引道，
   // 同一个 wetSpan 判定）；端点在水里、连跨两段水 → 仍是 road-in-water；水面太宽 → bridge-too-long（请用高架）。
   const span = wetSpan(layout, a, b);
-  if (!layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z)) blockers.push("road-in-water");
-  else if (span.kind === "invalid") blockers.push(span.reason === "bridge-too-long" ? "bridge-too-long" : "road-in-water");
+  // 端点：过河的一笔只要求不落在水里（桥头在前滩上，生成器同口径）；不过河的一笔仍要求两端可建。
+  if (span.kind === "invalid") blockers.push(span.reason === "bridge-too-long" ? "bridge-too-long" : "road-in-water");
+  else if (span.kind === "dry" && (!layout.terrain.buildable(a.x, a.z) || !layout.terrain.buildable(b.x, b.z))) blockers.push("road-in-water");
   else if (span.kind === "bridge") {
     warnings.push(`bridge:${Math.round(span.length)}`);
     // 桥上不能有路口（生成器同口径）：交点落在桥面段内就拦。
-    if (crossingPoints(layout, a, b).some((p) => nearestOnPolyline(p, [span.from, span.to]).distance < 0.5)) blockers.push("junction-on-bridge");
+    const crossings = crossingPoints(layout, a, b);
+    if (crossings.some((p) => nearestOnPolyline(p, [span.from, span.to]).distance < 0.5)) blockers.push("junction-on-bridge");
+    const approach = bridgeApproachProblem(layout, a, b, span, width, crossings);
+    if (approach) blockers.push(approach);
+    else gradeCheck(layout, [[a, span.from], [span.to, b]], blockers, warnings);
     // 桥上方有高架：本期不算净空，提示用户自己看。
     if ((layout.highways ?? []).some((run) => run.some((q, i) => i > 0 && !!segmentIntersection(run[i - 1], q, span.from, span.to)))) warnings.push("bridge-under-viaduct");
   } else if (badSamples(layout, next) > 0) blockers.push("road-in-water");
+  else gradeCheck(layout, [[a, b]], blockers, warnings);
   // ignoreSites：接入路从设施自己的门口起笔，路带必然擦到它自己——不算「压到设施」。
   const ignored = new Set<number>();
   if (ignoreSites.length) obstacles(layout, model).forEach((item, index) => { if (item.kind === "site" && ignoreSites.includes(item.id)) ignored.add(index); });
@@ -467,12 +489,12 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
   // 滨海大道离海太远：景观带仍会铺，但铺在离海近的一侧的陆地上——提示，不拦（SimCity 也不管你把海滨大道修在哪）。
   if (purpose === "waterfront" && layout.coast?.length && Math.abs(polygonDistance({ x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 }, layout.coast)) > FAR_FROM_COAST) warnings.push("far-from-coast");
 
-  // 锐角：只拦新引入的（接到的路口本来就锐角的不算新违例）。
+  // 锐角（< 50°）：只拦新引入的（接到的路口本来就锐角的不算新违例）。
   const dirAB = Math.atan2(b.z - a.z, b.x - a.x); const dirBA = Math.atan2(a.z - b.z, a.x - b.x);
   for (const [end, at, dir] of [[ea, a, dirAB], [eb, b, dirBA]] as const) {
     const existing = directionsAt(layout, end, at);
     if (existing.length + 1 < 3) continue;
-    if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
+    if (minGap([...existing, dir]) < SHARP_LIMIT && !(existing.length >= 3 && minGap(existing) < SHARP_LIMIT)) { blockers.push("junction-too-sharp"); break; }
   }
   return { blockers, warnings };
 }
@@ -502,6 +524,7 @@ function validateCurveAdd(layout: CityLayout, model: CityModel, from: Vec2, via:
   }
   if (ea.kind === "free" && eb.kind === "free" && junctions === 0) warnings.push("isolated-road");
   if (ea.kind === "free" || eb.kind === "free") warnings.push("creates-dead-end");
+  if (!blockers.includes("curve-over-water")) gradeCheck(layout, [pts], blockers, warnings);
   const next: RoadEdge = { id: "new", from: "a", to: "b", width, kind: width >= 8 ? "arterial" : "local", points: pts, structure: "ground-road" };
   applyImpact(roadImpact(layout, model, [next]), blockers, warnings);
   if (junctions) warnings.push(`auto-junction:${junctions}`);
@@ -511,7 +534,7 @@ function validateCurveAdd(layout: CityLayout, model: CityModel, from: Vec2, via:
   for (const [end, at, dir] of [[ea, a, dirA], [eb, b, dirB]] as const) {
     const existing = directionsAt(layout, end, at);
     if (existing.length + 1 < 3) continue;
-    if (minGap([...existing, dir]) < ACUTE_LIMIT && !(existing.length >= 3 && minGap(existing) < ACUTE_LIMIT)) { warnings.push("acute-junction"); break; }
+    if (minGap([...existing, dir]) < SHARP_LIMIT && !(existing.length >= 3 && minGap(existing) < SHARP_LIMIT)) { blockers.push("junction-too-sharp"); break; }
   }
   return { blockers, warnings };
 }

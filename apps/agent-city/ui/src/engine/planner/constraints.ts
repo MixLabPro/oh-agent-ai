@@ -16,7 +16,7 @@
 import type { createCityPlan } from "../cityPlan";
 import type { Vec2 } from "../cityLayout";
 import { declaredGroundRoadClear } from "./modelEnvelope";
-import { bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
+import { bridgeheadStubEnds, bridgeLandingNodes, isPlannedRoadEnd, isOwnedIslandGate } from "./endpoints";
 import { WATER_LEVEL, wetCount, polylineDistance, polylineClosest, closestPolylineSegment } from "./footprint";
 import { pointInPolygon, siteFootprint, siteFootprintSeparation, siteRoadClear, worldFootprintSamples } from "../planFootprint";
 import { componentOf, primaryComponentId } from "./intent";
@@ -241,7 +241,7 @@ export const looseInlandRoadEnds: Constraint = {
     // 豁免改用语义判定（planner/endpoints.ts，网络优先设计批次 1）：旧 height ≥ 2.5 是「靠水断头=合法」的
     // 地形代理，把平岛的内陆断头全部藏进盲区（四档 75–90% 的岛至少 1 个，2026-10-08 实测）。
     const world = {
-      bridgeLandings: bridgeLandingNodes(plan.roadEdges),
+      bridgeLandings: bridgeLandingNodes(plan.roadEdges), bridgeheadStubs: bridgeheadStubEnds(plan.roadEdges),
       sites: planSites(plan),
       boulevardEnds: (plan.seaside?.samples ?? []).filter((s: Site) => s.valid && s.boulevard).map((s: Site) => s.boulevard),
       // 海段 + 河岸段（批次 3-2 清偿切片分歧：曾只看海段，宽河 run 端 >40 时修复豁免、检测计违例）
@@ -253,8 +253,8 @@ export const looseInlandRoadEnds: Constraint = {
   },
 };
 
-/** 锐角路口阈值（相邻两条路夹角下限）。导出是为了让编辑器（planRoadRules.ts::ACUTE_LIMIT）直接导入，
- *  不再靠注释「同步」两份魔数；表达式保持 `(30 * Math.PI) / 180` 原样，浮点结果逐位不变。
+/** 锐角路口阈值（相邻两条路夹角下限）。生成器的口径；编辑器（planRoadRules.ts::SHARP_LIMIT）自 2026-10-21 起改用更严的
+ *  50°（渲染层渠化阈值 CHANNEL_T_GAP，玩家造出的锐角口车拐不过来），不再与这里同步。表达式保持 `(30 * Math.PI) / 180` 原样，浮点结果逐位不变。
  *  改值是产品决策（会改变所有种子布局，见 CITY_PLANNER_REFACTOR_SPEC R3/R6），不在此随手改。 */
 export const ACUTE_JUNCTION_RAD = (30 * Math.PI) / 180;
 

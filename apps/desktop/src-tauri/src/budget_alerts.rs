@@ -86,7 +86,7 @@ pub fn maybe_notify(app: &AppHandle, overview: &overview::Overview) {
             &key,
             agent_vitals_runtime::sql_sync::now_ms(),
             || app_for_notification.notification().builder()
-                .title(format!("Agent Vitals{}{threshold}", native_label(language, ": ", "：")))
+                .title(format!("Oh Agent{}{threshold}", native_label(language, ": ", "：")))
                 .body(body)
                 .action_type_id(ACTION_TYPE)
                 .extra("focusTab", FOCUS_TAB)
@@ -144,7 +144,7 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
             let app_for_notification = app.clone();
             let _ = agent_vitals_runtime::budget_notifications::claim_delivery_with(
                 data_home, &key, agent_vitals_runtime::sql_sync::now_ms(), || app_for_notification.notification().builder()
-                    .title(format!("Agent Vitals{}{threshold_text}", native_label(language, ": ", "：")))
+                    .title(format!("Oh Agent{}{threshold_text}", native_label(language, ": ", "：")))
                     .body(body).action_type_id(ACTION_TYPE).extra("focusTab", FOCUS_TAB)
                     .show().map_err(|error| error.to_string()),
             );

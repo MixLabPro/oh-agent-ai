@@ -7,7 +7,7 @@
 import * as THREE from "three";
 
 export type OverlayParcel = { x: number; y: number; z: number; yaw: number; width: number; depth: number };
-export type OverlayRibbon = { points: ReadonlyArray<{ x: number; z: number }>; width: number; tone: "erase" | "erase-blocked" | "draw" | "draw-warn" | "draw-blocked" | "link" };
+export type OverlayRibbon = { points: ReadonlyArray<{ x: number; z: number }>; width: number; tone: "erase" | "erase-blocked" | "draw" | "draw-warn" | "draw-blocked" | "link" | "drive" };
 export type OverlayMarker = { x: number; z: number; tone: "start" | "snap" | "snap-blocked" };
 /** 世界坐标的凸多边形（点序首尾相接）。 */
 export type OverlayPolygon = ReadonlyArray<{ x: number; z: number }>;
@@ -28,6 +28,7 @@ const COLORS = {
   draw: 0x35d07f,             // 可画：绿
   "draw-warn": 0xffc23d,      // 可画但有后果（会推平/安置）：琥珀
   "draw-blocked": 0xff8a3d,   // 不能画：橙红
+  drive: 0x4d8dff,            // 试驾：悬停的路/桥，蓝
   start: 0xffd84d,
   snap: 0x4dd2ff,
   "snap-blocked": 0xff8a3d,

@@ -311,7 +311,7 @@ pub fn run(report: PathBuf, mut context: tauri::Context<tauri::Wry>) {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let page_state = setup_state.clone();
             WebviewWindowBuilder::new(app, HOST, WebviewUrl::App("index.html".into()))
-                .title("Agent Vitals · plugin isolation probe").inner_size(1100.0, 760.0)
+                .title("Oh Agent · plugin isolation probe").inner_size(1100.0, 760.0)
                 .incognito(true).initialization_script(host_script())
                 .on_page_load(move |view, payload| {
                     let code = match payload.event() { tauri::webview::PageLoadEvent::Started => "load_started", tauri::webview::PageLoadEvent::Finished => "load_finished" };

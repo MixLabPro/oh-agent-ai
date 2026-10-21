@@ -28,7 +28,7 @@ export type RepairInfo = {
   savePending: boolean;
 };
 
-const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], roadType: "local", viaduct: [], drawMode: "straight", drawVia: null, siteTurn: 0, preview: null, message: null };
+const INACTIVE: RepairState = { active: false, tool: "build", buildingId: null, candidates: [], site: null, siteTargets: [], drawStart: null, dragNode: null, stranded: [], proposal: null, roadType: "local", viaduct: [], drawMode: "straight", drawVia: null, siteTurn: 0, preview: null, message: null };
 const NO_INFO: RepairInfo = { counts: null, staleCount: 0, tierChanged: false, generatorChanged: false, remap: null, canUndo: false, canRedo: false, saveFailed: false, savePending: false };
 
 export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { seed: number; model: CityModel | null; blocked: boolean }) {
@@ -80,6 +80,9 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
         restyleRoad: (id, width, purpose) => session.restyleRoad(id, width, purpose),
         dropEdge: (id) => session.dropEdge(id),
         dropEdges: (ids) => session.dropEdges(ids),
+        testDrive: (id) => session.testDrive(id),
+        proposeBridgeFix: (id) => session.proposeBridgeFix(id),
+        applyBridgeFix: (proposal) => session.applyBridgeFix(proposal),
         nodeAt: (x, z) => session.nodeAt(x, z),
         validateMove: (id, x, z, exact) => session.validateMove(id, x, z, exact),
         moveNode: (id, x, z) => session.moveNode(id, x, z),
@@ -139,7 +142,7 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if ((event.key === "Delete" || event.key === "Backspace") && controller.snapshot.tool === "site" && controller.snapshot.site) { event.preventDefault(); controller.removeSelected(); syncInfo(); return; }
-      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase", t: "restyle", s: "site", n: "node" };
+      const tool: Record<string, RepairTool> = { v: "build", r: "draw", e: "erase", t: "restyle", s: "site", n: "node", d: "drive" };
       if (tool[event.key.toLowerCase()]) { event.preventDefault(); controller.setTool(tool[event.key.toLowerCase()]); }
     };
     window.addEventListener("keydown", onKey);
@@ -185,6 +188,15 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     overlay.setSiteMarks(marks);
     const hasImpact = !!impact && (impact.bulldozed.length > 0 || impact.relocated.length > 0 || impact.homeless.length > 0);
     if (preview?.kind === "erase") ribbons.push({ points: preview.points, width: preview.width, tone: preview.ok ? "erase" : "erase-blocked" });
+    if (preview?.kind === "proposal") {
+      for (const points of preview.erase) ribbons.push({ points, width: 5, tone: "erase" });
+      ribbons.push({ points: [preview.draw.from, preview.draw.to], width: preview.draw.width, tone: "draw" });
+      markers.push({ ...preview.draw.from, tone: "snap" }, { ...preview.draw.to, tone: "snap" });
+    }
+    if (preview?.kind === "drive") {
+      ribbons.push({ points: preview.points, width: preview.width, tone: preview.result === "passed" ? "draw" : preview.result === "blocked" ? "erase" : preview.result === "undetermined" ? "draw-warn" : "drive" });
+      if (preview.blockedAt) markers.push({ ...preview.blockedAt, tone: "snap-blocked" });
+    }
     if (preview?.kind === "restyle") for (const edge of preview.edges) ribbons.push({ points: edge.points, width: edge.width, tone: !preview.ok ? "draw-blocked" : preview.warning ? "draw-warn" : "draw" });
     // 画路预览按实际铺成的折线画（拐角倒圆时 path 从旧路尾端的切点开始，弧线一目了然）。
     if (preview?.kind === "draw") { ribbons.push({ points: preview.path ?? [preview.from, preview.to], width: preview.width, tone: !preview.ok ? "draw-blocked" : hasImpact ? "draw-warn" : "draw" }); markers.push({ ...preview.to, tone: preview.ok ? "snap" : "snap-blocked" }); }
@@ -231,6 +243,10 @@ export function usePlanRepair(engine: RefObject<CityEngine | null>, options: { s
     audit: () => withSession((session) => { auditOpen.current = true; setIssues(session.audit()); }),
     closeAudit: () => { auditOpen.current = false; setIssues(null); },
     locate: (issue: PlanIssue) => { if (issue.at) engine.current?.focusPoint(issue.at.x, issue.at.z); },
+    /** 体检里的坏桥头：给出修复方案并飞过去看（P1-D）。 */
+    proposeFix: (issue: PlanIssue) => withSession((_s, controller) => { controller.proposeBridgeFix(issue.entities[0]); if (issue.at) engine.current?.focusPoint(issue.at.x, issue.at.z); }),
+    acceptProposal: () => withSession((session, controller) => { controller.acceptProposal(); if (auditOpen.current) setIssues(session.audit()); }),
+    cancelProposal: () => withSession((_s, controller) => controller.cancel()),
   };
 }
 
