@@ -15,7 +15,7 @@
 import type { CityModel } from "../cityModel";
 import type { CityLayout, RoadEdge, Vec2 } from "./cityLayout";
 import { bridgeChain, buildingRect, deckUnderLandmark, edgeLocked, edgesNear, highwayHit, nearestOnPolyline, rectClearOfEdges, VIADUCT_DECK_WIDTH, VIADUCT_JOIN_RADIUS, VIADUCT_RAMP, type BuildingRect } from "./planPatch";
-import { bridgeApproachProblem, curvePoints, minCurveRadius, polylineLength, polylineMinRadius, wetSpan } from "./planGeometry";
+import { bridgeApproachProblem, curvePoints, polylineMaxGrade, ROAD_MAX_GRADE, ROAD_STEEP_GRADE, minCurveRadius, polylineLength, polylineMinRadius, wetSpan } from "./planGeometry";
 import { polygonDistance, roadNodeId } from "./cityPlan";
 import { listSites, siteBox } from "./planSites";
 import { frontEntrance, segmentPolygonDistance, worldOverhead, type Polygon } from "./planFootprint";
@@ -137,6 +137,15 @@ function applyImpact(impact: RoadImpact, blockers: string[], warnings: string[])
 }
 
 /** 非桥路段沿线采样，统计不可建/水面采样点数。 */
+/** 坡度（修复升级 P0-B）：新铺的地面路坡比 > 车的爬坡上限 → 阻断 road-too-steep（物理上开不上去，§15 口径）；> 0.2 → 提示 road-steep。
+ *  `before` 给出时只拦「改陡了」的（拖生成器本来就陡的路口不该被拦——体检的 roadSteep 已经列着它）。 */
+function gradeCheck(layout: CityLayout, polylines: readonly (readonly Vec2[])[], blockers: string[], warnings: string[], before = 0): void {
+  const grade = Math.max(0, ...polylines.map((points) => polylineMaxGrade(layout, points).grade));
+  if (grade <= before + 1e-6) return;
+  if (grade > ROAD_MAX_GRADE) blockers.push("road-too-steep");
+  else if (grade > ROAD_STEEP_GRADE) warnings.push("road-steep");
+}
+
 function badSamples(layout: CityLayout, edge: RoadEdge): number {
   if (edge.bridge) return 0;
   let bad = 0;
@@ -175,6 +184,7 @@ export function validateNodeMove(layout: CityLayout, model: CityModel, nodeId: s
   const badBefore = moved.reduce((sum, { before }) => sum + badSamples(layout, before), 0);
   const badAfter = moved.reduce((sum, { after }) => sum + badSamples(layout, after), 0);
   if (badAfter > badBefore) blockers.push("road-in-water");
+  gradeCheck(layout, moved.map(({ after }) => after.points), blockers, warnings, Math.max(0, ...moved.map(({ before }) => polylineMaxGrade(layout, before.points).grade)));
 
   // 压到的东西：只算这一拖**新**压到的（原来就压着的是生成器残余，不算这一笔的）。
   const list = obstacles(layout, model);
@@ -460,9 +470,11 @@ export function validateRoadAdd(layout: CityLayout, model: CityModel, from: Vec2
     if (crossings.some((p) => nearestOnPolyline(p, [span.from, span.to]).distance < 0.5)) blockers.push("junction-on-bridge");
     const approach = bridgeApproachProblem(layout, a, b, span, width, crossings);
     if (approach) blockers.push(approach);
+    else gradeCheck(layout, [[a, span.from], [span.to, b]], blockers, warnings);
     // 桥上方有高架：本期不算净空，提示用户自己看。
     if ((layout.highways ?? []).some((run) => run.some((q, i) => i > 0 && !!segmentIntersection(run[i - 1], q, span.from, span.to)))) warnings.push("bridge-under-viaduct");
   } else if (badSamples(layout, next) > 0) blockers.push("road-in-water");
+  else gradeCheck(layout, [[a, b]], blockers, warnings);
   // ignoreSites：接入路从设施自己的门口起笔，路带必然擦到它自己——不算「压到设施」。
   const ignored = new Set<number>();
   if (ignoreSites.length) obstacles(layout, model).forEach((item, index) => { if (item.kind === "site" && ignoreSites.includes(item.id)) ignored.add(index); });
@@ -508,6 +520,7 @@ function validateCurveAdd(layout: CityLayout, model: CityModel, from: Vec2, via:
   }
   if (ea.kind === "free" && eb.kind === "free" && junctions === 0) warnings.push("isolated-road");
   if (ea.kind === "free" || eb.kind === "free") warnings.push("creates-dead-end");
+  if (!blockers.includes("curve-over-water")) gradeCheck(layout, [pts], blockers, warnings);
   const next: RoadEdge = { id: "new", from: "a", to: "b", width, kind: width >= 8 ? "arterial" : "local", points: pts, structure: "ground-road" };
   applyImpact(roadImpact(layout, model, [next]), blockers, warnings);
   if (junctions) warnings.push(`auto-junction:${junctions}`);

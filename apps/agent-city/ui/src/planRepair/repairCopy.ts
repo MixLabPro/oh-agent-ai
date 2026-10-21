@@ -95,6 +95,8 @@ export const EXACT: Record<string, string> = {
   "桥面由桥梁模型绑定，不能单独编辑（橡皮擦可以整座擦掉）": "Bridge decks are bound to the bridge model and can't be edited alone (the eraser removes the whole bridge)",
   "桥头离路口或落笔点太近：桥两端各要一段直引道（小路 14、次干道 16、主干道 18）——把起点/终点往岸上多拉一点，别在桥头附近穿过别的路": "The bridgehead is too close to a junction or the stroke end: each end needs a straight approach (14 for local, 16 for secondary, 18 for main roads) — pull the start/end further inland and don't cross other roads near the bridgehead",
   "桥头岸坡太陡，车开不上桥——换个岸坡缓的地方过河": "The bank at the bridgehead is too steep for cars — cross where the bank is gentler",
+  "太陡了：坡比超过车的爬坡上限 0.31，车开不上去——换条缓一点的线，或用弧线绕着坡走": "Too steep: the grade exceeds the 0.31 cars can climb — pick a gentler line, or curve around the slope",
+  "这条路很陡（坡比超过 0.2），车开得上去但很吃力": "This road is steep (grade above 0.2): cars can climb it, but only just",
   "会压到悬索桥（它是路网里的一段桥面）": "It would hit the suspension bridge (a deck segment of the road network)",
   "这座设施已锁定": "This site is locked",
   "主干道是城市骨架，不能擦": "Arterials are the city's backbone and can't be erased",

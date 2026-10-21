@@ -37,11 +37,11 @@ globalThis.window ??= globalThis;
 const {
   applyPlanPatch, validateBuildingMove, emptyPlanPatch, hashPlanPatch, edgeLocked, coercePlanPatch, appendRoadOp, layoutPinsFor,
   pruneStalePatch, patchGeneratorVersion, patchMatchesLayout, CITY_GENERATOR_VERSION,
-  appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, validateEdgeDrop, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
+  appendHighwayOp, filletAt, VIADUCT_DECK_WIDTH, VIADUCT_RAMP, validateHighwayAdd, validateRoadAdd, validateEdgeDrop, validateNodeMove, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_RAMP, roadRun, validateRestyle,
   curvePoints, polylineMinRadius, minCurveRadius, auditLayout, tagAuditOrigins, buildCityModel, createCityPlan, layoutCity, MIAMI_COASTAL,
 } = await loadCity({
   "engine/planPatch.ts": ["applyPlanPatch", "validateBuildingMove", "emptyPlanPatch", "hashPlanPatch", "edgeLocked", "coercePlanPatch", "appendRoadOp", "layoutPinsFor", "appendHighwayOp", "filletAt", "VIADUCT_DECK_WIDTH", "VIADUCT_RAMP", "pruneStalePatch", "patchGeneratorVersion", "patchMatchesLayout", "CITY_GENERATOR_VERSION"],
-  "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "validateEdgeDrop", "roadRun", "validateRestyle"],
+  "engine/planRoadRules.ts": ["validateHighwayAdd", "validateRoadAdd", "validateEdgeDrop", "validateNodeMove", "roadRun", "validateRestyle"],
   "engine/planGeometry.ts": ["curvePoints", "polylineMinRadius", "minCurveRadius"],
   "engine/render/shared.ts": ["EXPRESSWAY_DECK_WIDTH", "EXPRESSWAY_RAMP"],
   "engine/planAudit.ts": ["auditLayout", "tagAuditOrigins"],
@@ -717,6 +717,18 @@ const snap = (layout) => JSON.stringify({
   hill.roadEdges = [...hill.roadEdges, road({ x: -50, z: 0 }, { x: -50, z: 60 }), road({ x: -30, z: 0 }, { x: -30, z: 60 })];
   assert.ok(auditLayout(makeLayout(), model).some((i) => i.rule === "roadSteep" && fixtureEdge(i)), "the fixture's own 1-unit step at x=50 is itself a road a car can't climb (and the audit says so)");
   assert.deepEqual(auditLayout(hill, model).filter((i) => i.rule === "roadSteep" && !fixtureEdge(i)).map((i) => `${i.id}:${i.severity}`), ["roadSteep:-50:0/-50:60:error"], "a road straight up a 0.5 slope is too steep for cars; the one beside it on flat ground is fine");
+  // 画路坡度（修复升级 P0-B）：> 0.31 车开不上去 → 拦；> 0.2 → 提示；弧线同样；拖路口只拦「改陡了」的。
+  const steepAdd = (layout, from, to) => validateRoadAdd(layout, model, from, to, 5);
+  assert.ok(steepAdd(hill, { x: -55, z: 5 }, { x: -55, z: 55 }).blockers.includes("road-too-steep"), "a stroke straight up a 0.5 slope is refused");
+  assert.ok(!steepAdd(hill, { x: -80, z: 5 }, { x: -80, z: 55 }).blockers.includes("road-too-steep"), "…the same stroke on flat ground is fine");
+  const ramp = makeLayout(); ramp.terrain = { ...ramp.terrain, height: (x, z) => (Math.hypot(x, z) < 400 ? 2 + Math.max(0, z) * (x > -60 && x < -40 ? 0.25 : 0) : -1) };
+  const rampAdd = steepAdd(ramp, { x: -55, z: 5 }, { x: -55, z: 55 });
+  assert.ok(!rampAdd.blockers.includes("road-too-steep") && rampAdd.warnings.includes("road-steep"), `a 0.25 slope is climbable but flagged: ${rampAdd.blockers} / ${rampAdd.warnings}`);
+  assert.ok(validateRoadAdd(hill, model, { x: -55, z: 5 }, { x: -52, z: 55 }, 5, undefined, [], { x: -45, z: 30 }).blockers.includes("road-too-steep"), "an arc up the slope is refused too");
+  const steepNode = validateNodeMove(hill, model, "-50:60", { x: -50, z: 64 });
+  assert.ok(!steepNode.blockers.includes("road-too-steep"), `nudging a junction on a road that was already steep is not blocked by its old grade: ${steepNode.blockers}`);
+  const flatNode = validateNodeMove(hill, model, "-30:60", { x: -48, z: 60 });
+  assert.ok(flatNode.blockers.includes("road-too-steep"), `dragging a flat road's junction up onto the slope is refused: ${flatNode.blockers}`);
   const cliff = river(); const flat = cliff.terrain.height; cliff.terrain = { ...cliff.terrain, height: (x, z) => (x > 240 && x < 250 ? flat(x, z) + (250 - x) * 0.6 : flat(x, z)) };
   assert.deepEqual(validateRoadAdd(cliff, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers, ["bridge-approach-steep"], "a bank steeper than the car can climb is refused");
 }

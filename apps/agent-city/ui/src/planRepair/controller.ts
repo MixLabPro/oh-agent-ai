@@ -150,6 +150,7 @@ const BLOCKER_TEXT: Record<string, string> = {
   "junction-on-bridge": "桥上不能有路口：新路会在水面上和别的路交叉",
   "bridge-approach-short": "桥头离路口或落笔点太近：桥两端各要一段直引道（小路 14、次干道 16、主干道 18）——把起点/终点往岸上多拉一点，别在桥头附近穿过别的路",
   "bridge-approach-steep": "桥头岸坡太陡，车开不上桥——换个岸坡缓的地方过河",
+  "road-too-steep": "太陡了：坡比超过车的爬坡上限 0.31，车开不上去——换条缓一点的线，或用弧线绕着坡走",
   "road-over-building": "会穿过建筑、配套或花园",
   "crosses-road": "与现有道路交叉——请在交叉点连接",
   "acute-junction": "路口夹角太小（小于 30°）",
@@ -193,6 +194,7 @@ const WARNING_TEXT: Record<string, string> = {
   "drops-waterfront": "改掉的是滨海路——沿路的滨海景观带会撤掉",
   "narrows-arterial": "主干道会变窄",
   "bridge-under-viaduct": "桥的上方有高架（净空请自己看一眼）",
+  "road-steep": "这条路很陡（坡比超过 0.2），车开得上去但很吃力",
 };
 /** 带数量的提示码（`code:N`）。 */
 const COUNTED_TEXT: Record<string, (n: number) => string> = {
