@@ -120,6 +120,8 @@ export const polylineLength = (points: readonly Vec2[]): number => points.reduce
 export const MAX_GROUND_BRIDGE = 160;
 /** 桥台伸上岸的长度：桥面两端落在陆地上，不在水线上。 */
 export const BRIDGE_ABUTMENT = 3;
+/** 岸坡太陡时桥台最多伸到离水线这么远（P0-C）。 */
+export const BRIDGE_ABUTMENT_MAX = 20;
 /** 沿线采样水面的步长。 */
 const WET_STEP = 1;
 
@@ -154,8 +156,14 @@ export function wetSpan(layout: CityLayout, a: Vec2, b: Vec2): WetSpan {
   const last = wet.lastIndexOf(true);
   for (let i = first; i <= last; i += 1) if (!wet[i]) return { kind: "invalid", reason: "multi-water" };
   const at = (d: number) => quantize({ x: a.x + (b.x - a.x) * (d / len), z: a.z + (b.z - a.z) * (d / len) });
-  const start = Math.max(0, (first / steps) * len - BRIDGE_ABUTMENT);
-  const end = Math.min(len, (last / steps) * len + BRIDGE_ABUTMENT);
+  let start = Math.max(0, (first / steps) * len - BRIDGE_ABUTMENT);
+  let end = Math.min(len, (last / steps) * len + BRIDGE_ABUTMENT);
+  // 桥台延伸到缓坡（修复升级 P0-C）：岸坡比车的爬坡能力陡时，桥面沿笔画往岸上多伸，直到桥端外 8 内的坡缓下来，
+  // 离水线最多 BRIDGE_ABUTMENT_MAX——桥面是一块斜板，陡岸压在板下，车从缓坡上桥（生成器陡桥头 5 个的原地修法）。
+  const steepBeyond = (d: number, toward: Vec2) => polylineMaxGrade(layout, [at(d), toward], 0, BRIDGE_APPROACH_GRADE_REACH).grade > BRIDGE_APPROACH_MAX_GRADE;
+  const waterStart = (first / steps) * len, waterEnd = (last / steps) * len;
+  while (start - 1 >= 0 && waterStart - (start - 1) <= BRIDGE_ABUTMENT_MAX && steepBeyond(start, a)) start -= 1;
+  while (end + 1 <= len && (end + 1) - waterEnd <= BRIDGE_ABUTMENT_MAX && steepBeyond(end, b)) end += 1;
   const from = at(start); const to = at(end);
   const length = Math.hypot(to.x - from.x, to.z - from.z);
   if (length > MAX_GROUND_BRIDGE) return { kind: "invalid", reason: "bridge-too-long" };
@@ -184,6 +192,9 @@ export function bridgeApproachProblem(layout: CityLayout, a: Vec2, b: Vec2, span
   const point = (s: number) => ({ x: a.x + ux0 * s, z: a.z + uz0 * s });
   const ends: Array<[Vec2, Vec2]> = [[span.from, point(nearA)], [span.to, point(nearB)]];
   if (ends.some(([deck, end]) => Math.hypot(end.x - deck.x, end.z - deck.z) < bridgeApproachMin(width) - 1e-6)) return "bridge-approach-short";
+  // 桥面本身是一块斜板（两端各接路面高）：桥台伸上高岸后，板的坡比也不能超过车的爬坡上限。
+  const deckLength = Math.hypot(span.to.x - span.from.x, span.to.z - span.from.z);
+  if (deckLength > 0 && Math.abs(layout.terrain.height(span.to.x, span.to.z) - layout.terrain.height(span.from.x, span.from.z)) / deckLength > BRIDGE_APPROACH_MAX_GRADE) return "bridge-approach-steep";
   for (const [deck, end] of ends) {
     const run = Math.hypot(end.x - deck.x, end.z - deck.z), ux = (end.x - deck.x) / run, uz = (end.z - deck.z) / run;
     const h = (s: number) => layout.terrain.height(deck.x + ux * s, deck.z + uz * s);

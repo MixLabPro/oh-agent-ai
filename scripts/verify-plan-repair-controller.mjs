@@ -797,4 +797,72 @@ function harness(overrides = {}) {
   assert.equal(curve.controller.snapshot.drawStart, null);
 }
 
-console.log("City plan repair controller: arcs are drawn start → bend point → end (C toggles, Esc peels the bend point first, chains); the restyle tool changes a whole run to the chosen road type (target-width preview, bulldozer note, unchanged/locked explained, no viaduct); free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");
+// (a4) 试驾工具（修复升级 P1-E）：悬停高亮路/桥（结果未知），点击跑试驾；通过/挡住/未判定三种消息，挡住带红点位置；
+//      结果在鼠标留在同一条路上时保留，移到别的路上恢复悬停；太短的路说明原因。
+{
+  const { controller, deps } = harness();
+  const reports = {
+    e1: { verdict: "passed", path: [{ x: 0, z: 0 }, { x: 100, z: 0 }], width: 5, blockedAt: null, reason: "", kind: "road" },
+    bridge: { verdict: "blocked", path: [{ x: -4, z: 0 }, { x: 104, z: 0 }], width: 5, blockedAt: { x: 60, z: 1 }, reason: "unsupported-footprint:closed:no-surface", kind: "bridge" },
+  };
+  const driven = [];
+  deps.testDrive = (id) => { driven.push(id); return deps.driveReport !== undefined ? deps.driveReport : reports[id]; };
+  controller.enter(); controller.setTool("drive");
+  assert.match(controller.snapshot.message.text, /试驾/);
+  controller.hover({ x: 30, z: 1 });
+  assert.equal(controller.snapshot.preview.kind, "drive");
+  assert.equal(controller.snapshot.preview.result, null, "hovering only highlights");
+  controller.click({ pickedId: null, ground: { x: 30, z: 1 } });
+  assert.deepEqual(driven, ["e1"]);
+  assert.equal(controller.snapshot.message.kind, "ok"); assert.match(controller.snapshot.message.text, /试驾通过/);
+  assert.equal(controller.snapshot.preview.result, "passed");
+  controller.hover({ x: 40, z: 1 });
+  assert.equal(controller.snapshot.preview.result, "passed", "the result stays while the mouse stays on the same road");
+  controller.hover({ x: 40, z: -2 });
+  assert.equal(controller.snapshot.preview.result, null, "moving onto another road goes back to hovering");
+  controller.click({ pickedId: null, ground: { x: 40, z: -2 } });
+  assert.equal(controller.snapshot.message.kind, "error"); assert.match(controller.snapshot.message.text, /试驾挡住.*车轮悬空.*整座擦掉/);
+  assert.deepEqual(controller.snapshot.preview.blockedAt, { x: 60, z: 1 }, "the blocked spot is marked");
+  deps.driveReport = { ...reports.e1, verdict: "undetermined", reason: "start:footprint" };
+  controller.hover({ x: 30, z: 1 }); controller.click({ pickedId: null, ground: { x: 30, z: 1 } });
+  assert.equal(controller.snapshot.message.kind, "warn"); assert.match(controller.snapshot.message.text, /未判定.*不代表路不通/);
+  deps.driveReport = null;
+  controller.hover({ x: 30, z: 1 }); controller.click({ pickedId: null, ground: { x: 30, z: 1 } });
+  assert.match(controller.snapshot.message.text, /太短/);
+  controller.click({ pickedId: null, ground: { x: 30, z: 50 } });
+  assert.match(controller.snapshot.message.text, /没有道路可试驾/);
+}
+
+// (a5) 一键修复方案（修复升级 P1-D）：给方案 → 地图预览（红擦绿画）、悬停不覆盖方案；Esc 放弃；采用 → 一步写入 + 自动试驾新桥；
+//      找不到方案时说明原因并指向手动修法。
+{
+  const { controller, deps } = harness();
+  const proposal = { deckId: "bridge", erase: ["bridge", "stub"], erasePolylines: [[{ x: 0, z: 0 }, { x: 100, z: 0 }], [{ x: 100, z: 0 }, { x: 110, z: 5 }]],
+    draw: { from: { x: -20, z: 1 }, to: { x: 120, z: 1 }, width: 5, bridgeLength: 78 }, warnings: ["auto-junction:1"], ops: [] };
+  const applied = []; const driven = [];
+  deps.proposeBridgeFix = (id) => (id === "bridge" ? { ok: true, proposal } : { ok: false, reason: "no-redraw", detail: "附近找不到一笔合法的直桥（no-road-on-bank×819）" });
+  deps.applyBridgeFix = (p) => { applied.push(p); return { ok: true, patch: {}, warnings: [] }; };
+  deps.testDrive = (id) => { driven.push(id); return { verdict: "passed", path: [{ x: -20, z: 1 }, { x: 120, z: 1 }], width: 5, blockedAt: null, reason: "", kind: "bridge" }; };
+  controller.enter();
+  controller.proposeBridgeFix("bridge");
+  assert.equal(controller.snapshot.proposal, proposal);
+  assert.equal(controller.snapshot.preview.kind, "proposal");
+  assert.match(controller.snapshot.message.text, /擦掉整座桥和 1 段岸边残路.*78 的直桥.*采用/);
+  controller.hover({ x: 30, z: 1 });
+  assert.equal(controller.snapshot.preview.kind, "proposal", "hovering does not paint over the proposal");
+  controller.cancel();
+  assert.equal(controller.snapshot.proposal, null); assert.equal(controller.snapshot.preview, null);
+  assert.equal(controller.snapshot.active, true, "Esc dismisses the proposal, not the repair mode");
+  controller.proposeBridgeFix("bridge"); controller.acceptProposal();
+  assert.deepEqual(applied, [proposal], "accepting writes the proposal once");
+  assert.equal(driven.length, 1, "…and test-drives the new bridge right away");
+  assert.equal(controller.snapshot.proposal, null);
+  assert.match(controller.snapshot.message.text, /已按方案重建这座桥.*试驾通过/);
+  controller.proposeBridgeFix("other");
+  assert.equal(controller.snapshot.proposal, null);
+  assert.match(controller.snapshot.message.text, /找不到自动修复方案.*橡皮擦整座擦掉/);
+  controller.proposeBridgeFix("bridge"); controller.setTool("erase");
+  assert.equal(controller.snapshot.proposal, null, "switching tools drops the proposal");
+}
+
+console.log("City plan repair controller: bridgehead fix proposals preview (hover-proof), dismiss with Esc, apply once and test-drive the new bridge; the test-drive tool highlights, drives and reports passed / blocked (marked) / undetermined; arcs are drawn start → bend point → end (C toggles, Esc peels the bend point first, chains); the restyle tool changes a whole run to the chosen road type (target-width preview, bulldozer note, unchanged/locked explained, no viaduct); free sites rotate with [ / ], hover estimates until settled, then exact dry runs; road types (main / waterfront / viaduct drawn point by point, joined, cut by the eraser) and filleted previews, junction tool picks up/previews/drops with reasons, placement ghosts for buildings and sites, leftover access roads offered and withdrawn, exact impact previews, every building is movable (tools hand over to each other, locked objects explain why, pick boxes never swallow a ground move), impacts are announced not blocked, clicks ignored until entered, eraser previews/erases with spelled-out reasons, road drawing snaps/previews/chains and keeps the start on rejection, Esc peels back one layer at a time, tool switches clear transient state, hover jitter is ignored, session-building selection + candidates, move-on-ground with selection restore, blockers spelled out without raw codes, own-parcel/no-parcel/sky handled, Esc deselects then exits, refresh recomputes or drops a vanished building, subscriptions honoured.");

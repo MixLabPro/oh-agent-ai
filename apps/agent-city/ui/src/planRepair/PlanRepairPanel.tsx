@@ -18,6 +18,7 @@ const TOOLS: Array<{ id: RepairTool; label: string; key: string; icon: string; h
   { id: "restyle", icon: "⇄", label: "改路", key: "T", hint: "选路型后点一条路：整条街改成这个路型" },
   { id: "node", icon: "◎", label: "路口", key: "N", hint: "点一个路口拿起来，再点一下放下：连着的路跟着走" },
   { id: "site", icon: "▣", label: "设施", key: "S", hint: "编辑非会话建筑：公共设施、花园、地标、市政用地、背景楼——搬家或拆除" },
+  { id: "drive", icon: "▶", label: "试驾", key: "D", hint: "点一条路或一座桥：车沿它来回各开一遍，告诉你开不开得过去" },
 ];
 const ROAD_TYPES: Array<{ id: RoadType; label: string; hint: string }> = [
   { id: "local", label: "小路", hint: "宽 5，街区内的支路" },
@@ -92,7 +93,7 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
   const message = bubbleHidden ? null : state.message;
   const tipShown = !bubbleHidden && !!activeTool && !state.message && !previewReason && state.tool !== "draw" && state.tool !== "restyle";
   const hasDetail = !!(state.tool === "draw" || state.tool === "restyle" || info.remap || info.tierChanged || info.staleCount > 0 || message || tipShown
-    || previewReason || previewNote || state.buildingId || state.site || state.stranded.length || issues || (counts && total > 0));
+    || previewReason || previewNote || state.buildingId || state.site || state.stranded.length || state.proposal || issues || (counts && total > 0));
   const badge = total === 0 ? "未修改" : `${total} 处`;
   const saveNote = total === 0 ? null : info.saveFailed ? "仅临时" : info.savePending ? "保存中…" : "已保存";
   // 侧栏停靠形态（SimCity 式）：右边缘一条窄工具栏常驻，选项/提示/体检结果按需在它左侧弹出一块小卡片，
@@ -146,6 +147,11 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
       <button onClick={repair.removeSelected} title="拆除选中的设施（Delete）">拆除</button>
     </div>}
     {state.tool === "site" && !state.site && state.preview?.kind === "site" && <p className="city-repair-sel">指向：{state.preview.label}（点击选中）</p>}
+    {state.proposal && <div className="city-repair-site">
+      <span>{en ? "Fix proposal: red is erased, green is the new bridge" : "修复方案：红色擦掉，绿色画新桥"}</span>
+      <button onClick={repair.acceptProposal} title="一步写入，撤销可恢复；写入后自动试驾新桥">采用</button>
+      <button onClick={repair.cancelProposal} title="放弃这个方案（Esc）">取消</button>
+    </div>}
     {state.stranded.length > 0 && <div className="city-repair-site">
       <span>{en ? `${state.stranded.length} dead-end access segment(s) left behind` : `原址留下 ${state.stranded.length} 段断头接入路`}</span>
       <button onClick={repair.eraseStranded} title="一次擦掉，撤销可恢复">擦掉</button>
@@ -160,6 +166,7 @@ export function PlanRepairPanel({ repair }: { repair: PlanRepairUi }) {
         <ul>{issues.slice(0, MAX_ISSUE_ROWS).map((issue) => <li key={issue.id} className={`city-repair-${issue.severity}`}>
           <span><b>{SEVERITY_LABEL[issue.severity]}</b>{issue.origin && <i className={`city-repair-origin city-repair-origin-${issue.origin}`}>{issue.origin === "edit" ? "你的修改造成" : "生成时就有"}</i>}{" "}{`${T(RULE_LABEL[issue.rule] ?? issue.rule)}${en ? ": " : "："}${T(issue.detail)}`}</span>
           {issue.at && <button onClick={() => repair.locate(issue)}>定位</button>}
+          {(issue.rule === "bridgeheadOblique" || issue.rule === "bridgeheadSteep") && <button onClick={() => repair.proposeFix(issue)} title="擦掉整座桥和岸边残路，在附近画一座直桥——先预览，点「采用」才写入">修复方案</button>}
         </li>)}</ul>
       </>}
     </div>}

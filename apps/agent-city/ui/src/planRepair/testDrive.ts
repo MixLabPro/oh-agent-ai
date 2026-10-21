@@ -1,0 +1,136 @@
+/**
+ * 试驾（修复升级 P1-E，docs/CITY_REPAIR_UPGRADE_PLAN.md）：玩家改完一条路或一座桥，问「车开不开得过去」。
+ *
+ * 在当前生效布局（补丁后的城市，与驾驶模式同一份）上编译驾驶面，用驾驶模式的同一个内核（DrivingKernel +
+ * SurfaceDrivingEnvironment）沿这条路双向各开一遍，每 tick 由独立验证器复核。纯 CPU、不碰 three/DOM，可在 node 里测。
+ *
+ * 只认路面，不载场景固体：问的是「路面接不接得上、坡爬不爬得上」——坏桥头、陡路、桥面越界都是路面问题。
+ * 压在路上的楼/设施是另一类问题（体检的楼压路），这里不判。结果三态如实：通过 / 挡住（带位置）/ 未判定（带原因），
+ * 未判定不当成坏路（与 RoadPassabilityAudit 的口径一致：跑不通不等于路不通，只有挡住才有位置）。
+ *
+ * 路沿右侧车道开（车道中心 = 路中线向右 1/4 路宽）：渠化路口的导流岛在路中线上，沿中线开会把路口当成「挡住」。
+ * 桥沿中线开：窄桥两侧是护栏，偏到右车道时桥头接缝处车轮探出桥面（7/2 重画的 5 宽桥实测）。
+ */
+import type { CityLayout, Vec2 } from "../engine/cityLayout";
+import { bridgeChain, bridgeChainPolyline, edgeLocked } from "../engine/planPatch";
+import { compileCitySurface } from "../engine/surface/compileSurface";
+import { buildSurfaceIndex } from "../engine/surface/SurfaceIndex";
+import { buildSurfaceRegions, type SurfaceRegionsBuild } from "../engine/surface/surfaceRegions";
+import { DRIVING_DT, initialDrivingState, type DrivingState } from "../game/DrivingSimulation";
+import { DrivingKernel } from "../game/driving/DrivingKernel";
+import { CurvatureRoutePilot } from "../game/driving/audit/RoutePilot";
+import { polylineProgress, SurfaceDrivingEnvironment, SurfaceWorldValidator } from "../game/driving/SurfaceDrivingWorld";
+import { DRIVING_FOOTPRINT } from "../game/driving/vehicleFootprint";
+
+export type TestDriveTarget = { kind: "bridge" | "road"; edgeIds: string[]; width: number; /** 试驾路线（路中线；桥含两端各 4 的真实引道）。 */ path: Vec2[] };
+export type DriveLeg = { result: "ok" | "blocked" | "undetermined"; reason: string; at: Vec2 | null; driven: number; total: number };
+export type TestDriveResult = { target: TestDriveTarget; forward: DriveLeg; back: DriveLeg; verdict: "passed" | "blocked" | "undetermined" };
+
+const IDENTITY = Object.freeze({ baseSnapshotHash: "plan-repair-test-drive", vehicleConfigHash: "car-v1", kernelBuildId: "plan-repair", physicsVersion: 1, collisionVersion: 1, queryVersion: 1 });
+const BRIDGE_TAIL = 4;
+/** 路的两端各让开这么多（落在路口里的起止点会被别的路的路缘绊住，那不是这条路的事）。 */
+const ROAD_END_CLEARANCE = 3;
+const CRUISE = 7;
+
+const regionsCache = new WeakMap<object, SurfaceRegionsBuild>();
+/** 生效布局的驾驶区域（按布局缓存：布局不可变，补丁每次产出新布局）。 */
+export function drivingRegions(layout: CityLayout): SurfaceRegionsBuild {
+  const hit = regionsCache.get(layout);
+  if (hit) return hit;
+  const compiled = compileCitySurface(layout);
+  const surface = { ...compiled.surface, revision: `plan-repair:${layout.seed}:${layout.scaleTier}` };
+  const regions = buildSurfaceRegions(surface, buildSurfaceIndex(surface));
+  regionsCache.set(layout, regions);
+  return regions;
+}
+
+const along = (a: Vec2, b: Vec2, s: number): Vec2 => { const d = Math.hypot(b.x - a.x, b.z - a.z) || 1; return { x: a.x + (b.x - a.x) * s / d, z: a.z + (b.z - a.z) * s / d }; };
+
+function trimmed(points: readonly Vec2[], from: number, to: number): Vec2[] {
+  const out: Vec2[] = []; let base = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1], b = points[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
+    const s0 = Math.max(from, base), s1 = Math.min(to, base + len);
+    if (s1 > s0) { const p = along(a, b, s0 - base), q = along(a, b, s1 - base); if (!out.length) out.push(p); out.push(q); }
+    base += len;
+  }
+  return out;
+}
+
+/** 这条路/桥的试驾路线。桥：整座（bridgeChain）沿桥轴两端各加 4 的引道；路：整段，两端各让开 3。 */
+export function testDriveTarget(layout: CityLayout, edgeId: string): TestDriveTarget | null {
+  const edge = layout.roadEdges.find((candidate) => candidate.id === edgeId);
+  if (!edge) return null;
+  if (edgeLocked(edge)) {
+    const chain = bridgeChain(layout.roadEdges, edge); const line = bridgeChainPolyline(chain);
+    const a = line[0], b = line[line.length - 1];
+    // 两端从真实的引道上开过来：取与离桥方向最一致的地面路走 BRIDGE_TAIL（斜接桥头正是这条路拐得太急）；没有地面路就沿桥轴。
+    const approach = (end: Vec2, inner: Vec2): Vec2 => {
+      const id = `${end.x}:${end.z}`; const ox = end.x - inner.x, oz = end.z - inner.z, ol = Math.hypot(ox, oz) || 1;
+      let best: Vec2 | null = null; let bestDot = -Infinity;
+      for (const leg of layout.roadEdges) {
+        if (edgeLocked(leg) || (leg.from !== id && leg.to !== id)) continue;
+        const pts = leg.from === id ? leg.points : [...leg.points].reverse(); const d = Math.hypot(pts[1].x - pts[0].x, pts[1].z - pts[0].z) || 1;
+        const dot = ((pts[1].x - pts[0].x) * ox + (pts[1].z - pts[0].z) * oz) / (d * ol);
+        if (dot > bestDot) { bestDot = dot; best = along(pts[0], pts[1], Math.min(BRIDGE_TAIL, d * 0.8)); }
+      }
+      return best ?? along(end, inner, -BRIDGE_TAIL);
+    };
+    return { kind: "bridge", edgeIds: chain.map((piece) => piece.id), width: edge.width, path: [approach(a, line[1]), ...line, approach(b, line[line.length - 2])] };
+  }
+  const length = edge.points.slice(1).reduce((sum, q, i) => sum + Math.hypot(q.x - edge.points[i].x, q.z - edge.points[i].z), 0);
+  if (length <= 2 * ROAD_END_CLEARANCE + 1) return null;
+  return { kind: "road", edgeIds: [edge.id], width: edge.width, path: trimmed(edge.points, ROAD_END_CLEARANCE, length - ROAD_END_CLEARANCE) };
+}
+
+/** 路线向右平移到车道中心（按行驶方向）。 */
+function rightLane(path: readonly Vec2[], offset: number): Vec2[] {
+  return path.map((p, i) => {
+    const a = path[Math.max(0, i - 1)], b = path[Math.min(path.length - 1, i + 1)]; const l = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+    return { x: p.x - ((b.z - a.z) / l) * offset, z: p.z + ((b.x - a.x) / l) * offset };
+  });
+}
+
+function driveLeg(regions: SurfaceRegionsBuild, path: readonly Vec2[]): DriveLeg {
+  const lengths = [0]; for (let i = 1; i < path.length; i += 1) lengths.push(lengths[i - 1] + Math.hypot(path[i].x - path[i - 1].x, path[i].z - path[i - 1].z));
+  const total = lengths[lengths.length - 1];
+  const leg = (result: DriveLeg["result"], reason: string, at: Vec2 | null, driven: number): DriveLeg => ({ result, reason, at, driven, total });
+  if (regions.status !== "ready") return leg("undetermined", `surface:${regions.reason}`, null, 0);
+  const p0 = path[0]; const heading = Math.atan2(path[1].z - p0.z, path[1].x - p0.x);
+  const start = regions.classify(p0.x, p0.z, "ground");
+  // 起点不在地面路面上（引道太短、起点落进路口扇面外）——没开就谈不上挡住。
+  if (start.status !== "drivable") return leg("undetermined", `start:${start.cause ?? start.status}`, p0, 0);
+  const env = new SurfaceDrivingEnvironment(regions);
+  const placed = env.place(p0.x, p0.z, heading, start.regionId);
+  if (!placed) return leg("undetermined", "start:footprint", p0, 0);
+  let state: DrivingState = { ...initialDrivingState(p0.x, p0.z, heading, start.regionId), ...placed };
+  const progress = polylineProgress(path);
+  const validator = new SurfaceWorldValidator(regions, progress);
+  if (validator.validateStart(state) !== "valid") return leg("undetermined", "start:invalid", p0, 0);
+  const kernel = new DrivingKernel(env, IDENTITY); const pilot = new CurvatureRoutePilot(path, CRUISE);
+  const maxTicks = Math.ceil(total / (2 * DRIVING_DT)) + 600; // 领航员最低 2 m/s
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    const s = progress(state);
+    if (s >= total - 0.5) return leg("ok", "", null, s);
+    const step = kernel.step(state, pilot.input(state));
+    const verdict = validator.validate(state, step);
+    if (verdict !== "valid") return leg("undetermined", `simulation:${verdict}`, { x: state.x, z: state.z }, s);
+    if (step.motion.blocked) return leg("blocked", step.motion.reason ?? "blocked", { x: state.x, z: state.z }, s);
+    state = step.state;
+  }
+  return leg("undetermined", "timeout", { x: state.x, z: state.z }, progress(state));
+}
+
+/** 沿这条路/桥双向各开一遍。两向都通 → 通过；任一向挡住 → 挡住（带位置）；其余 → 未判定。 */
+export function testDrive(layout: CityLayout, edgeId: string): TestDriveResult | null {
+  const target = testDriveTarget(layout, edgeId);
+  if (!target) return null;
+  const regions = drivingRegions(layout);
+  // 桥沿中线开（窄桥两侧是护栏，车在 5 宽的桥上靠中走；偏到右车道，桥头接缝处车轮会探出桥面）；路沿右车道开（避开导流岛）。
+  const lane = target.kind === "bridge" ? 0 : Math.max(0, Math.min(target.width / 4, target.width / 2 - DRIVING_FOOTPRINT.halfWidth - 0.3));
+  const forward = driveLeg(regions, rightLane(target.path, lane));
+  const back = driveLeg(regions, rightLane([...target.path].reverse(), lane));
+  const verdict = forward.result === "blocked" || back.result === "blocked" ? "blocked" : forward.result === "ok" && back.result === "ok" ? "passed" : "undetermined";
+  return { target, forward, back, verdict };
+}
+

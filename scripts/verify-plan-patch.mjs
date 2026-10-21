@@ -730,7 +730,16 @@ const snap = (layout) => JSON.stringify({
   const flatNode = validateNodeMove(hill, model, "-30:60", { x: -48, z: 60 });
   assert.ok(flatNode.blockers.includes("road-too-steep"), `dragging a flat road's junction up onto the slope is refused: ${flatNode.blockers}`);
   const cliff = river(); const flat = cliff.terrain.height; cliff.terrain = { ...cliff.terrain, height: (x, z) => (x > 240 && x < 250 ? flat(x, z) + (250 - x) * 0.6 : flat(x, z)) };
-  assert.deepEqual(validateRoadAdd(cliff, model, { x: 150, z: -100 }, { x: 280, z: -100 }, 8).blockers, ["bridge-approach-steep"], "a bank steeper than the car can climb is refused");
+  // 桥台延伸到缓坡（P0-C）：10 宽的陡岸压在加长的桥面下，车从缓坡上桥——原来拦，现在原地就能画。
+  assert.deepEqual(validateRoadAdd(cliff, model, { x: 150, z: -100 }, { x: 290, z: -100 }, 8).blockers, [], "a short steep bank is bridged over by a longer abutment");
+  const overCliff = fresh(); overCliff.roadOps = [{ t: "add", from: { x: 150, z: -100 }, to: { x: 290, z: -100 }, width: 8 }];
+  const extended = applyPlanPatch(cliff, overCliff).layout.roadEdges.find((e) => e.bridge && e.points.every((q) => q.z === -100));
+  assert.ok(extended && Math.max(...extended.points.map((q) => q.x)) >= 250 && Math.max(...extended.points.map((q) => q.x)) <= 239 + 20, `…the replayed deck reaches past the steep bank, within 20 of the water: ${JSON.stringify(extended?.points)}`);
+  assert.ok(Math.min(...extended.points.map((q) => q.x)) > 195, "…and the gentle west bank keeps its 3-unit abutment");
+  const ridge = river(); ridge.terrain = { ...ridge.terrain, height: (x, z) => (x > 240 && x < 275 ? flat(x, z) + (x - 240) * 0.6 : x >= 275 ? flat(x, z) + 21 : flat(x, z)) };
+  assert.deepEqual(validateRoadAdd(ridge, model, { x: 150, z: -100 }, { x: 300, z: -100 }, 8).blockers, ["bridge-approach-steep"], "a bank steep for longer than the abutment can reach is still refused");
+  const plateau = river(); plateau.terrain = { ...plateau.terrain, height: (x, z) => (x >= 240 ? 30 : flat(x, z)) };
+  assert.deepEqual(validateRoadAdd(plateau, model, { x: 150, z: -100 }, { x: 290, z: -100 }, 8).blockers, ["bridge-approach-steep"], "a deck climbing a 27-high plateau over 45 would itself be too steep");
 }
 
 // (v) 弧线路。

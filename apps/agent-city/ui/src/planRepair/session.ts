@@ -8,6 +8,9 @@
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, tagAuditOrigins, type PlanIssue } from "../engine/planAudit";
+import { testDrive } from "./testDrive";
+import { proposeBridgeFix, type BridgeFixProposal, type BridgeFixResult } from "../engine/planBridgeFix";
+import type { DriveReport } from "./controller";
 import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, bridgeChain, bridgeChainPolyline, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, patchGeneratorVersion, patchMatchesLayout, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
 import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
@@ -357,6 +360,33 @@ export class PlanRepairSession {
     // 桥面：橡皮擦擦的是整座桥，悬停高亮整座（bridgeChain，与校验/重放同一口径）。
     const points = edge && edgeLocked(edge) ? bridgeChainPolyline(bridgeChain(layout!.roadEdges, edge)) : edge?.points;
     return edge ? { id: edge.id, points: points!, width: edge.width, locked: edge.bridge === true || edge.structure === "deck" || edge.structure === "ground-approach" || edge.purpose === "waterfront" } : null;
+  }
+
+  /** 坏桥头的一键修复方案（P1-D）：只产出候选，不写补丁。 */
+  proposeBridgeFix(deckId: string): BridgeFixResult {
+    const base = this.working();
+    const generated = this.engine.generatedLayout; const current = this.engine.currentLayout; const model = this.engine.currentModel;
+    if (!base.ok || !generated || !current || !model) return { ok: false, reason: "missing-bridge", detail: base.ok ? "city-not-ready" : base.reason };
+    return proposeBridgeFix(generated, current, model, base.patch, deckId);
+  }
+
+  /** 采用方案：擦桥 + 擦残路 + 画桥作为一步写进补丁（一步撤销）；画桥压到的楼照常走推土机。 */
+  applyBridgeFix(proposal: BridgeFixProposal): EditResult {
+    const base = this.working();
+    if (!base.ok) return base;
+    const verdict = validateEdgeDrop(this.engine.currentLayout!, this.engine.currentModel!, proposal.deckId);
+    if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
+    const patch = proposal.ops.reduce((next, op) => appendRoadOp(next, op.t === "drop" ? { ...op, ...this.edgeAnchor(op.edge) } : op), base.patch);
+    return this.commitWithBulldozer(patch, proposal.warnings);
+  }
+
+  /** 试驾（P1-E）：在当前生效布局上沿这条路/整座桥双向各开一遍（驾驶面按布局缓存，同一布局第二次起不再编译）。 */
+  testDrive(edgeId: string): DriveReport | null {
+    const layout = this.engine.currentLayout;
+    const result = layout ? testDrive(layout, edgeId) : null;
+    if (!result) return null;
+    const leg = result.forward.result === "blocked" ? result.forward : result.back.result === "blocked" ? result.back : result.forward.result !== "ok" ? result.forward : result.back;
+    return { verdict: result.verdict, path: result.target.path, width: result.target.width, blockedAt: result.verdict === "blocked" ? leg.at : null, reason: leg.reason, kind: result.target.kind };
   }
 
   validateDrop(edgeId: string): RoadVerdict {

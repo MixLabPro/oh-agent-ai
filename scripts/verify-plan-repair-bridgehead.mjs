@@ -11,10 +11,13 @@ import { makeRoutePilot } from "./city-kit/route-pilot.mjs";
 globalThis.window ??= globalThis;
 const kit = await loadCity({
   "engine/cityLayout.ts": ["layoutCity"],
+  "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "cityModel.ts": ["buildCityModel"],
   "engine/planPatch.ts": ["applyPlanPatch", "emptyPlanPatch", "bridgeChain"],
+  "engine/planBridgeFix.ts": ["proposeBridgeFix"],
   "engine/planRoadRules.ts": ["validateRoadAdd", "validateEdgeDrop", "snapPoint"],
   "engine/planAudit.ts": ["auditLayout"],
+  "planRepair/testDrive.ts": ["testDrive"],
   "engine/surface/compileSurface.ts": ["compileCitySurface", "landingConnectivity"],
   "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
   "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
@@ -24,7 +27,9 @@ const kit = await loadCity({
   "game/DrivingSimulation.ts": ["initialDrivingState"],
 });
 
+// 用法：[seed tier [miami]]——miami = 海滨配置（MIAMI_COASTAL，陡桥头所在的 30 个岛形规划）。
 const [seed, tier] = process.argv.length >= 4 ? [Number(process.argv[2]), Number(process.argv[3])] : [7, 2];
+const coastal = process.argv[4] === "miami" ? kit.MIAMI_COASTAL : null;
 const GENERATED_AT = Date.UTC(2026, 9, 7, 12, 0, 0);
 let r = 12345; const rnd = () => { r = (r * 1103515245 + 12345) & 0x7fffffff; return r / 0x7fffffff; };
 const rows = Array.from({ length: tier * 400 - 20 }, (_, i) => {
@@ -36,7 +41,7 @@ const rows = Array.from({ length: tier * 400 - 20 }, (_, i) => {
     cost_status: { state: "estimated", reason: "", has_unresolved: false } };
 });
 const model = kit.buildCityModel({ rows, findings: [], windowStartMs: GENERATED_AT - 30 * 86_400_000, windowEndMs: GENERATED_AT, windowLabel: "30d", totalSessions: rows.length, truncated: false, generatedAt: GENERATED_AT });
-const base = kit.layoutCity(model, null, seed);
+const base = kit.layoutCity(model, null, seed, coastal);
 assert.equal(base.scaleTier, tier, `the synthetic model lands on tier ${tier}`);
 
 const key = { baseSnapshotHash: "repair-bridgehead-v1", vehicleConfigHash: "car-v1", kernelBuildId: "fixture-build-v1",
@@ -47,15 +52,6 @@ const compile = (layout) => {
   const index = kit.buildSurfaceIndex(surface); assert.equal(index.status, "ready");
   const regions = kit.buildSurfaceRegions(surface, index); assert.equal(regions.status, "ready");
   return { c, regions };
-};
-const onRoad = (layout, p, max = 12) => {
-  let best = null, bestD = max;
-  for (const e of layout.roadEdges) if (!e.bridge) for (let i = 1; i < e.points.length; i++) {
-    const a = e.points[i - 1], b = e.points[i]; const dx = b.x - a.x, dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2)); const q = { x: a.x + dx * t, z: a.z + dz * t };
-    const d = Math.hypot(q.x - p.x, q.z - p.z); if (d < bestD) { bestD = d; best = { x: Math.round(q.x * 100) / 100, z: Math.round(q.z * 100) / 100 }; }
-  }
-  return best;
 };
 const leg = (layout, end, other) => {
   const id = `${end.x}:${end.z}`; const ox = end.x - other.x, oz = end.z - other.z, ol = Math.hypot(ox, oz);
@@ -103,43 +99,22 @@ for (const x of bad) {
   const verdict = kit.validateEdgeDrop(base, model, x.deck.id);
   assert.deepEqual(verdict.blockers, [], `${x.deck.id}: a whole bridge can be erased`);
   const drop = { ...kit.emptyPlanPatch(base.seed, base.scaleTier), roadOps: [{ t: "drop", edge: x.deck.id }] };
-  const erased = { ...kit.applyPlanPatch(base, drop) };
+  const erased = kit.applyPlanPatch(base, drop);
   assert.deepEqual(erased.stale, [], `${x.deck.id}: the erase replays cleanly`);
   assert.ok(!erased.layout.roadEdges.some((e) => x.chain.some((c) => c.id === e.id)), "every deck piece of the bridge is gone");
   assert.equal(erased.layout.bridges.length, base.bridges.length - base.bridges.filter((g) => x.chain.some((c) => {
     const mid = { x: (g.from.x + g.to.x) / 2, z: (g.from.z + g.to.z) / 2 };
-    return c.points.some((p, i) => i > 0 && Math.abs((p.x - c.points[i - 1].x) * (mid.z - c.points[i - 1].z) - (p.z - c.points[i - 1].z) * (mid.x - c.points[i - 1].x)) / Math.hypot(p.x - c.points[i - 1].x, p.z - c.points[i - 1].z) <= c.width / 2 + 1);
+    // 到线段（不是直线）的距离：海滨堤道是几座共线的桥，按直线算会把同一条线上的别的桥也算进来。
+    return c.points.some((p, i) => { if (i === 0) return false; const a = c.points[i - 1]; const dx = p.x - a.x, dz = p.z - a.z; const t = Math.max(0, Math.min(1, ((mid.x - a.x) * dx + (mid.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+      return Math.hypot(mid.x - a.x - dx * t, mid.z - a.z - dz * t) <= c.width / 2 + 1; });
   })).length, "the truss registry drops exactly the erased bridge");
 
-  // 玩家接着擦掉旧桥头留下的岸边残路（连着旧桥端点的路——它们伸到水边，会横穿新桥面）。
-  const landings = new Set(x.chain.flatMap((e) => [e.from, e.to]));
-  const stubs = erased.layout.roadEdges.filter((e) => !e.bridge && (landings.has(e.from) || landings.has(e.to)));
-  for (const stub of stubs) {
-    const v = kit.validateEdgeDrop(erased.layout, model, stub.id); assert.deepEqual(v.blockers, [], `${stub.id}: the leftover shore road can be erased`);
-  }
-  drop.roadOps.push(...stubs.map((stub) => ({ t: "drop", edge: stub.id })));
-  const cleared = kit.applyPlanPatch(base, drop);
-  assert.deepEqual(cleared.stale, [], "erasing the leftovers replays cleanly");
-  erased.layout = cleared.layout;
-
-  // ── 3. 重画：沿原桥轴平移/旋转，起止点吸附到两岸的路上，取第一笔画路校验全过的 ──
-  const ux = (x.b.x - x.a.x) / x.len, uz = (x.b.z - x.a.z) / x.len;
-  let drawn = null; const refused = {};
-  search: for (const offset of [0, 4, -4, 8, -8, 12, -12, 16, -16, 24, -24, 32, -32]) for (const reach of [14, 18, 24, 30, 40, 50]) for (const skew of [0, 0.08, -0.08, 0.16, -0.16, 0.25, -0.25]) {
-    const nx = -uz, nz = ux; const cx = Math.cos(skew), sx = Math.sin(skew); const vx = ux * cx - uz * sx, vz = ux * sx + uz * cx;
-    const mid = { x: (x.a.x + x.b.x) / 2 + nx * offset, z: (x.a.z + x.b.z) / 2 + nz * offset };
-    const half = x.len / 2 + reach;
-    // 玩家的落笔：探针附近 12 内最近的地面路上的点（画路工具再按路口 8 / 路段 4 吸附）。
-    const from = onRoad(erased.layout, { x: mid.x - vx * half, z: mid.z - vz * half }), to = onRoad(erased.layout, { x: mid.x + vx * half, z: mid.z + vz * half });
-    if (!from || !to || [from, to].some((p) => kit.snapPoint(erased.layout, p.x, p.z).kind === "free")) continue;
-    const verdict = kit.validateRoadAdd(erased.layout, model, from, to, x.deck.width);
-    for (const code of verdict.blockers.length ? verdict.blockers : verdict.warnings.some((w) => w.startsWith("bridge:")) ? [] : ["no-water"]) refused[code] = (refused[code] ?? 0) + 1;
-    if (verdict.blockers.length || !verdict.warnings.some((w) => w.startsWith("bridge:"))) continue;
-    drawn = { from: { x: from.x, z: from.z }, to: { x: to.x, z: to.z }, verdict };
-    break search;
-  }
-  if (!drawn) { report.push(`  ${x.deck.id.slice(0, 32)}: erased; no legal straight redraw found nearby ${JSON.stringify(refused)}`); continue; }
-  const redraw = { ...drop, roadOps: [...drop.roadOps, { t: "add", from: drawn.from, to: drawn.to, width: x.deck.width }] };
+  // ── 3. 一键修复方案（P1-D，面板里「修复方案」调的同一个函数）：擦桥 + 擦岸边残路 + 按画路校验搜一笔合法直桥 ──
+  const fix = kit.proposeBridgeFix(base, base, model, kit.emptyPlanPatch(base.seed, base.scaleTier), x.deck.id);
+  if (!fix.ok) { report.push(`  ${x.deck.id.slice(0, 32)}: erased; no fix proposal (${fix.reason}: ${fix.detail})`); continue; }
+  const drawn = { from: fix.proposal.draw.from, to: fix.proposal.draw.to, verdict: { warnings: [`bridge:${fix.proposal.draw.bridgeLength}`, ...fix.proposal.warnings] } };
+  for (const id of fix.proposal.erase.slice(1)) assert.deepEqual(kit.validateEdgeDrop(kit.applyPlanPatch(base, drop).layout, model, id).blockers, [], `${id}: the leftover shore road can be erased`);
+  const redraw = { ...drop, roadOps: fix.proposal.ops };
   const repaired = kit.applyPlanPatch(base, redraw);
   assert.deepEqual(repaired.stale, [], `${x.deck.id}: the redraw replays cleanly`);
   const after = compile(repaired.layout);
@@ -158,13 +133,20 @@ for (const x of bad) {
   assert.ok(!forward.startsWith("invalid") && !back.startsWith("invalid"), `${forward} / ${back}`);
   const ok = forward === "ok" && back === "ok";
   if (ok) fixed++;
+  // 试驾（P1-E，玩家在面板里点的同一个函数）：修前这座桥不算通过，修后新桥通过。
+  const t0 = performance.now(); const drivenBefore = kit.testDrive(base, x.deck.id); const t1 = performance.now();
+  const drivenAfter = kit.testDrive(repaired.layout, newDeck.id); const t2 = performance.now();
+  report.push(`    test drive: before ${drivenBefore.verdict} (${drivenBefore.forward.result}/${drivenBefore.back.result} ${drivenBefore.forward.reason || drivenBefore.back.reason}) ${Math.round(t1 - t0)}ms; after ${drivenAfter.verdict} (${drivenAfter.forward.reason || drivenAfter.back.reason || "ok"}) ${Math.round(t2 - t1)}ms`);
+  assert.notEqual(drivenBefore.verdict, "passed", `${x.deck.id}: the test drive does not pass the defective bridge`);
+  if (ok) assert.equal(drivenAfter.verdict, "passed", `${x.deck.id}: the test drive passes the repaired bridge`);
   // 体检（P0-A）：修之前列出这座桥的桥头问题，修好之后不再列。
   const flagged = (layout) => kit.auditLayout(layout, model).filter((i) => i.rule.startsWith("bridgehead") && i.entities.some((id) => x.chain.some((c) => c.id === id)));
   if (ok) assert.deepEqual(flagged(repaired.layout), [], `${x.deck.id}: the repaired bridge leaves no bridgehead issue`);
   report.push(`  ${x.deck.id.slice(0, 32)}: erased; redrawn ${drawn.verdict.warnings.find((w) => w.startsWith("bridge:"))} from ${drawn.from.x.toFixed(1)}:${drawn.from.z.toFixed(1)} → forward ${forward} back ${back}`);
 }
 for (const line of report) console.log(line);
-if (bad.length) assert.ok(fixed > 0, "at least one defective bridge can be repaired by the player (erase + redraw)");
+// 其它规划只报告（海滨的陡桥头多是通往小岛设施的堤道跳板、或断头溪桥：对岸没有路网，自动方案如实拒绝并说明原因）。
+if (bad.length && seed === 7 && tier === 2) assert.ok(fixed > 0, "at least one defective bridge can be repaired by the player (erase + redraw)");
 // 7/2 的悬索桥就是那座斜接坏桥头（驾驶内核在桥头 wheel-twist / 越出桥面）：它必须能被玩家修好。
 if (seed === 7 && tier === 2) assert.ok(report.some((line) => line.includes("-16.57:295.97/58.1:308.1") && line.includes("forward ok back ok")), "the 7/2 suspension bridge is repairable");
 console.log(`City plan repair bridgehead: ${bad.length} defective bridge(s) on ${seed}/${tier}; every one erasable as a whole (registry follows); ${fixed}/${bad.length} redrawn with the draw tool's own rules and driven across by the same kernel.`);
