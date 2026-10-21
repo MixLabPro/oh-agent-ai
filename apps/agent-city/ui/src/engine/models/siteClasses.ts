@@ -66,7 +66,7 @@ export const SITE_CLASSES: readonly SiteClass[] = [
   scenery("seaside", "海滨设施", "beach", ["city-lifeguard-towers", "city-yachts", "city-beach-furniture", "city-beach-people", "city-volleyball-courts", "city-promenade-props", "city-marina"]),
   scenery("airport", "机场岛与堤道", "airport", ["city-landmark-airport"]),
   scenery("bridge-truss", "桁架桥", "truss-bridge", ["city-landmark-truss-bridge"]),
-  scenery("expressway", "环线高架", "expressway", ["city-district-expressways"]),
+  scenery("expressway", "环线高架", "expressway", ["city-district-expressway-deck", "city-district-expressway-rails", "city-district-expressway-lines", "city-district-expressway-supports"]),
   scenery("volcano", "火山", null, ["city-sea-volcano"]), scenery("massing", "聚合楼群", null, ["city-massing"]),
   scenery("signs", "广告牌", "signs", []),
   { id: "data:session", family: "data", title: "会话楼", catalogId: "session-tower",

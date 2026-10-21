@@ -10,7 +10,7 @@ import type { CityLayout, RoadEdge, Vec2 } from "../cityLayout";
 import { cornerArc, curbClearance, junctionIndex, pavementIndex, renderRoadEdges, roadJunctionPlan, STRAIGHT_GAP, taperOutline } from "../cityRoadJunctions";
 import { channelizedTPlan, type ChannelizedArm } from "../cityRoadPaint";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, EXPRESSWAY_DECK_Y, expresswayDeckHeights } from "../render/shared";
-import { bridgeDeckParts, channelizedGeometry, culDeSacDiscs, expresswayPieces, FLARE_LIFT, highwayRampPieces, flareTriangles, trussBars } from "../surface/structureCompiler";
+import { bridgeDeckParts, channelizedGeometry, culDeSacDiscs, expresswayPieces, FLARE_LIFT, expresswayMeshes, highwayRampMeshes, highwayRampPieces, flareTriangles, trussBars, type DeckRibbonMesh } from "../surface/structureCompiler";
 import { conformMesh, terrainFit } from "../surface/terrainClip";
 export { culDeSacBulbRadius } from "../surface/structureCompiler";
 
@@ -213,10 +213,31 @@ export function buildChannelizedJunctions(host: RoadHost): void {
 
 /** 区界高架：与北环高架同视觉语言（桥面/车道线/护栏/桥墩），
  *  沿规划折线分段铺装 —— harness 城区之间可辨认的硬边界。 */
+/** 连续桥面网格（deckRibbonMesh）按角色各合一张网格：key "deck" 是桥面板，其余是装饰角色（护栏/标线）。 */
+function addRibbonMeshes(host: RoadHost, meshes: ReadonlyArray<DeckRibbonMesh>, roles: ReadonlyArray<readonly [string, string, string]>): void {
+  for (const [role, color, name] of roles) {
+    const tris = meshes.flatMap((m) => (role.endsWith("-deck") ? m.deck : m.decorations[role] ?? []));
+    if (!tris.length) continue;
+    const positions = new Float32Array(tris.length * 9);
+    tris.forEach((tri, t) => tri.forEach((p, v) => { positions[t * 9 + v * 3] = p.x; positions[t * 9 + v * 3 + 1] = p.y; positions[t * 9 + v * 3 + 2] = p.z; }));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.castShadow = !role.endsWith("lane-line"); mesh.receiveShadow = true; mesh.name = name;
+    host.group.add(mesh);
+    host.disposables.push(geometry, material);
+  }
+}
+
 export function buildDistrictExpressways(host: RoadHost): void {
   type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; pitch?: number; color: string };
-  // 桥墩、桥面、车道线、护栏：描述符与驾驶路面共用（surface/structureCompiler）。
-  const pieces: Piece[] = expresswayPieces(host.layout).map((p) => ({ x: p.x, y: p.y, z: p.z, sx: p.sx, sy: p.sy, sz: p.sz, yaw: p.ry, pitch: p.rz, color: p.color }));
+  // 桥面板 / 车道线 / 护栏：连续网格（expresswayMeshes，与驾驶面同一组斜接接缝；曾逐段画旋转盒子，弯道外侧张开楔形裂口）。
+  addRibbonMeshes(host, expresswayMeshes(host.layout), [["expressway-deck", "#6a7071", "city-district-expressway-deck"], ["expressway-rail", "#b9bcb2", "city-district-expressway-rails"], ["expressway-lane-line", "#c6c6bb", "city-district-expressway-lines"]]);
+  // 桥墩与盖梁：描述符与碰撞共用（surface/structureCompiler）。
+  const pieces: Piece[] = expresswayPieces(host.layout).filter((p) => p.role !== "expressway-deck" && p.role !== "expressway-rail" && p.role !== "expressway-lane-line")
+    .map((p) => ({ x: p.x, y: p.y, z: p.z, sx: p.sx, sy: p.sy, sz: p.sz, yaw: p.ry, pitch: p.rz, color: p.color }));
   if (!pieces.length) return;
   const geometry = BOX.clone();
   const mesh = new THREE.InstancedMesh(geometry, new THREE.MeshLambertMaterial({ color: "#ffffff" }), pieces.length);
@@ -235,7 +256,7 @@ export function buildDistrictExpressways(host: RoadHost): void {
   });
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  mesh.name = "city-district-expressways";
+  mesh.name = "city-district-expressway-supports";
   host.group.add(mesh);
   host.disposables.push(geometry, mesh.material);
 }
@@ -245,7 +266,9 @@ export function buildDistrictExpressways(host: RoadHost): void {
  *  匝道完全离开主桥幅后才沿剩余路程 smoothstep 降到路面，落在干道 T 口上；墩柱每 18 一根，离地 < 1.5 或压在
  *  地面车道上的不立。 */
 export function buildHighwayRamps(host: RoadHost): void {
-  const parts = highwayRampPieces(host.layout);
+  // 桥面板 / 护栏 / 车道边线：连续网格（highwayRampMeshes，与驾驶面同一组斜接接缝）。曾逐段画旋转盒子，弯道外侧张开楔形裂口。
+  addRibbonMeshes(host, highwayRampMeshes(host.layout), [["ramp-deck", "#6a7071", "city-highway-ramp-deck"], ["ramp-rail", "#b9bcb2", "city-highway-ramp-rails"], ["ramp-lane-line", "#e4dfc9", "city-highway-ramp-lines"]]);
+  const parts = highwayRampPieces(host.layout).filter((p) => p.role === "ramp-pier");
   if (!parts.length) return;
   const pieces = parts.map((p) => ({ x: p.x, y: p.y, z: p.z, sx: p.sx, sy: p.sy, sz: p.sz, yaw: p.ry, pitch: p.rz, color: p.color }));
   const mesh = new THREE.InstancedMesh(BOX.clone(), new THREE.MeshLambertMaterial({ color: "#ffffff" }), pieces.length);
@@ -262,7 +285,7 @@ export function buildHighwayRamps(host: RoadHost): void {
   });
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  mesh.name = "city-highway-ramps";
+  mesh.name = "city-highway-ramp-piers";
   host.group.add(mesh);
   host.disposables.push(mesh.geometry, mesh.material);
 }

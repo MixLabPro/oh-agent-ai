@@ -267,3 +267,38 @@
 .city-skill-list li { display: block; }
 .city-skill-list strong { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }
 .city-skill-list dl { margin: 0; }
+
+/* 小地图（2026-10-21）：路网与路况，左下角，在时间回放条之上。 */
+/* 小地图：正方形，贴着窗口左缘。静止时半透明、无边框文字（不挡视线）；悬停或键盘聚焦时变实，标签/摘要/图例浮在图内。
+   收起时整块缩进左缘，只留一个窄把手。 */
+.city-minimap { --mm-size: 184px; position: absolute; left: 0; bottom: calc(var(--city-timeline-height, 48px) + 30px); z-index: 4; display: flex; align-items: center; font-size: 11px; transition: transform 0.22s ease; }
+.city-minimap.is-driving { bottom: 76px; }
+.city-minimap.is-collapsed { transform: translateX(calc(-1 * var(--mm-size) - 8px)); }
+.city-minimap-frame { position: relative; padding: 4px; margin-left: 0; border-radius: 0 12px 12px 0; background: rgba(12, 18, 22, 0.18); border: 1px solid rgba(255, 255, 255, 0.14); border-left: 0; backdrop-filter: blur(2px); opacity: 0.82; transition: background 0.18s, opacity 0.18s, box-shadow 0.18s; }
+.city-minimap:hover .city-minimap-frame, .city-minimap:focus-within .city-minimap-frame { background: var(--city-surface); border-color: var(--city-border); opacity: 1; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3); }
+.city-minimap.is-collapsed .city-minimap-frame { visibility: hidden; transition: visibility 0s 0.22s; }
+.city-minimap canvas { display: block; border-radius: 0 9px 9px 0; }
+.city-minimap-alert { position: absolute; top: 9px; right: 9px; width: 7px; height: 7px; border-radius: 50%; background: #ff4d3d; box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35); transition: opacity 0.18s; }
+.city-minimap-top, .city-minimap-bottom { position: absolute; left: 4px; right: 4px; opacity: 0; pointer-events: none; transition: opacity 0.18s; }
+.city-minimap:hover :is(.city-minimap-top, .city-minimap-bottom), .city-minimap:focus-within :is(.city-minimap-top, .city-minimap-bottom) { opacity: 1; pointer-events: auto; }
+.city-minimap:hover .city-minimap-alert, .city-minimap:focus-within .city-minimap-alert { opacity: 0; }
+.city-minimap-top { top: 8px; left: 8px; right: auto; }
+.city-minimap-bottom { bottom: 4px; padding: 18px 8px 6px; border-radius: 0 0 9px 0; background: linear-gradient(transparent, rgba(8, 12, 16, 0.78) 36%); color: #e8eaec; pointer-events: none !important; }
+.city-minimap-tabs { display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgba(8, 12, 16, 0.62); backdrop-filter: blur(4px); }
+.city-minimap-tabs button { flex: 1; border: 0; border-radius: 5px; padding: 1px 6px; background: none; color: rgba(255, 255, 255, 0.72); font: inherit; font-size: 10.5px; line-height: 1.5; cursor: pointer; white-space: nowrap; }
+.city-minimap-tabs button.is-on { background: rgba(255, 255, 255, 0.92); color: #11161a; font-weight: 600; }
+.city-minimap-summary { margin: 0 0 3px; font-variant-numeric: tabular-nums; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.city-minimap-summary.is-detail { white-space: normal; font-weight: 500; }
+.city-minimap-summary.is-bad { color: #ff8a7e; }
+.city-minimap-summary.is-ok { color: #8fe0a6; }
+.city-minimap-legend { display: flex; flex-wrap: wrap; gap: 2px 8px; margin: 0; padding: 0; list-style: none; color: rgba(232, 234, 236, 0.78); font-size: 10px; }
+.city-minimap-legend i { display: inline-block; width: 9px; height: 3px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
+.city-minimap-legend i.is-dashed { background: repeating-linear-gradient(90deg, #c65cff 0 3px, transparent 3px 5px) !important; }
+.city-minimap-legend i.is-arrow { width: 0; height: 0; border-radius: 0; background: none; border-left: 7px solid #4dd2ff; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; }
+.city-minimap-handle { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 16px; min-height: 44px; padding: 6px 0; border: 1px solid rgba(255, 255, 255, 0.14); border-left: 0; border-radius: 0 7px 7px 0; background: rgba(12, 18, 22, 0.45); color: #fff; font: inherit; cursor: pointer; opacity: 0; transition: opacity 0.18s; }
+.city-minimap:hover .city-minimap-handle, .city-minimap:focus-within .city-minimap-handle, .city-minimap.is-collapsed .city-minimap-handle { opacity: 1; }
+.city-minimap.is-collapsed .city-minimap-handle { width: 20px; background: var(--city-surface); color: var(--city-text); border-color: var(--city-border); }
+.city-minimap-handle span { font-size: 14px; line-height: 1; }
+.city-minimap-handle em { font-style: normal; font-size: 11px; writing-mode: vertical-rl; letter-spacing: 1px; }
+@media (hover: none) { .city-minimap-handle { opacity: 1; } }
+@media (max-width: 720px) { .city-minimap { transform-origin: left bottom; } .city-minimap:not(.is-collapsed) { transform: scale(0.8); } }

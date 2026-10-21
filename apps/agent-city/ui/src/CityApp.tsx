@@ -9,6 +9,7 @@ import { embedded, connect, observeHealth, publishToolbar, type Tool } from "./h
 import type { EngineQualityMode } from "./engine/CityEngine";
 import { CityExperience, useCityExperience } from "./CityExperience";
 import { usePlanRepair } from "./planRepair/usePlanRepair";
+import { CityMinimap } from "./minimap/CityMinimap";
 import { supportsBackgroundFilm } from "./export/filmJob";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { replayStartMs } from "./replayRange";
@@ -304,6 +305,8 @@ export function CityApp() {
       <div hidden={driving.active}><CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} planRepair={planRepair}
         windowDays={windowDays} windowOptions={windowOptions} onWindowDays={(days) => setWindowDays(days as WindowDays)} labels={labels} onLabels={(next) => { engineRef.current?.setLabelsVisible(next); setLabels(next); }}
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} /></div>
+      <CityMinimap engine={engineRef} language={language} driving={{ active: driving.active, pose: driving.pose }}
+        hidden={!sceneReady || cinema || game.active || !!experience.film || driving.hud.phase === "preparing" || driving.hud.phase === "error"} />
       <DrivingHud model={{ active: driving.active, entryError: driving.entryError,
         initialPaused: driving.initialPaused, hud: driving.hud, preparationProgress: driving.preparationProgress, events: driving.events, diagnostics: driving.diagnostics() }}
         actions={{ clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,

@@ -24,6 +24,8 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
   const [sfxEnabled, setSfxEnabled] = useState(true);
   const [soundAvailable, setSoundAvailable] = useState(false);
   const [initialPaused, setInitialPaused] = useState(false);
+  /** 车的最新位姿（小地图画「我在哪」）：每帧 present 写，退出驾驶清空。 */
+  const poseRef = useRef<Readonly<{ x: number; z: number; heading: number }> | null>(null);
   const removeVisuals = useCallback(() => {
     const currentVisuals = visuals.current;
     if (currentVisuals) visualScene.current?.detach([currentVisuals.root]);
@@ -34,6 +36,7 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
     present: (state, blocked, _reason, frameSeconds, cameraSweep: CameraClearanceQuery, scene: CityCarSceneCapability) => {
       const current = engine.current;
       if (!current) return;
+      poseRef.current = { x: state.x, z: state.z, heading: state.heading };
       if (!visuals.current) { visuals.current = new CarVisuals(); visualScene.current = scene; scene.attach([visuals.current.root]); }
       // 撞击反馈与音效都只在接触上升沿触发，不把 blocked 持续帧当多次碰撞。
       if (blocked && !blockedSeen.current) {
@@ -77,7 +80,7 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
     if (car.hud.phase !== "running") { inputSource.current?.clear(); sfxRef.current?.suspend(); }
   }, [car.hud.phase]);
   useEffect(() => {
-    if (car.hud.phase === "idle" || car.hud.phase === "error") removeVisuals();
+    if (car.hud.phase === "idle" || car.hud.phase === "error") { removeVisuals(); poseRef.current = null; }
   }, [car.hud.phase, removeVisuals]);
   useEffect(() => removeVisuals, [removeVisuals]);
   useEffect(() => {
@@ -124,5 +127,6 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
   }, []);
   const toggleSfx = useCallback(() => { const next = !sfxEnabledRef.current; sfxEnabledRef.current = next; setSfxEnabled(next); sfxRef.current?.setMuted(!next); }, []);
   const sound = soundAvailable ? { volume: soundVolume, onVolume: setSoundVolume, sfx: { enabled: sfxEnabled, onToggle: toggleSfx } } : undefined;
-  return { ...car, active, enter, exit, resume, pause, openUiContext, initialPaused, sound };
+  const pose = useCallback(() => poseRef.current, []);
+  return { ...car, active, enter, exit, resume, pause, openUiContext, initialPaused, sound, pose };
 }

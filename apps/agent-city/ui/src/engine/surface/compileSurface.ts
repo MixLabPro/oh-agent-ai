@@ -17,7 +17,7 @@ import { extractMeshBoundaries } from "./meshBoundaries";
 import { buildSurfaceIndex } from "./SurfaceIndex";
 import {
   boxCorners, boxPoint, boxTopFace, bridgeDeckParts, bridgeDrivableHalf, channelizedGeometry, culDeSacDiscs, culDeSacTopCap,
-  EXPRESSWAY_DRIVABLE_HALF, expresswayPieces, FLARE_LIFT, flareTriangles, highwayRampPieces, rampDrivableHalf, trussBarPart, trussBars, type BoxPart,
+  EXPRESSWAY_DRIVABLE_HALF, expresswayPieces, FLARE_LIFT, flareTriangles, highwayRampPieces, rampDrivableHalf, ribbonFaces, trussBarPart, trussBars, type BoxPart,
 } from "./structureCompiler";
 import { conformMesh, terrainFit } from "./terrainClip";
 import type { SurfaceRegionsBuild } from "./surfaceRegions";
@@ -25,8 +25,6 @@ import type { CompiledCitySurface, SurfaceCompileIssue, SurfaceKind, SurfacePatc
 
 /** Bump when any patch, layer or obstacle rule here changes (AuditKey.surfaceVersion input). */
 export const CITY_SURFACE_GEOMETRY_VERSION = 16;
-/** Lift of an expressway ribbon's interior seams above the higher slab top (keeps slabs below the drivable surface). */
-const RIBBON_LIFT = 0.03;
 /** Along-span distance from a bridge end treated as its landing (not an overpass). */
 const LANDING_ZONE = 3;
 
@@ -132,55 +130,6 @@ const seamOf = (top: readonly P3[], end: StructureLanding["end"]) => {
   const owned = (p: P3) => Object.freeze({ x: Math.fround(p.x), y: Math.fround(p.y), z: Math.fround(p.z) });
   return Object.freeze({ a: owned(end === "from" ? top[0] : top[1]), b: owned(end === "from" ? top[3] : top[2]) });
 };
-
-/** Drivable ribbon over a run of deck slabs (expressways and interchange ramps): interior seams are shared
- * between neighbours — the higher of both slab tops at the true segment end, lifted RIBBON_LIFT where the
- * pitch changes — and mitred sideways; the run's two end edges stay the first/last slab's full top edge. */
-function ribbonFaces(deck: readonly BoxPart[], half: number, overhang: number): P3[][] {
-  const tops = deck.map((piece) => boxTopFace(piece, half));
-  // Centre of the top face at the piece's true segment end: slabs are `overhang` longer than their segment
-  // (expressways slant + 0.5, ramps slant + 0.4) so neighbouring render slabs close their gaps.
-  const endAt = (i: number, sign: number) => { const piece = deck[i]; const f = sign * Math.max(0, (piece.sx - overhang) / 2) / piece.sx; return boxPoint(piece, f, 1, 0); };
-  const sideOf = (i: number) => { const t = tops[i]; const sx = t[3].x - t[0].x, sz = t[3].z - t[0].z; const l = Math.hypot(sx, sz) || 1; return { x: sx / l, z: sz / l }; };
-  const seamAt = (i: number): [P3, P3] | null => {
-    const lift = Math.abs(deck[i - 1].rz - deck[i].rz) > 1e-9 ? RIBBON_LIFT : 0;
-    const a = endAt(i - 1, 1), b = endAt(i, -1); const c = { x: (a.x + b.x) / 2, y: Math.max(a.y, b.y) + lift, z: (a.z + b.z) / 2 };
-    const s0 = sideOf(i - 1), s1 = sideOf(i); let mx = s0.x + s1.x, mz = s0.z + s1.z; const ml = Math.hypot(mx, mz);
-    if (ml < 1e-9) return null; mx /= ml; mz /= ml;
-    const cos = mx * s0.x + mz * s0.z; if (cos < 0.5) return null; // sharper than 120°: keep the slab tops there
-    const w = half / cos;
-    return [{ x: c.x - mx * w, y: c.y, z: c.z - mz * w }, { x: c.x + mx * w, y: c.y, z: c.z + mz * w }];
-  };
-  const seams = deck.map((_, i) => (i === 0 ? null : seamAt(i)));
-  // boxTopFace order: [start −side, end −side, end +side, start +side].
-  const faceOf = (i: number): P3[] => {
-    const t = tops[i]; const start = seams[i], end = i + 1 < deck.length ? seams[i + 1] : null;
-    return [start ? start[0] : t[0], end ? end[0] : t[1], end ? end[1] : t[2], start ? start[1] : t[3]];
-  };
-  // 斜接不得把短段折叠（2026-10-20）：弯内侧的斜接点比接缝中心后退 half·tan(θ/2)，短段（高架落地处 1.9–2.4 长、
-  // 紧接 ~65° 转弯）上它越过了这段另一端的接缝，面片自交成蝴蝶结，边界提取失败 → 面片 boundary-unresolved 被排除，
-  // 1000/7、1000/65537 的 expressway:0 from 端落地后第一块驾驶面不存在（structure:expressway:0:from:* 无法连通）。
-  // 侧边恒平行于段轴，未折叠的四边形必为凸——非凸即折叠：该段两端的接缝退回板顶（与 >120° 的退路相同），直到全部为凸。
-  const convex = (q: readonly P3[]) => {
-    let sign = 0;
-    for (let k = 0; k < 4; k++) {
-      const a = q[k], b = q[(k + 1) % 4], c = q[(k + 2) % 4];
-      const cr = (b.x - a.x) * (c.z - b.z) - (b.z - a.z) * (c.x - b.x);
-      if (Math.abs(cr) < 1e-9) return false;
-      if (sign === 0) sign = Math.sign(cr); else if (Math.sign(cr) !== sign) return false;
-    }
-    return true;
-  };
-  for (let changed = true; changed;) {
-    changed = false;
-    for (let i = 0; i < deck.length; i++) {
-      if (convex(faceOf(i))) continue;
-      if (seams[i]) { seams[i] = null; changed = true; }
-      if (i + 1 < deck.length && seams[i + 1]) { seams[i + 1] = null; changed = true; }
-    }
-  }
-  return deck.map((_, i) => faceOf(i));
-}
 
 export function compileCitySurface(layout: CitySurfaceLayout, options: { ground?: CompiledGroundRoadSurface; aliasTolerance?: number } = {}): CitySurfaceCompilation {
   const tolerance = options.aliasTolerance ?? 0.1;

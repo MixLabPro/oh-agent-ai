@@ -34,19 +34,21 @@ assert(harness.mesh.count > 12, "bridge includes edge lines and dashed center ma
   const points = [{ x: -120, z: 0 }, { x: -9, z: 0 }, { x: -6, z: 2 }, { x: -3, z: 4 }, { x: 0, z: 6 }];
   const short = new Harness({ highways: [points], terrain: { height: () => 1.2 } });
   buildDistrictExpressways(short);
-  const mesh = short.group.getObjectByName("city-district-expressways"), matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3(), rotation = new THREE.Quaternion(), scale = new THREE.Vector3();
-  const decks = [];
-  for (let i = 0; i < mesh.count; i += 1) {
-    mesh.getMatrixAt(i, matrix); matrix.decompose(position, rotation, scale);
-    if (Math.abs(scale.y - EXPRESSWAY_DECK_THICKNESS) < 1e-5) decks.push(position.clone());
+  // 桥面板是连续网格（2026-10-21，弯道不再张开楔形裂口）：每个重采样段的中点都要落在桥面顶面上。
+  const mesh = short.group.getObjectByName("city-district-expressway-deck");
+  assert.ok(mesh, "the expressway deck is rendered");
+  const pos = mesh.geometry.getAttribute("position"); const tops = [];
+  for (let i = 0; i < pos.count; i += 3) {
+    const t = [0, 1, 2].map((k) => ({ x: pos.getX(i + k), y: pos.getY(i + k), z: pos.getZ(i + k) }));
+    if (Math.abs((t[1].x - t[0].x) * (t[2].z - t[0].z) - (t[1].z - t[0].z) * (t[2].x - t[0].x)) > 1e-6) tops.push(t);
   }
+  const inside = (p, t) => { const d = (a, b, c) => (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x); const d1 = d(t[0], t[1], p), d2 = d(t[1], t[2], p), d3 = d(t[2], t[0], p);
+    return !((d1 < -1e-9 || d2 < -1e-9 || d3 < -1e-9) && (d1 > 1e-9 || d2 > 1e-9 || d3 > 1e-9)); };
   const sampled = expresswayRun(short.layout, points).points;
   assert.ok(sampled.length > points.length, "long ramp segments are resampled");
-  assert.equal(decks.length, sampled.length - 1, "every resampled segment, including consecutive short exit arcs, has a bridge deck");
   for (let i = 1; i < sampled.length; i += 1) {
-    assert.ok(Math.abs(decks[i - 1].x - (sampled[i - 1].x + sampled[i].x) / 2) < 1e-5);
-    assert.ok(Math.abs(decks[i - 1].z - (sampled[i - 1].z + sampled[i].z) / 2) < 1e-5);
+    const mid = { x: (sampled[i - 1].x + sampled[i].x) / 2, z: (sampled[i - 1].z + sampled[i].z) / 2 };
+    assert.ok(tops.some((t) => inside(mid, t)), `every resampled segment, including consecutive short exit arcs, has a bridge deck (segment ${i})`);
   }
   for (const disposable of short.disposables) disposable.dispose();
 }
