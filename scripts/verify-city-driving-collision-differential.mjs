@@ -47,3 +47,34 @@ assert.equal(current.status, "contact", "optimized solver must resolve tick181 w
 assert.equal(current.contact?.solidId, historical.solid.id);
 
 console.log(`Differential CCD fixture v${fixture.reference.drivingCollisionVersion}@${fixture.reference.commit}: ${fixture.cases.length} cases passed (${contacts} contacts, ${clearPaths} clear); historical unresolved budget case kept separate.`);
+
+// Geometry 16 regressions: absolute-world projection roundoff must not cause
+// an unresolved interval just before a genuine skin contact. Keep the original
+// remaining budgets and the colliding slab; translating the world changes no rule.
+const geometry16 = JSON.parse(fs.readFileSync(path.join(root, "fixtures/city-driving/geometry16-rotation-contact.json"), "utf8"));
+for (const sample of geometry16.cases) {
+  const actual = sweepBody([sample.solid], sample.from, sample.to, sample.dimensions, sample.options);
+  assert.equal(actual.status, "contact", `${sample.id}: ${actual.reason}`);
+  assert.equal(actual.contact.solidId, sample.solid.id);
+  assert.ok(actual.tests <= sample.options.maxTests, `${sample.id}: exhausted captured budget`);
+  assert.ok(actual.contact.timeUpper - actual.contact.time <= 1e-7);
+  for (const offset of [-1_000_000, -100, 100, 1_000_000]) {
+    const translate = (v) => ({ ...v, x: v.x + offset, z: v.z - offset });
+    const solid = { ...sample.solid, minX: sample.solid.minX + offset, maxX: sample.solid.maxX + offset,
+      minZ: sample.solid.minZ - offset, maxZ: sample.solid.maxZ - offset,
+      poly: { ...sample.solid.poly, vertices: sample.solid.poly.vertices.map(translate) } };
+    const moved = sweepBody([solid], translate(sample.from), translate(sample.to), sample.dimensions, sample.options);
+    assert.equal(moved.status, "contact", `${sample.id}: translated world ${offset}`);
+    if (Math.abs(offset) <= 100) {
+      assert.ok(Math.abs(moved.contact.time - actual.contact.time) <= 2e-7, `${sample.id}: world-origin-dependent TOI`);
+    } else {
+      // Translating the input to large coordinates quantizes its represented geometry.
+      // Bound the resulting witness displacement instead of assuming identical time.
+      const motion = Math.hypot(sample.to.x-sample.from.x, sample.to.y-sample.from.y, sample.to.z-sample.from.z)
+        + Math.hypot(...Object.values(sample.dimensions)) * (Math.abs(sample.to.heading-sample.from.heading)
+          + Math.abs(sample.to.pitch-sample.from.pitch) + Math.abs(sample.to.roll-sample.from.roll));
+      assert.ok(Math.abs(moved.contact.time-actual.contact.time)*motion <= 512*Number.EPSILON*Math.abs(offset));
+    }
+  }
+  console.log(`${sample.id}: historical ${sample.historical.reason} → contact in ${actual.tests}/${sample.options.maxTests} tests`);
+}

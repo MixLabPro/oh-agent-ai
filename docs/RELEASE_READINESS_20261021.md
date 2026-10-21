@@ -39,3 +39,16 @@ Windows 当前流程没有证书签名接入；未签名不能标为已签名。
 先修 legacy 夹具和桥梁/预算，再按最终源码运行相关回归及完整 Verify；准备签名凭据并选择版本；推送候选提交获得 CI 证据；生成同 SHA 三平台产物并原生安装长测；验收后创建/使用对应 release tag 发布，最后接通官网的真实下载。
 
 在阻断关闭前可以继续内部测试或显式发布受限预览，不能称正式稳定版已验收。发布与 Git push 需按用户后续明确指令执行；本轮仅检查与记录。
+
+## 本地修复复核追加
+
+用户要求先仅保存在本地：不 push，不创建 Release。本机 Keychain profile 已确认可用（仅记录验证结论，不记录凭据）；这不代表 GitHub Actions 已配置 Apple secrets，也不代表本轮候选包已公证。
+
+- legacy declarations 修复已提交 `4826a516`，工作台合约守卫通过。
+- City 英文目录遗漏修复已提交 `6d5e8b66`，529条目录检查通过。
+- 发布管线修复已提交 `cb282c85`：显式签名嵌套 CLI，校验 Developer ID/runtime/同 Team；App 使用 ditto ZIP 传递以保留权限和符号链接。对应合约测试及 YAML/Bash 检查通过；尚无当前 SHA 的远端运行证据。
+- Python 全套1293项通过（跳过209项），Rust release tests、Clippy、Rust release build 通过；Python/Rust golden 各16项通过。
+- City 全套第一轮在 i18n 目录守卫停止，此项已修复；后续阶段继续运行，尚不能称全套最终通过。
+- CCD v7 的17条历史差分及4条几何16接触复现、连续驾驶守卫、typecheck 通过。真实1000/7指定桥端两向重跑为 pilot-failed，无 simulation-invalid，仍不能开放为已认证通行。7/2桥头仍未关闭。
+
+原生最新源码打包、公证、30分钟长测和当前提交三平台验收仍待完成。此前表格中的这些阻断仍有效。
