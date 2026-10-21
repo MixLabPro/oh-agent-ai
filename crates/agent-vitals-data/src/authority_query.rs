@@ -1595,6 +1595,33 @@ pub fn sessions_billing_buckets_in_window(
     session_keys: &[String],
     window: Option<(i64, i64)>,
 ) -> Result<std::collections::BTreeMap<String, Vec<Value>>, AuthorityError> {
+    sessions_billing_buckets_impl(conn, session_keys, window, false)
+}
+
+/// Local presentation only: when no historical snapshot exists, offer an explicitly
+/// dated reference estimate from the latest local snapshot. Never changes historical
+/// billing, MCP/export defaults, persisted facts, or subscription attribution.
+pub fn sessions_billing_buckets_with_reference_in_window(
+    conn: &Connection,
+    session_keys: &[String],
+    window: Option<(i64, i64)>,
+) -> Result<std::collections::BTreeMap<String, Vec<Value>>, AuthorityError> {
+    sessions_billing_buckets_impl(conn, session_keys, window, true)
+}
+
+fn sessions_billing_buckets_impl(
+    conn: &Connection,
+    session_keys: &[String],
+    window: Option<(i64, i64)>,
+    allow_reference: bool,
+) -> Result<std::collections::BTreeMap<String, Vec<Value>>, AuthorityError> {
+    let reference_snapshot = if allow_reference {
+        conn.query_row(
+            "SELECT pricing_version, payload_json, captured_at_ms FROM pricing_snapshots
+             ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
+            [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+        ).optional()?
+    } else { None };
     // Trace fixtures from before v1.0 intentionally omit the derived attribution
     // tables. Keep their scalar billing_mode path, while production databases use
     // the latest saved subscription attribution as the authoritative session view.
@@ -1673,15 +1700,21 @@ pub fn sessions_billing_buckets_in_window(
             &harness, &model_id, provider_id.as_deref(), peak != 0,
             [uncached, cache_read, cache_write, output],
         );
+        let reference = if pricing_payload.is_none() && billing_mode != "subscription" {
+            reference_snapshot.as_ref()
+        } else { None };
+        let selected_payload = pricing_payload.as_deref().or_else(|| reference.map(|r| r.1.as_str()));
         let (cost_minor, backfilled) = if billing_mode == "subscription" {
             (None, false)
         } else {
-            price_with_sync_backfill(&harness, &usage, pricing_payload.as_deref(), sync_overlay.as_ref())
+            price_with_sync_backfill(&harness, &usage, selected_payload, sync_overlay.as_ref())
         };
         let cost_minor = cost_minor.map(|cost| cost.to_json());
         // 补录的金额单独标出：它用的是事后才到的价卡，不是事件发生时就有的价格。
         let pricing_source = if cost_minor.is_none() {
             None
+        } else if reference.is_some() {
+            Some("current_card_reference")
         } else if backfilled {
             Some("backfilled")
         } else if evidence_basis == "explicit-official-route" {
@@ -1691,10 +1724,12 @@ pub fn sessions_billing_buckets_in_window(
         };
         let unresolved_reason = if billing_mode == "subscription" {
             Some("subscription token usage is not a per-token bill".to_string())
-        } else if pricing_payload.is_none() {
+        } else if selected_payload.is_none() {
             Some("no pricing snapshot covers this event time".to_string())
         } else if cost_minor.is_none() {
             Some("no compatible price card for this provider/model bucket".to_string())
+        } else if reference.is_some() {
+            Some("no historical pricing snapshot; latest local price card reference estimate, not a historical bill; route/provider evidence unchanged".to_string())
         } else if pricing_basis == "metered_estimate" || evidence_basis != "explicit-official-route" {
             Some("provider-specific price card unavailable; official-card fallback estimate required".to_string())
         } else {
@@ -1702,7 +1737,7 @@ pub fn sessions_billing_buckets_in_window(
         };
         let total = uncached.checked_add(cache_read).and_then(|n| n.checked_add(cache_write))
             .and_then(|n| n.checked_add(output)).ok_or(rusqlite::Error::InvalidQuery)?;
-        buckets.entry(key).or_default().push(json!({
+        let mut bucket = json!({
             "provider_id": provider_id,
             "provider_raw": provider_raw,
             "model_id": model_id,
@@ -1710,7 +1745,7 @@ pub fn sessions_billing_buckets_in_window(
             "billing_mode": billing_mode,
             "pricing_basis": pricing_basis,
             "evidence_basis": evidence_basis,
-            "pricing_version": pricing_version,
+            "pricing_version": pricing_version.or_else(|| reference.map(|r| r.0.clone())),
             "pricing_source": pricing_source,
             "cost_minor": cost_minor,
             "peak": peak != 0,
@@ -1727,7 +1762,11 @@ pub fn sessions_billing_buckets_in_window(
             // not let it masquerade as route/price uncertainty.
             "has_unresolved": billing_mode != "subscription" && unresolved_reason.is_some(),
             "unresolved_reason": unresolved_reason,
-        }));
+        });
+        if let Some((_, _, captured_at_ms)) = reference.filter(|_| cost_minor.is_some()) {
+            bucket["reference_captured_at_ms"] = json!(captured_at_ms);
+        }
+        buckets.entry(key).or_default().push(bucket);
     }
     Ok(buckets)
 }
@@ -1780,14 +1819,23 @@ pub fn session_cost_view_from_buckets(buckets: &[Value]) -> Value {
         .filter_map(|bucket| bucket["pricing_version"].as_str())
         .map(str::to_string)
         .collect();
+    let reference_prices: std::collections::BTreeSet<(String, i64)> = buckets.iter()
+        .filter_map(|bucket| Some((bucket["pricing_version"].as_str()?.to_string(), bucket["reference_captured_at_ms"].as_i64()?)))
+        .collect();
     if let Some(cost) = cost_minor.as_mut() {
         cost["pricing_versions"] = json!(pricing_versions.iter().collect::<Vec<_>>());
-        cost["pricing_source"] = json!(if has_unresolved {
+        cost["pricing_source"] = json!(if !reference_prices.is_empty() {
+            "current_card_reference"
+        } else if has_unresolved {
             "fallback_official"
         } else {
             "official"
         });
-        cost["evidence_basis"] = json!(if has_unresolved {
+        cost["evidence_basis"] = json!(if !reference_prices.is_empty() && buckets.iter()
+            .filter(|bucket| bucket["billing_mode"] != "subscription")
+            .all(|bucket| bucket["evidence_basis"] == "explicit-official-route") {
+            "explicit-official-route"
+        } else if has_unresolved {
             "route-or-provider-unresolved"
         } else {
             "explicit-official-route"
@@ -1800,7 +1848,9 @@ pub fn session_cost_view_from_buckets(buckets: &[Value]) -> Value {
     } else if all_subscription {
         ("subscription", "subscription-token-usage-is-not-a-per-token-bill")
     } else if cost_minor.is_some() {
-        ("estimated", if has_unresolved {
+        ("estimated", if !reference_prices.is_empty() {
+            "current-card-reference-estimate"
+        } else if has_unresolved {
             "official-card-fallback-estimate"
         } else {
             "metered-estimate"
@@ -1826,13 +1876,18 @@ pub fn session_cost_view_from_buckets(buckets: &[Value]) -> Value {
     let status_has_unresolved = has_unresolved
         || state == "unpriced"
         || (state == "unavailable" && token_total > 0);
-    json!({
+    let mut view = json!({
         "cost_minor": cost_minor,
         "status": state,
         "reason": reason,
         "has_unresolved": status_has_unresolved,
         "pricing_versions": pricing_versions.iter().collect::<Vec<_>>(),
-    })
+    });
+    if !reference_prices.is_empty() {
+        view["reference_prices"] = json!(reference_prices.into_iter().map(|(pricing_version,captured_at_ms)|
+            json!({"pricing_version":pricing_version,"captured_at_ms":captured_at_ms})).collect::<Vec<_>>());
+    }
+    view
 }
 
 // ─────── v0.9.1 最后一公里（PR #2）：sessions_search / session_detail envelope
@@ -3699,6 +3754,42 @@ mod tests {
         // 真实过渡态。JOIN 应返 None，不冒充零成本。
         let r = session_cost_minor(db.conn(), skey).unwrap();
         assert!(r.is_none(), "无价卡覆盖 → None（不冒充 0）");
+
+        let keys = vec![skey.to_string()];
+        let reference = |db: &AuthorityDb| {
+            let buckets = sessions_billing_buckets_with_reference_in_window(db.conn(), &keys, None).unwrap();
+            session_cost_view_from_buckets(&buckets[skey])
+        };
+        assert_eq!(reference(&db)["reason"], "no-pricing-snapshot");
+        db.conn().execute("UPDATE usage_facts SET model_id='dsh/deepseek-v4-pro-0813'", []).unwrap();
+        db.pricing_snapshot_put("future", "fixture", TEST_PRICING_FRAGMENT, day_start + DAY_MS).unwrap();
+        let view = reference(&db);
+        assert_eq!(view["status"], "estimated");
+        assert_eq!(view["reason"], "current-card-reference-estimate");
+        assert_eq!(view["has_unresolved"], true);
+        assert_eq!(view["cost_minor"]["basis"], "metered_estimate");
+        assert_eq!(view["cost_minor"]["evidence_basis"], "route-or-provider-unresolved");
+        db.conn().execute("UPDATE usage_facts SET evidence_basis='explicit-official-route'", []).unwrap();
+        assert_eq!(reference(&db)["cost_minor"]["evidence_basis"], "explicit-official-route");
+        assert_eq!(reference(&db)["has_unresolved"], true, "reference pricing remains uncertain even with a known route");
+        assert_eq!(view["reference_prices"][0]["captured_at_ms"], day_start + DAY_MS);
+        assert_eq!(view["reference_prices"][0]["pricing_version"], "future");
+        assert!(session_cost_minor(db.conn(), skey).unwrap().is_none(), "default historical query stays strict");
+        assert_eq!(session_cost_view(db.conn(), skey).unwrap()["reason"], "no-pricing-snapshot");
+        db.conn().execute("UPDATE usage_facts SET billing_mode='subscription'", []).unwrap();
+        assert_eq!(reference(&db)["status"], "subscription");
+        assert!(reference(&db).get("reference_prices").is_none());
+        db.conn().execute("UPDATE usage_facts SET billing_mode='metered'", []).unwrap();
+        db.pricing_snapshot_put("historical", "fixture", TEST_PRICING_FRAGMENT, day_start - DAY_MS).unwrap();
+        let historical = reference(&db);
+        assert!(historical.get("reference_prices").is_none());
+        assert_eq!(historical["pricing_versions"], json!(["historical"]));
+        assert_eq!(historical["cost_minor"], session_cost_view(db.conn(), skey).unwrap()["cost_minor"]);
+        db.conn().execute("DELETE FROM pricing_snapshots WHERE pricing_version='historical'", []).unwrap();
+        db.conn().execute("UPDATE pricing_snapshots SET payload_json='{}'", []).unwrap();
+        assert_eq!(reference(&db)["cost_minor"], Value::Null, "unknown card never produces a fake zero");
+        db.conn().execute("UPDATE pricing_snapshots SET payload_json='invalid-json'", []).unwrap();
+        assert_eq!(reference(&db)["cost_minor"], Value::Null, "malformed reference stays unavailable");
 
         let _ = std::fs::remove_file(&path);
     }

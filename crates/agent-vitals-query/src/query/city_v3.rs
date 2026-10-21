@@ -184,7 +184,7 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
             let row=rows.first().ok_or("session_outside_window")?;
             let models=stats::model_distribution(db.conn(),from,end,Some(&keys)).map_err(|_|"data_unavailable")?;
             let mut detail=app_local::projected_session(row,&models,&salt,identities.contains_key(row["harness"].as_str().unwrap_or("")))?;
-            let buckets=billing::sessions_billing_buckets_in_window(db.conn(),&keys,Some((from,end))).map_err(|_|"cost_unavailable")?;
+            let buckets=billing::sessions_billing_buckets_with_reference_in_window(db.conn(),&keys,Some((from,end))).map_err(|_|"cost_unavailable")?;
             detail["cost"]=cost_breakdown(buckets.get(&keys[0]).map(Vec::as_slice).unwrap_or(&[]),row["tokens"]["total"].as_i64().ok_or("data_unavailable")?)?;
             if request["include_excerpts"]==true {
                 detail["task_excerpts"]=json!(app_local::clean_excerpts(&stats::excerpt_candidates(db.conn(),&keys).map_err(|_|"detail_unavailable")?));

@@ -169,7 +169,7 @@ export async function readCitySessionDetail(projection: CityProjectionV1, id: st
   const response = await readV3({ ...continuation(projection.v3_context), operation: "session.detail", id, include_excerpts: true }, signal);
   if (response.snapshot !== projection.v3_context.snapshot || response.detail?.id !== id) throw new Error("city_detail_invalid");
   const detail = response.detail;
-  return { ...detail, cost_minor: detail.cost.cost_minor, cost_breakdown: detail.cost.breakdown, cost_complete: detail.cost.complete,
+  return { ...detail, cost_minor: detail.cost.cost_minor, cost_breakdown: detail.cost.breakdown, cost_complete: detail.cost.complete, cost_reference_prices: detail.cost.reference_prices,
     cost_status: { state: detail.cost.status, reason: detail.cost.reason, has_unresolved: detail.cost.has_unresolved } };
 }
 export async function readCityModule(projection: CityProjectionV1, module: "findings" | "skills" | "workflow", signal?: AbortSignal, fresh = false, harness?: string) {

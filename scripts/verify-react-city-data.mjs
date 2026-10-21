@@ -124,3 +124,19 @@ assert.equal(paged.sessions[0].id,`sr_${(500).toString(16).padStart(32,"0")}`);
 assert.equal(paged.summary.tokens.total,50100);
 assert.deepEqual(stages,["reading_summary","reading_sessions","reading_summary","reading_sessions","ready"]);
 console.log("City v3: staged pages, deterministic layout order, whole-window totals and revision restart passed.");
+
+// Lazy detail must retain reference provenance through the host -> UI adapter.
+const referencePrices=[{pricing_version:"local-reference",captured_at_ms:toMs}];
+windowStub.__TAURI__.core.invoke = async (_command,{request}) => {
+  const result=responseV3(overviewReads,0,1);
+  const row=result.page.sessions[0]; delete result.page;
+  result.detail={...row,cost:{cost_minor:{amount_minor:20,currency:"USD",basis:"metered_estimate"},status:"estimated",
+    reason:"current-card-reference-estimate",has_unresolved:true,complete:true,reference_prices:referencePrices,
+    breakdown:[{amount_minor:20,currency:"USD",basis:"metered_estimate"}]}};
+  return {version:1,requestId:request.requestId,ok:true,result};
+};
+const detailed=await mod.exports.readCitySessionDetail(paged,`sr_${"0".repeat(32)}`);
+assert.deepEqual(detailed.cost_reference_prices,referencePrices);
+assert.equal(detailed.cost_status.has_unresolved,true);
+assert.equal(detailed.cost_minor.amount_minor,20);
+console.log("City reference estimate: host provenance survives lazy detail mapping.");

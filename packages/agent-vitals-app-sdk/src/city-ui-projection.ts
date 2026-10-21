@@ -30,6 +30,7 @@ export type CityUiProjectionV2 = {
     cost_minor?: { amount_minor: number; currency: string; basis: string; pricing_versions?: string[]; pricing_source?: string; evidence_basis?: string; has_unresolved?: boolean } | null;
     cost_breakdown?: Array<{ amount_minor: number; currency: string; basis: string }>;
     cost_complete?: boolean;
+    cost_reference_prices?: Array<{ pricing_version: string; captured_at_ms: number }>;
     cost_status?: { state: "estimated" | "subscription" | "unpriced" | "unavailable"; reason: string; has_unresolved: boolean };
     event_count?: number;
     task_excerpts?: Array<{ role: "user_first" | "user_turn"; text: string; provenance: "verbatim" | "truncated" | "scrubbed"; is_excerpt: true }>;
@@ -56,7 +57,7 @@ export type CityProjectionV3 = CitySnapshotV3 & {
   harnesses?: HarnessPublicIdentityV1[];
   page?: { sessions: CitySessionV3[]; next_cursor: string | null; coverage: { matched: number; returned: number; offset: number; has_more: boolean; render_budget: number; selection: string; order: string } };
   modules?: Record<"overview" | "activity" | "findings" | "skills" | "workflow", CityModuleV3>;
-  detail?: CitySessionV3 & { cost: { cost_minor: CityUiProjectionV2["sessions"][number]["cost_minor"]; status: "estimated" | "subscription" | "unpriced" | "unavailable"; reason: string; has_unresolved: boolean; complete: boolean; breakdown: Array<{ amount_minor: number; currency: string; basis: string }> }; excerpt_scope?: "session_lifetime_not_window" };
+  detail?: CitySessionV3 & { cost: { cost_minor: CityUiProjectionV2["sessions"][number]["cost_minor"]; status: "estimated" | "subscription" | "unpriced" | "unavailable"; reason: string; has_unresolved: boolean; complete: boolean; reference_prices?: Array<{ pricing_version: string; captured_at_ms: number }>; breakdown: Array<{ amount_minor: number; currency: string; basis: string }> }; excerpt_scope?: "session_lifetime_not_window" };
   module?: "findings" | "skills" | "workflow";
   result?: CityModuleV3 | Record<string, unknown>;
 };
@@ -127,6 +128,15 @@ export function validateCityProjectionV3(value: unknown): CityProjectionV3 {
     const cost=object(object(root.detail).cost);
     if (!["estimated","subscription","unpriced","unavailable"].includes(cost.status as string) || typeof cost.reason !== "string"
       || typeof cost.has_unresolved !== "boolean" || typeof cost.complete !== "boolean" || !Array.isArray(cost.breakdown) || cost.breakdown.length>100) throw new Error("city_cost_invalid");
+    if (cost.reference_prices !== undefined) {
+      if (!Array.isArray(cost.reference_prices) || cost.reference_prices.length < 1 || cost.reference_prices.length > 16) throw new Error("city_cost_invalid");
+      for (const item of cost.reference_prices) {
+        const ref = object(item); integer(ref.captured_at_ms);
+        if (typeof ref.pricing_version !== "string" || !ref.pricing_version.length || ref.pricing_version.length > 256
+          || (ref.captured_at_ms as number) > 8640000000000000) throw new Error("city_cost_invalid");
+      }
+      if (cost.has_unresolved !== true) throw new Error("city_cost_invalid");
+    }
     for (const item of cost.breakdown) { const part=object(item); integer(part.amount_minor); if (typeof part.currency !== "string" || typeof part.basis !== "string") throw new Error("city_cost_invalid"); }
   }
   if (!root.page && !root.detail && !root.result) throw new Error("city_projection_invalid");

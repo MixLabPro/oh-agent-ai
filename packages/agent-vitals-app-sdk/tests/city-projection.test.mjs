@@ -22,7 +22,33 @@ test("City v3 validates safe integers, tokens, page counts, source tokens and st
   }
 });
 test("v2 remains compatible while missing source is null and unknown sources are controlled tokens",()=>{
-  const v2={protocol:"city:v2",harnesses:[],findings:[],sessions:[{...session,title_source:null}],coverage:{total:1,returned:1}};
+  const v2={protocol:"city:v2",harnesses:[],findings:[],sessions:[{...structuredClone(session),title_source:null}],coverage:{total:1,returned:1}};
   assert.equal(validateCityProjectionV2(v2),v2);
   v2.sessions[0].tokens.total=NaN; assert.throws(()=>validateCityProjectionV2(v2));
+});
+
+test("reference estimates require bounded price provenance and explicit uncertainty",()=>{
+  const detail={...structuredClone(response),page:undefined,detail:{...session,cost:{cost_minor:null,status:"unavailable",reason:"partially_priced",
+    has_unresolved:true,complete:false,breakdown:[],reference_prices:[{pricing_version:"local-card",captured_at_ms:1790995699084}]}}};
+  assert.equal(validateCityProjectionV3(detail),detail);
+  for (const change of [c=>c.has_unresolved=false,c=>c.reference_prices=[],c=>c.reference_prices[0].pricing_version="",
+    c=>c.reference_prices[0].captured_at_ms=-1,c=>c.reference_prices[0].captured_at_ms=9000000000000000,
+    c=>c.reference_prices=Array(17).fill(c.reference_prices[0])]) {
+    const invalid=structuredClone(detail); change(invalid.detail.cost); assert.throws(()=>validateCityProjectionV3(invalid));
+  }
+});
+const labelBuild=await build({entryPoints:[`${repo}/apps/agent-city/ui/src/data/sessionCostLabel.ts`],bundle:true,write:false,platform:"node",format:"cjs",logLevel:"silent"});
+const labelModule={exports:{}}; vm.runInNewContext(labelBuild.outputFiles[0].text,{module:labelModule,exports:labelModule.exports});
+const {sessionCostLabel}=labelModule.exports;
+test("cost UI explains reference date, partial coverage, subscriptions and missing historical snapshots in both languages",()=>{
+  const priced={...session,cost_minor:{amount_minor:123,currency:"USD",basis:"metered_estimate"},
+    cost_reference_prices:[{pricing_version:"local-card",captured_at_ms:1790995699084}],cost_status:{state:"estimated",reason:"breakdown",has_unresolved:true}};
+  assert.match(sessionCostLabel(priced,"en"),/\$1.23.*reference estimate.*2026-10-03.*not a historical bill/);
+  assert.match(sessionCostLabel(priced,"zh"),/参考估价.*2026-10-03.*非历史账单/);
+  for (const [reason,en,zh] of [["no-pricing-snapshot",/No local price snapshot/,/价格快照/],
+    ["partially_priced",/Only part/,/部分用量/],["legacy_aggregate_not_priced",/Historical aggregate/,/历史汇总/]]) {
+    const row={...session,cost_status:{state:"unavailable",reason,has_unresolved:true}};
+    assert.match(sessionCostLabel(row,"en"),en); assert.match(sessionCostLabel(row,"zh"),zh);
+  }
+  assert.match(sessionCostLabel({...priced,cost_status:{state:"subscription",reason:"subscription",has_unresolved:false}},"en"),/Subscription usage/);
 });

@@ -307,3 +307,31 @@ fn game_links_commit_reference_grants_and_revision_together() {
     assert_ne!(resolve(json!([asset])).unwrap()["result"]["state"],"ready");
     assert_eq!(game_links_state(&f.home,"plugin.state.write",&json!({"revision":2,"value":{"schemaVersion":1,"assetRefs":[],"raw":"secret"}})),Err("invalid_state_value"));
 }
+
+#[test]
+fn city_detail_prices_pre_snapshot_usage_as_dated_reference_only() {
+    let f=Fixture::new(); f.session("reference");
+    f.fact("reference","reference-fact",Some(f.now-1000),Some("gpt-5.6-luna"),"delta");
+    f.db.conn().execute("UPDATE usage_facts SET uncached_input_tokens=1000000,cache_read_tokens=0,cache_write_tokens=0,output_tokens=0",[]).unwrap();
+    f.db.pricing_snapshot_put("later-local-card","fixture",r#"{"pricing":{},"codex_pricing":{"entries":[{"modelPrefix":"gpt-5.6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.2","outputUsdPerMTok":"1.2"}]}}"#,f.now).unwrap();
+    let overview=f.overview(200);
+    let request=f.next(&overview,json!({"operation":"session.detail","id":overview["page"]["sessions"][0]["id"]}));
+    let detail=city_v3::read(&f.home,&request,f.now).unwrap();
+    let cost=&detail["detail"]["cost"];
+    assert_eq!(cost["status"],"estimated"); assert_eq!(cost["complete"],true);
+    assert_eq!(cost["cost_minor"]["amount_minor"],20);
+    assert_eq!(cost["cost_minor"]["basis"],"metered_estimate");
+    assert_eq!(cost["has_unresolved"],true);
+    assert_eq!(cost["reference_prices"],json!([{"pricing_version":"later-local-card","captured_at_ms":f.now}]));
+    assert_eq!(agent_vitals_data::authority_query::session_cost_view(f.db.conn(),"reference").unwrap()["reason"],"no-pricing-snapshot");
+    f.fact("reference","unpriced-fact",Some(f.now-500),Some("unpriced-model"),"delta");
+    let overview=f.overview(200);
+    let request=f.next(&overview,json!({"operation":"session.detail","id":overview["page"]["sessions"][0]["id"]}));
+    let partial=city_v3::read(&f.home,&request,f.now).unwrap();
+    let cost=&partial["detail"]["cost"];
+    assert_eq!(cost["reason"],"partially_priced"); assert_eq!(cost["complete"],false);
+    assert_eq!(cost["cost_minor"],Value::Null);
+    assert_eq!(cost["breakdown"][0]["amount_minor"],20);
+    assert_eq!(cost["coverage"]["unpriced_tokens"],100);
+    assert_eq!(cost["reference_prices"][0]["pricing_version"],"later-local-card");
+}
