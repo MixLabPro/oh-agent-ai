@@ -5,6 +5,7 @@ import type { PlanningWorkSnapshot } from "./planner/operationBudget";
 import { PLANNING_WORK_UNITS } from "./planner/operationBudget";
 import { hashSeed, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
+import { gradeRoadLandings } from "./surface/roadLandingGrading";
 import { clearsHighways, polygonDistance } from "./roadGeometry";
 import { scaleTierFor } from "./scaleTier";
 import { oceanDriveSplitZ, oceanDriveWall, seasideHotelLots, seasideStripContains, type CoastalConfig, type OceanDriveBuilding } from "./citySeaside";
@@ -229,6 +230,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       while (plans.size > CITY_PLAN_CACHE_CONFIG.maxEntries) plans.delete(plans.keys().next().value!);
     }
   }
+  // Earthworks precede all placement heights. Keep the cached geographical
+  // plan immutable; render terrain, beach, bridge landings and driving support
+  // subsequently share this one graded height field.
+  plan = { ...plan, terrain: gradeRoadLandings(plan.terrain, plan.roadEdges) };
   // 海滨酒店地块并入可落楼街区（单地块合成街区，朝海、宽 20–29）：酒店只在有会话落户时才出现。
   // 只进本函数的落楼候选，不改缓存的 plan、不进返回的 layout.blocks（地面贴图/规划守卫看到的规划不变），
   // 配套选址与背景楼仍只看 plan.blocks——酒店地块留给会话。

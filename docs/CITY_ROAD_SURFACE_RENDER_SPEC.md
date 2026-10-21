@@ -100,3 +100,11 @@
 另一次尝试运行旧 `verify-city-road-terrain` 在已有坐标 `(158.7,429.1)` 的 `drivable` 断言失败，新增海岸测试已独立登记，未改动或放宽该旧断言。
 
 补跑 `verify-city-ground-surface` 也在既有 straight fixture 的 pre-refactor geometry digest 比较失败（actual `5df8cb02…`，expected `713dda6d…`）。该守卫只加载本轮未改动的 CPU 道路编译器及夹具，不能通过更新沙滩场景 golden 将其视为已修复；本轮未更新该夹具基线，未宣称全量道路守卫通过。
+
+## 2026-10-22：低海拔桥头地基整平（v1）
+
+贴地只保证不穿插，不保证地面平整。`surface/roadLandingGrading.ts` 现在提供真实高度场的局部填方：在两端都有地面引道的低海拔桥梁落地点，沿相接引道采样 18 单位确定平台标高，平台核心至少覆盖这段引道与路幅，外围 12 单位 smoothstep 过渡回原地形。核心不能小于取标高的引道长度，否则会在高平台与上坡引道之间再次产生低洼。单点填高不超过 1.2，不挖山，不填水域/河床，不改远处高度；仅有单端引道的断头/装饰桥暂不整平，避免固定远端桥面与抬高岸端失配。
+
+整平发生在 `layoutCity` 取得不可变规划之后、计算建筑和配套高度之前，返回一个新的 terrain 包装对象，不修改缓存的 geography。渲染地面、道路、沙滩、桥面落地剖面和驾驶路面编译均读取同一整平高度；slope 也由该高度重算。它不是只改变沙滩贴片，也不承担全局道路纵坡设计、海岸填海、挡土墙或单端装饰桥台的完整工程设计。
+
+验收：`verify-city-coastal-receivers` 覆盖平整核心、过渡不新增凹陷、填方上限、原始地理不变、水域/远处不变、顺序确定性及桥面高度同源；实际 `verify-city-driving-bridge-crossing` 全部通过（双向梁桥驶出对岸、内核高速过桥、断头桥护栏停车、桥下净空与相机）。car-session、driving-spawns、driving-architecture、typecheck/build 通过。380/1600 会话昼夜四个场景与现有基线一致，无需刷新 golden。浏览器已查看演示城桥头近景；未进行原生 App 或全城市长时间驾驶验收。
