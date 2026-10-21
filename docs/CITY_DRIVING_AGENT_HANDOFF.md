@@ -209,7 +209,9 @@ B 批次（审计、恢复）到此完成。下一步是 D 的用例规划器，
 
 正式入口必须消费 `PublishedDrivingGraph` 和由 `validateSpawnSpec` 签发的 `VerifiedSpawnCredential`。`DrivingSpawnConfirmationController` 的最小接线契约为：`publishedGraph: PublishedDrivingGraph | null`、宿主冻结 `capture`、与其 revision / 发布边界 / 车辆配置完全一致的 `SpawnConfirmationBinding`、`useCityDriving` 返回的确认状态与 actions，以及正式入口 `onEnter`。controller 仅从已发布图导出候选；校验时把候选交给完整 `validateSpawnSpec`，只把验证器签发的凭证写入 `SpawnConfirmationStore`。缺图、过期租约、binding 不匹配或验证失败均不可确认；同一新鲜凭证的重复确认幂等。卸载时失效 Store。验证异常会撤销候选并显式报告 `spawn-validation-failed`。
 
-**当前阻塞是正式发布证据的生产者缺失。** `useRoadAudit` 可以给出有界 audit 的 `plan`、`manifest`、`report` 和冻结 capture，但 manifest 使用 `releaseBoundaryHash: null`，`publishDrivingGraph` 会按 `final-boundary-replay-required` 拒绝发布。普通 passability 结果、planner corridor、表面支撑局部检查或任意道路边都不是最终边界重放证据，不能据此构造 fence 或伪造 `ReleasedUnitBoundaryEvidence`。当前城市驾驶 runtime 和 capture/world validator 没有共享的最终 fence 几何、版本化边界编译器及边界碰撞接线。因此发布图、正式确认与正式驾驶入口必须继续保持不可用，直到同一组可追溯 fences 同时参与最终 replay 和正式运行时判碰撞，并能按 verifier 契约产出边界证据。
+**2026-10-21 进展：完整支撑面的严格审计图生产者已接入，正式驾驶准入仍未接通。** `useRoadAudit` 的第一阶段仍使用 `releaseBoundaryHash: null`；仅全部 mandatory 路线通过且没有排除项时，才编译 `FinalSurfaceBoundary`，对同一冻结计划执行第二阶段复跑，并在宿主深度新鲜度检查通过后绑定发布图。此生产者只支持未裁剪的完整支撑面：实际 region/layer 边界与严格整车覆盖、连续运动验证构成边界约束，mounting 禁用；不新增虚拟围栏，不允许用通过子集关闭失败道路。边界对象必须由同一 world 签发，证据超预算则拒绝发布。详见 [发布与历史集成说明](CITY_ROAD_AUDIT_RELEASE_INTEGRATION.md)。
+
+当前的发布图仅证明该严格审计策略下的已测计划，不授予游戏准入。游玩模式的可越路缘、边界滑动与之不同，不能继承证明。选择性封路仍缺少实际 fence 编译及正式 runtime 的同源接线；普通 passability 结果、planner corridor、任意非空 hash 和历史记录都不能代替边界证据。正式确认及正式入口仍须等待与实际运行策略一致的边界、凭证及租约集成验收。
 
 接续实现应先提供版本化 fence 编译/哈希与单一数据源，再把它接到正式 runtime 和冻结 replay world；对 manifest/key 绑定的完整 mandatory plan 执行边界重放，最后由现有 verifier 校验并发布图。至少验收：无 hash 或 replay 不完整时拒绝发布；任一 fence/runtime/revision/key 不匹配时拒绝发布或确认；修改场景后旧租约、候选、凭证和已确认状态全部失效；成功凭证只可在同一 binding 下进入正式入口；取消/卸载释放 capture 并失效确认；重复确认不改变结果；validator 返回拒绝或抛异常时不留下可用凭证；free-drive 与诊断入口不创建正式确认状态。
 

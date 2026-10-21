@@ -17,7 +17,7 @@ import type { AuditKey, AuditManifest, AuditUnit, AuditUnitKind, RoadAuditCase }
 import { ROUTE_PILOT_CONTROLLER_VERSION, routePilotFactory } from "./RoutePilot";
 import { auditRoute, type PassabilityOptions, type PassabilityResult, type PassabilityRoute, type PassabilityWorld } from "./RoadPassabilityAudit";
 
-export const ROAD_AUDIT_PLANNER_VERSION = 5; // 2: routes start/exit on the deck layer their end points lie on; 3: ramp landings follow the real host road; 4: ramp landings mid-host-edge follow that edge; 5: the deck side follows the structure centreline when one is given
+export const ROAD_AUDIT_PLANNER_VERSION = 6; // 2: deck end layers; 3: real host roads; 4: mid-host-edge landings; 5: structure centrelines; 6: bidirectional whole elevated spans
 
 type P = Readonly<{ x: number; z: number }>;
 export type PlannerEdge = Readonly<{ id: string; from: string; to: string; width: number; points: readonly P[]; bridge?: boolean; structure?: string }>;
@@ -199,6 +199,23 @@ export function planRoadAudit(input: PlannerInput, params: PlannerParams = DEFAU
       const onto = fillet([...[...groundSide].reverse(), ...deckSide.slice(1)], params.filletRadius, params.filletStep);
       route(id, "structure-transition", dir === "onto" ? onto : [...onto].reverse(), half,
         dir === "onto" ? { startLayer: "ground", exitLayer: l.layerId } : { startLayer: l.layerId, exitLayer: "ground" });
+    }
+  }
+
+  // Whole elevated spans need their own bidirectional runs; landing probes alone
+  // cannot certify the unvisited middle of a long expressway or ramp.
+  for (const [structureId, raw] of Object.entries(input.structurePaths ?? {}).sort(([a],[b])=>a<b?-1:a>b?1:0)) {
+    const from=input.landings.find((l)=>l.structureId===structureId&&l.end==="from");
+    const to=input.landings.find((l)=>l.structureId===structureId&&l.end==="to");
+    const points=dedupe(raw); const length=points.length>1?lengthsOf(points).at(-1)!:0;
+    for (const dir of ["fwd","rev"] as const) {
+      const id=`span:${structureId}:${dir}`;
+      if(!from||!to||length-2*params.edgeTrim<params.minEdgeRun){exclude(id,"directed-edge","structure-span-unplanned");continue;}
+      const core=slice(points,params.edgeTrim,length-params.edgeTrim);
+      const width=Math.max(Math.hypot(from.seam.a.x-from.seam.b.x,from.seam.a.z-from.seam.b.z),
+        Math.hypot(to.seam.a.x-to.seam.b.x,to.seam.a.z-to.seam.b.z))/2+params.structureMargin;
+      route(id,"directed-edge",dir==="fwd"?core:[...core].reverse(),width,
+        dir==="fwd"?{startLayer:from.layerId,exitLayer:to.layerId}:{startLayer:to.layerId,exitLayer:from.layerId});
     }
   }
 

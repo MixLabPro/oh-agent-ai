@@ -318,7 +318,7 @@ export function CityApp() {
           resume: driving.resume, openUiContext: driving.openUiContext }}
         locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />
       {roadAuditEnabled && roadAuditOpen && <RoadAuditPanel snapshot={roadAudit.snapshot} run={() => { void roadAudit.run(); }} cancel={() => roadAudit.cancel()}
-        engineRef={engineRef} locale={language === "en" ? "en" : "zh-Hans"} canRun={roadAuditEnabled} close={() => setRoadAuditOpen(false)} />}
+        engineRef={engineRef} locale={language === "en" ? "en" : "zh-Hans"} canRun={roadAuditEnabled} history={roadAudit.history} historySaved={roadAudit.historySaved} close={() => setRoadAuditOpen(false)} />}
     </section>
   ), language);
 }

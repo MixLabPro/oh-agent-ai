@@ -1,3 +1,4 @@
+import { matchesFinalSurfaceBoundary, type FinalSurfaceBoundary } from "./FinalSurfaceBoundary";
 /** Road passability audit (Agent B): every audited route returns passed, blocked WITH a witness, or
  * inconclusive with its cause — always bound to the world revision it was computed on.
  * Pure CPU; no THREE, DOM, host or renderer. The host hands in a frozen CityDrivingSnapshot.
@@ -125,6 +126,7 @@ export type PassabilityResult = Readonly<{
   evidence: readonly StaticUnitEvidence[];
 }>;
 export type PassabilityOptions = Readonly<{
+  finalBoundary?: FinalSurfaceBoundary;
   /** Local automatic-run diagnostics only; never used as release evidence. */
   evidence?:AuditEvidenceSink;
   footprint?: VehicleFootprint; params?: FootprintParams;
@@ -356,6 +358,9 @@ export function auditRoute(world: PassabilityWorld, key: AuditKey, route: Passab
     return Object.freeze({ key, routeId: route.id, worldRevision: world.worldRevision, auditVersion: ROAD_PASSABILITY_AUDIT_VERSION, verdict, cause,
       witness, detail, run, evidence: Object.freeze(evidenceFor(key, route.units, topology, geometry, evidenceWitness)) });
   };
+  if (options.finalBoundary && (!matchesFinalSurfaceBoundary(options.finalBoundary,world,key) ||
+    options.engine === "legacy" || options.mountablePolicy === "gameplay" || options.footprint || options.params || options.collider))
+    return finish("inconclusive", "unconfirmed", "final-boundary-policy-mismatch", null, null, "inconclusive", "inconclusive");
   const mountablePolicy=options.mountablePolicy??"disabled";
   if(mountablePolicy!=="disabled"&&mountablePolicy!=="gameplay")return finish("inconclusive","unconfirmed","invalid-mountable-policy",null,null,"inconclusive","inconclusive");
   try { auditKeyId(key); } catch { return finish("inconclusive", "unconfirmed", "invalid-audit-key", null, null, "inconclusive", "inconclusive"); }

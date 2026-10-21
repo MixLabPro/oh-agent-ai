@@ -11,6 +11,11 @@ import { makeFixtures } from "./city-kit/surface-region-fixtures.mjs";
 const city = await loadCity({
   "engine/surface/meshBoundaries.ts": ["extractMeshBoundaries"],
   "game/RoadAuditWorker.ts": ["runRoadAuditWorker"],
+  "engine/surface/SurfaceIndex.ts":["buildSurfaceIndex"],
+  "engine/surface/surfaceRegions.ts":["buildSurfaceRegions"],
+  "game/driving/audit/FinalSurfaceBoundary.ts":["buildFinalSurfaceBoundary","matchesFinalSurfaceBoundary"],
+  "game/driving/audit/RoadPassabilityAudit.ts":["passabilityWorld","auditRoute"],
+  "game/driving/audit/RoadAuditPlanner.ts":["planRoadAudit"],
   "game/RoadAuditLifecycle.ts": ["RoadAuditRunLock", "clearOwnedCaptureResources", "auditMustInvalidate"],
 });
 assert.equal(typeof globalThis.self, "undefined", "worker module import must not require a DOM worker global");
@@ -66,3 +71,49 @@ assert.equal(completed.report.manifestHash, completed.plan.manifestHash);
 assert.equal(completed.report.results.length, completed.plan.routes.length);
 assert.ok(completed.report.results.every((result) => result.key.manifestHash === completed.manifest.key.manifestHash));
 console.log("city road audit worker serialization and execution guard passed");
+assert.equal(completed.publication.status, "published", "a fully passing fixture must complete final-boundary replay and publication");
+assert.equal(completed.phase, "final-replay");
+assert.ok(completed.key.releaseBoundaryHash);
+assert.ok(completed.publication.graph.geometry.every((entry) => entry.boundaryEvidence?.finalReplayPassed));
+assert.ok(messages.some((message)=>message.type==="progress"&&message.phase==="diagnostic"));
+assert.ok(messages.some((message)=>message.type==="progress"&&message.phase==="final-replay"));
+const incomplete=[];
+city.runRoadAuditWorker({runId:2,snapshot:{...snapshot,obstacleCoverage:"structures-only"},input},(message)=>incomplete.push(message));
+const denied=incomplete.find((message)=>message.type==="complete");
+assert.ok(denied); assert.equal(denied.publication.status,"not-published");
+assert.equal(denied.phase,"diagnostic"); assert.equal(denied.key.releaseBoundaryHash,null);
+assert.ok(denied.report.results.some((result)=>result.verdict==="inconclusive"));
+const excluded=[];
+city.runRoadAuditWorker({runId:3,snapshot,input:{...input,roadEdges:[...input.roadEdges,
+  {id:"short",from:"a",to:"b",width:6,points:[{x:10,z:1},{x:10.5,z:1}]}]}},(message)=>excluded.push(message));
+const excludedResult=excluded.find((message)=>message.type==="complete");
+assert.ok(excludedResult); assert.ok(excludedResult.plan.exclusions.length>0);
+assert.equal(excludedResult.publication.status,"not-published");
+assert.equal(excludedResult.publication.reason,"excluded-units-require-physical-closure");
+console.log("Road audit final replay: complete fixture publishes; incomplete solids and excluded roads never publish a green subset.");
+
+const regions=city.buildSurfaceRegions(surface,city.buildSurfaceIndex(surface));
+const worldResult=city.passabilityWorld(snapshot,regions,()=>true);assert.equal(worldResult.status,"ready");
+const world=worldResult.world;
+const boundary=city.buildFinalSurfaceBoundary(world);assert.ok(boundary);
+const finalKey={...completed.key,releaseBoundaryHash:boundary.hash};
+assert.equal(city.matchesFinalSurfaceBoundary(boundary,world,finalKey),true);
+assert.equal(city.matchesFinalSurfaceBoundary({...boundary},world,finalKey),false,"a copied hash/contour is not an issued boundary capability");
+assert.equal(city.matchesFinalSurfaceBoundary(boundary,{...world},finalKey),false,"boundary is bound to the actual enforcing world");
+assert.equal(city.matchesFinalSurfaceBoundary(boundary,world,{...finalKey,releaseBoundaryHash:"forged"}),false);
+const changed={...world,regions:{...regions,boundaryOf:id=>regions.boundaryOf(id).map(s=>({...s,ya:s.ya+1}))}};
+assert.notEqual(city.buildFinalSurfaceBoundary(changed).hash,boundary.hash,"height layers participate in final boundary identity");
+const route=completed.plan.routes[0];
+for(const options of [{finalBoundary:{...boundary}},{finalBoundary:boundary,mountablePolicy:"gameplay"},{finalBoundary:boundary,engine:"legacy"}]){
+ const result=city.auditRoute(world,finalKey,route,options);
+ assert.equal(result.verdict,"inconclusive");assert.equal(result.detail,"final-boundary-policy-mismatch");
+}
+assert.equal(city.buildFinalSurfaceBoundary({...world,isCurrent:()=>false}),null);
+const landing=(end,x)=>({structureId:"expressway:0",end,layerId:"deck",patchId:"deck",x,z:0,
+ seam:{a:{x,y:3,z:-3},b:{x,y:3,z:3}},outX:end==="from"?-1:1,outZ:0,deckY:3,groundY:3,step:0,status:"aligned"});
+const spanPlan=city.planRoadAudit({...input,worldRevision:snapshot.revision,landings:[landing("from",-30),landing("to",30)],
+ structurePaths:{"expressway:0":[{x:-30,z:0},{x:0,z:3},{x:30,z:0}]}});
+const spans=spanPlan.routes.filter(r=>r.id.startsWith("span:"));assert.equal(spans.length,2);
+assert.ok(spans.every(r=>r.path.some(p=>p.x===0&&p.z===3)),"both directions test the curved middle, not just landing probes");
+assert.ok(spans.every(r=>r.startLayer==="deck"&&r.exitLayer==="deck"));
+console.log("Final boundary: unforgeable world binding, height identity, stale/policy rejection and whole elevated-span coverage passed.");

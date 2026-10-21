@@ -522,6 +522,12 @@
     "file": "verify-city-audit-planner.mjs"
   },
   {
+    "id": "verify-city-road-audit-history",
+    "file": "verify-city-road-audit-history.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-city-road-audit-ui",
     "file": "verify-city-road-audit-ui.mjs"
   },
