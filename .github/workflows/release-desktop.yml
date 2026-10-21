@@ -137,7 +137,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: cargo tauri build --ci --bundles app,dmg
+        run: |
+          cargo tauri build --ci --bundles app --no-sign
+          bash ../../../scripts/sign-notarize-macos.sh
 
       - name: Verify signed app and bundled CLI
         env:
@@ -166,8 +168,9 @@ jobs:
         run: |
           set -eu
           mkdir -p "dist/$EXPECTED_ARCH"
-          ditto "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app" \
-            "dist/$EXPECTED_ARCH/Oh Agent.app"
+          node scripts/test-macos-app-artifact.mjs
+          node scripts/macos-app-artifact.mjs pack "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app" \
+            "dist/$EXPECTED_ARCH/Oh Agent.app.zip"
           node scripts/desktop-release-artifacts.mjs stage macos "$EXPECTED_ARCH" apps/desktop/src-tauri/target/release/bundle/dmg "dist/$EXPECTED_ARCH"
           dmg="$(find "dist/$EXPECTED_ARCH" -type f -name '*.dmg' -print -quit)"
           [ -n "$dmg" ] || { echo "missing DMG for $EXPECTED_ARCH" >&2; exit 1; }
@@ -203,6 +206,17 @@ jobs:
           pattern: desktop-*-x86_64
           path: platform-dist
           merge-multiple: true
+
+      - name: Restore app bundles with original permissions
+        shell: bash
+        run: |
+          set -eu
+          for arch in x86_64 arm64; do
+            count="$(find dist -type f -path "*-${arch}/Oh Agent.app.zip" | wc -l | tr -d ' ')"
+            [ "$count" = 1 ] || { echo "expected one $arch app archive" >&2; exit 1; }
+            archive="$(find dist -type f -path "*-${arch}/Oh Agent.app.zip" -print -quit)"
+            node scripts/macos-app-artifact.mjs unpack "$archive" "$(dirname "$archive")"
+          done
 
       - name: Re-verify downloaded app
         shell: bash

@@ -3,6 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
+import { signatureContract, matchingDeveloperIdSignatures } from "./macos-signature-contract.mjs";
 
 const repo = path.resolve(import.meta.dirname, "..");
 const defaultApp = path.join(repo, "apps/desktop/src-tauri/target/release/bundle/macos/Oh Agent.app");
@@ -98,21 +99,25 @@ if (requiredArchitecture && architectures.length === 0) {
   fail(`required architecture ${requiredArchitecture} could not be verified`);
 }
 
-const signatureResult = spawnSync("codesign", ["-dvvv", app], { encoding: "utf8" });
-const signature = `${signatureResult.stdout || ""}${signatureResult.stderr || ""}`;
-const team = signature.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim();
-const isAdhoc = /^(?:Signature=adhoc|flags=.*adhoc)/m.test(signature);
-if (team && team !== "not set" && !isAdhoc) ok(`Developer ID team: ${team}`);
-else if (requireDeveloperId) fail("Developer ID signature required but no valid team signature was found");
-else console.warn("WARN package is not Developer ID signed (diagnostic-only mode)");
-
-if (requireDeveloperId) {
-  try {
-    execFileSync("codesign", ["--verify", "--deep", "--strict", app], { encoding: "utf8" });
-    ok("codesign strict verification passed");
-  } catch (error) {
-    fail(`codesign strict verification failed: ${(error.stderr || error.message).trim()}`);
+const signatures = [];
+for (const [label, file] of [["app", app], ["bundled CLI", cli]]) {
+  const result = spawnSync("codesign", ["-dvvv", file], { encoding: "utf8" });
+  const signature = signatureContract(`${result.stdout || ""}${result.stderr || ""}`);
+  signatures.push(signature);
+  if (result.status === 0 && signature.developerId) ok(`${label}: Developer ID + hardened runtime (team ${signature.team})`);
+  else if (requireDeveloperId) fail(`${label}: Developer ID Application signature with hardened runtime required`);
+  else console.warn(`WARN ${label} is not Developer ID signed with hardened runtime (diagnostic-only mode)`);
+  if (requireDeveloperId) {
+    try {
+      execFileSync("codesign", ["--verify", "--strict", ...(label === "app" ? ["--deep"] : []), file], { encoding: "utf8" });
+      ok(`${label}: codesign strict verification passed`);
+    } catch (error) {
+      fail(`${label}: codesign strict verification failed: ${(error.stderr || error.message).trim()}`);
+    }
   }
+}
+if (requireDeveloperId && !matchingDeveloperIdSignatures(signatures[0], signatures[1])) {
+  fail("app and bundled CLI must have matching Developer ID teams and hardened runtime");
 }
 
 if (process.exitCode) process.exit(process.exitCode);

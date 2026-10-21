@@ -17,7 +17,15 @@ const platformWorkflow = readFileSync(path.join(repo, ".github/workflows/desktop
 for (const required of ["Stage branded installers", "Name=Oh Agent", "VersionInfo.ProductName", "test-desktop-release-artifacts.mjs"]) {
   if (!platformWorkflow.includes(required)) throw new Error(`missing platform guard: ${required}`);
 }
+const signingScript = readFileSync(path.join(repo, "scripts/sign-notarize-macos.sh"), "utf8");
+for (const required of ['--timestamp "$cli"', '--timestamp "$app"', "get('status') != 'Accepted'", 'stapler validate "$dmg"']) {
+  if (!signingScript.includes(required)) throw new Error(`missing signing boundary: ${required}`);
+}
+if (signingScript.indexOf('--timestamp "$cli"') > signingScript.indexOf('--timestamp "$app"')) throw new Error("CLI must be signed before app");
 const checks = [
+  ["permission-preserving app packing", "node scripts/macos-app-artifact.mjs pack"],
+  ["permission-preserving app restoration", "node scripts/macos-app-artifact.mjs unpack"],
+  ["native app transport regression", "node scripts/test-macos-app-artifact.mjs"],
   ["bounded macOS artifact staging", "node scripts/desktop-release-artifacts.mjs stage macos"],
   ["unique platform artifacts", "expected one $extension installer"],
   ["release commit CI preflight", "Require successful Verify run for release commit"],
@@ -38,7 +46,8 @@ const checks = [
   ["React shadow bundle preflight", "Verify React shadow bundle"],
   ["React shadow bundle build", "npm ci && npm run verify:react"],
   ["React Tauri shadow candidate compile", "cargo tauri build --config tauri.react.conf.json --no-bundle --debug"],
-  ["noninteractive build", "cargo tauri build --ci --bundles app,dmg"],
+  ["unsigned input build before inside-out signing", "cargo tauri build --ci --bundles app --no-sign"],
+  ["explicit nested executable signing", "bash ../../../scripts/sign-notarize-macos.sh"],
   ["build architecture check", "--require-architecture=$EXPECTED_ARCH"],
   ["publish artifact path", "find dist -type d -path \"*-${arch}/Oh Agent.app\""],
   ["publish app zip name", "release/oh-agent-${RELEASE_TAG}-${arch}.app.zip"],
@@ -57,6 +66,9 @@ function occurrences(needle) {
 }
 
 let failed = false;
+if (workflow.indexOf("Restore app bundles with original permissions") > workflow.indexOf("Re-verify downloaded app")) {
+  throw new Error("App archives must be restored before executable/signature verification");
+}
 for (const [label, needle] of checks) {
   if (workflow.includes(needle)) console.log(`ok   ${label}`);
   else {

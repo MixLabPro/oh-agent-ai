@@ -59,6 +59,7 @@ jobs:
           node scripts/verify-desktop-platforms.mjs
           node scripts/test-run-npm.mjs
           node scripts/test-desktop-release-artifacts.mjs
+          node scripts/test-macos-signature-contract.mjs
       - name: Install frontend dependencies
         run: npm ci --prefix apps/desktop/ui-dev
       - name: Install Tauri CLI
