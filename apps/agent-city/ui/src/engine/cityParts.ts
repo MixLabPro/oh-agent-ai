@@ -87,6 +87,9 @@ type StaticCity = {
   landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }>;
   nightLights: NightLights | null;
   context: { bodies: THREE.InstancedMesh; crowns: THREE.InstancedMesh; matrices: Float32Array } | null;
+  /** 配套网格随静态城复用，拾取索引与落成进度也必须带回：曾漏带，缓存命中后点医院/学校只剩通用「城市配套」，
+   * 没有「打开设施数据」，回放时配套也不再按进度长出。进度数组与网格矩阵同一份状态，共享引用而非拷贝。 */
+  civics: { pieces: CityParts["civicPieces"]; meshes: THREE.InstancedMesh[]; progress: number[]; target: number[] };
 };
 let staticCityCache: StaticCity | null = null;
 
@@ -267,6 +270,7 @@ export class CityParts {
         context: this.context,
         landmarkWindows: this.landmarkWindows,
         lifeguardGlowMaterial: this.lifeguardGlowMaterial,
+        civics: { pieces: this.civicPieces, meshes: this.civicMeshes, progress: this.civicProgress, target: this.civicTarget },
       };
       staticCityCache = staticCity;
       // this.group 曾是静态组：让位给动态组，静态组挂为其子节点。
@@ -298,6 +302,10 @@ export class CityParts {
     // 夜间材质随静态城一起复用：曾只缓存网格不缓存这两个引用，缓存命中后救生塔灯与地标亮窗夜里不再亮。
     this.landmarkWindows = staticCity.landmarkWindows;
     this.lifeguardGlowMaterial = staticCity.lifeguardGlowMaterial;
+    this.civicPieces = staticCity.civics.pieces;
+    this.civicMeshes = staticCity.civics.meshes;
+    this.civicProgress = staticCity.civics.progress;
+    this.civicTarget = staticCity.civics.target;
     this.captureAnimationOrigin();
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };
