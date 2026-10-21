@@ -44,3 +44,36 @@ assert(eng.includes("LIGHT_BUDGET.ambient.exposureCut"), "night exposure comes f
 assert(/setNightHour\(hour\)/.test(eng), "engine feeds the local hour to the window-rate curve");
 assert(/"#38e8ff"[\s\S]{0,200}bridgeSaturation/.test(parts), "bridge neon is desaturated through the budget");
 console.log("City night lighting: budget self-check, rate curves, lamp tiers and no hand-tuned multipliers passed.");
+
+// Receiver geometry must agree at triangle interiors too: vertex-only height
+// samples or a fitted tangent disc can still cut through the road between them.
+const { loadCity } = await import("./city-kit/index.mjs");
+const {streetLightPoolGeometry,STREET_POOL_LIFT,terrainSurfaceHeight,ROAD_SURFACE_LIFT}=await loadCity({
+ "engine/render/streetLightPools.ts":["streetLightPoolGeometry","STREET_POOL_LIFT"],
+ "engine/surface/terrainSampling.ts":["terrainSurfaceHeight"],
+ "engine/surface/groundRoadCompiler.ts":["ROAD_SURFACE_LIFT"],
+});
+const layout={extent:384,terrain:{height:(x,z)=>0.4*Math.sin(x*0.65)+0.3*Math.cos(z*0.7)+x*0.08}};
+const lamp={x:2.4,z:0,nx:1,nz:0,poolReach:3.2,poolRadius:9.5,tier:1,flat:false,base:0};
+const data=streetLightPoolGeometry(layout,[lamp]);
+assert(data.indices.length>14*3,"curved terrain requires splitting beyond the original circle fan");
+const at=(i)=>Array.from(data.positions.slice(i*3,i*3+3));
+for(let i=0;i<data.indices.length;i+=3){
+ const [a,b,c]=Array.from(data.indices.slice(i,i+3),at);
+ const winding=(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]);
+ assert(winding>0,"light receivers face upward");
+ for(const weights of [[1/3,1/3,1/3],[0.6,0.2,0.2],[0.1,0.4,0.5]]){
+  const p=[0,1,2].map(axis=>a[axis]*weights[0]+b[axis]*weights[1]+c[axis]*weights[2]);
+  const terrain=terrainSurfaceHeight(layout,p[0],p[2]);
+  assert(Math.abs(p[1]-terrain-STREET_POOL_LIFT)<2e-5,"pool interiors follow the actual terrain triangle");
+  assert(p[1]-terrain-ROAD_SURFACE_LIFT>0.07,"road surface cannot hide the pool");
+ }
+}
+const deck=streetLightPoolGeometry(layout,[{...lamp,flat:true,base:20}]);
+for(let i=1;i<deck.positions.length;i+=3)assert(Math.abs(deck.positions[i]-20.12)<1e-5,"deck pools never follow the terrain below");
+assert(data.uvs.every(v=>v>=-1e-6&&v<=1+1e-6));
+const nightSource=fs.readFileSync(path.join(engine,"render/nightLighting.ts"),"utf8");
+assert.match(nightSource,/depthTest: true/);
+assert.match(nightSource,/depthWrite: false/);
+assert.match(nightSource,/streetLightPoolGeometry\(host.layout, plan\)/);
+console.log("Street pools: curved-terrain interior clearance, upward winding, UVs and elevated-layer isolation passed.");

@@ -15,6 +15,7 @@ import { culDeSacBulbRadius } from "../systems/roadSystem";
 import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH } from "./shared";
 import { expresswayRun } from "../surface/structureCompiler";
 import type { NightLights } from "./types";
+import { streetLightPoolGeometry } from "./streetLightPools";
 
 /** 立面 uniforms 里夜景用到的那几项（完整 FacadeUniforms 仍在 cityParts.ts，另一路搬迁中，这里只取结构子集）。 */
 type NightFacadeUniforms = {
@@ -196,7 +197,7 @@ export function buildNightLights(host: NightHost): NightLights {
     gctx.fillRect(0, 0, 64, 64);
   }
   const glowTexture = new THREE.CanvasTexture(glow);
-  const pools = new THREE.MeshBasicMaterial({ color: "#ff9e4d", map: glowTexture, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+  const pools = new THREE.MeshBasicMaterial({ color: "#ff9e4d", map: glowTexture, transparent: true, depthWrite: false, depthTest: true, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -12, vertexColors: true, blending: THREE.AdditiveBlending, toneMapped: false });
   // N5 开车模式交叉淡化：解析街灯在相机周边接管后，贴纸光斑在 FADE_NEAR..FADE_FAR 带内
   // 按片元到相机距离让位（与解析光的按灯距离淡入互补，总量近似守恒）。非开车模式
   // uPoolFadeOn 恒 0，材质行为与从前逐位一致。
@@ -225,52 +226,39 @@ uniform float uPoolFadeOn;`)
   const neon = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
   const poles = host.makeInstanced(new THREE.CylinderGeometry(0.1, 0.14, 1, 5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#59636a" }), 4600);
   const headMesh = host.makeInstanced(new THREE.BoxGeometry(0.5, 0.22, 0.9), heads, 4600);
-  const poolMesh = host.makeInstanced(new THREE.CircleGeometry(1, 14).rotateX(-Math.PI / 2), pools, 4600);
-  poolMesh.renderOrder = 2;
   const stripMesh = host.makeInstanced(BOX, strips, 2200);
   // 灯位自纯函数表（与开车模式解析街灯同一份）；截到实例容量，多出的候选没有可见几何。
   const plan = planStreetLamps(host.layout).slice(0, 4600);
-  // 光斑贴坡的临时基向量（makeBasis 列）。
-  const poolTangent = new THREE.Vector3();
-  const poolNormal = new THREE.Vector3();
-  const poolBitangent = new THREE.Vector3();
   let lamps = 0;
   const lamp = (p: StreetLampPlan) => {
     if (lamps >= 4600) return;
-    const poolRadius = p.poolRadius * (0.6 + 0.4 * p.tier); // N3：路灯按道路等级分档——主干最亮最大，支路/步道小而暗
     headMesh.setColorAt(lamps, host.color.setScalar(0.5 + 0.5 * p.tier));
-    poolMesh.setColorAt(lamps, host.color.setScalar(0.4 + 0.6 * p.tier));
     // 杆高 8 m（REAL.lamp）：行车道路灯 6–10 m。灯头同步，光斑半径/落点不动。
     host.compose(p.x, p.base, p.z, 0, 1, m(REAL.lamp.height), 1);
     poles.setMatrixAt(lamps, host.matrix);
     // 灯头悬在路中心一侧（臂长 0.7），朝路面。
     host.compose(p.x - p.nx * 0.45, p.base + m(REAL.lamp.height) - 0.05, p.z - p.nz * 0.45, p.yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
     headMesh.setMatrixAt(lamps, host.matrix);
-    // 光斑贴坡：平圆片只对平地成立——海岸坡（10 单位内抬升 1.2）与丘陵 fbm 的坡度远超
-    // 0.12 的离地余量，圆片上坡一侧钻进路面下，被深度测试沿两平面交线切成直线（贴地
-    // 追尾相机读作「挡光的影子」，随镜头移动而变，夜间 UAT 实拍确认）。四向采样局部
-    // 坡度，把圆片摆成坡面切平面；坡度截断 ±0.5 防河岸陡坎把圆片立起来。高架灯落在
-    // 平桥面上（flat），不采样桥下地面。
-    if (p.flat) {
-      host.compose(p.x - p.nx * p.poolReach, p.base + 0.12, p.z - p.nz * p.poolReach, 0, poolRadius, 1, poolRadius);
-    } else {
-      const cx = p.x - p.nx * p.poolReach, cz = p.z - p.nz * p.poolReach;
-      const heightAt = (dx: number, dz: number) => Math.max(0, host.layout.terrain.height(cx + dx, cz + dz));
-      const slopeX = Math.max(-0.5, Math.min(0.5, (heightAt(poolRadius, 0) - heightAt(-poolRadius, 0)) / (poolRadius * 2)));
-      const slopeZ = Math.max(-0.5, Math.min(0.5, (heightAt(0, poolRadius) - heightAt(0, -poolRadius)) / (poolRadius * 2)));
-      poolNormal.set(-slopeX, 1, -slopeZ).normalize();
-      poolTangent.set(1, slopeX, 0).normalize();
-      poolBitangent.crossVectors(poolTangent, poolNormal).normalize();
-      host.matrix.makeBasis(poolTangent.multiplyScalar(poolRadius), poolNormal, poolBitangent.multiplyScalar(poolRadius))
-        .setPosition(cx, heightAt(0, 0) + 0.14, cz);
-    }
-    poolMesh.setMatrixAt(lamps, host.matrix);
     lamps += 1;
   };
   for (const p of plan) lamp(p);
-  poles.count = lamps; headMesh.count = lamps; poolMesh.count = lamps;
-  for (const mesh of [poles, headMesh, poolMesh]) { mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
-  for (const mesh of [headMesh, poolMesh]) if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  poles.count = lamps; headMesh.count = lamps;
+  for (const mesh of [poles, headMesh]) { mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
+  for (const mesh of [headMesh]) if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  // One merged receiver mesh: exact terrain-triangle clipping prevents curved
+  // ground/asphalt from cutting through a single planar decal. Depth testing
+  // remains enabled so upper decks, curbs and buildings still occlude the pool.
+  const poolData = streetLightPoolGeometry(host.layout, plan);
+  const poolGeometry = new THREE.BufferGeometry();
+  poolGeometry.setAttribute("position", new THREE.BufferAttribute(poolData.positions, 3));
+  poolGeometry.setAttribute("uv", new THREE.BufferAttribute(poolData.uvs, 2));
+  poolGeometry.setAttribute("color", new THREE.BufferAttribute(poolData.colors, 3));
+  poolGeometry.setIndex(new THREE.BufferAttribute(poolData.indices, 1));
+  const poolMesh = new THREE.Mesh(poolGeometry, pools);
+  poolMesh.name = "street-light-pools";
+  poolMesh.renderOrder = 2;
+  host.group.add(poolMesh);
+  host.disposables.push(poolGeometry);
   // 高架灯带：沿环线两侧护栏上沿的发光细条（桥面高 8.2，护栏在 ±5.1）。
   let strip = 0;
   for (const highway of host.layout.highways ?? []) {
