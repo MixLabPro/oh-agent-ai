@@ -478,6 +478,12 @@
     "shared": false
   },
   {
+    "id": "verify-plan-repair-drivability",
+    "file": "verify-plan-repair-drivability.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-plan-repair-bridgehead",
     "file": "verify-plan-repair-bridgehead.mjs",
     "env": {},

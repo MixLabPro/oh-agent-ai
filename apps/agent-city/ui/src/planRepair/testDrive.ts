@@ -8,7 +8,7 @@
  * 压在路上的楼/设施是另一类问题（体检的楼压路），这里不判。结果三态如实：通过 / 挡住（带位置）/ 未判定（带原因），
  * 未判定不当成坏路（与 RoadPassabilityAudit 的口径一致：跑不通不等于路不通，只有挡住才有位置）。
  *
- * 路沿右侧车道开（车道中心 = 路中线向右 1/4 路宽）：渠化路口的导流岛在路中线上，沿中线开会把路口当成「挡住」。
+ * 宽路（≥ 8）沿右侧车道开（车道中心 = 路中线向右 1/4 路宽），窄路沿中线；渠化路口的导流岛另由 keepRightOfIslands 绕开。
  * 桥沿中线开：窄桥两侧是护栏，偏到右车道时桥头接缝处车轮探出桥面（7/2 重画的 5 宽桥实测）。
  */
 import type { CityLayout, Vec2 } from "../engine/cityLayout";
@@ -50,8 +50,12 @@ function windowAround(layout: CityLayout, path: readonly Vec2[]): CityLayout {
   const box: Box = { minX: Math.min(...path.map((p) => p.x)) - WINDOW_MARGIN, maxX: Math.max(...path.map((p) => p.x)) + WINDOW_MARGIN,
     minZ: Math.min(...path.map((p) => p.z)) - WINDOW_MARGIN, maxZ: Math.max(...path.map((p) => p.z)) + WINDOW_MARGIN };
   const inside = (p: Vec2) => p.x >= box.minX && p.x <= box.maxX && p.z >= box.minZ && p.z <= box.maxZ;
+  // 路口闭包：窗口里的路段两端的路口要带上全部入边——少一条腿，路口扇面按剩下的腿重算，几何就不是全城那一份了
+  // （弧线接路的抽样里，裁掉一条腿的路口扇面解不出边界，试驾报 unresolved-patch，全城编译里并没有这个洞）。
+  const near = layout.roadEdges.filter((edge) => nearBox(box, edge.points));
+  const ends = new Set(near.flatMap((edge) => [edge.from, edge.to]));
   return { ...layout,
-    roadEdges: layout.roadEdges.filter((edge) => nearBox(box, edge.points)),
+    roadEdges: layout.roadEdges.filter((edge) => ends.has(edge.from) || ends.has(edge.to)),
     highways: (layout.highways ?? []).filter((run) => nearBox(box, run)),
     highwayRamps: (layout.highwayRamps ?? []).filter((ramp) => nearBox(box, ramp.points)),
     bridges: (layout.bridges ?? []).filter((bridge) => nearBox(box, [bridge.from, bridge.to])),
@@ -86,6 +90,15 @@ function trimmed(points: readonly Vec2[], from: number, to: number): Vec2[] {
     base += len;
   }
   return out;
+}
+
+/** 这些折线附近驾驶面里解不出边界的可行驶面片数（surfaceRegions 的 boundary-unresolved：车开到那里脚下没有路面）。 */
+export function surfaceHoles(layout: CityLayout, lines: readonly (readonly Vec2[])[]): number {
+  const points = lines.flat();
+  if (!points.length) return 0;
+  const regions = drivingRegions(layout, points);
+  if (regions.status !== "ready") return Infinity;
+  return regions.report.excluded.filter((entry) => entry.reason === "boundary-unresolved" && entry.kind !== "sidewalk" && entry.kind !== "island").length;
 }
 
 /** 这条路/桥的试驾路线。桥：整座（bridgeChain）沿桥轴两端各加 4 的引道；路：整段，两端各让开 3。 */
@@ -200,7 +213,8 @@ export function testDrive(layout: CityLayout, edgeId: string, whole = false): Te
   if (!target) return null;
   const regions = drivingRegions(layout, target.path, whole);
   // 桥沿中线开（窄桥两侧是护栏，车在 5 宽的桥上靠中走；偏到右车道，桥头接缝处车轮会探出桥面）；路沿右车道开（避开导流岛）。
-  const lane = target.kind === "bridge" ? 0 : Math.max(0, Math.min(target.width / 4, target.width / 2 - DRIVING_FOOTPRINT.halfWidth - 0.3));
+  // 窄路（< 8，单车道宽）也沿中线：5 宽路右车道只剩 0.3 余量，弯道上领航员内切 0.25 就擦人行道（弧线抽样实测）。
+  const lane = target.kind === "bridge" || target.width < 8 ? 0 : Math.max(0, Math.min(target.width / 4, target.width / 2 - DRIVING_FOOTPRINT.halfWidth - 0.3));
   const islands = channelizedGeometry(windowAround(layout, target.path)).islands;
   const forward = driveLeg(regions, keepRightOfIslands(rightLane(target.path, lane), islands));
   const back = driveLeg(regions, keepRightOfIslands(rightLane([...target.path].reverse(), lane), islands));

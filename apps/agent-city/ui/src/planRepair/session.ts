@@ -8,10 +8,10 @@
  */
 import type { CityEngine } from "../engine/CityEngine";
 import { auditLayout, tagAuditOrigins, type PlanIssue } from "../engine/planAudit";
-import { testDrive } from "./testDrive";
+import { surfaceHoles, testDrive } from "./testDrive";
 import { proposeBridgeFix, type BridgeFixProposal, type BridgeFixResult } from "../engine/planBridgeFix";
 import type { DriveReport } from "./controller";
-import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, bridgeChain, bridgeChainPolyline, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, patchGeneratorVersion, patchMatchesLayout, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1 } from "../engine/planPatch";
+import { appendHighwayOp, appendRoadOp, appendSiteOp, applyPlanPatch, bridgeChain, bridgeChainPolyline, buildingRect, edgeLocked, emptyPlanPatch, filletAt, hashPlanPatch, highwayCutWindow, highwayHit, patchGeneratorVersion, patchMatchesLayout, planPatchEmpty, pruneStalePatch, validateBuildingMove, VIADUCT_DECK_WIDTH, type PlanPatchV1, type RoadOp } from "../engine/planPatch";
 import { autoPlaceFree, formatFreeTarget, listSites, parseFreeTarget, pickSite, siteBox, siteClassOf, siteMoveProblem, siteTargets, type SiteInfo, type SiteTarget } from "../engine/planSites";
 import { accessRoadFor, siteTouchesRoad, strandedAccessEdges } from "../engine/planAccess";
 import { worldBox, worldOverhead, worldParts } from "../engine/planFootprint";
@@ -154,7 +154,7 @@ export class PlanRepairSession {
   moveNode(nodeId: string, x: number, z: number): EditResult {
     const base = this.working();
     if (!base.ok) return base;
-    const verdict = validateNodeMove(this.engine.currentLayout!, this.engine.currentModel!, nodeId, { x, z });
+    const verdict = this.surfaceVerdict({ t: "move", node: nodeId, to: { x, z } }, validateNodeMove(this.engine.currentLayout!, this.engine.currentModel!, nodeId, { x, z }), true);
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
     const node = this.engine.currentLayout!.roadNodes.find((candidate) => candidate.id === nodeId);
     return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "move", node: nodeId, to: { x, z }, ...(node ? { anchor: { x: node.x, z: node.z } } : {}) }), verdict.warnings);
@@ -205,9 +205,10 @@ export class PlanRepairSession {
     const base = this.working();
     if (!base.ok) return base;
     const bend = via ? quantizePoint(via) : undefined;
-    const verdict = validateRoadAdd(this.engine.currentLayout!, this.engine.currentModel!, from, to, width, purpose, [], bend);
+    const op: RoadOp = { t: "add", from, to, width, ...(purpose ? { purpose } : {}), ...(bend ? { via: bend } : {}) };
+    const verdict = this.surfaceVerdict(op, validateRoadAdd(this.engine.currentLayout!, this.engine.currentModel!, from, to, width, purpose, [], bend), true);
     if (verdict.blockers.length) return { ok: false, reason: "blocked", blockers: verdict.blockers };
-    return this.commitWithBulldozer(appendRoadOp(base.patch, { t: "add", from, to, width, ...(purpose ? { purpose } : {}), ...(bend ? { via: bend } : {}) }), verdict.warnings);
+    return this.commitWithBulldozer(appendRoadOp(base.patch, op), verdict.warnings);
   }
 
   // ── 高架（SPEC §17.2）──
@@ -399,7 +400,7 @@ export class PlanRepairSession {
     if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
     const bend = via ? quantizePoint(via) : undefined;
     const op = { t: "add" as const, from, to, width, ...(purpose ? { purpose } : {}), ...(bend ? { via: bend } : {}) };
-    const preview = this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateRoadAdd(layout, model, from, to, width, purpose, [], bend), exact);
+    const preview = this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), this.surfaceVerdict(op, validateRoadAdd(layout, model, from, to, width, purpose, [], bend), exact), exact);
     // 弧线：预览画重放会铺的同一条折线；直路：起点是路尽头且拐弯时画倒圆后的折线。
     const path = bend ? curvePoints(quantizePoint(from), bend, quantizePoint(to)) : this.bendPath(from, to, width);
     return path ? { ...preview, path } : preview;
@@ -417,6 +418,31 @@ export class PlanRepairSession {
     const fillet = filletAt(pts[pts.length - 2], node, to, Math.min(incident[0].width, width));
     return fillet ? [...fillet.before, fillet.mid, ...fillet.after, to] : null;
   }
+
+  /**
+   * 驾驶面安全网（2026-10-21）：把这一笔套上，编译它附近的驾驶面；新出现解不出边界的路面片（车开到那里脚下没有路）就拦
+   * surface-unresolved。规则层（坡度/夹角/桥头）挡不住编译器自己的失败——弧线接到路上偶尔生成一块解不出的路口面片
+   * （玩家式编辑抽样 ~2/100）。只在停住后的确切预览与提交时跑（局部编译 ~0.1–0.3 s），本来就有的洞不算这一笔的。
+   */
+  private surfaceVerdict(op: RoadOp, verdict: RoadVerdict, exact: boolean): RoadVerdict {
+    if (!exact || verdict.blockers.length) return verdict;
+    const base = this.working(); const generated = this.engine.generatedLayout; const before = this.engine.currentLayout;
+    if (!base.ok || !generated || !before) return verdict;
+    const key = `${hashPlanPatch(base.patch)}|${JSON.stringify(op)}`;
+    const cached = this.surfaceCache.get(key);
+    let holes: boolean;
+    if (cached !== undefined) holes = cached;
+    else {
+      const after = applyPlanPatch(generated, appendRoadOp(base.patch, op)).layout;
+      const known = new Set(before.roadEdges.map((edge) => edge.id));
+      const touched = after.roadEdges.filter((edge) => !known.has(edge.id)).map((edge) => edge.points);
+      holes = touched.length > 0 && surfaceHoles(after, touched) > surfaceHoles(before, touched);
+      if (this.surfaceCache.size > 64) this.surfaceCache.clear();
+      this.surfaceCache.set(key, holes);
+    }
+    return holes ? { ...verdict, blockers: [...verdict.blockers, "surface-unresolved"] } : verdict;
+  }
+  private readonly surfaceCache = new Map<string, boolean>();
 
   /** 推土机试算：把这一笔道路操作连同推平/安置算一遍但不提交。悬停每动一下都会调用，按（补丁, 操作）记住上一次结果。 */
   private dryRun(opKey: string, next: (patch: PlanPatchV1) => PlanPatchV1, verdict: RoadVerdict, exact = true): RoadPreview {
@@ -456,7 +482,7 @@ export class PlanRepairSession {
     const layout = this.engine.currentLayout; const model = this.engine.currentModel;
     if (!layout || !model) return { blockers: ["city-not-ready"], warnings: [] };
     const op = { t: "move" as const, node: nodeId, to: { x, z } };
-    return this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), validateNodeMove(layout, model, nodeId, { x, z }), exact);
+    return this.dryRun(JSON.stringify(op), (patch) => appendRoadOp(patch, op), this.surfaceVerdict(op, validateNodeMove(layout, model, nodeId, { x, z }), exact), exact);
   }
 
   /** 地面点附近（radius 内）最近的路口。 */
