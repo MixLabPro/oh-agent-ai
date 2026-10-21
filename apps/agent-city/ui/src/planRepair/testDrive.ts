@@ -32,15 +32,45 @@ const BRIDGE_TAIL = 4;
 const ROAD_END_CLEARANCE = 3;
 const CRUISE = 7;
 
-const regionsCache = new WeakMap<object, SurfaceRegionsBuild>();
-/** 生效布局的驾驶区域（按布局缓存：布局不可变，补丁每次产出新布局）。 */
-export function drivingRegions(layout: CityLayout): SurfaceRegionsBuild {
-  const hit = regionsCache.get(layout);
+/** 局部驾驶面的外扩：路线包围盒外这么远的整条路段都编进来——离路线最近的路口扇面、桥头落地口、匝道都完整。 */
+const WINDOW_MARGIN = 40;
+type Box = { minX: number; maxX: number; minZ: number; maxZ: number };
+const nearBox = (box: Box, points: readonly Vec2[]) => {
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i], b = points[Math.min(points.length - 1, i + 1)]; const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 10));
+    for (let k = 0; k <= steps; k += 1) { const x = a.x + (b.x - a.x) * k / steps, z = a.z + (b.z - a.z) * k / steps; if (x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ) return true; }
+  }
+  return false;
+};
+
+/** 路线附近的局部布局：只裁对象清单（整条路段/整条高架/整条匝道/整座地标），地形与几何不动。
+ *  4000 楼全城编译驾驶面 8.7 s（主线程卡死）；试驾只问这一条路，局部编译与全城在路线附近是同一份几何。 */
+function windowAround(layout: CityLayout, path: readonly Vec2[]): CityLayout {
+  const box: Box = { minX: Math.min(...path.map((p) => p.x)) - WINDOW_MARGIN, maxX: Math.max(...path.map((p) => p.x)) + WINDOW_MARGIN,
+    minZ: Math.min(...path.map((p) => p.z)) - WINDOW_MARGIN, maxZ: Math.max(...path.map((p) => p.z)) + WINDOW_MARGIN };
+  const inside = (p: Vec2) => p.x >= box.minX && p.x <= box.maxX && p.z >= box.minZ && p.z <= box.maxZ;
+  return { ...layout,
+    roadEdges: layout.roadEdges.filter((edge) => nearBox(box, edge.points)),
+    highways: (layout.highways ?? []).filter((run) => nearBox(box, run)),
+    highwayRamps: (layout.highwayRamps ?? []).filter((ramp) => nearBox(box, ramp.points)),
+    bridges: (layout.bridges ?? []).filter((bridge) => nearBox(box, [bridge.from, bridge.to])),
+    landmarks: (layout.landmarks ?? []).filter((landmark) => inside(landmark) || (!!landmark.to && nearBox(box, [landmark, landmark.to]))),
+    culDeSacEnds: (layout.culDeSacEnds ?? []).filter(inside) };
+}
+
+const regionsCache = new WeakMap<object, Map<string, SurfaceRegionsBuild>>();
+/** 路线附近的驾驶区域（按布局 + 路线缓存：布局不可变，补丁每次产出新布局）。 */
+export function drivingRegions(layout: CityLayout, path: readonly Vec2[], whole = false): SurfaceRegionsBuild {
+  const key = whole ? "whole" : path.map((p) => `${p.x.toFixed(1)}:${p.z.toFixed(1)}`).join("|");
+  let byPath = regionsCache.get(layout);
+  if (!byPath) { byPath = new Map(); regionsCache.set(layout, byPath); }
+  const hit = byPath.get(key);
   if (hit) return hit;
-  const compiled = compileCitySurface(layout);
-  const surface = { ...compiled.surface, revision: `plan-repair:${layout.seed}:${layout.scaleTier}` };
+  const local = whole ? layout : windowAround(layout, path);
+  const compiled = compileCitySurface(local);
+  const surface = { ...compiled.surface, revision: `plan-repair:${layout.seed}:${layout.scaleTier}:${key.length}` };
   const regions = buildSurfaceRegions(surface, buildSurfaceIndex(surface));
-  regionsCache.set(layout, regions);
+  byPath.set(key, regions);
   return regions;
 }
 
@@ -122,10 +152,11 @@ function driveLeg(regions: SurfaceRegionsBuild, path: readonly Vec2[]): DriveLeg
 }
 
 /** 沿这条路/桥双向各开一遍。两向都通 → 通过；任一向挡住 → 挡住（带位置）；其余 → 未判定。 */
-export function testDrive(layout: CityLayout, edgeId: string): TestDriveResult | null {
+/** `whole`：编译全城驾驶面（只给测试对照局部窗口用；面板里恒为局部）。 */
+export function testDrive(layout: CityLayout, edgeId: string, whole = false): TestDriveResult | null {
   const target = testDriveTarget(layout, edgeId);
   if (!target) return null;
-  const regions = drivingRegions(layout);
+  const regions = drivingRegions(layout, target.path, whole);
   // 桥沿中线开（窄桥两侧是护栏，车在 5 宽的桥上靠中走；偏到右车道，桥头接缝处车轮会探出桥面）；路沿右车道开（避开导流岛）。
   const lane = target.kind === "bridge" ? 0 : Math.max(0, Math.min(target.width / 4, target.width / 2 - DRIVING_FOOTPRINT.halfWidth - 0.3));
   const forward = driveLeg(regions, rightLane(target.path, lane));

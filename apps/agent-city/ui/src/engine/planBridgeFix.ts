@@ -33,6 +33,8 @@ const REACHES = [14, 18, 24, 30, 40, 50, 65, 80, 100];
 const SKEWS = [0, 0.08, -0.08, 0.16, -0.16, 0.25, -0.25];
 const ROAD_SNAP = 12;
 const STUB_MAX = 20;
+/** 引道再长就是路网的一部分（海滨实测有 108、145 长的引道），擦了会把路网剪断——不擦。 */
+const APPROACH_MAX = 60;
 
 function nearestRoadPoint(layout: CityLayout, p: Vec2): Vec2 | null {
   let best: Vec2 | null = null; let bestD = ROAD_SNAP;
@@ -66,7 +68,7 @@ export function proposeBridgeFix(generated: CityLayout, current: CityLayout, mod
   const landings = new Set(chain.flatMap((piece) => [piece.from, piece.to]));
   const lengthOf = (points: readonly Vec2[]) => points.slice(1).reduce((sum, q, i) => sum + Math.hypot(q.x - points[i].x, q.z - points[i].z), 0);
   const stubs = erasedOnly.roadEdges.filter((edge) => !edge.bridge && (landings.has(edge.from) || landings.has(edge.to))
-    && (lengthOf(edge.points) <= STUB_MAX || approachIds.has(edge.id)) && !validateEdgeDrop(erasedOnly, model, edge.id).blockers.length);
+    && (lengthOf(edge.points) <= STUB_MAX || (approachIds.has(edge.id) && lengthOf(edge.points) <= APPROACH_MAX)) && !validateEdgeDrop(erasedOnly, model, edge.id).blockers.length);
   const ops: RoadOp[] = [{ t: "drop", edge: deck.id }, ...stubs.map((stub) => ({ t: "drop" as const, edge: stub.id }))];
   const cleared = applyPlanPatch(generated, ops.reduce((next, op) => appendRoadOp(next, op), patch)).layout;
   // 断头支路的尽头：擦掉的残路若是一条通到尽头的支路（溪桥常见——支路通往一处设施），它的尽头也是合法落笔点，
