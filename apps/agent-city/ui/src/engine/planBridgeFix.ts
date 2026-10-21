@@ -6,7 +6,8 @@
  * 不做「一键修全城」：每条方案都要玩家看过再收，补丁仍是玩家的修改记录。
  *
  * 搜索与 scripts/verify-plan-repair-bridgehead.mjs 验收的是同一个函数：沿原桥轴平移（±32）/旋转（±0.25 rad）/
- * 加长（两端各伸 14–100 上岸），起止点取探针附近 12 内最近的地面路上的点，取第一笔 validateRoadAdd 全过、且真的过河的。
+ * 加长（两岸各自伸 14–100 上岸，两岸分开找、按总伸出量从短到长配对），起止点取探针附近 12 内最近的地面路上的点
+ * （或被擦掉的断头支路的尽头），取第一笔 validateRoadAdd 全过、且真的过河的。
  * 7/2 实测：悬索桥擦掉后找到一座 78 的直桥，驾驶内核双向开过。
  */
 import type { CityModel } from "../cityModel";
@@ -86,18 +87,35 @@ export function proposeBridgeFix(generated: CityLayout, current: CityLayout, mod
   const len = Math.hypot(b.x - a.x, b.z - a.z); const ux = (b.x - a.x) / len, uz = (b.z - a.z) / len;
   const refused: Record<string, number> = {};
   const note = (code: string) => { refused[code] = (refused[code] ?? 0) + 1; };
-  for (const offset of OFFSETS) for (const reach of REACHES) for (const skew of SKEWS) {
+  // 两岸分开找落笔点：两岸离路网的距离常常不一样（溪桥一侧是 44 外的支路尽头、另一侧是 88 外的路口），同一个伸出量两头都对不上。
+  // 每个（平移, 旋转）先各自收集去重的落笔点，再按两侧伸出量之和从短到长配对——先试最短的一笔。
+  const tried = new Set<string>();
+  for (const offset of OFFSETS) for (const skew of SKEWS) {
     const vx = ux * Math.cos(skew) - uz * Math.sin(skew), vz = ux * Math.sin(skew) + uz * Math.cos(skew);
-    const mid = { x: (a.x + b.x) / 2 - uz * offset, z: (a.z + b.z) / 2 + ux * offset }; const half = len / 2 + reach;
-    const from = endpoint({ x: mid.x - vx * half, z: mid.z - vz * half }), to = endpoint({ x: mid.x + vx * half, z: mid.z + vz * half });
-    if (!from || !to) { note("no-road-on-bank"); continue; }
-    if (terminals.includes(from) && terminals.includes(to)) { note("no-road-on-bank"); continue; } // 两端都是尽头：新桥接不上路网
-    const verdict = validateRoadAdd(cleared, model, from, to, deck.width);
-    const bridge = verdict.warnings.find((code) => code.startsWith("bridge:"));
-    if (verdict.blockers.length || !bridge) { for (const code of verdict.blockers.length ? verdict.blockers : ["no-water"]) note(code); continue; }
-    return { ok: true, proposal: { deckId, erase: ops.map((op) => (op as { edge: string }).edge), erasePolylines: [...chain, ...stubs].map((edge) => edge.points),
-      draw: { from, to, width: deck.width, bridgeLength: Number(bridge.split(":")[1]) }, warnings: verdict.warnings.filter((code) => !code.startsWith("bridge:")),
-      ops: [...ops, { t: "add", from, to, width: deck.width }] } };
+    const mid = { x: (a.x + b.x) / 2 - uz * offset, z: (a.z + b.z) / 2 + ux * offset };
+    const side = (sign: number) => {
+      const out: Array<{ p: Vec2; rank: number }> = []; const seen = new Set<string>();
+      REACHES.forEach((reach, rank) => {
+        const half = len / 2 + reach; const p = endpoint({ x: mid.x + sign * vx * half, z: mid.z + sign * vz * half });
+        if (p && !seen.has(`${p.x}:${p.z}`)) { seen.add(`${p.x}:${p.z}`); out.push({ p, rank }); }
+      });
+      return out;
+    };
+    const fromSide = side(-1), toSide = side(1);
+    if (!fromSide.length || !toSide.length) { note("no-road-on-bank"); continue; }
+    const pairs = fromSide.flatMap((f) => toSide.map((t) => ({ from: f.p, to: t.p, rank: f.rank + t.rank }))).sort((x, y) => x.rank - y.rank);
+    for (const { from, to } of pairs) {
+      const key = `${from.x}:${from.z}>${to.x}:${to.z}`;
+      if (tried.has(key)) continue;
+      tried.add(key);
+      if (terminals.includes(from) && terminals.includes(to)) { note("no-road-on-bank"); continue; } // 两端都是尽头：新桥接不上路网
+      const verdict = validateRoadAdd(cleared, model, from, to, deck.width);
+      const bridge = verdict.warnings.find((code) => code.startsWith("bridge:"));
+      if (verdict.blockers.length || !bridge) { for (const code of verdict.blockers.length ? verdict.blockers : ["no-water"]) note(code); continue; }
+      return { ok: true, proposal: { deckId, erase: ops.map((op) => (op as { edge: string }).edge), erasePolylines: [...chain, ...stubs].map((edge) => edge.points),
+        draw: { from, to, width: deck.width, bridgeLength: Number(bridge.split(":")[1]) }, warnings: verdict.warnings.filter((code) => !code.startsWith("bridge:")),
+        ops: [...ops, { t: "add", from, to, width: deck.width }] } };
+    }
   }
   const top = Object.entries(refused).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([code, n]) => `${code}×${n}`).join(" ");
   return { ok: false, reason: "no-redraw", detail: `附近找不到一笔合法的直桥（${top}）` };

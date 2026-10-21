@@ -5,7 +5,7 @@
  * 本批只落布局级规则；plan 级诊断可先用 `scripts/diagnose-city-residuals.mjs` 补位。
  */
 import type { CityBuilding, CityModel } from "../cityModel";
-import type { CityLayout, Parcel, Vec2 } from "./cityLayout";
+import type { CityLayout, Parcel, RoadEdge, Vec2 } from "./cityLayout";
 import { buildingRect, clearanceRoads, rectClearOfRoads, rectsOverlap, type BuildingRect, type PatchStaleEntry } from "./planPatch";
 import { bridgeheadDefects, polylineMaxGrade, ROAD_MAX_GRADE, ROAD_STEEP_GRADE } from "./planGeometry";
 
@@ -39,6 +39,17 @@ function distanceToEdges(point: Vec2, edges: readonly { points: Vec2[] }[]): num
     }
   }
   return best;
+}
+
+/** 路段坡度按路段对象缓存：布局不可变，补丁重放时没动过的路段沿用同一个对象，生成布局与生效布局共享它们——
+ *  体检在编辑后重跑、还要给生成布局再跑一遍（标来源），不缓存时 4000 楼一次体检 547 ms（预算 300）。 */
+const gradeCache = new WeakMap<RoadEdge, WeakMap<object, ReturnType<typeof polylineMaxGrade>>>();
+function edgeGrade(layout: CityLayout, edge: RoadEdge): ReturnType<typeof polylineMaxGrade> {
+  let byTerrain = gradeCache.get(edge);
+  if (!byTerrain) { byTerrain = new WeakMap(); gradeCache.set(edge, byTerrain); }
+  let hit = byTerrain.get(layout.terrain);
+  if (!hit) { hit = polylineMaxGrade(layout, edge.points); byTerrain.set(layout.terrain, hit); }
+  return hit;
 }
 
 const SEVERITY_ORDER: Record<PlanIssueSeverity, number> = { error: 0, warning: 1, info: 2 };
@@ -119,7 +130,7 @@ export function auditLayout(layout: CityLayout, model: CityModel, stale: readonl
   }
   // roadSteep：地面路沿线坡比。> 上限：车开不上去（error）；> 0.2：很陡（warning）。
   for (const edge of groundRoads) {
-    const { grade, at } = polylineMaxGrade(layout, edge.points);
+    const { grade, at } = edgeGrade(layout, edge);
     if (grade > ROAD_MAX_GRADE && at) issues.push({ id: `roadSteep:${edge.id}`, severity: "error", rule: "roadSteep", at, entities: [edge.id],
       detail: `这段路坡比 ${grade.toFixed(2)}，超过车的爬坡上限 ${ROAD_MAX_GRADE}，车开不上去——擦掉它，绕缓坡重画` });
     else if (grade > ROAD_STEEP_GRADE && at) issues.push({ id: `roadSteep:${edge.id}`, severity: "warning", rule: "roadSteep", at, entities: [edge.id],

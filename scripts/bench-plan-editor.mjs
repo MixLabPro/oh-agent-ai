@@ -40,7 +40,9 @@ for (const n of (process.env.SIZES ?? "380,1600,4000").split(",").map(Number)) {
   const parcels = layout.blocks.flatMap((bl) => bl.parcels).slice(0, 40);
   const [cand] = time(() => parcels.forEach((p) => k.validateBuildingMove(layout, model, patch, model.buildings[0].id, p.id)));
   const [audit] = time(() => k.auditLayout(layout, model));
+  // 编辑后体检重跑（面板开着时每次编辑都跑）：路段坡度按路段对象缓存，第二次起只算新路段。
+  const [auditWarm] = time(() => k.auditLayout(layout, model));
   const r = (x) => (x < 10 ? x.toFixed(1) : Math.round(x));
   console.log(JSON.stringify({ buildings: n, tier: layout.scaleTier, edges: layout.roadEdges.length, nodes: layout.roadNodes.length, parcels: layout.blocks.reduce((s, bl) => s + bl.parcels.length, 0), sites: k.listSites(layout).length,
-    ms: { generate: r(gen), relayoutCached: r(relayout), validateAdd: r(validateAdd), snap: r(snap), edgeAt: r(edgeAt), validateDrop: r(drop), validateNodeMove: r(nodeMove), applyPatch: r(apply), bulldozer: r(dozer), pickSite: r(pick), candidates40: r(cand), audit: r(audit) }, addWarnings: verdict.warnings }));
+    ms: { generate: r(gen), relayoutCached: r(relayout), validateAdd: r(validateAdd), snap: r(snap), edgeAt: r(edgeAt), validateDrop: r(drop), validateNodeMove: r(nodeMove), applyPatch: r(apply), bulldozer: r(dozer), pickSite: r(pick), candidates40: r(cand), audit: r(audit), auditWarm: r(auditWarm) }, addWarnings: verdict.warnings }));
 }
