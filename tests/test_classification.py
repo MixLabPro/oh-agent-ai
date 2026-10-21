@@ -13,8 +13,7 @@ repo 里有两个都叫「skill」的东西，按名字猜会互相进错门：
 就靠这份人和机器一起看的名单。谁把 `skill.py` 挪进 `skills/`，或把
 `behavior.py` 挪出 `agent/`，这里立刻红。
 
-清单按当前布局逐字写。新增模块时把它加进对应家族的 set（Python 侧还要同步
-`tests/test_clawhub_packaging.py` 的 ALLOWED_PACKAGE_FILES）；跨家族移动模块
+清单按当前布局逐字写。新增模块时把它加进对应家族的 set；跨家族移动模块
 必须先改这份名单再动文件，让移动本身变成显式决策。
 """
 

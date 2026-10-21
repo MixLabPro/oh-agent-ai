@@ -109,8 +109,8 @@ apps/desktop/src-tauri/     # 菜单栏 app（Tauri 2，**独立 workspace**，P
                             #   SqlSummaryRepository（冻结 DTO；Phase 4.3 后是唯一实现），不长第四份拷贝
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
-.github/workflows/          # verify.yml, package-clawhub.yml, release-desktop.yml, …（skill 二进制的 release.yml 已删：
-                            #   skill 体检不单独发 GitHub Release，后续迁出本仓库）
+.github/workflows/          # verify.yml, release-desktop.yml, …（skill 体检的 release.yml 与 package-clawhub.yml
+                            #   已删：skill 不单独发 GitHub Release、不进 CI 打包，后续迁出本仓库）
 ```
 
 **两个子树的分界**（`tests/test_classification.py` 用显式清单钉死）：`skills/` 是
@@ -651,9 +651,9 @@ are Python↔Rust byte-parity locksteps pinned by `AGENT_VITALS_BIN` differentia
 `crates/agent-vitals-domain/src/contracts/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔
 top-level `packages/agent-vitals-python/agent_vitals/source_identity.py` — which is also what
 `usage_fact.{rs,py}`'s `fact_id` and the DSH observer's frozen `source_event_id` hash
-through; **no consumer may grow a second inline copy** (both packaging allow-lists —
-`.github/workflows/package-clawhub.yml` + `tests/test_clawhub_packaging.py` — and the
-`test_classification.py` agent-family sets pin the module list verbatim). The emit is
+through; **no consumer may grow a second inline copy** (the `test_classification.py`
+agent-family sets pin the module list verbatim; the ClawHub packaging allow-lists were
+removed with `package-clawhub.yml` in 2026-10). The emit is
 in-memory + read-only diagnostic only — nothing is written to disk yet (see
 `docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7). E4b superseded the "deliberately
 excluded" decision (2026-09-11, docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5): WorkBuddy
