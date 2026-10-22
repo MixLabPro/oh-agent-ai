@@ -397,13 +397,24 @@ function runNative(deb) {
     const cityShot = path.join(nativeOut, "08-native-city.png");
     const grabbed = spawnSync("bash", ["-lc", `import -display ${display} -window root ${JSON.stringify(cityShot)}`], { env, encoding: "utf8" });
     writeFileSync(path.join(nativeOut, "native.log"), log.join(""));
+    const appLog = path.join(home, "logs/app.log");
+    if (existsSync(appLog)) spawnSync("cp", [appLog, path.join(nativeOut, "app.log")]);
+    const diagSrc = "/tmp/agent-vitals-plugin-diagnostics.json";
+    let diagnostics = null;
+    if (existsSync(diagSrc)) {
+      spawnSync("cp", [diagSrc, path.join(nativeOut, "diag.json")]);
+      try { diagnostics = JSON.parse(readFileSync(diagSrc, "utf8")); } catch {}
+    }
+    const pluginReady = diagnostics?.ready === true;
+    const pluginWebview = pluginReady ? "ready" : (existsSync(cityShot) ? "opened" : "missing");
     return {
-      pass: existsSync(overview) && app.exitCode == null, screenshot: existsSync(overview) ? overview : null,
+      pass: existsSync(overview) && app.exitCode == null && pluginReady, screenshot: existsSync(overview) ? overview : null,
       cityScreenshot: existsSync(cityShot) ? cityShot : null,
       binary: bin, seed: seed.status, seedOut: (seed.stdout || "") + (seed.stderr || ""),
       import: grabbed.status, log: path.join(nativeOut, "native.log"), windowId: wid || null,
       recording: existsSync(path.join(nativeOut, "native-workbench.mp4")) ? path.join(nativeOut, "native-workbench.mp4") : null,
-      note: "Playwright cannot attach to WebKitGTK. Native xvfb smoke launches the packaged binary, seeds 4101 sessions, and clicks City in the sidebar. City's first paint still needs the worker (~60s); this capture is a boot/nav smoke, not a WebDriver of the WebKitGTK plugin webview.",
+      pluginWebview, diagnostics: diagnostics ? { ready: diagnostics.ready, codes: (diagnostics.events || []).map((e) => e.code) } : null,
+      note: "Playwright cannot attach to WebKitGTK. Native xvfb smoke launches the packaged binary, seeds 4101 sessions, and clicks City. Success is plugin diagnostics ready=true (toolbar_updated / view_load), not a 3D first-paint wait.",
     };
   } finally {
     try { app?.kill("SIGTERM"); } catch {}

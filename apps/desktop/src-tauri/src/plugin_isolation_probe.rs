@@ -135,8 +135,8 @@ fn create_city(app: &tauri::AppHandle, state: &ProbeState, label: &str) -> Resul
     record(state, label, "create_started", Vec::new());
     let page_state = state.clone();
     let view = app.get_window(HOST).ok_or("probe_host_missing")?.add_child(
-        WebviewBuilder::new(label, WebviewUrl::App("plugins/AgentCity.plugin/ui/index.html".into()))
-            .incognito(true)
+        crate::plugin_host::apply_plugin_webview_platform(app,
+            WebviewBuilder::new(label, WebviewUrl::App("plugins/AgentCity.plugin/ui/index.html".into())))
             .initialization_script(OBSERVER)
             .on_page_load(move |view, payload| {
                 let code = match payload.event() { tauri::webview::PageLoadEvent::Started => "load_started", tauri::webview::PageLoadEvent::Finished => "load_finished" };
