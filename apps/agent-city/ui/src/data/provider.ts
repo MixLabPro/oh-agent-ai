@@ -1,10 +1,23 @@
 import { invokeHost } from "../host";
-import { validateCityProjectionV2, validateCityProjectionV3, type CitySnapshotV3, type CityProjectionV3, type PluginRequestV1, type PluginResponseV1, type CityUiProjectionV2 } from "@agent-vitals/app-sdk";
+import { validateCityProjectionV2, validateCityProjectionV3, type CitySnapshotV3, type CityProjectionV3, type CityModuleV3, type CitySessionV3, type PluginRequestV1, type PluginResponseV1, type CityUiProjectionV2 } from "@agent-vitals/app-sdk";
 
 export type CityProjectionV1 = CityUiProjectionV2;
 
 export interface CityDataProvider {
-  getProjection(input: { windowDays: 7 | 30 | 90 | 366; signal?: AbortSignal; onStage?: (stage: "reading_summary" | "reading_sessions" | "ready") => void }): Promise<CityProjectionV1>;
+  getProjection(input: {
+    windowDays: 7 | 30 | 90 | 366;
+    signal?: AbortSignal;
+    onStage?: (stage: "reading_summary" | "reading_sessions" | "ready") => void;
+    onPartial?: (projection: CityProjectionV1) => void;
+  }): Promise<CityProjectionV1>;
+}
+
+/** Packaged plugin webviews have no query string, so v3 is the default there.
+ *  The landing host only answers city:v2; `?cityData=v2` remains an explicit override. */
+export function cityDataProtocol(): "v2" | "v3" {
+  const search = typeof location !== "undefined" && typeof URLSearchParams !== "undefined" ? new URLSearchParams(location.search) : null;
+  if (search?.get("presentation") === "landing" || search?.get("cityData") === "v2") return "v2";
+  return "v3";
 }
 
 let requestSequence = 0;
@@ -160,17 +173,34 @@ function continuation(context: CitySnapshotV3): Record<string, unknown> {
   return { expected_revision: context.data_revision, snapshot: context.snapshot, context: context.context,
     query_semantics: context.query_semantics, window: context.window };
 }
+function mapSessionDetail(detail: NonNullable<CityProjectionV3["detail"]>): CityProjectionV1["sessions"][number] {
+  return { ...detail, cost_minor: detail.cost.cost_minor, cost_breakdown: detail.cost.breakdown, cost_complete: detail.cost.complete, cost_reference_prices: detail.cost.reference_prices,
+    cost_status: { state: detail.cost.status, reason: detail.cost.reason, has_unresolved: detail.cost.has_unresolved } };
+}
+async function freshV3Context(windowDays: number, signal?: AbortSignal): Promise<CitySnapshotV3> {
+  const first = await readV3({ operation: "overview", windowDays, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, page_size: 1 }, signal);
+  return { data_revision: first.data_revision, snapshot: first.snapshot, context: first.context,
+    query_semantics: first.query_semantics, window: first.window };
+}
 export async function readCitySessionDetail(projection: CityProjectionV1, id: string, signal?: AbortSignal): Promise<CityProjectionV1["sessions"][number]> {
   if (!projection.v3_context) {
     const session = projection.sessions.find((s) => s.id === id);
     if (!session) throw new Error("session_unavailable");
     return session;
   }
-  const response = await readV3({ ...continuation(projection.v3_context), operation: "session.detail", id, include_excerpts: true }, signal);
-  if (response.snapshot !== projection.v3_context.snapshot || response.detail?.id !== id) throw new Error("city_detail_invalid");
-  const detail = response.detail;
-  return { ...detail, cost_minor: detail.cost.cost_minor, cost_breakdown: detail.cost.breakdown, cost_complete: detail.cost.complete, cost_reference_prices: detail.cost.reference_prices,
-    cost_status: { state: detail.cost.status, reason: detail.cost.reason, has_unresolved: detail.cost.has_unresolved } };
+  const load = async (context: CitySnapshotV3) => {
+    const response = await readV3({ ...continuation(context), operation: "session.detail", id, include_excerpts: true }, signal);
+    if (response.snapshot !== context.snapshot || response.detail?.id !== id) throw new Error("city_detail_invalid");
+    return mapSessionDetail(response.detail);
+  };
+  try {
+    return await load(projection.v3_context);
+  } catch (error) {
+    // Background writes change the logical snapshot; re-read overview and retry once
+    // instead of leaving the details panel permanently unavailable.
+    if (!(error instanceof Error) || !["revision_changed", "city_detail_invalid"].includes(error.message)) throw error;
+    return load(await freshV3Context(projection.window.days, signal));
+  }
 }
 export async function readCityModule(projection: CityProjectionV1, module: "findings" | "skills" | "workflow", signal?: AbortSignal, fresh = false, harness?: string) {
   if (projection.source !== "local") return { source: "fixture" as const, window: projection.window, generated_at: projection.generated_at,
@@ -193,23 +223,70 @@ export async function resolveSavedCityAssets(windowDays: number, assetRefs: stri
   const context = await readV3({ operation: "overview", windowDays, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, page_size: 1 });
   return readV3({ ...continuation(context), operation: "assets.resolve", save_id: "city-primary", asset_refs: assetRefs });
 }
+function findingsFromV3(module: CityModuleV3 | undefined): CityProjectionV1["findings"] {
+  const rows = [...(Array.isArray(module?.data?.current_backlog) ? module.data.current_backlog : [])];
+  const grouped = new Map<string, { harness: string; severity: "critical" | "warning" | "info"; count: number }>();
+  for (const raw of rows) {
+    if (!raw || typeof raw !== "object") continue;
+    const row = raw as { harness?: unknown; severity?: unknown; count?: unknown };
+    if (typeof row.harness !== "string" || !["critical", "warning", "info"].includes(String(row.severity))
+      || typeof row.count !== "number" || !Number.isSafeInteger(row.count) || row.count < 0) continue;
+    const key = `${row.harness}\0${row.severity}`;
+    const current = grouped.get(key) ?? { harness: row.harness, severity: row.severity as "critical" | "warning" | "info", count: 0 };
+    current.count += row.count;
+    grouped.set(key, current);
+  }
+  return [...grouped.values()];
+}
+function adaptV3(first: CityProjectionV3, sessions: CitySessionV3[], windowDays: 7 | 30 | 90 | 366): CityProjectionV1 {
+  const context: CitySnapshotV3 = { data_revision: first.data_revision, snapshot: first.snapshot, context: first.context,
+    query_semantics: first.query_semantics, window: first.window };
+  const summary = first.modules?.overview.data as CityProjectionV1["summary"] & {
+    models?: { model_ids?: string[]; unknown_model_usage_events?: number; legacy_usage_events?: number };
+    time_classification?: { scope: string; unknown_time_only: number; mixed_time: number; excluded_no_usage: number } };
+  const activity = first.modules?.activity.data as CityProjectionV1["activity"];
+  if (!summary?.tokens || !Number.isSafeInteger(summary.tokens.total)) throw new Error("city_overview_invalid");
+  const findingsModule = first.modules?.findings;
+  const findings = findingsModule ? findingsFromV3(findingsModule) : [];
+  const findingsReady = findingsModule?.state === "ready" || findingsModule?.state === "empty";
+  const time = summary.time_classification;
+  const matched = first.page?.coverage.matched ?? sessions.length;
+  const ordered = [...sessions].sort((a, b) => a.layout_order - b.layout_order);
+  return validateCityProjectionV2({
+    protocol: "city:v2", source: "local", v3_context: context, data_revision: first.data_revision,
+    generated_at: first.generated_at, harnesses: first.harnesses ?? [],
+    window: { days: windowDays, label: `最近 ${windowDays} 天`, from: first.window.from, to: first.window.to },
+    sessions: ordered, models: summary.models?.model_ids ?? [],
+    model_coverage: summary.models ? { unknown_model_usage_events: summary.models.unknown_model_usage_events ?? 0,
+      legacy_usage_events: summary.models.legacy_usage_events ?? 0 } : undefined,
+    activity, summary, findings,
+    coverage: { total: matched, returned: sessions.length, truncated: matched > sessions.length,
+      unknown_time: (time?.unknown_time_only ?? 0) + (time?.mixed_time ?? 0),
+      unknown_time_semantics: "compat_any_untimed_fact_all_sessions",
+      time_classification: time, findings_state: findingsReady ? "partial" : "unavailable" },
+    status: matched > 0 ? "ready" : "empty",
+  });
+}
+async function readV2(windowDays: 7 | 30 | 90 | 366, signal?: AbortSignal, onStage?: (stage: "reading_summary" | "reading_sessions" | "ready") => void): Promise<CityProjectionV1> {
+  onStage?.("reading_summary");
+  const request: PluginRequestV1 = { version: 1, instanceId: window.__AV_PLUGIN_INSTANCE__!, requestId: `city-request-${++requestSequence}`,
+    method: "data.read", payload: { projection: "city", version: 2, windowDays } };
+  const response = await invokeHost<PluginResponseV1<CityProjectionV1>>("plugin_request", { request });
+  if (signal?.aborted) throw new Error("city_request_cancelled");
+  if (response.version !== 1 || response.requestId !== request.requestId) throw new Error("plugin_response_invalid");
+  if (!response.ok || !response.result) throw new Error(response.error?.code ?? "plugin_request_failed");
+  onStage?.("ready");
+  return validateCityProjectionV2(response.result);
+}
 export const tauriCityDataProvider: CityDataProvider = {
-  async getProjection({ windowDays, signal, onStage }) {
+  async getProjection({ windowDays, signal, onStage, onPartial }) {
     const standalone = !window.__AV_PLUGIN_INSTANCE__;
     if (standalone && new URLSearchParams(location.search).get("demo") === "1") return completeFixture(demoCityProjection(windowDays));
     if (standalone || window.__CITY_ISOLATION_FIXTURE__) return completeFixture(fixtureProjection(windowDays));
-    if (new URLSearchParams(location.search).get("cityData") !== "v3") {
-      onStage?.("reading_summary");
-      const request: PluginRequestV1 = { version: 1, instanceId: window.__AV_PLUGIN_INSTANCE__!, requestId: `city-request-${++requestSequence}`,
-        method: "data.read", payload: { projection: "city", version: 2, windowDays } };
-      const response = await invokeHost<PluginResponseV1<CityProjectionV1>>("plugin_request", { request });
-      if (signal?.aborted) throw new Error("city_request_cancelled");
-      if (response.version !== 1 || response.requestId !== request.requestId) throw new Error("plugin_response_invalid");
-      if (!response.ok || !response.result) throw new Error(response.error?.code ?? "plugin_request_failed");
-      onStage?.("ready");
-      return validateCityProjectionV2(response.result);
-    }
-    // Stage pages privately; apply the model once. A revision change discards every staged page.
+    if (cityDataProtocol() === "v2") return readV2(windowDays, signal, onStage);
+    // First page is enough to render. Later pages append; a revision change after the
+    // city is visible restarts quietly instead of blanking.
+    let visible: CityProjectionV1 | undefined;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         onStage?.("reading_summary");
@@ -221,6 +298,8 @@ export const tauriCityDataProvider: CityDataProvider = {
         const sessions = [...first.page.sessions];
         const ids = new Set(sessions.map((session) => session.id));
         let cursor = first.page.next_cursor;
+        visible = adaptV3(first, sessions, windowDays);
+        onPartial?.(visible);
         onStage?.("reading_sessions");
         while (cursor && sessions.length < 4000) {
           const page = await readV3({ ...continuation(context), operation: "sessions.page", cursor, page_size: 500 }, signal);
@@ -232,25 +311,18 @@ export const tauriCityDataProvider: CityDataProvider = {
           }
           if (page.page.next_cursor === cursor) throw new Error("city_cursor_invalid");
           cursor = page.page.next_cursor;
+          visible = adaptV3(first, sessions, windowDays);
+          onPartial?.(visible);
         }
-        sessions.sort((a,b) => a.layout_order - b.layout_order);
-        const summary = first.modules.overview.data as CityProjectionV1["summary"] & {
-          models?: { model_ids?: string[] }; time_classification?: { unknown_time_only: number; mixed_time: number } };
-        const activity = first.modules.activity.data as CityProjectionV1["activity"];
-        if (!summary?.tokens || !Number.isSafeInteger(summary.tokens.total)) throw new Error("city_overview_invalid");
         onStage?.("ready");
-        return { protocol: "city:v2", source: "local", v3_context: context, data_revision: first.data_revision,
-          generated_at: first.generated_at, harnesses: first.harnesses,
-          window: { days: windowDays, label: `最近 ${windowDays} 天`, from: first.window.from, to: first.window.to },
-          sessions, models: summary.models?.model_ids ?? [], activity, summary,
-          findings: [], coverage: { total: first.page.coverage.matched, returned: sessions.length,
-            truncated: first.page.coverage.matched > sessions.length,
-            unknown_time: (summary.time_classification?.unknown_time_only ?? 0) + (summary.time_classification?.mixed_time ?? 0),
-            findings_state: "unavailable" }, status: first.page.coverage.matched > 0 ? "ready" : "empty" };
+        return visible;
       } catch (error) {
-        if (!(error instanceof Error) || error.message !== "revision_changed" || attempt === 2) throw error;
+        if (signal?.aborted) throw error;
+        if (error instanceof Error && error.message === "revision_changed" && attempt < 2) continue;
+        if (visible) return visible;
+        break;
       }
     }
-    throw new Error("revision_changed");
+    return readV2(windowDays, signal, onStage);
   },
 };

@@ -94,6 +94,39 @@ fn full_window_summary_and_stable_pages_are_not_truncated_to_geometry_budget() {
 }
 
 #[test]
+fn pages_use_cached_keyset_and_keep_global_layout_order() {
+    let f=Fixture::new();
+    f.db.conn().execute_batch("BEGIN").unwrap();
+    for index in 0..250 {
+        let key=format!("private-{index:03}"); f.session(&key);
+        f.fact(&key,&format!("fact-{index}"),Some(f.now-1000-index as i64),Some("visible-model"),"delta");
+    }
+    f.db.conn().execute_batch("COMMIT").unwrap();
+    let first=f.overview(100);
+    assert_eq!(first["page"]["coverage"]["matched"],250);
+    assert!(first["page"]["modules"].is_null());
+    let mut seen=std::collections::BTreeSet::new();
+    let mut orders=std::collections::BTreeSet::new();
+    let mut page=first.clone();
+    let mut pages=0u32;
+    loop {
+        pages+=1;
+        assert!(page.get("modules").is_none() || pages==1, "later pages must not re-emit window modules");
+        for row in page["page"]["sessions"].as_array().unwrap() {
+            assert!(seen.insert(row["id"].as_str().unwrap().to_string()));
+            assert!(orders.insert(row["layout_order"].as_i64().unwrap()));
+        }
+        let Some(cursor)=page["page"]["next_cursor"].as_str() else {break};
+        page=city_v3::read(&f.home,&f.next(&first,json!({"operation":"sessions.page","page_size":100,"cursor":cursor})),f.now).unwrap();
+        assert!(page.get("modules").is_none());
+    }
+    assert_eq!(pages,3);
+    assert_eq!(seen.len(),250);
+    assert_eq!(orders.len(),250);
+    assert!(orders.contains(&1) && orders.contains(&250));
+}
+
+#[test]
 fn logical_snapshot_rejects_unrevisioned_title_updates_and_tampered_windows() {
     let f=Fixture::new(); f.session("a"); f.fact("a","f",Some(f.now-1),None,"delta");
     let first=f.overview(200); let id=&first["page"]["sessions"][0]["id"];
@@ -193,18 +226,27 @@ fn synthetic_projection_performance() {
             stats::excerpt_candidates(&conn,&keys).unwrap();
             stats::daily_activity(&conn,&json!([{"date":"whole-window","from_ms":from,"to_ms":f.now+1}])).unwrap();
             let query_count=QUERIES.load(Ordering::SeqCst); conn.trace(None);
-            let mut times_v2=Vec::new(); let mut times_v3=Vec::new(); let mut bytes_v2=0; let mut bytes_v3=0;
+            let mut times_v2=Vec::new(); let mut times_v3=Vec::new(); let mut times_v3_full=Vec::new();
+            let mut bytes_v2=0; let mut bytes_v3=0;
             for _ in 0..3 {
                 let begin=std::time::Instant::now(); let v2=app_local::city_projection(&f.home,30,f.now).unwrap();
                 times_v2.push(begin.elapsed().as_secs_f64()*1000.0); bytes_v2=v2.to_string().len();
-                let begin=std::time::Instant::now(); let v3=f.overview(200);
+                // Match the UI default page_size (500). TTFB is overview+first page;
+                // full load is TTFB plus remaining pages on the same snapshot.
+                let begin=std::time::Instant::now(); let v3=f.overview(500);
                 times_v3.push(begin.elapsed().as_secs_f64()*1000.0); bytes_v3=v3.to_string().len();
+                let mut page=v3.clone();
+                while let Some(cursor)=page["page"]["next_cursor"].as_str() {
+                    page=city_v3::read(&f.home,&f.next(&v3,json!({"operation":"sessions.page","page_size":500,"cursor":cursor})),f.now).unwrap();
+                }
+                times_v3_full.push(begin.elapsed().as_secs_f64()*1000.0);
             }
-            times_v2.sort_by(f64::total_cmp); times_v3.sort_by(f64::total_cmp);
+            times_v2.sort_by(f64::total_cmp); times_v3.sort_by(f64::total_cmp); times_v3_full.sort_by(f64::total_cmp);
             let rss=std::process::Command::new("ps").args(["-o","rss=","-p",&std::process::id().to_string()])
                 .output().ok().and_then(|o|String::from_utf8(o.stdout).ok()).and_then(|s|s.trim().parse::<u64>().ok());
             println!("CITY_PERF {}",json!({"sessions":count,"facts":count*facts_per_session,"core_sql":query_count,
                 "samples":3,"v2_p50_ms":times_v2[1],"v2_max_ms":times_v2[2],"v3_initial_p50_ms":times_v3[1],"v3_initial_max_ms":times_v3[2],
+                "v3_full_p50_ms":times_v3_full[1],"v3_full_max_ms":times_v3_full[2],
                 "v2_bytes":bytes_v2,"v3_initial_bytes":bytes_v3,"process_rss_kib":rss}));
             if count==4000 && facts_per_session==10 {
                 let mut plan=conn.prepare("EXPLAIN QUERY PLAN SELECT session_key FROM usage_facts WHERE deleted_at_ms IS NULL AND event_ts_ms>=?1 AND event_ts_ms<=?2").unwrap();
@@ -224,6 +266,8 @@ fn findings_backlog_and_window_new_have_different_denominators() {
             'warning','fixture','1',?1,?3,'{}')",rusqlite::params![id,status,opened]).unwrap();
     }
     let first=f.overview(200);
+    assert_eq!(first["modules"]["findings"]["state"],"ready");
+    assert_eq!(first["modules"]["findings"]["data"]["current_backlog"][0]["count"],1);
     let response=city_v3::read(&f.home,&f.next(&first,json!({"operation":"module.read","module":"findings"})),f.now).unwrap();
     assert_eq!(response["result"]["state"],"ready");
     assert_eq!(response["result"]["data"]["current_backlog"][0]["count"],1);

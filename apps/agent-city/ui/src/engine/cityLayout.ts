@@ -4,7 +4,7 @@ import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath
 import { runPlanningJob, type PlanningWorkerPort } from "./planningWorker/planningJob";
 import type { PlanningWorkSnapshot } from "./planner/operationBudget";
 import { PLANNING_WORK_UNITS } from "./planner/operationBudget";
-import { hashSeed, type CityModel } from "../cityModel";
+import { hashSeed, RENDER_CAP, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
 import { gradeRoadLandings } from "./surface/roadLandingGrading";
 import { layoutAirport, type AirportPlan } from "./airportPlan";
@@ -200,10 +200,15 @@ function layoutPlanKey(seed: number, tier: number, coastal: CoastalConfig | null
 /** Warm the exact layout plan on a local worker before mounting a large city.
  * Cancellation and worker failures never fall back to UI-thread planning. The
  * validated worker result shares the same bounded LRU as synchronous fixtures. */
+function layoutPopulation(model: CityModel): number {
+  const planned = model.stats?.totalSessions;
+  return Math.min(RENDER_CAP, Math.max(model.buildings.length, Number.isFinite(planned) ? planned : 0));
+}
+
 export async function prepareCityLayout(model: CityModel, seed: number, coastal: CoastalConfig | null,
   options: { signal: AbortSignal; workerFactory?: () => PlanningWorkerPort; onPlanningProgress?: (snapshot: PlanningWorkSnapshot) => void }): Promise<void> {
   if (options.signal.aborted) throw new Error("layout-preparation-cancelled");
-  const tier = scaleTierFor(model.buildings.length), key = layoutPlanKey(seed, tier, coastal);
+  const tier = scaleTierFor(layoutPopulation(model)), key = layoutPlanKey(seed, tier, coastal);
   if (plans.has(key)) return;
   // Existing synchronous planning has no aggregate work cap. Transport accounting
   // preserves that policy; worker cancellation/heartbeat remains independently bounded.
@@ -217,8 +222,8 @@ export async function prepareCityLayout(model: CityModel, seed: number, coastal:
 }
 
 export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null, backdrop: BackdropMode = "auto", pins: LayoutPins | null = null): CityLayout {
-  // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
-  const tier = scaleTierFor(model.buildings.length);
+  // 规模档位由全窗会话总数分档，不由当前已载入页：分页追加不得换档重排全城。
+  const tier = scaleTierFor(layoutPopulation(model));
   // plans 缓存键携带海滨配置身份（profile+version）：同 seed 不同配置不得复用旧规划。
   // 缓存键含参数指纹：同 profile/version 改参数（如 maxCoastalHeight）必须产生
   // 新规划——曾只带 profile:version，参数变化时复用旧海滨带（审查 #5 复现）。

@@ -109,19 +109,24 @@ export function CityApp() {
     let active = true;
     const loading = new AbortController();
     setStatus("正在更新 City 插槽数据…");
-    tauriCityDataProvider.getProjection({ windowDays, signal: loading.signal, onStage: (stage) => {
-      if (active && stage !== "ready") setStatus(stage === "reading_summary" ? "正在读取全窗口统计…" : "正在读取会话建筑…");
-    } }).then((data) => {
-      if (!active) return;
+    const apply = (data: CityProjectionV1, paging = false) => {
       setProjection(data);
       setDataLoaded(true);
       setCityLoad({ stage: "model", work: null });
-      setStatus(projectionStatusLabel(data));
+      setStatus(paging && data.coverage.truncated
+        ? `${projectionStatusLabel(data)} · 继续载入会话建筑`
+        : projectionStatusLabel(data));
+    };
+    tauriCityDataProvider.getProjection({ windowDays, signal: loading.signal, onStage: (stage) => {
+      if (active && stage !== "ready") setStatus(stage === "reading_summary" ? "正在读取全窗口统计…" : "正在读取会话建筑…");
+    }, onPartial: (data) => { if (active) apply(data, true); } }).then((data) => {
+      if (active) apply(data);
     }).catch(() => {
       if (!active) return;
-      setProjection(null);
       setDataLoaded(true);
-      setStatus("City 数据暂不可用");
+      // Keep a city that already rendered; packaged v3 fallback happens inside the provider.
+      setProjection((current) => current ?? null);
+      setStatus((current) => current && !current.startsWith("正在") ? current : "City 数据暂不可用");
     });
     return () => { active = false; loading.abort(); };
   }, [windowDays, refresh]);
@@ -193,25 +198,32 @@ export function CityApp() {
     experience.modelRef.current = model;
     experience.setModel(model);
     setCityLoad({ stage: "planning", work: null });
-    const signature = JSON.stringify([projection.window, projection.harnesses, projection.sessions, projection.findings]);
+    // Geography is keyed by window + planned population, not the sessions array.
+    // Paging appends must not rebuild the island or hide the first frame.
+    const planned = Math.min(4000, Math.max(projection.sessions.length, projection.coverage.total));
+    const geography = JSON.stringify([projection.window, experience.seed, planned]);
+    const occupants = projection.sessions.map((session) => session.id).join("\0");
+    const signature = `${geography}|${occupants}|${JSON.stringify(projection.findings)}`;
     if (signature !== fingerprint.current) {
-      setFirstModelFrame(false);
+      const sameGeography = fingerprint.current.startsWith(`${geography}|`);
+      if (!sameGeography) setFirstModelFrame(false);
       void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal,
         onPlanningProgress: (snapshot: PlanningWorkSnapshot) => {
+          if (sameGeography) return;
           const work = Object.values(snapshot.consumed).reduce((sum, value) => sum + value, 0);
           setCityLoad({ stage: "planning", work });
         } }).then(() => {
         if (preparation.signal.aborted || engineRef.current !== engine) return;
-        setCityLoad({ stage: "mounting", work: null });
-        engine.applyModel(model, appliedWindow.current === projection.window.days);
-        setCityLoad({ stage: "rendering", work: null });
+        if (!sameGeography) setCityLoad({ stage: "mounting", work: null });
+        engine.applyModel(model, sameGeography || appliedWindow.current === projection.window.days);
+        if (!sameGeography) setCityLoad({ stage: "rendering", work: null });
         // applyModel synchronously renders the first frame for this model before returning.
         setFirstModelFrame(true);
         appliedWindow.current = projection.window.days;
         fingerprint.current = signature;
         experience.refreshSelection();
       }).catch(() => {
-        if (!preparation.signal.aborted) { setSceneUnavailable(true); setCityLoad({ stage: "data", work: null }); }
+        if (!preparation.signal.aborted && !sameGeography) { setSceneUnavailable(true); setCityLoad({ stage: "data", work: null }); }
       });
     }
     experience.refreshSelection();
