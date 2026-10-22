@@ -5,6 +5,7 @@
  */
 import * as THREE from "three";
 import type { Vec2 } from "./cityLayout";
+import { parkedPlane } from "./render/playableVehicles";
 
 export type AirportPlan = { shore: Vec2; centre: Vec2; yaw: number; outward: Vec2 };
 
@@ -65,7 +66,7 @@ export function planAirport(coast: Vec2[], core: Vec2, avoid: Vec2[], roads: Vec
 
 /** 生成机场岛 + 堤道网格组（单一 Group，名字以 city-landmark-airport 开头供拾取）。 */
 export function buildAirport(plan: AirportPlan, disposables: Array<{ dispose: () => void }>, nightHead: THREE.Material | null,
-  roadTopAt?: (x: number, z: number) => number | null): THREE.Group {
+  roadTopAt?: (x: number, z: number) => number | null, planeScaleDiagonal?: number): THREE.Group {
   const group = new THREE.Group();
   group.name = "city-landmark-airport";
   const mat = (color: string) => { const m = new THREE.MeshLambertMaterial({ color }); disposables.push(m); return m; };
@@ -101,6 +102,17 @@ export function buildAirport(plan: AirportPlan, disposables: Array<{ dispose: ()
   add(new THREE.CylinderGeometry(5, 4, 4.5, 10).translate(0, 2.25, 0), mat("#3f5f6e"), 80, 31.4, 34);
   add(new THREE.CylinderGeometry(5.4, 5.4, 0.6, 10), mat("#e2ddd2"), 80, 36.2, 34);
   add(new THREE.SphereGeometry(0.7, 8, 6), nightHead ?? mat("#ff3b3b"), 80, 37.2, 34);
+  // 机坪上停着一架可以开的飞机（2026-10-22，用户：「把飞机游戏的建模放到机场，用户点击以后可以开始玩开飞机」）：
+  // 滑行道与航站楼之间、指廊西侧，机头顺跑道。点它从跑道西端顺跑道方向起飞（runway 标记点给出世界位姿，CityEngine.playableAt）。
+  if (planeScaleDiagonal !== undefined) {
+    const plane = parkedPlane(planeScaleDiagonal, disposables);
+    plane.position.set(-62, 1.48, 14);
+    island.add(plane);
+    const runway = new THREE.Object3D(); runway.name = "city-playable-plane-runway";
+    runway.position.set(-L / 2 + 30, 1.5, -18);
+    island.add(runway);
+    plane.userData.runway = runway;
+  }
   // 跑道边灯（夜间与路灯同批次材质，白天不亮）。
   if (nightHead) for (let x = -L / 2 + 14; x <= L / 2 - 14; x += 14) for (const z of [-30, -6]) add(new THREE.BoxGeometry(0.6, 0.4, 0.6), nightHead, x, 1.6, z);
   buildCauseway(group, plan.shore, { x: plan.centre.x - plan.outward.x * (W / 2), z: plan.centre.z - plan.outward.z * (W / 2) }, mat, add, roadTopAt);

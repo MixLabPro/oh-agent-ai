@@ -16,6 +16,7 @@ import { DISTRICT_LANDMARK_RENDER_GEOMETRY } from "../models/layoutPlacementGeom
 import { groundRoadClearance } from "../surface/roadClearance";
 import { landmarkSite } from "../models/districtLandmarkFootprint";
 import { buildDistrictLandmarkSite } from "../render/landmarks/districtLandmarkSite";
+import { parkedCar } from "../render/playableVehicles";
 import { m, REAL } from "../worldScale";
 
 export interface LandmarkSystemHost {
@@ -144,6 +145,12 @@ export function buildDistrictLandmarks(host: LandmarkSystemHost): void {
     // 回放时只拉伸塔身（applyDistrictLandmarkGrowth），裙楼与停车场不跟着压扁。
     const built = buildDistrictLandmarkSite(site, spot.districtId, palette.accent, neon, host);
     group.add(built.group);
+    // 停车场里那辆可以开走的车：城区 harness 楼同色（palette.accent），点它从这座地标出发开车。
+    if (built.heroStall) {
+      const car = parkedCar(spot.districtId, palette.accent, host.disposables);
+      car.position.set(built.heroStall.x, built.heroStall.y, built.heroStall.z);
+      built.group.add(car);
+    }
     const tower = new THREE.Group();
     tower.name = "district-tower";
     tower.position.set(site.podium.cu, built.podiumTop, site.podium.cv);

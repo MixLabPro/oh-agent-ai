@@ -1,4 +1,5 @@
 import { sessionCostLabel } from "./data/sessionCostLabel";
+import { playableKind } from "./engine/render/playableVehicles";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { CityModel } from "./cityModel";
 import { readCitySessionDetail, type CityProjectionV1 } from "./data/provider";
@@ -119,6 +120,16 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     onHover(id: string | null, x: number, y: number) {
       const tooltip = tooltipRef.current;
       if (!tooltip) return;
+      // 可开的载具：提示「点击开车 / 开飞机」，车带上它所属城区的名字（颜色就是这个城区的 harness 楼色）。
+      const play = playableKind(id);
+      if (play) {
+        const en = pluginLocale() === "en";
+        tooltip.textContent = play === "plane" ? (en ? "Plane · click to fly from the runway" : "飞机 · 点击从跑道起飞")
+          : `${districtLabel(id!.slice("play:car:".length))} · ${en ? "click to drive from this landmark" : "点击从这座地标出发开车"}`;
+        tooltip.style.opacity = "1";
+        tooltip.style.transform = `translate(${Math.min(x + 14, Math.max(8, window.innerWidth - 270))}px, ${Math.min(y + 14, window.innerHeight - 60)}px)`;
+        return;
+      }
       const decor = id && isDecorId(id) ? describeDecor(id) : null;
       const building = decor ? undefined : modelRef.current?.buildings.find((b) => b.id === id);
       if (!building && !decor) { tooltip.style.opacity = "0"; return; }

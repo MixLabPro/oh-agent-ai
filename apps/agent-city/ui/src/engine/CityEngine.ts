@@ -38,6 +38,8 @@ import { planAirport, roadSamples } from "./cityAirport";
 import { LIGHT_BUDGET, nightFactor } from "./cityLightBudget";
 import { DRIVING_PARAMS } from "../game/DrivingSimulation";
 import { CAR_DIMENSIONS } from "../game/carDimensions";
+import { PLAYABLE_CAR_PREFIX, PLAYABLE_PLANE_NAME, playableKind, type PlayTarget } from "./render/playableVehicles";
+import { paletteFor } from "./cityTextures";
 import { CarCamera } from "../game/CarCamera";
 import { FlightCameraControls } from "../game/FlightCameraControls";
 import { RainbowArch, RainOverlay } from "./cityWeather";
@@ -77,6 +79,8 @@ export type CityEngineOptions = {
   headless?: boolean;
   onHover?: (id: string | null, clientX: number, clientY: number) => void;
   onSelect?: (id: string | null) => void;
+  /** 点到可开的载具（地标停车场的车 / 机坪的飞机）：宿主据此进入开车或开飞机，不走选中流程。 */
+  onPlay?: (target: PlayTarget) => void;
   onOrbitLock?: (id: string | null) => void;
   onStats?: (stats: EngineStats) => void;
   onTimeCursor?: (ms: number, live: boolean) => void;
@@ -1357,6 +1361,8 @@ export class CityEngine {
       return;
     }
     const id = this.pick();
+    const play = playableKind(id) ? this.playableAt(id!) : null;
+    if (play) { this.options.onPlay?.(play); return; }
     if (id && id.startsWith("decor:")) {
       // Decorations share orbit locking, but not session-only selection rings.
       this.lockSelection(id);
@@ -1368,6 +1374,25 @@ export class CityEngine {
       this.setSelected(null);
       this.options.onSelect?.(null);
     }
+  }
+
+  /** 可开载具的世界位姿：车 = 停车位与车头朝向（出发点就是这座地标）；飞机 = 跑道西端、顺跑道方向（起飞点）。 */
+  playableAt(id: string): PlayTarget | null {
+    const kind = playableKind(id);
+    if (!this.parts || !kind) return null;
+    const heading = (object: THREE.Object3D, local: THREE.Vector3) => { const d = local.transformDirection(object.matrixWorld); return Math.atan2(d.z, d.x); };
+    this.parts.group.updateMatrixWorld(true);
+    if (kind === "car") {
+      const districtId = id.slice("play:car:".length);
+      const car = this.parts.group.getObjectByName(`${PLAYABLE_CAR_PREFIX}${districtId}`);
+      if (!car) return null;
+      const at = car.getWorldPosition(new THREE.Vector3());
+      return { kind, districtId, color: paletteFor(districtId).accent, x: at.x, z: at.z, heading: heading(car, new THREE.Vector3(0, 0, 1)) };
+    }
+    const runway = this.parts.group.getObjectByName(PLAYABLE_PLANE_NAME)?.userData.runway as THREE.Object3D | undefined;
+    if (!runway) return null;
+    const at = runway.getWorldPosition(new THREE.Vector3());
+    return { kind, x: at.x, y: at.y, z: at.z, heading: heading(runway, new THREE.Vector3(1, 0, 0)) };
   }
 
   private pick(): string | null {

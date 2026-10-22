@@ -115,7 +115,11 @@ export class GameSession {
     return { cityReady: !!(this.engine.currentLayout && this.engine.currentModel), cinemaActive, filmActive, busy };
   }
 
-  async enter(kind: GameSelection, host: EnterHostState): Promise<{ ok: true } | { ok: false; reason: string }> {
+  /** 练习从这里起飞（点了机坪上的飞机：跑道西端、顺跑道方向）；null = 按世界安全位挑出生点。 */
+  private origin: Readonly<{ x: number; y: number; z: number; heading: number }> | null = null;
+
+  async enter(kind: GameSelection, host: EnterHostState, origin?: Readonly<{ x: number; y: number; z: number; heading: number }>): Promise<{ ok: true } | { ok: false; reason: string }> {
+    this.origin = kind.mode === "practice" ? origin ?? null : null;
     const attempt = this.controller.enter(kind, host);
     if (!attempt.ok) return { ok: false, reason: attempt.refusal };
     const runId = this.controller.snapshot.runId;
@@ -295,6 +299,17 @@ export class GameSession {
       const z = first.z - first.nz * back;
       if (world.isPointClear(x, y, z, params.planeRadius + 2)) {
         return { x, y, z, heading: Math.atan2(first.nz, first.nx) };
+      }
+    }
+    // 从机场起飞：飞行模型没有地面滑跑（只有空中体制），所以在跑道上空、顺跑道方向开始——像刚离地的爬升段。
+    // 高度从跑道面以上一个安全余量起往上试，机身与追尾相机都要净空；都不通再退回世界安全位，不硬塞进障碍里。
+    const origin = this.origin;
+    if (origin && !this.course) {
+      const clearance = params.planeRadius + 1.5, back = params.planeRadius * 5.2, up = params.planeRadius * 2.4;
+      for (const lift of [params.planeRadius * 3, params.planeRadius * 5, params.planeRadius * 8, params.planeRadius * 12]) {
+        const y = origin.y + lift;
+        const camX = origin.x - Math.cos(origin.heading) * back, camZ = origin.z - Math.sin(origin.heading) * back;
+        if (world.isPointClear(origin.x, y, origin.z, clearance) && world.isPointClear(camX, y + up, camZ, clearance * 0.6)) return { x: origin.x, y, z: origin.z, heading: origin.heading };
       }
     }
     return world.findSafeSpawn(params.planeRadius + 1.5, params.planeRadius * 5.2, params.planeRadius * 2.4);

@@ -92,7 +92,7 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     return () => window.clearInterval(timer);
   }, [hud.phase, publish]);
 
-  const start = useCallback(async (mode: "formal" | "free-drive" | "diagnostic", vehicle?: Readonly<{ vtol: boolean }>): Promise<boolean> => {
+  const start = useCallback(async (mode: "formal" | "free-drive" | "diagnostic", vehicle?: Readonly<{ vtol: boolean }>, near?: Readonly<{ x: number; z: number }>): Promise<boolean> => {
     const host = engine.current;
     if (!host || runtimeRef.current) return false;
     if (optionsRef.current.cinemaActive() || optionsRef.current.gameActive() || optionsRef.current.busy()) {
@@ -112,7 +112,7 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     eventLog.current!.clear(); setEvents(Object.freeze([]));
     latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N", altitude: null, boost: null };
     setEntryError(null); setHud({ ...IDLE_HUD, phase: "preparing" });
-    const request = { collider: CITY_CAR_COLLIDER, vtol: vehicle?.vtol ?? (currentOptions.vtol === true), onPreparationMetric: runtime.recordPreparation.bind(runtime),
+    const request = { collider: CITY_CAR_COLLIDER, vtol: vehicle?.vtol ?? (currentOptions.vtol === true), near, onPreparationMetric: runtime.recordPreparation.bind(runtime),
       onPreparationProgress: (value: PreparationProgress) => setPreparationProgress(value), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
       const s = frame.state;
       latest.current = { ...latest.current, speed: Math.abs(frame.state.speed), blocked: frame.blocked, reason: frame.reason,
@@ -175,5 +175,5 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
   const diagnostics = useCallback((): RuntimeDiagnosticSnapshot | null => runtimeRef.current?.diagnostics ?? null, []);
   return { hud, entryError, preparationProgress, events, clearEntryError: () => setEntryError(null), spawnConfirmation,
     deriveSpawnCandidates, validateSpawnCandidate, confirmSpawn, cancelSpawn, invalidateSpawn,
-    enter: () => start("formal"), enterFreeDrive: (vehicle?: Readonly<{ vtol: boolean }>) => start("free-drive", vehicle), enterDiagnostic: () => start("diagnostic"), exit, pause, resume, toggle, setInput, diagnostics, physicsStep: DRIVING_DT };
+    enter: () => start("formal"), enterFreeDrive: (vehicle?: Readonly<{ vtol: boolean }>, near?: Readonly<{ x: number; z: number }>) => start("free-drive", vehicle, near), enterDiagnostic: () => start("diagnostic"), exit, pause, resume, toggle, setInput, diagnostics, physicsStep: DRIVING_DT };
 }

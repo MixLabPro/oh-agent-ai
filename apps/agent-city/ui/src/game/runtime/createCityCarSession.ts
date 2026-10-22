@@ -42,6 +42,8 @@ type CityCarRequestBase = Readonly<{
   onPreparationProgress?(progress: PreparationProgress): void;
   /** VTOL 推进器会话（玩法专属）：地面段与默认完全一致，注入空中体制物理。 */
   vtol?: boolean;
+  /** 自由驾驶的出发点：点了地标停车场里的车，出生点搜索从离这里最近的路开始（不改搜索的校验，只改先试哪里）。 */
+  near?: Readonly<{ x: number; z: number }>;
 }>;
 export type CityCarRequest = CityCarRequestBase & Readonly<{
   /** Issued only after full current-world and released-graph spawn validation. */
@@ -68,7 +70,7 @@ export async function createCityCarSession(host: CityCarHost, runtime: GameRunti
 /** Ordinary free-drive entry. Finds a safe, locally clear spawn in the current
  * frozen city. It does not certify/release road connectivity for the whole city. */
 export async function createCityCarFreeDriveSession(host: CityCarHost, runtime: GameRuntime<DrivingInputState>,
-  request: Pick<CityCarRequestBase, "collider" | "present" | "onPreparationMetric" | "onPreparationProgress">, signal?: AbortSignal): Promise<CityCarEntry> {
+  request: Pick<CityCarRequestBase, "collider" | "present" | "onPreparationMetric" | "onPreparationProgress" | "vtol" | "near">, signal?: AbortSignal): Promise<CityCarEntry> {
   return createSession(host, runtime, { ...request, x: 0, z: 0, heading: 0, layerId: "" }, "free-drive", signal);
 }
 /** Development diagnostic entry. Kept separate from player free drive and
@@ -181,7 +183,7 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
     const spawnStarted = preparationNow();
     progress("diagnostic-spawn", "started");
     const rawSpawn = mode !== "validated" ? await diagnosticSpawnAsync(snapshot.surface, regions, environment, signal, leaseCurrent,
-      (completedCandidates, candidateLimit) => progress("diagnostic-spawn", "started", { completedCandidates, candidateLimit })) : (() => {
+      (completedCandidates, candidateLimit) => progress("diagnostic-spawn", "started", { completedCandidates, candidateLimit }), mode === "free-drive" ? request.near : undefined) : (() => {
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return null;
       const support = environment.place(request.x, request.z, request.heading, point.regionId);

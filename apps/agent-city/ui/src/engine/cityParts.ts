@@ -216,7 +216,9 @@ export class CityParts {
         const core = this.layout.core ?? { x: 0, z: 0 };
         const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges), (x, z) => this.layout.terrain.height(x, z) < -0.6);
         if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null,
-          (x,z) => groundRoadTopAt(this.layout,x,z)));
+          (x,z) => groundRoadTopAt(this.layout,x,z),
+          // 机坪上那架飞机与飞行游戏同一尺度（GameSession：flightParamsFor(城区对角线)）。
+          Math.hypot(this.layout.urbanBounds.right - this.layout.urbanBounds.left, this.layout.urbanBounds.south - this.layout.urbanBounds.north)));
       }
       this.registerDrivingRoots("civic", () => this.buildCivics());
       this.registerDrivingRoots("landmark", () => this.buildLandmarks());

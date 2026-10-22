@@ -78,14 +78,14 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     return () => { active = false; };
   }, []);
 
-  const enterGame = useCallback(async (mode: "practice" | "race") => {
+  const enterGame = useCallback(async (mode: "practice" | "race", origin?: Readonly<{ x: number; y: number; z: number; heading: number }>) => {
     const session = getSession();
     const engineInstance = engine.current;
     if (!session || !engineInstance) return;
     setEntryError(null);
     const hostState = session.hostState(hostRef.current.cinemaActive(), hostRef.current.filmActive(), hostRef.current.busy());
     let result: Awaited<ReturnType<GameSession["enter"]>>;
-    try { result = await session.enter({ mode }, hostState); }
+    try { result = await session.enter({ mode }, hostState, origin); }
     catch (error) {
       if (sessionRef.current === session && session.controller.snapshot.phase !== "data") {
         setEntryError(error instanceof Error ? error.message : (hostRef.current.locale() === "en" ? "Cannot prepare the flight scene." : "飞行场景准备失败。"));
@@ -160,6 +160,8 @@ export function useCityGame(engine: RefObject<CityEngine | null>, host: GameHost
     saveFailed,
     clearEntryError: () => setEntryError(null),
     enterPractice: () => enterGame("practice"),
+    /** 点了机场机坪上的飞机：练习模式，从跑道起飞。 */
+    enterPracticeFrom: (origin: Readonly<{ x: number; y: number; z: number; heading: number }>) => enterGame("practice", origin),
     enterRace: () => enterGame("race"),
     enterUatRace: async () => {
       if (typeof __CITY_GAME_UAT__ === "undefined" || !__CITY_GAME_UAT__) return;

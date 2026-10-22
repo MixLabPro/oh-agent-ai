@@ -1,7 +1,8 @@
 {
  "380/day": {
-  "all": "71d5c24ea2127a57",
+  "all": "c07429126e76d329",
   "sections": {
+   "brake-lights": "3:1e6b585f55f9",
    "city-beach": "1:944722f410bf",
    "city-beach-furniture": "3:aabd8546bcee",
    "city-beach-people": "2:d757193d45ee",
@@ -36,6 +37,7 @@
    "city-landmark-villa-complex": "18:283086b4be18",
    "city-lifeguard-towers": "1:a51be15da6c9",
    "city-marina": "3:b67eba4fb2a7",
+   "city-playable-plane": "11:b60ec7200ba9",
    "city-promenade": "2:9eddbc621c29",
    "city-promenade-props": "4:8be7c2512cac",
    "city-public-sites-boxes": "1:1ff28291babf",
@@ -58,19 +60,27 @@
    "city-vice-context-rooftops": "1:9ef47d0f0300",
    "city-volleyball-courts": "1:95c85bff7f6b",
    "city-yachts": "1:2ba44b3222d5",
-   "district-landmark-cars": "3:64eed32ef362",
+   "district-landmark-cars": "3:8276eac1549f",
    "district-landmark-site": "65:04fe6e299d22",
    "district-tower": "28:78cf59afbf5d",
+   "headlights": "3:0d049cc2b7ef",
+   "interior": "3:0b33b2c7999a",
+   "paint": "3:a73b911aae9a",
+   "reverse-lights": "3:ae90ebfc9364",
+   "rubber-and-grille": "3:9ee24813bdde",
    "street-light-pools": "1:d1c64f74b14a",
    "unnamed:Mesh": "40:f4750efffb08",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:7b281fbaeacc",
-   "villa-campanile": "15:fe2f3223e864"
+   "villa-campanile": "15:fe2f3223e864",
+   "wheel": "12:76ada4dda117",
+   "windows": "3:89463a06c585"
   }
  },
  "380/night": {
-  "all": "f4c38ff7c5db88fe",
+  "all": "79e94aa0a32e1901",
   "sections": {
+   "brake-lights": "3:1e6b585f55f9",
    "city-beach": "1:944722f410bf",
    "city-beach-furniture": "3:aabd8546bcee",
    "city-beach-people": "2:d757193d45ee",
@@ -105,6 +115,7 @@
    "city-landmark-villa-complex": "18:283086b4be18",
    "city-lifeguard-towers": "1:a51be15da6c9",
    "city-marina": "3:b67eba4fb2a7",
+   "city-playable-plane": "11:b60ec7200ba9",
    "city-promenade": "2:9eddbc621c29",
    "city-promenade-props": "4:df80f10ac199",
    "city-public-sites-boxes": "1:1ff28291babf",
@@ -127,19 +138,27 @@
    "city-vice-context-rooftops": "1:9ef47d0f0300",
    "city-volleyball-courts": "1:95c85bff7f6b",
    "city-yachts": "1:2ba44b3222d5",
-   "district-landmark-cars": "3:64eed32ef362",
+   "district-landmark-cars": "3:8276eac1549f",
    "district-landmark-site": "65:7d12d710b2b6",
    "district-tower": "28:b73e6a114aed",
+   "headlights": "3:0d049cc2b7ef",
+   "interior": "3:0b33b2c7999a",
+   "paint": "3:a73b911aae9a",
+   "reverse-lights": "3:ae90ebfc9364",
+   "rubber-and-grille": "3:9ee24813bdde",
    "street-light-pools": "1:cb675dae0aab",
    "unnamed:Mesh": "40:ac04fe45b021",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:7b281fbaeacc",
-   "villa-campanile": "15:fe2f3223e864"
+   "villa-campanile": "15:fe2f3223e864",
+   "wheel": "12:76ada4dda117",
+   "windows": "3:89463a06c585"
   }
  },
  "1600/day": {
-  "all": "c391283d7d3af8d5",
+  "all": "371ad84c9d8d3b4d",
   "sections": {
+   "brake-lights": "4:5d5b378cb53c",
    "city-beach": "1:9c86895925bb",
    "city-beach-furniture": "3:4dda9432ea9a",
    "city-beach-people": "2:2ef56905c0e7",
@@ -183,6 +202,7 @@
    "city-landmark-villa-complex": "18:21046b529ae7",
    "city-lifeguard-towers": "1:d5a38bb69895",
    "city-marina": "3:29783f454950",
+   "city-playable-plane": "11:8b764b8809e6",
    "city-promenade": "2:a281bf650736",
    "city-promenade-props": "4:0a8c1fddc788",
    "city-public-sites-boxes": "1:f6c1109be3d7",
@@ -205,19 +225,27 @@
    "city-vice-context-rooftops": "1:870f440bbc6c",
    "city-volleyball-courts": "1:73dc74bfba0f",
    "city-yachts": "1:2ba44b3222d5",
-   "district-landmark-cars": "4:166466f34ac6",
+   "district-landmark-cars": "4:3171faac354f",
    "district-landmark-site": "76:2b0204169b91",
    "district-tower": "28:03ada4cdad52",
+   "headlights": "4:6ad186e67ef2",
+   "interior": "4:1a3fd04d59ae",
+   "paint": "4:24cdc4d3a8e9",
+   "reverse-lights": "4:085911d001db",
+   "rubber-and-grille": "4:0b4911bec0ec",
    "street-light-pools": "1:0091614a7ecf",
    "unnamed:Mesh": "40:4531b575be0e",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:6f7fe88104ae",
-   "villa-campanile": "15:4778efa1cc24"
+   "villa-campanile": "15:4778efa1cc24",
+   "wheel": "16:aaab2dff9298",
+   "windows": "4:82f55d096c78"
   }
  },
  "1600/night": {
-  "all": "dedccb170226ed2e",
+  "all": "9685566dabad97e6",
   "sections": {
+   "brake-lights": "4:5d5b378cb53c",
    "city-beach": "1:9c86895925bb",
    "city-beach-furniture": "3:4dda9432ea9a",
    "city-beach-people": "2:2ef56905c0e7",
@@ -261,6 +289,7 @@
    "city-landmark-villa-complex": "18:21046b529ae7",
    "city-lifeguard-towers": "1:d5a38bb69895",
    "city-marina": "3:29783f454950",
+   "city-playable-plane": "11:8b764b8809e6",
    "city-promenade": "2:a281bf650736",
    "city-promenade-props": "4:f6fed21bbd3d",
    "city-public-sites-boxes": "1:f6c1109be3d7",
@@ -283,14 +312,21 @@
    "city-vice-context-rooftops": "1:870f440bbc6c",
    "city-volleyball-courts": "1:73dc74bfba0f",
    "city-yachts": "1:2ba44b3222d5",
-   "district-landmark-cars": "4:166466f34ac6",
+   "district-landmark-cars": "4:3171faac354f",
    "district-landmark-site": "76:41fdd93848be",
    "district-tower": "28:03c8b6c4548a",
+   "headlights": "4:6ad186e67ef2",
+   "interior": "4:1a3fd04d59ae",
+   "paint": "4:24cdc4d3a8e9",
+   "reverse-lights": "4:085911d001db",
+   "rubber-and-grille": "4:0b4911bec0ec",
    "street-light-pools": "1:2f7761df2960",
    "unnamed:Mesh": "40:289ad9c72549",
    "unnamed:Sprite": "0:da39a3ee5e6b",
    "villa-arcade": "28:6f7fe88104ae",
-   "villa-campanile": "15:4778efa1cc24"
+   "villa-campanile": "15:4778efa1cc24",
+   "wheel": "16:aaab2dff9298",
+   "windows": "4:82f55d096c78"
   }
  }
 }

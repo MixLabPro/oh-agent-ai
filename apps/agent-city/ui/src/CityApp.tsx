@@ -16,6 +16,7 @@ import { replayStartMs } from "./replayRange";
 import { useCityGame } from "./game/useCityGame";
 import { useCityDrivingPlay } from "./game/useCityDrivingPlay";
 import { DrivingHud } from "./game/DrivingHud";
+import type { PlayTarget } from "./engine/render/playableVehicles";
 import { useRoadAudit } from "./game/useRoadAudit";
 import { RoadAuditPanel } from "./game/ui/RoadAuditPanel";
 import type { PlanningWorkSnapshot } from "./engine/planner/operationBudget";
@@ -85,6 +86,15 @@ export function CityApp() {
   drivingActive.current = driving.active;
   // 规划修复（开发开关 ?cityPlan / cityPlanDev=1；未开启时 hook 什么都不做）。与游戏/航拍/导出/忙碌互斥。
   const planRepair = usePlanRepair(engineRef, { seed: experience.seed, model: experience.model, blocked: cinema || game.active || driving.active || experience.busy || !!experience.film });
+  // 点停车场里的车 / 机坪上的飞机直接开（2026-10-22）：与工具栏「驾车」「驾驶飞机」同一组互斥条件——
+  // 航拍、导出、忙碌、修复城市、已经在开车或飞行时不响应（引擎只在非驾驶世界里派发点击）。
+  const playRef = useRef<(target: PlayTarget) => void>(() => {});
+  playRef.current = (target) => {
+    if (cinema || game.active || driving.active || experience.busy || !!experience.film || planRepair.state.active) return;
+    experience.setOptions(false); experience.clearSelection();
+    if (target.kind === "car") driving.enterAt(target);
+    else game.enterPracticeFrom(target);
+  };
   planRepairActive.current = planRepair.state.active;
   const appliedWindow = useRef<number | null>(null);
   const fingerprint = useRef("");
@@ -121,7 +131,7 @@ export function CityApp() {
     if (!canvas) return;
     let engine: CityEngine;
     try {
-      engine = new CityEngine({ canvas, ...experience.callbacks, onFirstFrame: () => setFirstModelFrame(true), onCinematic: (_elapsed, _plan, ended) => {
+      engine = new CityEngine({ canvas, ...experience.callbacks, onPlay: (target) => playRef.current(target), onFirstFrame: () => setFirstModelFrame(true), onCinematic: (_elapsed, _plan, ended) => {
         experience.callbacks.onCinematic(_elapsed, _plan, ended);
         if (ended) { setCinema(false); }
       } });
