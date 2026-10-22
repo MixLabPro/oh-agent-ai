@@ -22,7 +22,7 @@ import { makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor }
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
-import { buildAirport, planAirport, roadSamples } from "./cityAirport";
+import { buildAirport } from "./cityAirport";
 import { LANDMARK_BUILDERS } from "./render/landmarkBuilders";
 import { captureRenderedSolids, type RenderedSolidRoot, type RenderedSolidRole } from "./surface/renderedSolids";
 import type { LandmarkHost } from "./models/landmarkContext";
@@ -39,7 +39,6 @@ import type { CitySurfaceSource } from "./surface/citySurfacePort";
 import type { RenderedSolidSource } from "./surface/renderedSolidTypes";
 import type { SolidInput } from "../game/driving/CollisionIndex";
 import { collectSceneSolids } from "./surface/sceneSolids";
-import { groundRoadTopAt } from "./surface/structureCompiler";
 import { buildInfrastructure, buildCulDeSacBulbs, buildJunctionIslands, buildChannelizedJunctions, buildDistrictExpressways, buildHighwayRamps, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
@@ -211,12 +210,10 @@ export class CityParts {
       this.buildPublicSites();
       this.buildMarina();
       {
-        // L-4 机场岛 + L-5 堤道：避开港口与海滨景观段。
-        const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
-        const core = this.layout.core ?? { x: 0, z: 0 };
-        const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges), (x, z) => this.layout.terrain.height(x, z) < -0.6);
-        if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null,
-          (x,z) => groundRoadTopAt(this.layout,x,z)));
+        // L-4 机场岛：布局期规划（layout.airport），堤道已是路网里的一段桥面（上面的桥梁渲染画它）。
+        // 岛是可行驶的地标平台：航站楼 / 塔台 / 指廊进驾驶碰撞（注册为地标驾驶根），跑道等贴面薄层自标非实体。
+        const airport = this.layout.airport;
+        if (airport) this.registerDrivingRoots("landmark", () => this.group.add(buildAirport(airport, this.disposables, this.nightLights?.heads ?? null)));
       }
       this.registerDrivingRoots("civic", () => this.buildCivics());
       this.registerDrivingRoots("landmark", () => this.buildLandmarks());

@@ -34,7 +34,6 @@ import { MIAMI_COASTAL } from "./citySeaside";
 import { CityAurora } from "./cityAurora";
 import { CityAmbient } from "./cityAmbient";
 import { CityWildlife } from "./cityWildlife";
-import { planAirport, roadSamples } from "./cityAirport";
 import { LIGHT_BUDGET, nightFactor } from "./cityLightBudget";
 import { DRIVING_PARAMS } from "../game/DrivingSimulation";
 import { CAR_DIMENSIONS } from "../game/carDimensions";
@@ -1130,7 +1129,7 @@ export class CityEngine {
       "sail-opera": () => landmark("sail-opera", 10, 75),
       "suspension-bridge": () => landmark("suspension-bridge", 12, 95),
       "truss-bridge": () => (truss ? [(truss.from.x + truss.to.x) / 2, 4, (truss.from.z + truss.to.z) / 2, 55] : null),
-      airport: () => { const avoid = [...L.publicSites.filter((x) => x.kind === "harbor"), ...(L.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(L.seaside && !L.seaside.degraded ? L.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])]; const a = planAirport(L.coast, L.core ?? { x: 0, z: 0 }, avoid, roadSamples(L.roadEdges), (x, z) => L.terrain.height(x, z) < -0.6); return a ? [a.centre.x, 6, a.centre.z, 230] : null; },
+      airport: () => (L.airport ? [L.airport.centre.x, 6, L.airport.centre.z, 230] : null),
       harbor: () => (harbor ? [harbor.x, 6, harbor.z, 75] : null),
       hospital: () => civicOf("hospital"), school: () => civicOf("school"), mall: () => civicOf("mall"),
       garden: () => { const g = (L.gardens ?? [])[0]; return g ? [g.x, 2, g.z, 60] : null; },
