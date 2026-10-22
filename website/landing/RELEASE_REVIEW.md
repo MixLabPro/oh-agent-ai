@@ -1,5 +1,15 @@
 # City-first landing implementation review
 
+## Desktop beta downloads: 1.0.0-beta.3 (2026-10-22)
+
+- Verified via `GET /repos/Oh-Agent-AI/oh-agent/releases/tags/app-v1.0.0-beta.3`: pre-release, not draft, published 2026-10-22 13:42 (UTC+8), five assets (Apple Silicon DMG, Windows x64 setup.exe, Linux x64 .deb and AppImage, SHA256SUMS). All five download URLs and the tag page answered (302 / 200) on the review date.
+- Download section (en/zh) now shows a Beta · 1.0.0-beta.3 · Pre-release status, one card per platform with direct asset buttons, signing state (macOS signed + notarized; Windows/Linux not code-signed), Intel Mac "coming later" without a link, release-notes and SHA256SUMS links, and requirements macOS 11+ on Apple Silicon · Windows x64 · Linux x64 (macOS minimum from `apps/desktop/src-tauri/tauri.conf.json`).
+- Known limits are stated briefly: some City road-passability checks are not fully certified; Windows/Linux interactive gameplay has not been manually accepted.
+- Mac-only copy removed from nav ("Download" / "下载"), hero lede, City footer, insights, privacy boundary, FAQ 1/2/7/8, meta/OG/Twitter descriptions and the Chinese runtime description.
+- Verifier: release-state assertions replaced. Public links must be exactly the repository, the tag page and the five verified assets (each must be present); `/releases/latest` and any Intel DMG are rejected; stale Mac-only/pending strings are rejected in both locales.
+- Validation: `node website/landing/tools/verify-landing.mjs`, `bash -n deploy.sh`, `git diff --check` PASS. Headless Chrome render at 1440px and 390px in both locales: no page errors and no horizontal overflow. This is not a production deployment; nothing was deployed.
+
+
 ## Repository relocation (2026-10-19)
 
 - Verified that `MixLabPro/oh-agent-ai` is now public and updated the English and Chinese FAQ to link to the source repository. The GitHub Releases page is still empty; the FAQ keeps the desktop installer marked as unpublished.
@@ -105,7 +115,7 @@ Stored under `docs/assets/landing-city-first-2026-10-16/`:
 
 ## Remaining launch work
 
-- [ ] Public repository/source/LICENSE access and actual download assets must be verified; current 404 prevents download conversion. Do not mark the page publicly launched while it shows preparation status.
+- [x] Public repository and 1.0.0-beta.3 download assets verified on 2026-10-22 (see top section). Intel Mac and Windows/Linux signing remain open.
 - [ ] Verify or replace canonical, hreflang and OG deployment URLs using the final host.
 - [ ] Verify supported chip/system combinations, signing, notarization and clean-machine installation against the actual release.
 - [ ] Conduct the spec's 5-person comprehension/interaction study. This development browser review is not that study.

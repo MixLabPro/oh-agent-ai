@@ -22,7 +22,7 @@ Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. The page is a static site; 
 
 ## Page and data
 
-Hero with the production City frontend → three desktop exploration modes (plane, driving, jet roadster) → data mapping → usage/cost/session illustrations → local privacy → FAQ → platform release status and public source links.
+Hero with the production City frontend → three desktop exploration modes (plane, driving, jet roadster) → data mapping → usage/cost/session illustrations → local privacy → FAQ → per-platform beta downloads, release notes, checksums and public source links.
 
 - The hero embeds the frontend built from `apps/agent-city/ui`. Static fallback/building images use existing English product captures with synthetic sessions; their sample counts are separate from the interactive fixture. The share preview is also a mock-data capture. No personal records are involved. Provenance is in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
 - The visible desktop/tablet hero (over 600 CSS px) starts the real City frontend automatically, unless reduced motion or data saving is requested. Narrow phone views retain explicit entry. `city-host.js` serves deterministic synthetic `city:v2` projections through the production SDK's instance-scoped, same-origin message transport. Default 30 days contains 2000 mock sessions; 7 days contains 469. The frontend render cap is 4000, so this dataset does not trigger overflow aggregation; this does not change the native data projection's 500-session cap. No local authority, harness logs, generic IPC or SQL access is available.
@@ -59,7 +59,20 @@ Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository
 
 ## Public release
 
-The repository `https://github.com/MixLabPro/oh-agent-ai` was verified public on 2026-10-19 and moved to `https://github.com/Oh-Agent-AI/oh-agent` on 2026-10-22 and the FAQ links to it in both locales. The GitHub Releases page is empty, so desktop downloads remain unavailable. Before changing that release state, verify downloadable assets, supported architectures and system requirements, signing and notarization; then update both locales and the verifier's release-state assertion. Domain availability does not mean the desktop release is ready.
+The repository `https://github.com/MixLabPro/oh-agent-ai` was verified public on 2026-10-19 and moved to `https://github.com/Oh-Agent-AI/oh-agent` on 2026-10-22; the FAQ links to it in both locales.
+
+**Current release: `1.0.0-beta.3`** — GitHub pre-release [`app-v1.0.0-beta.3`](https://github.com/Oh-Agent-AI/oh-agent/releases/tag/app-v1.0.0-beta.3), published 2026-10-22 13:42 (UTC+8) and checked through the GitHub Releases API the same day. The download section links these assets directly:
+
+| Platform | Asset | Signing |
+| --- | --- | --- |
+| macOS, Apple Silicon (macOS 11+, per `tauri.conf.json`) | `oh-agent-1.0.0-beta.3-arm64.dmg` | Developer ID signed, notarized, stapled |
+| Windows x64 | `oh-agent-1.0.0-beta.3-windows-x86_64-setup.exe` | Not Authenticode-signed (unknown-publisher / SmartScreen warning possible) |
+| Linux x64 | `oh-agent-1.0.0-beta.3-linux-x86_64.deb`, `oh-agent-1.0.0-beta.3-linux-x86_64.AppImage` | Unsigned; AppImage needs `chmod +x` and FUSE |
+| Checksums | `SHA256SUMS` | — |
+
+Intel Mac packages are not included and are described as "coming later" with no link. Known limits stated on the page: beta; some City road-passability checks are not fully certified; interactive gameplay on Windows and Linux has not been manually accepted.
+
+Link rules: never use `/releases/latest` (it skips pre-releases). Link the tag page and `releases/download/app-v<version>/<asset>` URLs. For the next release, verify the assets via the API, then update the URLs, both locales and the verifier's `releaseTag`/`releaseAssets` allowlist together. Domain availability or a merged landing change does not mean the site is deployed.
 
 Canonical and social metadata point to `https://ohagent.ai/`. The domain was accessed successfully during the 2026-10-16 browser review. Cloudflare Pages project: `oh-agent-landing`; production alias: `oh-agent-landing.pages.dev`. Review deployment changes separately from local preview work; this README update does not deploy anything.
 
