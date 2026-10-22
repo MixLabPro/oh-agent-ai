@@ -11,14 +11,13 @@ import * as THREE from "three";
 import { CarVisuals } from "../../game/CarVisuals";
 import { FlightVisuals } from "../../game/FlightVisuals";
 import { flightParamsFor } from "../../game/FlightSimulation";
+import { VISUAL_BOOST } from "../worldScale";
 
 export const PLAYABLE_CAR_PREFIX = "city-playable-car:";
 export const PLAYABLE_PLANE_NAME = "city-playable-plane";
-/** 停着的车比开起来那辆小一档：开车用的车（2.8 长）比地标停车场的车位（2.7 长）略长，停进车位会压线。 */
-const PARKED_CAR_SCALE = 0.9;
-/** 停着的飞机缩小：飞行游戏为了好操控把飞机放大了（翼展约 24，比 22 宽的跑道还宽），原尺寸停在机坪上会压住滑行道和航站楼。
- * 0.45 倍后翼展约 11，正好放进滑行道与航站楼之间的机坪；开起来的仍是游戏里那一份原尺寸。 */
-const PARKED_PLANE_SCALE = 0.45;
+/** 停着的车与飞机的缩放登记在 worldScale.VISUAL_BOOST（parkedCar / parkedPlane，理由写在那里）；开起来的仍是游戏里那一份原尺寸。 */
+const PARKED_CAR_SCALE = VISUAL_BOOST.parkedCar;
+const PARKED_PLANE_SCALE = VISUAL_BOOST.parkedPlane;
 
 /** 一辆停着的车：车头朝局部 +z（地标场地的「朝街」方向），城区配色。 */
 export function parkedCar(districtId: string, color: string, disposables: Array<{ dispose: () => void }>): THREE.Group {

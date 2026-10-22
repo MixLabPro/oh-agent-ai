@@ -69,6 +69,23 @@ export const REAL = {
 export const VISUAL_BOOST = {
   /** 鸟群在 130–220 m 高空绕城：真实 2.2 m 翼展在常用机位下不到 2 像素，放大 2.5 倍（≈5.5 m）刚好读出 V 字队形。 */
   bird: 2.5,
+  /**
+   * 玩家车（开车模式，game/carDimensions.ts 的 CAR_DIMENSIONS 2.8 × 1.4 × 1.15）相对 REAL.car（4.5 × 1.8 × 1.5 m
+   * = 2.25 × 0.9 × 0.75 单位）的倍数：长 ×1.24、宽 ×1.56、高 ×1.53。追尾视角下车身要读得清，所以比路上的背景车（按 REAL.car）大一圈。
+   * **驾驶物理的阈值全以它为基准**（车身包络、可越障 0.144 = 轮半径 0.24 × 0.6、路宽两车道约束……）：不要「顺手修正」成真实尺寸，
+   * 改它要整体重测驾驶、碰撞与试驾基线（docs/CITY_WORLD_PRECISION_AND_SIZE_STANDARD_SPEC.md V2/V3）。
+   */
+  playerCar: { length: 2.8 / 2.25, width: 1.4 / 0.9, height: 1.15 / 0.75 },
+  /**
+   * 飞行模式双翼机：翼展 = 4.2 × planeRadius，r = clamp(2.2, 5, 城区对角线 × 0.004)（game/FlightSimulation.ts），
+   * 即 9.24–21 单位 = 18.5–42 m，对真实双翼机翼展 ~9 m 为 ×2.05–4.67。随地图放大是有意的：大城市全景里飞机要看得见；
+   * 飞机的碰撞球半径就是 r，所以这个倍数同时是飞行碰撞的尺度。
+   */
+  plane: { realWingspan: 9, range: [2.05, 4.67] as const },
+  /** 地标停车场里那辆可开的车（engine/render/playableVehicles.ts）：玩家车 ×0.9——玩家车长 2.8 比车位 2.7 略长，原尺寸停进去会压线。 */
+  parkedCar: 0.9,
+  /** 机坪上那架可开的飞机：游戏飞机 ×0.45（翼展约 4–9.5 单位 = 8–19 m）——原尺寸翼展比 22 宽的跑道还宽，停在机坪上会压住滑行道和航站楼。 */
+  parkedPlane: 0.45,
 } as const;
 
 /**
