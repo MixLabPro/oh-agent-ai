@@ -28,7 +28,7 @@ import { Mp4Writer } from "./mp4Muxer";
 import { WebmFilmWriter, type WebmCodec } from "./webmMuxer";
 import { layoutCity, type CityLayout, type BackdropMode } from "./cityLayout";
 import { applyPlanPatch, layoutPinsFor, type PatchedLayout, type PlanPatchV1 } from "./planPatch";
-import { CityParts, type QualityLevel } from "./cityParts";
+import { CityParts, occupantsCanAppend, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { MIAMI_COASTAL } from "./citySeaside";
 import { CityAurora } from "./cityAurora";
@@ -111,6 +111,8 @@ export class CityEngine {
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private parts: CityParts | null = null;
+  /** Last applyModel path: mount rebuilds CityParts; append keeps the scene and adds occupants. */
+  lastApplyMode: "mount" | "append" = "mount";
   /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
   /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
@@ -778,11 +780,44 @@ export class CityEngine {
   /** reuse=false：丢弃上一布局做全量重排（分页到齐后的圈层修正）。
    *  keepBase：模型与钉子都没变，沿用缓存的底层布局只重套补丁（setPlanPatch 的快路径）。 */
   applyModel(model: CityModel, reuse = true, keepBase = false): void {
-    const sameModel = model === this.model;
+    const previousModel = this.model;
+    const sameModel = model === previousModel;
     this.model = model;
     if (this.seed === null) return;
+    const patch = this.planPatch;
+    const base = keepBase && sameModel && this.baseLayout ? this.baseLayout
+      : layoutCity(model, reuse ? this.baseLayout : null, this.seed, MIAMI_COASTAL, this.backdrop, layoutPinsFor(patch));
+    const planResult = patch ? applyPlanPatch(base, patch) : null;
+    const layout = planResult ? planResult.layout : base;
+    // 同岛分页：不拆 CityParts / 实例网格 / 相机 / 选中态；只把新楼写进已有批次。
+    // 修订导致会话丢失或搬家时走下面的整层重建。
+    if (reuse && this.parts && previousModel && this.layout && occupantsCanAppend(previousModel, model, this.layout, layout)) {
+      this.baseLayout = base;
+      this.planResult = planResult;
+      this.layout = layout;
+      this.lastApplyMode = "append";
+      this.parts.appendOccupants(model, layout);
+      this.drivingWorldPort.invalidate();
+      this.parts.setLabelsVisible(true);
+      this.parts.setQualityLevel(this.quality);
+      if (this.cursorMs !== null) this.parts.applyCursor(this.cursorMs, false, this.playbackSpeed * 1000);
+      this.parts.snapToTargets();
+      this.parts.setSelected(this.selectedId?.startsWith("decor:") ? null : this.selectedId);
+      this.parts.setHovered(this.hoveredId);
+      if (!this.options.headless && !this.contextLost) {
+        this.updateScene(0);
+        this.renderFrame();
+        this.lastRenderAt = performance.now();
+        if (!this.firstFrameSent) {
+          this.firstFrameSent = true;
+          this.options.onFirstFrame?.();
+        }
+      }
+      return;
+    }
     // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
     const previousDisplays = this.parts ? this.parts.displaySnapshot() : null;
+    this.lastApplyMode = "mount";
     this.hostEpoch += 1;
     this.gameScenePort.invalidate();
     this.surfacePort.invalidate();
@@ -792,12 +827,8 @@ export class CityEngine {
       this.parts.dispose();
       this.parts = null;
     }
-    const patch = this.planPatch;
-    const base = keepBase && sameModel && this.baseLayout ? this.baseLayout
-      : layoutCity(model, reuse ? this.baseLayout : null, this.seed, MIAMI_COASTAL, this.backdrop, layoutPinsFor(patch));
     this.baseLayout = base;
-    this.planResult = patch ? applyPlanPatch(base, patch) : null;
-    const layout = this.planResult ? this.planResult.layout : base;
+    this.planResult = planResult;
     this.layout = layout;
     this.parts = new CityParts(model, layout, previousDisplays);
     if (this.assets) this.parts.applyAssets(this.assets);
