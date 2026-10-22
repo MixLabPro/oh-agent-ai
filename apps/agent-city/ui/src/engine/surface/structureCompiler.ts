@@ -70,6 +70,64 @@ function landsOnRoad(layout: BridgeLayoutInput, p: Vec2): boolean {
   if (!ends) { ends = renderRoadEdges(layout.roadEdges).filter((e) => !e.bridge && e.structure !== "deck").flatMap((e) => [e.points[0], e.points[e.points.length - 1]]); groundEnds.set(layout.roadEdges, ends); }
   return ends.some((q) => Math.abs(q.x - p.x) < 0.01 && Math.abs(q.z - p.z) < 0.01);
 }
+/** Seam fit only where the road rises above the deck end by more than this. Elsewhere the deck is left
+ * exactly as before — byte for byte — so only the seams that fail get a different deck. */
+const SEAM_FIT_THRESHOLD = 0.08;
+const NO_SEAM_FIT = Object.freeze({ dy: 0, dlean: 0 });
+/**
+ * 桥头接缝的横截面拟合（2026-10-22）：桥面末段是一块不能扭的箱体，端头取「中线贴路面、两侧取路面横坡」。
+ * 陡岸上地形格（5.7–9.9）里的三角面折痕正好压在引道下，接缝横截面成 V 形（1703310796/2：中线 0.35、两侧 0.47 / 0.52），
+ * 路面在桥面两侧冒出 0.12–0.23 > surfaceRegions 的 aliasTolerance 0.1——桥面与引道分属两个区域，车压到接缝即
+ * ambiguous-region（30 个海滨规划里 3 座桥 4 个桥头，正是那 3 座「桥头过陡」的桥）。
+ *
+ * 判据是**单侧**的：桥面遮住比它低的地面（surfaceRegions：路面低于桥面不算冲突，1703294958/2 的 141.66 桥头桥面高出
+ * 路面 0.19 照样连通），只有路面**高出**桥面才断开。第一版做对称（切比雪夫）拟合，把这座本来连通的桥头往下压，
+ * 路面反冒出 0.117，接缝断开——修一个坏一个。
+ *
+ * 修法：只在接缝外伸带（桥面伸出节点 0.25 盖住路面的那条）里路面高出桥面超过 SEAM_FIT_THRESHOLD 时，扫一遍横坡取
+ * 「路面减桥面」极差最小的一条，把端头抬到路面上包络（路面处处不高于桥面、上包络处恰好接上），以 dy / dlean 只加在
+ * 该端的落地过渡区里。模型是箱体的真实几何：端头那段箱体的横坡是该段**中点**的横坡，纵坡是该段两端的高差；横向只取
+ * 两块路面真正重叠的一段（bridgeDrivableHalf 与引道半宽取小）——取到桥宽边缘会把陡岸在路边骤降处也算进来。
+ */
+function seamFit(road: (p: Vec2) => number, lean: (p: Vec2) => number, end: Vec2, out: Vec2, nx: number, nz: number, half: number, section: number): { dy: number; dlean: number } {
+  if (!(half > 0) || !(section > 0)) return NO_SEAM_FIT;
+  const centre = road(end);
+  const lean0 = lean({ x: end.x - out.x * section / 2, z: end.z - out.z * section / 2 });
+  // 外伸带里桥面沿端头那段箱体的纵坡外推（落地过渡区内箱体两端跟着路面中线走）。
+  const pitchOut = (centre - road({ x: end.x - out.x * section, z: end.z - out.z * section })) / section;
+  const samples: Array<{ s: number; r: number }> = [];
+  for (let i = 0; i <= 4; i++) {
+    const a = 0.0625 * i;
+    for (let j = 0; j <= 32; j++) {
+      const s = -half + (2 * half * j) / 32;
+      samples.push({ s, r: road({ x: end.x + out.x * a + nx * s, z: end.z + out.z * a + nz * s }) - centre - pitchOut * a });
+    }
+  }
+  /** 路面减桥面（桥面横坡 b、端头不抬）的上下包络。 */
+  const envelope = (b: number) => {
+    let lo = Infinity, hi = -Infinity;
+    for (const { s, r } of samples) { const e = r - b * s; if (e < lo) lo = e; if (e > hi) hi = e; }
+    return { lo, hi };
+  };
+  if (envelope(lean0).hi <= SEAM_FIT_THRESHOLD) return NO_SEAM_FIT;
+  let best = { b: lean0, ...envelope(lean0) };
+  for (let k = -40; k <= 40; k++) {
+    const b = lean0 + k * 0.005; const fit = envelope(b);
+    if (fit.hi - fit.lo < best.hi - best.lo - 1e-12) best = { b, ...fit };
+  }
+  return { dy: best.hi, dlean: best.b - lean0 };
+}
+/** Half-width of the widest ordinary road that ends at p (0 if none). */
+function landingRoadHalf(layout: BridgeLayoutInput, p: Vec2): number {
+  if (!Array.isArray(layout.roadEdges)) return 0;
+  let half = 0;
+  for (const e of renderRoadEdges(layout.roadEdges)) {
+    if (e.bridge || e.structure === "deck") continue;
+    const a = e.points[0], b = e.points[e.points.length - 1];
+    if ((Math.abs(a.x - p.x) < 0.01 && Math.abs(a.z - p.z) < 0.01) || (Math.abs(b.x - p.x) < 0.01 && Math.abs(b.z - p.z) < 0.01)) half = Math.max(half, e.width / 2);
+  }
+  return half;
+}
 /** Bridge deck top profile: each end that lands on a road meets the RENDERED road surface there
  * (terrain triangulation + road lift); an end with no road keeps the landed end's height (an end
  * over open water must not dip into it); with no landing at all the old level deck remains.
@@ -79,23 +137,27 @@ export function bridgeDeckProfile(layout: BridgeLayoutInput, from: Vec2, to: Vec
   const level = Math.max(levelFloor, layout.terrain.height(from.x, from.z), layout.terrain.height(to.x, to.z));
   const fromLands = landsOnRoad(layout, from); const toLands = landsOnRoad(layout, to);
   const road = (p: Vec2) => terrainSurfaceHeight(layout, p.x, p.z) + ROAD_LIFT;
-  const ya = fromLands ? road(from) : toLands ? road(to) : level;
-  const yb = toLands ? road(to) : fromLands ? road(from) : level;
   const length = Math.hypot(to.x - from.x, to.z - from.z);
-  const pitch = Math.atan2(yb - ya, length);
   // Cross slope: the landed road surfaces lean sideways; a level-across deck left their edges
   // 0.11–0.15 above it. A box cannot twist, so it takes the mean lean of its landed ends.
   const nx = -(to.z - from.z) / length; const nz = (to.x - from.x) / length; const half = width / 2;
   const lean = (p: Vec2) => half > 0 ? (road({ x: p.x + nx * half, z: p.z + nz * half }) - road({ x: p.x - nx * half, z: p.z - nz * half })) / width : 0;
-  const leans = [fromLands ? lean(from) : null, toLands ? lean(to) : null].filter((v): v is number => v !== null);
+  // 端头那段箱体的长度 = 落地过渡区按 0.5 切出的一格（bridgeDeckSplitParts 的 blendSteps）。
+  const blendLength = Math.min(3, length / 3); const section = blendLength / Math.max(1, Math.ceil(blendLength / 0.5));
+  const overlapHalf = (p: Vec2) => Math.min(half - 0.3, landingRoadHalf(layout, p)); // = bridgeDrivableHalf ∩ 引道
+  const fitFrom = fromLands ? seamFit(road, lean, from, { x: -(to.x - from.x) / length, z: -(to.z - from.z) / length }, nx, nz, overlapHalf(from), section) : NO_SEAM_FIT;
+  const fitTo = toLands ? seamFit(road, lean, to, { x: (to.x - from.x) / length, z: (to.z - from.z) / length }, nx, nz, overlapHalf(to), section) : NO_SEAM_FIT;
+  const ya = fromLands ? road(from) + fitFrom.dy : toLands ? road(to) + fitTo.dy : level;
+  const yb = toLands ? road(to) + fitTo.dy : fromLands ? road(from) + fitFrom.dy : level;
+  const pitch = Math.atan2(yb - ya, length);
+  const leans = [fromLands ? lean(from) + fitFrom.dlean : null, toLands ? lean(to) + fitTo.dlean : null].filter((v): v is number => v !== null);
   const crossSlope = leans.length ? leans.reduce((n, v) => n + v, 0) / leans.length : 0;
-  const leanFrom = fromLands ? lean(from) : crossSlope, leanTo = toLands ? lean(to) : crossSlope;
+  const leanFrom = fromLands ? lean(from) + fitFrom.dlean : crossSlope, leanTo = toLands ? lean(to) + fitTo.dlean : crossSlope;
   // A bridge end can overlap the road's junction fan for up to LANDING_ZONE. A single plane
   // between the endpoint heights then sits below the rising ground fan (notably on steep banks),
   // making the same-layer road/deck pair disconnected. Follow the rendered terrain surface only
   // within a bounded landing zone, then ease back to the span chord. No-ground ends keep the old
   // chord and never sample the terrain profile.
-  const blendLength = Math.min(3, length / 3);
   const smoothFalloff = (distance: number) => {
     const t = Math.max(0, Math.min(1, distance / blendLength));
     return 1 - t * t * (3 - 2 * t);
@@ -103,22 +165,23 @@ export function bridgeDeckProfile(layout: BridgeLayoutInput, from: Vec2, to: Vec
   const baseAt = (t: number) => ya + (yb - ya) * t;
   const baseLeanAt = (t: number) => leanFrom + (leanTo - leanFrom) * t;
   const positionAt = (t: number) => ({ x: from.x + (to.x - from.x) * t, z: from.z + (to.z - from.z) * t });
-  const blendAt = (t: number) => {
+  // The seam fit (if any) of the end whose landing zone t lies in rides on top of the road profile.
+  const endAt = (t: number) => {
     const distance = Math.max(0, Math.min(length, t * length));
-    if (fromLands && distance < blendLength) return smoothFalloff(distance);
-    if (toLands && length - distance < blendLength) return smoothFalloff(length - distance);
-    return 0;
+    if (fromLands && distance < blendLength) return { blend: smoothFalloff(distance), fit: fitFrom };
+    if (toLands && length - distance < blendLength) return { blend: smoothFalloff(length - distance), fit: fitTo };
+    return null;
   };
   const at = (t: number) => {
-    const base = baseAt(t), blend = blendAt(t);
-    if (blend === 0) return base;
+    const base = baseAt(t), end = endAt(t);
+    if (!end || end.blend === 0) return base;
     const p = positionAt(t);
-    return base + (road(p) - base) * blend;
+    return base + (road(p) + end.fit.dy - base) * end.blend;
   };
   const leanAt = (t: number) => {
-    const base = baseLeanAt(t), blend = blendAt(t);
-    if (blend === 0) return base;
-    return base + (lean(positionAt(t)) - base) * blend;
+    const base = baseLeanAt(t), end = endAt(t);
+    if (!end || end.blend === 0) return base;
+    return base + (lean(positionAt(t)) + end.fit.dlean - base) * end.blend;
   };
   return Object.freeze({ ya, yb, length, pitch, crossSlope, leanFrom, leanTo, fromLands, toLands, blendLength,
     slant: Math.hypot(length, yb - ya), at, leanAt });
