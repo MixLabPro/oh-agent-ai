@@ -53,7 +53,7 @@ import { artDecoTowerGeometry, BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESS
 import type { BuildingRuntime, Car, CarPath, NightLights, QualityLevel } from "./render/types";
 export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
-import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildOceanDrive, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
+import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
 
 /** 静态城（只依赖 seed 的部分：地形/基建/高架/公共设施/地标/远山/树/水面/
  *  车/船/云/花园）。模块级缓存——数据刷新重建时整段复用，重建成本只剩建筑层；
@@ -194,7 +194,7 @@ export class CityParts {
       && staticCityCache.layout.coastalConfigKey === layout.coastalConfigKey
       && staticCityCache.layout.activityKey === layout.activityKey // G1：建成区变化 → 地面与路网重画
       && staticCityCache.layout.highways === layout.highways
-      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings, staticCityCache.layout.oceanDrive]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings, layout.oceanDrive]) ? staticCityCache : null;
+      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings]) ? staticCityCache : null;
     if (!staticCity) {
       staticCityCache?.disposables.forEach((disposable) => disposable.dispose());
       const staticBucket: Array<{ dispose: () => void }> = [];
@@ -223,7 +223,6 @@ export class CityParts {
       this.buildTrussBridges();
       this.registerDrivingRoots("landmark", () => this.buildDistrictLandmarks());
       this.registerDrivingRoots("context", () => this.buildUrbanContext());
-      buildOceanDrive(this as unknown as BuildingSystemHost);
       this.buildSeaMountains();
       this.buildBeachRibbon();
       const seaside = this.layout.seaside;

@@ -133,3 +133,19 @@ if (coastal?.profile === "miami-coastal") {           // CityEngine.ts:448 恒�
 - **批次 3（兼容与卫生）**：F5 + F6 + F7。
 
 每批：拍照对照 + 守卫全绿后提交，提交信息引用本 SPEC 的 F 编号。
+
+### 2026-10-22：移除海滨街墙填充楼，保留真实会话楼
+
+Ocean Drive 的圆角粉彩装饰楼不再填补空地：移除 `buildOceanDrive`
+绘制路径及 `layout.oceanDrive` 装饰实例输出。此前这条独立路径绕过背景楼
+关闭设置，且没有拾取介绍，容易与海滨会话楼混淆。所有背景楼档位均不再
+生成这批装饰；现有内陆背景楼设置与地标不受此改动影响。
+
+海滨地块仍由 `oceanDriveWall` / `seasideHotelLots` 提供给会话分配，
+`oceandrive:` / `hotel:` 会话楼的模型、地址和详情入口保持原有规则。
+本次不重做真实会话楼的造型，也不把真实数据楼当作装饰删除。
+
+验收：`verify-city-site-registry-scene.mjs` 在 seed 74031 的合成城市中确认
+26 栋海滨会话楼保留地址、锚点、拾取身份，且自动/关闭背景楼模式下均无旧
+填充楼网格；原 380/1600 昼夜场景注册测试通过。浏览器少量会话场景点击
+海滨楼可打开 Codex 会话详情（合成数据截图 `/tmp/ohagent-coastal-session-preserved.png`）。
