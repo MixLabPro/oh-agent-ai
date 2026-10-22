@@ -15,6 +15,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
 use super::city_assets;
+use super::city_building_compliance::{self, compliant_catalog_ids, derive_slot, slot_to_json};
 use super::session_ref::{self, session_ref};
 
 pub const KIT_VERSION: &str = "session-kit/v1";
@@ -27,11 +28,11 @@ pub const ENTITY_CHANGED_TYPE: &str = "CityEntityChanged";
 pub const ENTITY_KIND_BUILDING: &str = "building";
 
 const KINDS: &[&str] = &["box", "cylinder", "cone"];
-const ROLES: &[&str] = &["wall", "trim", "roof", "glass", "structure"];
+const ROLES: &[&str] = &["wall", "trim", "roof", "glass", "structure", "door", "window"];
 const FORMS: &[&str] = &["tower", "slab", "block", "midrise"];
 const PART_KEYS: &[&str] = &["id", "kind", "role", "at", "size", "rot", "color"];
 const MODEL_KEYS: &[&str] = &["kit_version", "params", "parts"];
-const PARAM_KEYS: &[&str] = &["form", "palette"];
+const PARAM_KEYS: &[&str] = &["form", "palette", "catalog_id", "build_cost", "floors", "story_height"];
 
 /// Canonical lot envelope in local parcel coordinates (world units, 1 u = 2 m).
 /// Cheap out-of-bounds check until the city loader can supply the real parcel.
@@ -47,11 +48,34 @@ pub struct BuildingError {
     pub parts: Vec<String>,
     pub message: String,
     pub suggested_fix: Option<String>,
+    pub compliant_models: Vec<String>,
 }
 
 impl BuildingError {
     fn validation(rule: &'static str, parts: Vec<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
-        Self { kind: "validation", rule, parts, message: message.into(), suggested_fix: Some(fix.into()) }
+        Self {
+            kind: "validation",
+            rule,
+            parts,
+            message: message.into(),
+            suggested_fix: Some(fix.into()),
+            compliant_models: Vec::new(),
+        }
+    }
+
+    pub(crate) fn invalid_model_compliance(
+        message: impl Into<String>,
+        fix: impl Into<String>,
+        candidates: &[String],
+    ) -> Self {
+        Self {
+            kind: "validation",
+            rule: "invalid_model",
+            parts: Vec::new(),
+            message: message.into(),
+            suggested_fix: Some(fix.into()),
+            compliant_models: candidates.to_vec(),
+        }
     }
     fn conflict(current_revision: u64) -> Self {
         Self {
@@ -60,6 +84,7 @@ impl BuildingError {
             parts: Vec::new(),
             message: format!("expected_revision does not match current revision {current_revision}"),
             suggested_fix: Some("call get_building and retry with the returned revision".into()),
+            compliant_models: Vec::new(),
         }
     }
     fn not_found(session_id: &str) -> Self {
@@ -69,16 +94,21 @@ impl BuildingError {
             parts: Vec::new(),
             message: format!("no session building matches `{session_id}`"),
             suggested_fix: Some("pass sessions_search.session_ref (sr_…) or the building asset_ref (ca_…)".into()),
+            compliant_models: Vec::new(),
         }
     }
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut out = json!({
             "kind": self.kind,
             "rule": self.rule,
             "parts": self.parts,
             "message": self.message,
             "suggested_fix": self.suggested_fix,
-        })
+        });
+        if !self.compliant_models.is_empty() {
+            out["compliant_models"] = json!(self.compliant_models);
+        }
+        out
     }
 }
 
@@ -87,7 +117,14 @@ pub struct BuildingIdentity {
     pub asset_ref: String,
     pub session_id: String,
     pub harness: String,
+    pub session_key: String,
     tokens_total: i64,
+}
+
+impl BuildingIdentity {
+    pub fn tokens_total(&self) -> i64 {
+        self.tokens_total
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -252,12 +289,12 @@ fn validate_part(index: usize, part: &Value, seen_ids: &mut std::collections::BT
         ));
     }
     let role = obj.get("role").and_then(Value::as_str).ok_or_else(|| {
-        BuildingError::validation("invalid_part", vec![label.clone()], format!("part `{label}` is missing role"), "role must be wall, trim, roof, glass, or structure")
+        BuildingError::validation("invalid_part", vec![label.clone()], format!("part `{label}` is missing role"), "role must be wall, trim, roof, glass, structure, door, or window")
     })?;
     if !ROLES.contains(&role) {
         return Err(BuildingError::validation(
             "invalid_part", vec![label.clone()], format!("part `{label}` role `{role}` is not in the kit"),
-            "use wall, trim, roof, glass, or structure",
+            "use wall, trim, roof, glass, structure, door, or window",
         ));
     }
     let at = vec3(obj.get("at"), &label, "at")?;
@@ -391,15 +428,25 @@ pub fn default_model(tokens_total: i64) -> Value {
     let shaft_h = (height - podium_h - roof_h).max(0.8);
     let shaft_w = (w * 0.86).max(1.2);
     let shaft_d = (d * 0.86).max(1.2);
+    let story_h = (shaft_h / 2.0).clamp(2.4, 4.2);
     json!({
         "kit_version": KIT_VERSION,
-        "params": { "form": form },
+        "params": { "form": form, "floors": 2, "story_height": round4(story_h) },
         "parts": [
             { "id": "podium", "kind": "box", "role": "structure", "at": [0.0, 0.0, 0.0], "size": [w, podium_h, d] },
             { "id": "shaft", "kind": "box", "role": "wall", "at": [0.0, podium_h, 0.0], "size": [shaft_w, shaft_h, shaft_d] },
             { "id": "roof", "kind": "box", "role": "roof", "at": [0.0, podium_h + shaft_h, 0.0], "size": [w, roof_h, d] },
+            { "id": "door", "kind": "box", "role": "door", "at": [0.0, 0.0, d / 2.0], "size": [1.2, 2.0, 0.2] },
+            { "id": "window", "kind": "box", "role": "window", "at": [0.0, podium_h + shaft_h * 0.35, d / 2.0], "size": [1.4, 1.2, 0.15] },
         ],
     })
+}
+
+fn validate_for_session(identity: &BuildingIdentity, model: &Value) -> Result<Value, BuildingError> {
+    let clean = validate_model(model)?;
+    let slot = derive_slot(&identity.session_key, identity.tokens_total());
+    city_building_compliance::validate_model_compliance(&clean, &slot)?;
+    Ok(clean)
 }
 
 fn open_store(home: &Path) -> Result<Connection, BuildingError> {
@@ -443,6 +490,7 @@ fn store_unavailable() -> BuildingError {
         parts: Vec::new(),
         message: "city building override store is unavailable".into(),
         suggested_fix: Some("retry; the store lives under state/plugins/city-buildings/".into()),
+        compliant_models: Vec::new(),
     }
 }
 
@@ -746,6 +794,7 @@ pub fn resolve_identity(home: &Path, conn: &Connection, session_id: &str) -> Res
         asset_ref,
         session_id: session_ref(&salt, &session_key),
         harness,
+        session_key,
         tokens_total,
     })
 }
@@ -766,11 +815,14 @@ fn session_stats(conn: &Connection, session_key: &str) -> Result<(String, i64), 
 }
 
 fn projection_meta(identity: &BuildingIdentity, summary: &Value, kit_status: &str) -> Value {
+    let slot = derive_slot(&identity.session_key, identity.tokens_total());
     json!({
         "asset_ref": identity.asset_ref,
         "session_id": identity.session_id,
         "harness": identity.harness,
         "height": summary["height"],
+        "lot": slot_to_json(&slot),
+        "compliant_catalog": compliant_catalog_ids(&slot),
         "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
         "kit_status": kit_status,
         "screenshot": { "state": "unavailable", "reason": "optional_vision_attachment_not_in_mvp" },
@@ -804,7 +856,7 @@ pub fn get_building(home: &Path, conn: &Connection, session_id: &str) -> Result<
 
 pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, model: &Value) -> Result<Value, BuildingError> {
     let identity = resolve_identity(home, conn, session_id)?;
-    match validate_model(model) {
+    match validate_for_session(&identity, model) {
         Ok(clean) => {
             let summary = geometric_summary(&clean);
             Ok(json!({
@@ -828,6 +880,8 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, model:
                 "asset_ref": identity.asset_ref,
                 "session_id": identity.session_id,
                 "harness": identity.harness,
+                "lot": slot_to_json(&derive_slot(&identity.session_key, identity.tokens_total())),
+                "compliant_catalog": json!(compliant_catalog_ids(&derive_slot(&identity.session_key, identity.tokens_total()))),
                 "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
             },
         })),
@@ -836,7 +890,7 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, model:
 
 pub fn set_building_model(home: &Path, conn: &Connection, session_id: &str, model: &Value, expected_revision: u64) -> Result<Value, BuildingError> {
     let identity = resolve_identity(home, conn, session_id)?;
-    let clean = match validate_model(model) {
+    let clean = match validate_for_session(&identity, model) {
         Ok(clean) => clean,
         Err(error) => {
             return Ok(json!({
@@ -985,6 +1039,21 @@ mod tests {
         assert_eq!(summary["height"], 2.2);
     }
 
+    #[test]
+    fn preview_rejects_compliance_pillar_with_invalid_model_candidates() {
+        let (home, db, session_id) = seed();
+        let pillar = json!({
+            "kit_version": KIT_VERSION,
+            "params": {},
+            "parts": [{"id": "pin", "kind": "box", "role": "wall", "at": [0.0, 0.0, 0.0], "size": [0.8, 10.0, 0.8]}]
+        });
+        let fail = preview_building(&home, db.conn(), &session_id, &pillar).unwrap();
+        assert_eq!(fail["ok"], false);
+        assert_eq!(fail["error"]["rule"], "invalid_model");
+        assert!(fail["error"]["compliant_models"].as_array().is_some_and(|a| !a.is_empty()));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn seed() -> (std::path::PathBuf, AuthorityDb, String) {
         let home = std::env::temp_dir().join(format!(
             "av-city-bldg-{}-{}",
@@ -1021,14 +1090,20 @@ mod tests {
         assert_eq!(got["ok"], true);
         assert_eq!(got["source"], "default");
         assert_eq!(got["revision"], 0);
-        assert_eq!(got["model"]["parts"].as_array().unwrap().len(), 3);
+        assert_eq!(got["model"]["parts"].as_array().unwrap().len(), 5);
         let asset = got["projection"]["asset_ref"].as_str().unwrap().to_string();
         assert!(asset.starts_with("ca_"));
 
-        let proposed = valid_model(vec![
-            json!({"id": "base", "kind": "box", "role": "structure", "at": [0.0, 0.0, 0.0], "size": [3.0, 2.0, 3.0]}),
-            json!({"id": "cap", "kind": "cone", "role": "roof", "at": [0.0, 2.0, 0.0], "size": [2.0, 1.5, 2.0]}),
-        ]);
+        let proposed = json!({
+            "kit_version": KIT_VERSION,
+            "params": {"catalog_id": "kit-low-block", "floors": 2, "story_height": 2.8},
+            "parts": [
+                {"id": "base", "kind": "box", "role": "structure", "at": [0.0, 0.0, 0.0], "size": [5.0, 2.8, 6.0]},
+                {"id": "cap", "kind": "box", "role": "wall", "at": [0.0, 2.8, 0.0], "size": [4.5, 2.8, 5.5]},
+                {"id": "door", "kind": "box", "role": "door", "at": [0.0, 0.0, 3.0], "size": [1.2, 2.0, 0.2]},
+                {"id": "window", "kind": "box", "role": "window", "at": [0.0, 3.5, 3.0], "size": [1.4, 1.2, 0.15]},
+            ]
+        });
         let fail = preview_building(&home, db.conn(), &session_id, &valid_model(vec![
             valid_part("a", 0.0), valid_part("b", 0.2),
         ])).unwrap();
@@ -1102,7 +1177,15 @@ mod tests {
             BufReader::new(stream).read_line(&mut line).unwrap();
             let _ = tx.send(line);
         });
-        let proposed = valid_model(vec![valid_part("a", 0.0)]);
+        let proposed = json!({
+            "kit_version": KIT_VERSION,
+            "params": {"catalog_id": "kit-low-block", "floors": 1, "story_height": 2.6},
+            "parts": [
+                {"id": "a", "kind": "box", "role": "structure", "at": [0.0, 0.0, 0.0], "size": [5.0, 2.6, 6.0]},
+                {"id": "door", "kind": "box", "role": "door", "at": [0.0, 0.0, 3.0], "size": [1.0, 2.0, 0.2]},
+                {"id": "window", "kind": "box", "role": "window", "at": [0.0, 1.2, 3.0], "size": [1.2, 1.0, 0.15]},
+            ]
+        });
         let set = set_building_model(&home, db.conn(), &session_id, &proposed, 0).unwrap();
         assert_eq!(set["ok"], true);
         assert_eq!(set["construction"]["ui"], "pushed");

@@ -45,7 +45,7 @@ fn session_id_prop() -> Value {
 fn model_prop() -> Value {
     json!({
         "type": "object",
-        "description": "session-kit/v1 payload: {kit_version, params, parts}. parts ≤ 64; kinds box|cylinder|cone; no scripts."
+        "description": "session-kit/v1 payload: {kit_version, params, parts}. parts ≤ 64; kinds box|cylinder|cone; roles include door|window; params may include catalog_id, floors, story_height, build_cost; no scripts."
     })
 }
 
@@ -232,10 +232,12 @@ mod tests {
     fn stacked() -> Value {
         json!({
             "kit_version": "session-kit/v1",
-            "params": {"form": "tower"},
+            "params": {"catalog_id": "kit-low-block", "floors": 2, "story_height": 2.8},
             "parts": [
-                {"id": "base", "kind": "box", "role": "structure", "at": [0, 0, 0], "size": [3, 2, 3]},
-                {"id": "cap", "kind": "cone", "role": "roof", "at": [0, 2, 0], "size": [2, 1.5, 2]}
+                {"id": "base", "kind": "box", "role": "structure", "at": [0, 0, 0], "size": [5, 2.8, 6]},
+                {"id": "cap", "kind": "box", "role": "wall", "at": [0, 2.8, 0], "size": [4.5, 2.8, 5.5]},
+                {"id": "door", "kind": "box", "role": "door", "at": [0, 0, 3], "size": [1.2, 2, 0.2]},
+                {"id": "window", "kind": "box", "role": "window", "at": [0, 3.5, 3], "size": [1.4, 1.2, 0.15]}
             ]
         })
     }
@@ -270,7 +272,7 @@ mod tests {
         assert_eq!(got["revision"], 0);
         let asset = got["projection"]["asset_ref"].as_str().unwrap();
         assert!(asset.starts_with("ca_"));
-        assert_eq!(got["observe"]["summary"]["part_count"], 3);
+        assert_eq!(got["observe"]["summary"]["part_count"], 5);
 
         let fail = data(&dispatch("preview_building", &json!({"session_id": session_id, "model": overlapping()}), &home).unwrap()).clone();
         assert_eq!(fail["ok"], false);
