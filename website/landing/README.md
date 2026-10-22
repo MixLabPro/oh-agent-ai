@@ -48,14 +48,17 @@ The builder replaces the generated `city3d/` directory from the current producti
 ## Verify
 
 ```sh
-node tools/verify-landing.mjs
+node tools/build-zh.mjs        # regenerate the prerendered Chinese page zh/index.html after editing index.html or i18n.js
+node tools/verify-landing.mjs   # also fails if zh/index.html is stale
 ```
+
+`deploy.sh` regenerates `/zh/`, verifies, builds the docs (`website/docs`, Node 22.22+) and stages them under `/docs`, so one Cloudflare Pages deploy serves the landing, `/zh/` and `/docs`. `robots.txt` lists both `/sitemap.xml` (landing, en + zh) and `/docs/sitemap-index.xml` (docs, published pages only).
 
 Checks cover actual translation keys, local assets and deployment staging, anchor targets, truthful sample/cost/release labels, three-way exploration selection, file-preview handling, script syntax, and a simulated host exercising the v2 contract, deterministic windows, origin/method rejection, readiness, timeout, stale responses, retry and teardown. This command is a local implementation check, **not** permission to publish and not a substitute for browser interaction or public-download verification.
 
 The former `--allow-missing-shots` workflow belongs to the previous diagnostics-first design. Current evidence and pending work are tracked in [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
 
-Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository root. The current share image is `assets/oh-agent-preview.jpg`. The public domain is `https://ohagent.ai/`; subsequent local copy/render changes are not automatically proof of production deployment. Oh Agent is the public-facing name; repository paths and native application identifiers retain project compatibility.
+Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository root. The current share image is `assets/oh-agent-preview-beta3.jpg` (1200×630, captured 2026-10-22 from the live hero City with mock data). The public domain is `https://ohagent.ai/`; subsequent local copy/render changes are not automatically proof of production deployment. Oh Agent is the public-facing name; repository paths and native application identifiers retain project compatibility.
 
 ## Public release
 

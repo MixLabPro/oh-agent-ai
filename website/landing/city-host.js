@@ -10,6 +10,8 @@
   const settings = document.getElementById('city-settings');
   const stop = document.getElementById('city-stop');
   const locale = window.__avLandingLang;
+  // The prerendered /zh/ page lives one level down; it sets data-site-root="../".
+  const root = document.documentElement?.dataset?.siteRoot || '';
   const t = (key) => locale.t(key);
   let frame = null;
   let instance = '';
@@ -141,7 +143,7 @@
     const attempt = ++generation;
     instance = `av-landing-city-${attempt}`;
     timer = setTimeout(() => { if (generation === attempt) fail('city.timeout'); }, 20000);
-    fetch('city3d/index.html', { method: 'HEAD', credentials: 'omit' }).then((response) => {
+    fetch(`${root}city3d/index.html`, { method: 'HEAD', credentials: 'omit' }).then((response) => {
       if (generation !== attempt) return;
       if (!response.ok) { fail(); return; }
       frame = document.createElement('iframe');
@@ -149,7 +151,7 @@
       frame.title = locale.lang === 'zh' ? 'Agent City 样例城市 · 模拟数据' : 'Agent City sample · synthetic data';
       frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
       frame.referrerPolicy = 'no-referrer';
-      frame.src = `city3d/index.html?instanceId=${encodeURIComponent(instance)}&locale=${locale.lang === 'zh' ? 'zh-Hans' : 'en'}&presentation=landing&windowDays=${range.value}`;
+      frame.src = `${root}city3d/index.html?instanceId=${encodeURIComponent(instance)}&locale=${locale.lang === 'zh' ? 'zh-Hans' : 'en'}&presentation=landing&windowDays=${range.value}`;
       frame.addEventListener('error', () => { if (generation === attempt) fail(); }, { once: true });
       stage.append(frame);
       stop.disabled = false;

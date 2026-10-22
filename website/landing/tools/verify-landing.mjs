@@ -73,13 +73,61 @@ const releasePage = `https://github.com/Oh-Agent-AI/oh-agent/releases/tag/${rele
 const assetBase = `https://github.com/Oh-Agent-AI/oh-agent/releases/download/${releaseTag}/`;
 const releaseAssets = ['oh-agent-1.0.0-beta.3-arm64.dmg', 'oh-agent-1.0.0-beta.3-windows-x86_64-setup.exe',
   'oh-agent-1.0.0-beta.3-linux-x86_64.deb', 'oh-agent-1.0.0-beta.3-linux-x86_64.AppImage', 'SHA256SUMS'];
-const allowedLinks = new Set(['https://github.com/Oh-Agent-AI/oh-agent', releasePage, ...releaseAssets.map((name) => assetBase + name)]);
+const allowedLinks = new Set(['https://github.com/Oh-Agent-AI/oh-agent', 'https://x.com/ohagentai', releasePage, ...releaseAssets.map((name) => assetBase + name)]);
 for (const link of publicLinks) assert.ok(allowedLinks.has(link), `Unverified public link: ${link}`);
 for (const link of allowedLinks) assert.ok(publicLinks.includes(link), `Missing verified release link: ${link}`);
 assert.doesNotMatch(html, /releases\/latest/, '/releases/latest skips pre-releases; link the tag');
 assert.doesNotMatch(html, /x86_64\.dmg|x64\.dmg/, 'Intel Mac is not part of beta.3');
 for (const [, anchor] of html.matchAll(/href="#([\w-]+)"/g)) assert.ok(html.includes(`id="${anchor}"`), `Missing anchor ${anchor}`);
 assert.doesNotMatch(html, /health score|framework-agnostic|burning money|saves you/i);
+
+// PR #4: nav (Docs + GitHub), hero download/star, footer, SEO, cost wording, platform hints.
+assert.match(html, /<h1 id="hero-title"><span data-i18n="hero.line1">Your agents work\.<\/span><br><em data-i18n="hero.line2">Your world grows\.<\/em><\/h1>/, 'Headline must stay exactly as approved');
+assert.match(i18n, /'hero\.line1': "Agent 在工作，", 'hero\.line2': "你的世界在生长。"/);
+const navBlock = html.match(/<nav aria-label="Main navigation"[\s\S]*?<\/nav>/)[0];
+assert.match(navBlock, /<a href="\/docs\/" data-href-zh="\/docs\/zh\/" data-i18n="nav\.docs">Docs<\/a>/, 'Nav links to the docs (en /docs/, zh /docs/zh/)');
+assert.match(navBlock, /href="https:\/\/github\.com\/Oh-Agent-AI\/oh-agent" target="_blank" rel="noopener">GitHub ↗<\/a>/, 'Nav links to GitHub');
+assert.match(i18n, /'nav\.docs': '文档'/);
+assert.match(html, /id="hero-download" href="#download" data-i18n="cta\.download">Download the beta · v1\.0\.0-beta\.3</);
+assert.match(i18n, /'cta\.download': '下载测试版 · v1\.0\.0-beta\.3'/);
+assert.match(html, /data-i18n="hero\.star">★ Star on GitHub</);
+assert.match(i18n, /'hero\.star': '★ 在 GitHub 点 Star'/);
+assert.doesNotMatch(read('app.js'), /api\.github|stargazers/, 'No GitHub API star count');
+assert.match(html, /© 2026 Oh Agent/);
+assert.doesNotMatch(html, /Mixlab/i);
+assert.match(html, /Desktop City shows per-session estimates in building details; the web demo has no cost data\./);
+assert.match(i18n, /桌面版城市会在建筑详情里显示单个会话的估价；网页演示不含费用数据。/);
+assert.doesNotMatch(html + i18n, /cost is not shown in City|does not currently project cost|尚未显示在城市中|尚未接入费用数据/);
+assert.match(html, /up to 4,000 recent sessions/, 'FAQ 4 matches SESSION_CAP = 4_000');
+assert.doesNotMatch(i18n, /Mock 会话|mock 会话/);
+assert.doesNotMatch(html, /⌘ Codex/);
+assert.match(html, /"@type": "SoftwareApplication"[\s\S]*"softwareVersion": "1\.0\.0-beta\.3"[\s\S]*"downloadUrl": "https:\/\/github\.com\/Oh-Agent-AI\/oh-agent\/releases\/tag\/app-v1\.0\.0-beta\.3"/);
+assert.match(html, /og:image" content="https:\/\/ohagent\.ai\/assets\/oh-agent-preview-beta3\.jpg"/);
+assert.ok(existsSync(path.join(root, 'assets/oh-agent-preview-beta3.jpg')), 'OG image asset exists');
+assert.match(html, /<link rel="alternate" hreflang="zh-CN" href="https:\/\/ohagent\.ai\/zh\/">/);
+assert.match(html, /class="city-poster"[^>]*loading="eager" fetchpriority="high"/, 'Hero LCP image loads eagerly');
+for (const id of ['mac', 'windows', 'linux']) assert.match(html, new RegExp(`data-platform="${id}"`));
+// Prerendered Chinese page: must be fresh and self-canonical.
+const zhPath = path.join(root, 'zh/index.html');
+assert.ok(existsSync(zhPath), 'zh/index.html exists (node tools/build-zh.mjs)');
+const zhHtml = readFileSync(zhPath, 'utf8');
+assert.match(zhHtml, /<html lang="zh-CN" data-static-lang="zh" data-site-root="\.\.\/">/);
+assert.match(zhHtml, /<link rel="canonical" href="https:\/\/ohagent\.ai\/zh\/">/);
+assert.match(zhHtml, /Agent 在工作，<\/span><br><em data-i18n="hero\.line2">你的世界在生长。/);
+assert.match(zhHtml, /<a href="\/docs\/zh\/" data-href-zh="\/docs\/zh\/" data-i18n="nav\.docs">文档<\/a>/);
+for (const [, source] of zhHtml.matchAll(/<(?:img|script)[^>]+src="([^"]+)"/g)) {
+  if (/^https?:/.test(source)) continue;
+  assert.ok(existsSync(path.join(root, 'zh', source.split('?')[0])), `zh page: missing asset ${source}`);
+}
+{
+  const { execFileSync } = await import('node:child_process');
+  execFileSync(process.execPath, [path.join(root, 'tools/build-zh.mjs'), '--check'], { stdio: 'pipe' });
+}
+assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/zh\/<\/loc>/);
+assert.match(read('sitemap.xml'), /<lastmod>2026-10-22<\/lastmod>/);
+assert.match(read('robots.txt'), /Sitemap: https:\/\/ohagent\.ai\/docs\/sitemap-index\.xml/);
+assert.match(read('deploy.sh'), /rsync -a --exclude="\.DS_Store" \.\.\/docs\/dist\/ "\$STAGE"\/docs\//, 'deploy.sh stages the docs under /docs');
+assert.match(read('deploy.sh'), /cp zh\/index\.html "\$STAGE"\/zh\//, 'deploy.sh stages /zh/');
 
 // Execute localization against all actual translation-bearing elements.
 function translated(lang) {
@@ -127,7 +175,25 @@ translated('zh');
   assert.equal(panels.filter((panel) => !panel.hidden).length, 1);
   assert.equal(buttons.filter((button) => button.attrs['aria-pressed'] === 'true').length, 1);
 }
-console.log('Content, assets, anchors, bilingual copy, privacy and cost basis: PASS');
+// Platform hint: the hero download button adopts the matching card's direct link.
+for (const [ua, expected] of [['Macintosh', 'mac'], ['Windows NT 10.0', 'windows'], ['X11; Linux x86_64', 'linux'], ['iPhone', ''], ['X11; CrOS x86_64', '']]) {
+  const links = { mac: 'MAC-LINK', windows: 'WIN-LINK', linux: 'LINUX-LINK' };
+  const cards = Object.fromEntries(Object.keys(links).map((id) => [id, { classList: { added: [], add(c) { this.added.push(c); } },
+    querySelector: () => ({ getAttribute: () => links[id] }) }]));
+  const lines = Object.fromEntries(Object.keys(links).map((id) => [id, { hidden: true }]));
+  const hero = { href: '#download' };
+  const note = { hidden: true, querySelector: (sel) => lines[sel.match(/"(\w+)"/)[1]] };
+  const documentElement = { dataset: {} };
+  vm.runInNewContext(read('app.js'), { navigator: { userAgent: `Mozilla/5.0 (${ua})` }, document: { documentElement,
+    querySelector: (sel) => cards[sel.match(/data-platform="(\w+)"/)?.[1]] || null, querySelectorAll: () => [],
+    getElementById: (id) => (id === 'hero-download' ? hero : id === 'hero-download-note' ? note : null) } });
+  assert.equal(hero.href, expected ? links[expected] : '#download', `Hero download for ${ua}`);
+  assert.equal(documentElement.dataset.platform, expected || undefined);
+  if (expected) assert.deepEqual(cards[expected].classList.added, ['is-detected']);
+  if (expected) assert.equal(lines[expected].hidden, false);
+}
+assert.doesNotMatch(read('app.js'), /https?:\/\//, 'No URLs in app.js');
+console.log('Content, assets, anchors, bilingual copy, privacy, cost basis, nav, SEO, /zh/ prerender, platform hint: PASS');
 
 function host({ desktop = false, reduced = false, protocol = 'http:' } = {}) {
   class Element {
