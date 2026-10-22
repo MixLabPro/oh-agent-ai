@@ -13,7 +13,7 @@
  */
 import type { CityModel } from "../cityModel";
 import type { CityLayout, Vec2 } from "./cityLayout";
-import { applyPlanPatch, appendHighwayOp, appendRoadOp, appendSiteOp, edgeLocked, emptyPlanPatch, nearestOnPolyline, pruneStalePatch, quantize, reservedParcelIdsShared, validateBuildingMove, type PatchStaleEntry, type PlanPatchV1 } from "./planPatch";
+import { applyPlanPatch, appendHighwayOp, appendRoadOp, appendTerrainOp, appendSiteOp, edgeLocked, emptyPlanPatch, nearestOnPolyline, pruneStalePatch, quantize, reservedParcelIdsShared, validateBuildingMove, type PatchStaleEntry, type PlanPatchV1 } from "./planPatch";
 import { listSites, parseFreeTarget, siteClassOf, siteMoveProblem, type SiteInfo } from "./planSites";
 
 export type RemapFailure = { kind: string; id: string; detail: string };
@@ -117,6 +117,16 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
     touched();
   }
 
+  // ── 平整日志（全是坐标型）：坐标与尺寸按半径比缩放，高度不缩放（海平面不随岛放大）。缩放后越界、
+  //    或落水的，交给下面的「新档重放仍失效」如实剔掉——不替玩家猜新位置。──
+  for (const op of patch.terrainOps ?? []) {
+    const size = (v: number) => Math.round(v * ratio * 100) / 100;
+    next = appendTerrainOp(next, op.t === "pad"
+      ? { t: "pad", at: scale(op.at), radius: size(op.radius), falloff: size(op.falloff), height: op.height }
+      : { t: "ramp", from: { ...scale(op.from), h: op.from.h }, to: { ...scale(op.to), h: op.to.h }, width: size(op.width), falloff: size(op.falloff) }, next.updatedAt);
+    touched();
+  }
+
   // ── 设施日志（按顺序；同类设施里找最近的）──
   patch.siteOps.forEach((op, index) => {
     const label = `${index + 1}:${op.t}`;
@@ -191,8 +201,8 @@ export function remapPlanPatch(layout: CityLayout, model: CityModel, patch: Plan
   const replay: PatchStaleEntry[] = applyPlanPatch(layout, next).stale;
   for (const entry of replay) fail(entry.kind, `新档:${entry.id}`, entry.detail);
   const cleaned = replay.length ? pruneStalePatch(next, replay, next.updatedAt) : next;
-  const total = patch.roadOps.length + (patch.highwayOps?.length ?? 0) + patch.siteOps.length + Object.keys(patch.buildingMoves).length + patch.suppressedContext.length;
-  const final = cleaned && Object.keys(cleaned.buildingMoves).length + cleaned.roadOps.length + (cleaned.highwayOps?.length ?? 0) + cleaned.siteOps.length + cleaned.suppressedContext.length ? cleaned : null;
+  const total = patch.roadOps.length + (patch.highwayOps?.length ?? 0) + (patch.terrainOps?.length ?? 0) + patch.siteOps.length + Object.keys(patch.buildingMoves).length + patch.suppressedContext.length;
+  const final = cleaned && Object.keys(cleaned.buildingMoves).length + cleaned.roadOps.length + (cleaned.highwayOps?.length ?? 0) + (cleaned.terrainOps?.length ?? 0) + cleaned.siteOps.length + cleaned.suppressedContext.length ? cleaned : null;
   return { patch: final ? { ...final, updatedAt: Date.now() } : null, report: { fromTier: patch.scaleTier, toTier: layout.scaleTier, ratio, total,
     remapped: Math.max(0, total - failed.length - alreadySatisfied.length), alreadySatisfied, failed } };
 }

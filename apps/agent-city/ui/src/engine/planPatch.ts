@@ -31,9 +31,11 @@ import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 import { CITY_GENERATOR_VERSION } from "./generatorVersion";
 import { applySiteOps, type SiteOp } from "./planSites";
 import { regradeRoadLandings } from "./surface/roadLandingGrading";
+import { applyTerrainOps, TERRAIN_OP_LIMITS, terrainOpProblem, terrainOpsTouch, type TerrainOp } from "./surface/terrainOps";
 import { bridgeChain, buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan, curvePoints } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
+export type { TerrainOp } from "./surface/terrainOps";
 
 export const PLAN_PATCH_VERSION = 1;
 
@@ -92,13 +94,16 @@ export type PlanPatchV1 = {
   moveAnchors?: Record<string, Vec2>;
   /** 压制的背景楼 id（"context:<parcelId>"，M3）。 */
   suppressedContext: string[];
+  /** 玩家土方（docs/CITY_REPAIR_TERRAIN_GRADING_SPEC.md），按顺序叠加；可缺省，旧存档没有这一项。 */
+  terrainOps?: TerrainOp[];
 };
 
 /** 条目无法套用的原因——诚实降级：丢弃 + 上报，绝不猜测替代目标。 */
 export type PatchStaleEntry = {
-  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "road-restyle" | "site-remove" | "site-move" | "context-suppress" | "highway-add" | "highway-cut";
+  kind: "building-move" | "road-drop" | "road-move" | "road-add" | "road-restyle" | "site-remove" | "site-move" | "context-suppress" | "highway-add" | "highway-cut" | "terrain-op";
   id: string;
-  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "generator-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway" | "road-in-water";
+  reason: "missing-node" | "missing-edge" | "missing-parcel" | "unknown-building" | "missing-context" | "locked-edge" | "parcel-occupied" | "node-collision" | "tier-changed" | "generator-changed" | "edge-exists" | "degenerate" | "unknown-site" | "site-changed" | "missing-target" | "target-occupied" | "site-blocked" | "missing-highway" | "road-in-water"
+    | "terrain-invalid" | "terrain-too-large" | "terrain-ramp-too-short" | "terrain-ramp-too-steep" | "terrain-on-water" | "terrain-too-many";
   detail: string;
 };
 
@@ -139,6 +144,13 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     if (op.t === "add" && Array.isArray(op.points)) { const points = op.points.map(point).filter((q): q is Vec2 => !!q); if (points.length >= 2) highwayOps.push({ t: "add", points }); }
     else if (op.t === "cut") { const at = point(op.at); if (at) highwayOps.push({ t: "cut", at }); }
   }
+  const terrainOps: TerrainOp[] = [];
+  const height = (value: unknown): (Vec2 & { h: number }) | null => { const p = point(value); return p && isRecord(value) && isFiniteNumber(value.h) ? { ...p, h: value.h } : null; };
+  if (Array.isArray(raw.terrainOps)) for (const op of raw.terrainOps) {
+    if (!isRecord(op) || !isFiniteNumber(op.falloff)) continue;
+    if (op.t === "pad") { const at = point(op.at); if (at && isFiniteNumber(op.radius) && isFiniteNumber(op.height)) terrainOps.push({ t: "pad", at, radius: op.radius, falloff: op.falloff, height: op.height }); }
+    else if (op.t === "ramp") { const from = height(op.from); const to = height(op.to); if (from && to && isFiniteNumber(op.width)) terrainOps.push({ t: "ramp", from, to, width: op.width, falloff: op.falloff }); }
+  }
   const siteOps: SiteOp[] = [];
   if (Array.isArray(raw.siteOps)) for (const op of raw.siteOps) {
     if (!isRecord(op) || typeof op.id !== "string") continue;
@@ -159,6 +171,7 @@ export function coercePlanPatch(raw: unknown): PlanPatchV1 | null {
     updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : 0,
     roadOps, siteOps, buildingMoves, suppressedContext: strings(raw.suppressedContext),
     ...(highwayOps.length ? { highwayOps } : {}),
+    ...(terrainOps.length ? { terrainOps } : {}),
     // 只保留正整数；坏值按缺省（=1）读，不能因为一个错型字段把整份补丁判成「别的生成器写的」。
     ...(Number.isInteger(raw.generatorVersion) && (raw.generatorVersion as number) >= 1 ? { generatorVersion: raw.generatorVersion as number } : {}),
     ...(isFiniteNumber(raw.islandRadius) && raw.islandRadius > 0 ? { islandRadius: raw.islandRadius } : {}),
@@ -179,6 +192,8 @@ export function hashPlanPatch(patch: PlanPatchV1): string {
     siteOps: patch.siteOps,
     buildingMoves: Object.keys(patch.buildingMoves).sort().map((id) => [id, patch.buildingMoves[id]]),
     suppressedContext: [...patch.suppressedContext].sort(),
+    // 同理：只在有平整操作时进指纹——没有平整的补丁指纹与引入土方前逐字相同。
+    ...(patch.terrainOps?.length ? { terrainOps: patch.terrainOps } : {}),
   });
   return String(Math.round(hashSeed(canonical) * 1e9));
 }
@@ -266,9 +281,13 @@ export function appendHighwayOp(patch: PlanPatchV1, op: HighwayOp, now = Date.no
   return { ...patch, updatedAt: now, highwayOps: [...(patch.highwayOps ?? []), op] };
 }
 
+export function appendTerrainOp(patch: PlanPatchV1, op: TerrainOp, now = Date.now()): PlanPatchV1 {
+  return { ...patch, updatedAt: now, terrainOps: [...(patch.terrainOps ?? []), op] };
+}
+
 /** 补丁是否什么都没改（会话据此把空补丁存成「无补丁」）。 */
 export function planPatchEmpty(patch: PlanPatchV1): boolean {
-  return !patch.roadOps.length && !(patch.highwayOps?.length) && !patch.siteOps.length && !Object.keys(patch.buildingMoves).length && !patch.suppressedContext.length;
+  return !patch.roadOps.length && !(patch.highwayOps?.length) && !patch.siteOps.length && !Object.keys(patch.buildingMoves).length && !patch.suppressedContext.length && !(patch.terrainOps?.length);
 }
 
 /**
@@ -284,6 +303,7 @@ export function pruneStalePatch(patch: PlanPatchV1, stale: readonly PatchStaleEn
   const highwayLabels = new Set(stale.filter((entry) => entry.kind.startsWith("highway-")).map((entry) => entry.id));
   const buildings = new Set(stale.filter((entry) => entry.kind === "building-move").map((entry) => entry.id));
   const contexts = new Set(stale.filter((entry) => entry.kind === "context-suppress").map((entry) => entry.id));
+  const terrainLabels = new Set(stale.filter((entry) => entry.kind === "terrain-op").map((entry) => entry.id));
   const next: PlanPatchV1 = {
     ...patch, updatedAt: now,
     roadOps: patch.roadOps.filter((op, index) => !roadLabels.has(`${index + 1}:${op.t}`)),
@@ -292,6 +312,7 @@ export function pruneStalePatch(patch: PlanPatchV1, stale: readonly PatchStaleEn
     buildingMoves: Object.fromEntries(Object.entries(patch.buildingMoves).filter(([id]) => !buildings.has(id))),
     ...(patch.moveAnchors ? { moveAnchors: Object.fromEntries(Object.entries(patch.moveAnchors).filter(([id]) => !buildings.has(id))) } : {}),
     suppressedContext: patch.suppressedContext.filter((id) => !contexts.has(id)),
+    ...(patch.terrainOps?.length ? { terrainOps: patch.terrainOps.filter((op, index) => !terrainLabels.has(`${index + 1}:${op.t}`)) } : {}),
   };
   return planPatchEmpty(next) ? null : next;
 }
@@ -712,8 +733,25 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
     patch.siteOps.forEach((op, index) => stale.push({ kind: op.t === "remove" ? "site-remove" : "site-move", id: `${index + 1}:${op.t}`, reason, detail }));
     (patch.highwayOps ?? []).forEach((op, index) => stale.push({ kind: op.t === "add" ? "highway-add" : "highway-cut", id: `${index + 1}:${op.t}`, reason, detail }));
     for (const id of [...patch.suppressedContext].sort()) stale.push({ kind: "context-suppress", id, reason, detail });
+    (patch.terrainOps ?? []).forEach((op, index) => stale.push({ kind: "terrain-op", id: `${index + 1}:${op.t}`, reason, detail }));
     return { layout, stale, patchHash };
   }
+
+  // ── 0.5 玩家土方（docs/CITY_REPAIR_TERRAIN_GRADING_SPEC.md）：地形是最底层，先于道路重放——画路时校验看到的地形
+  //        （已含之前的平整）与重放时一致。坏操作进失效清单、不改地形；操作中心落水不叠（水陆不由补丁改）。──
+  const generatedTerrain = layout.terrain;
+  const terrainOps: TerrainOp[] = [];
+  (patch.terrainOps ?? []).forEach((op, index) => {
+    const id = `${index + 1}:${op.t}`;
+    if (index >= TERRAIN_OP_LIMITS.maxOps) { stale.push({ kind: "terrain-op", id, reason: "terrain-too-many", detail: `一份补丁最多 ${TERRAIN_OP_LIMITS.maxOps} 处平整` }); return; }
+    const problem = terrainOpProblem(op);
+    if (problem) { stale.push({ kind: "terrain-op", id, reason: problem, detail: "平整操作的尺寸或坡度超出允许范围" }); return; }
+    const anchors = op.t === "pad" ? [op.at] : [op.from, op.to];
+    if (anchors.some((p) => !(generatedTerrain.height(p.x, p.z) > 0))) { stale.push({ kind: "terrain-op", id, reason: "terrain-on-water", detail: "平整的中心或端点落在水里" }); return; }
+    terrainOps.push(op);
+  });
+  // 道路重放基准 T_replay = 生成地形 ⊕ 玩家土方；后面的设施/移楼落位也读它。
+  if (terrainOps.length) layout = { ...layout, terrain: applyTerrainOps(generatedTerrain, terrainOps) };
 
   // ── 1. 道路操作日志（删/移/加，按顺序重放）──
   const replayed = patch.roadOps.length ? replayRoadOps(layout, patch.roadOps, stale) : null;
@@ -726,7 +764,9 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   // 回归（2026-10-22，ceaa2cce 之后）：只在生成布局上平整、补丁不重算，旧桥头的土台留在原地，新桥两头都撞 height-conflict，
   // 一键修复从此一座桥也修不好。
   const generatedDecks = new Set(layout.roadEdges.filter((edge) => edge.bridge).map((edge) => edge.id));
-  const terrain = replayed ? regradeRoadLandings(layout.terrain, roadEdges.filter((edge) => !edge.bridge || generatedDecks.has(edge.id))) : layout.terrain;
+  // 最终地形 T_final = 原始地形 ⊕ 生成器土方（只算仍在的生成器桥）⊕ 玩家土方；与 T_replay 只在被擦掉的生成器桥头处不同。
+  const graded = replayed ? regradeRoadLandings(generatedTerrain, roadEdges.filter((edge) => !edge.bridge || generatedDecks.has(edge.id))) : generatedTerrain;
+  const terrain = applyTerrainOps(graded, terrainOps);
   const highways = patch.highwayOps?.length ? replayHighwayOps(layout.highways ?? [], patch.highwayOps, stale) : layout.highways;
   const coastRoads = replayed ? deriveCoastRoads(layout, roadEdges) : layout.coastRoads;
   // 画路生成的地面桥登记进 bridges（渲染层的桁架装饰读它，与生成器的跨河桥同构）；整座擦掉的桥从登记里撤掉——
@@ -757,8 +797,8 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   // ── 3. buildingMoves：目标缺失/被占（按套用顺序先到先得）→ stale；否则换 slot 重算地面高度 ──
   const districts = layout.districts.map((district) => ({ ...district, slots: new Map(district.slots), grounds: new Map(district.grounds), carPaths: district.carPaths }));
   // 重新平整了：城区共用同一份地形，楼的地面高度与生成时同口径（terrain.height(地块)）重取。
-  if (terrain !== layout.terrain) for (const district of districts) {
-    if (district.terrain === layout.terrain) district.terrain = terrain;
+  if (terrain !== generatedTerrain) for (const district of districts) {
+    if (district.terrain === generatedTerrain) district.terrain = terrain;
     for (const [id, slot] of district.slots) district.grounds.set(id, terrain.height(slot.x, slot.z));
   }
   if (Object.keys(patch.buildingMoves).length) {
@@ -818,5 +858,15 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   // 悬索桥是「最长过河桥」的塔架与主缆（地标）：它下面的桥被整座擦掉，塔与缆一起拆（校验提示 erases-suspension-bridge）。
   const unhung = (l: CityLayout["landmarks"][number]) => l.kind === "suspension-bridge" && !!l.to && erasedSpan({ from: l, to: l.to });
   const landmarks = decksDropped && (view.landmarks ?? []).some(unhung) ? view.landmarks.filter((l) => !unhung(l)) : view.landmarks;
-  return { layout: { ...view, roadNodes, roadEdges, districts, ...(terrain !== layout.terrain ? { terrain } : {}), culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}), ...(bridges !== layout.bridges ? { bridges } : {}), ...(landmarks !== view.landmarks ? { landmarks } : {}) }, stale, patchHash };
+  // 玩家土方范围内、布局期按地形算死的高度，与生成时同口径重取（范围外一律不动：没有平整的补丁逐字不变）。
+  const touched = (p: Vec2) => terrainOpsTouch(terrainOps, p.x, p.z);
+  const reground = <T extends Vec2 & { y: number }>(items: readonly T[], floor = -Infinity): T[] =>
+    terrainOps.length && items.some(touched) ? items.map((item) => (touched(item) ? { ...item, y: Math.max(floor, terrain.height(item.x, item.z)) } : item)) : (items as T[]);
+  if (terrainOps.length) for (const district of districts) if (touched(district.plaza)) district.plaza = { ...district.plaza, y: Math.max(0.4, terrain.height(district.plaza.x, district.plaza.z)) };
+  contextBuildings = reground(contextBuildings, 0.3);
+  const heights = terrainOps.length ? {
+    massing: reground(view.massing, 0.3), gardens: reground(view.gardens), parkTrees: reground(view.parkTrees),
+    ...(view.districtLandmarks ? { districtLandmarks: reground(view.districtLandmarks) } : {}),
+  } : {};
+  return { layout: { ...view, ...heights, roadNodes, roadEdges, districts, ...(terrain !== view.terrain ? { terrain } : {}), culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}), ...(bridges !== layout.bridges ? { bridges } : {}), ...(landmarks !== view.landmarks ? { landmarks } : {}) }, stale, patchHash };
 }

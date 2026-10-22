@@ -1,6 +1,6 @@
 # City Repair 地形平整（推土机）系统方案
 
-状态：方案，未实施。日期：2026-10-22。对应 `CITY_REPAIR_UPGRADE_PLAN.md` §3 P3-G（原「暂不做」），由本文取代其中的简述。
+状态：T0（数据层）已实施（2026-10-22，见 §14）；T1–T3 未做。日期：2026-10-22。对应 `CITY_REPAIR_UPGRADE_PLAN.md` §3 P3-G（原「暂不做」），由本文取代其中的简述。
 前置：`bdd27d80`（补丁改路后按原始地形重新平整；玩家画的桥不自动垫土）。
 
 ## 0. 结论
@@ -225,3 +225,22 @@ T0 不带 UI，可以先合入；T1 起在修复模式内可见。
 - **与生成器土方的交互**：玩家在生成器土台上再平整时，两层的过渡带会叠加；需要合成用例覆盖「平台压在生成器桥头上」。
 - **补丁存档兼容**：新字段可缺省、指纹只在非空时变化，旧客户端读到含 `terrainOps` 的补丁时会忽略该字段，导致显示不一致——需要在存档里带最低版本号，旧客户端遇到时只读提示，而不是静默丢弃。
 - **视觉**：大面积平整会在自然地形上留下几何感明显的平台。过渡带用 smoothstep 并有最小宽度，首版接受；地表材质（草/土）随坡度变化已由地形着色器处理。
+
+## 14. 实施记录
+
+### T0 数据层（2026-10-22）
+
+§12 四项按建议默认值执行：约束值照 §4.3；可挖可垫（下限受「不改水陆」约束）；全图可用与快捷键 G 属于 T1，到时再落。
+
+| 落点 | 内容 |
+| --- | --- |
+| `engine/surface/terrainOps.ts` | `TerrainOp`（pad / ramp）、`terrainOpProblem`（静态约束）、`applyTerrainOps`（按序叠加、网格桶索引、按下层地形对象缓存最近 8 份、空操作返回原对象）、`terrainBeneathOps`、`terrainOpsTouch` |
+| `engine/planPatch.ts` | `PlanPatchV1.terrainOps?`；`coercePlanPatch` 宽容读回；指纹只在非空时变化；`appendTerrainOp`、`planPatchEmpty`、`pruneStalePatch` 支持；失效码 `terrain-op` × `terrain-invalid / -too-large / -ramp-too-short / -ramp-too-steep / -on-water / -too-many`；`applyPlanPatch` 按 §3 两个基准套用，范围内的背景楼 / 花园 / 公园树 / 城区地标 / massing / 广场落地高度同口径重取，范围外逐字不动 |
+| `engine/planRemap.ts` | 跨档：坐标与尺寸按半径比缩放，高度不缩放；越界或落水由新档重放的失效清单剔除 |
+| `scripts/verify-plan-terrain.mjs`（清单第 113 项） | §10 的纯函数、补丁、真实城市（7/2）各层；「范围内跟着新地面」在花园、公园树、城区地标上各有实测对象，去掉重取逻辑时守卫会红 |
+
+与 §4.3 的差异：山体约束实现为「下层高度 11–12 平滑淡出、≥ 12 不动」，而不是在 12 处硬切，避免山脚台阶；
+近水 0–0.2 同样淡入（与生成器土方同口径），水线处连续。广场落地高度在没有就近公共设施时原本取固定值 3，平台压到它时会改按地形取高——这种城区极少，T1 再看是否需要特判。
+
+回归（本机）：City 类型检查、导入边界、`verify-plan-{patch,remap,sites,bulldozer,road-rules,repair-controller,repair-copy,repair-bridgehead,repair-drivability}`、`verify-city-coastal-receivers`、`verify-city-verification` 全部通过；没有平整的补丁指纹、地形对象与此前逐字相同，渲染与场景基线未重冻。
+
