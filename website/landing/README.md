@@ -59,7 +59,7 @@ Current brand captures are in `docs/assets/oh-agent-2026-10-16/` from repository
 
 ## Public release
 
-The repository `https://github.com/Oh-Agent-AI/oh-agent` was verified public on 2026-10-19 and the FAQ links to it in both locales. The GitHub Releases page is empty, so desktop downloads remain unavailable. Before changing that release state, verify downloadable assets, supported architectures and system requirements, signing and notarization; then update both locales and the verifier's release-state assertion. Domain availability does not mean the desktop release is ready.
+The repository `https://github.com/MixLabPro/oh-agent-ai` was verified public on 2026-10-19 and moved to `https://github.com/Oh-Agent-AI/oh-agent` on 2026-10-22 and the FAQ links to it in both locales. The GitHub Releases page is empty, so desktop downloads remain unavailable. Before changing that release state, verify downloadable assets, supported architectures and system requirements, signing and notarization; then update both locales and the verifier's release-state assertion. Domain availability does not mean the desktop release is ready.
 
 Canonical and social metadata point to `https://ohagent.ai/`. The domain was accessed successfully during the 2026-10-16 browser review. Cloudflare Pages project: `oh-agent-landing`; production alias: `oh-agent-landing.pages.dev`. Review deployment changes separately from local preview work; this README update does not deploy anything.
 

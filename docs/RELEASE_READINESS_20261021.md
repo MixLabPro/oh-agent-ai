@@ -31,8 +31,8 @@ Windows 当前流程没有证书签名接入；未签名不能标为已签名。
 未进行本轮全量 Rust/Python/City 测试，不宣称全绿。远端 Windows/Linux 成功记录为旧 SHA，不是新主线质量证明。菜单栏错误归属已在本机清理，用户确认图标恢复，这是本机设置恢复，不是代码发布证据。
 
 远端证据：
-- Verify 失败：https://github.com/Oh-Agent-AI/oh-agent/actions/runs/39234593924
-- 旧版平台包成功：https://github.com/Oh-Agent-AI/oh-agent/actions/runs/39234593925
+- Verify 失败：https://github.com/MixLabPro/oh-agent-ai/actions/runs/39234593924
+- 旧版平台包成功：https://github.com/MixLabPro/oh-agent-ai/actions/runs/39234593925
 
 ## 建议执行次序
 
@@ -52,3 +52,5 @@ Windows 当前流程没有证书签名接入；未签名不能标为已签名。
 - CCD v7 的17条历史差分及4条几何16接触复现、连续驾驶守卫、typecheck 通过。真实1000/7指定桥端两向重跑为 pilot-failed，无 simulation-invalid，仍不能开放为已认证通行。7/2桥头仍未关闭。
 
 原生最新源码打包、公证、30分钟长测和当前提交三平台验收仍待完成。此前表格中的这些阻断仍有效。
+
+> 2026-10-22 仓库迁移补记：当前地址为 https://github.com/Oh-Agent-AI/oh-agent 。上文保留当时检查的地址与结论，不代表新地址的当前可用性。
