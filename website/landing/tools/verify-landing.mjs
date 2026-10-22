@@ -218,7 +218,7 @@ function host({ desktop = false, reduced = false, protocol = 'http:' } = {}) {
     createElement: () => (created = new Element()), addEventListener: (name, handler) => { events[name] = handler; } };
   const context = { document, window, location: { origin: 'http://localhost', protocol },
     matchMedia: (query) => ({ matches: query.includes('min-width') ? desktop : reduced }),
-    fetch: (url, opts) => { requested++; assert.equal(url, 'city3d/index.html'); assert.equal(opts.credentials, 'omit'); return fetchResult; },
+    fetch: (url, opts) => { requested++; assert.equal(url, 'city3d/'); assert.equal(opts.credentials, 'omit'); return fetchResult; },
     setTimeout: (f) => { timers.set(++timeId, f); return timeId; }, clearTimeout: (id) => timers.delete(id),
     IntersectionObserver: class { constructor(fn) { fn([{ isIntersecting: true }]); } observe() {} } };
   vm.runInNewContext(read('city-host.js'), context);
@@ -255,10 +255,10 @@ assert.equal(seven.source, 'fixture');
 assert.equal(seven.harnesses.length, 4);
 assert.deepEqual(JSON.parse(JSON.stringify(seven)), JSON.parse(JSON.stringify(h.readProjection(7))), 'Fixture must be deterministic');
 const thirty = h.readProjection(30);
-assert.equal(thirty.sessions.length, 2000, 'The default mock city must receive all 2000 sessions');
-assert.equal(thirty.coverage.returned, 2000);
+assert.equal(thirty.sessions.length, 800, 'The default mock city must receive all 800 sessions (City scale tier 2)');
+assert.equal(thirty.coverage.returned, 800);
 assert.equal(thirty.coverage.truncated, false);
-assert.equal(seven.sessions.length, 469, 'The week remains a filtered subset of the same 2000-session dataset');
+assert.equal(seven.sessions.length, 189, 'The week remains a filtered subset of the same 800-session dataset');
 assert.ok(seven.sessions.length > 0 && thirty.sessions.length > seven.sessions.length);
 assert.ok(seven.sessions.every((session) => Date.parse(session.last_event_at) >= Date.parse(seven.window.from)));
 const count = h.frame().sent.length;

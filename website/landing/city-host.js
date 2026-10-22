@@ -34,7 +34,10 @@
       { id: 'claude_code', display_name: 'Claude Code' }, { id: 'codex', display_name: 'Codex' },
       { id: 'deepseek_harness', display_name: 'DeepSeek Harness' }, { id: 'workbuddy', display_name: 'WorkBuddy' },
     ].map((h) => ({ ...h, capabilities: { session_statistics: { available: true }, findings: { available: false, reason: 'sample_only' } } }));
-    const all = Array.from({ length: 2000 }, (_, i) => {
+    // 800 sessions keeps the sample at City scale tier 2. The current planner runs a
+    // full road/block plan in a worker; 2000 sessions (tier 5) took ~25 s before the
+    // first model frame, longer than the startup timeout, so the hero never left loading.
+    const all = Array.from({ length: 800 }, (_, i) => {
       const start = to - (i % 30) * 86400000 - Math.floor(rnd() * 72000000) - 7200000;
       const end = start + (10 + Math.floor(rnd() * 75)) * 60000;
       const total = Math.floor(50000 + Math.pow(rnd(), 2) * 4000000);
@@ -142,8 +145,10 @@
     state('loading', t('city.loading'));
     const attempt = ++generation;
     instance = `av-landing-city-${attempt}`;
-    timer = setTimeout(() => { if (generation === attempt) fail('city.timeout'); }, 20000);
-    fetch(`${root}city3d/index.html`, { method: 'HEAD', credentials: 'omit' }).then((response) => {
+    // The City overlay shows live planner progress, so allow slow machines time to finish.
+    timer = setTimeout(() => { if (generation === attempt) fail('city.timeout'); }, 60000);
+    // Request the directory URL directly: Cloudflare Pages 308-redirects /city3d/index.html to /city3d/.
+    fetch(`${root}city3d/`, { method: 'HEAD', credentials: 'omit' }).then((response) => {
       if (generation !== attempt) return;
       if (!response.ok) { fail(); return; }
       frame = document.createElement('iframe');
@@ -151,7 +156,7 @@
       frame.title = locale.lang === 'zh' ? 'Agent City 样例城市 · 模拟数据' : 'Agent City sample · synthetic data';
       frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
       frame.referrerPolicy = 'no-referrer';
-      frame.src = `${root}city3d/index.html?instanceId=${encodeURIComponent(instance)}&locale=${locale.lang === 'zh' ? 'zh-Hans' : 'en'}&presentation=landing&windowDays=${range.value}`;
+      frame.src = `${root}city3d/?instanceId=${encodeURIComponent(instance)}&locale=${locale.lang === 'zh' ? 'zh-Hans' : 'en'}&presentation=landing&windowDays=${range.value}`;
       frame.addEventListener('error', () => { if (generation === attempt) fail(); }, { once: true });
       stage.append(frame);
       stop.disabled = false;
@@ -173,7 +178,7 @@
     state('loading', t('city.updating'));
     command('city.window', range.value);
     clearTimeout(timer);
-    timer = setTimeout(() => fail('city.timeout'), 10000);
+    timer = setTimeout(() => fail('city.timeout'), 60000);
   });
   new IntersectionObserver(([entry]) => {
     visible = entry.isIntersecting;
