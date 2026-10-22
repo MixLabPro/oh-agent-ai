@@ -13,6 +13,7 @@ mod quota_alerts;
 mod plugin_host;
 mod plugin_projections;
 mod plugin_state;
+mod update_check;
 // 「测试」板 Claude IP 风险自检：全部出站探测收敛在此模块（离线包契约：React
 // 源码不得含远端 URL / 网络客户端），并按 scutil --proxy 对齐系统代理路由。
 mod ip_check;
@@ -4163,40 +4164,54 @@ fn about_diagnostics() -> Value {
     })
 }
 
-const TRUSTED_RELEASES_URL: &str = "https://github.com/Oh-Agent-AI/oh-agent/releases";
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/Oh-Agent-AI/oh-agent/releases/latest";
+use update_check::TRUSTED_RELEASES_URL;
 
-fn parse_latest_release_tag(payload: &Value) -> Result<String, String> {
-    let tag = payload
-        .get("tag_name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "trusted release response has no tag_name".to_string())?;
-    if !tag.starts_with("app-v") {
-        return Err(format!("trusted release tag is not an app release: {tag}"));
-    }
-    Ok(tag.to_string())
-}
-
+/// 应用内版本检查：拉取 `/releases` 列表（`/releases/latest` 会跳过 prerelease，
+/// beta 用户因此永远收不到下一个 beta），再由 `update_check::select_update`
+/// 按通道与 semver 选候选。只报告、不下载、不安装（automatic_install 恒为 false）。
+/// 列表为空 / 404 → no_release；限流（403/429）或当前版本号无法解析 → unavailable，
+/// 都不当作错误弹给用户。
 #[tauri::command]
 async fn check_for_updates() -> Result<Value, String> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let unavailable = |reason: &str| {
+        serde_json::json!({
+            "status": "unavailable",
+            "reason": reason,
+            "current_version": current_version,
+            "url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        })
+    };
+    let no_release = || {
+        serde_json::json!({
+            "status": "no_release",
+            "current_version": current_version,
+            "url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        })
+    };
+    let Ok(current) = semver::Version::parse(current_version) else {
+        return Ok(unavailable("invalid_current_version"));
+    };
     let client = reqwest::Client::builder()
-        .user_agent(format!("agent-vitals/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("agent-vitals/{current_version}"))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|error| format!("build update client failed: {error}"))?;
     let response = client
-        .get(LATEST_RELEASE_API)
+        .get(update_check::RELEASES_API)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
         .map_err(|error| format!("check updates failed: {error}"))?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
-        return Ok(serde_json::json!({
-            "status": "no_release",
-            "current_version": env!("CARGO_PKG_VERSION"),
-            "url": TRUSTED_RELEASES_URL,
-            "automatic_install": false,
-        }));
+        return Ok(no_release());
+    }
+    // GitHub 未认证限流返回 403/429：属于"暂时拿不到版本信息"，不是故障。
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Ok(unavailable("rate_limited"));
     }
     if !status.is_success() {
         return Err(format!("check updates returned HTTP {status}"));
@@ -4205,11 +4220,17 @@ async fn check_for_updates() -> Result<Value, String> {
         .json()
         .await
         .map_err(|error| format!("parse update response failed: {error}"))?;
-    let tag = parse_latest_release_tag(&payload)?;
+    let Some(selection) = update_check::select_update(&current, &payload) else {
+        return Ok(no_release());
+    };
     Ok(serde_json::json!({
         "status": "ok",
-        "current_version": env!("CARGO_PKG_VERSION"),
-        "latest_tag": tag,
+        "current_version": current_version,
+        "channel": if current.pre.is_empty() { "stable" } else { "prerelease" },
+        "latest_tag": selection.latest.tag,
+        "latest_prerelease": selection.latest.prerelease,
+        "update_available": selection.update_available,
+        "release_url": selection.latest.release_url,
         "url": TRUSTED_RELEASES_URL,
         "automatic_install": false,
     }))
@@ -7977,15 +7998,5 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"keep-current");
         assert!(!root.join("authority.sqlite.pre-restore-43.bak").exists());
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn latest_release_parser_accepts_only_app_tags() {
-        assert_eq!(
-            parse_latest_release_tag(&serde_json::json!({"tag_name": "app-v1.0.0"})).unwrap(),
-            "app-v1.0.0"
-        );
-        assert!(parse_latest_release_tag(&serde_json::json!({})).is_err());
-        assert!(parse_latest_release_tag(&serde_json::json!({"tag_name": "v1.0.0"})).is_err());
     }
 }
