@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use super::extension_installer::{self, LocalInputBinding};
 use super::local_manifest_install;
 
-pub const OFFICIAL_INDEX_URL: &str = "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/catalog/index.json";
+pub const OFFICIAL_INDEX_URL: &str = "https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/main/catalog/index.json";
 pub const MAX_GROUP_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_GROUP_ENTRIES: usize = 64;
 
@@ -58,7 +58,7 @@ pub fn official_payload_url(entry: &Value) -> Result<String, String> {
     index["entries"][0]["dependencies"] = json!([]);
     catalog_index::validate_catalog(&index, &harness_slot_support(), &CapabilitySet::default().app_version,
         &"0".repeat(64), None).map_err(str::to_string)?;
-    Ok(format!("https://raw.githubusercontent.com/MixLabPro/agent-vitals/{}/{}",
+    Ok(format!("https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/{}/{}",
         entry["revision"].as_str().ok_or("catalog revision")?,
         entry["payload_path"].as_str().ok_or("catalog path")?))
 }
@@ -277,7 +277,7 @@ mod tests {
         let index: Value = serde_json::from_slice(&index).unwrap();
         let mut entry = index["entries"][0].clone();
         assert_eq!(official_payload_url(&entry).unwrap(), format!(
-            "https://raw.githubusercontent.com/MixLabPro/agent-vitals/{}/catalog/harnesses/zcode/manifest.json", "a".repeat(40)));
+            "https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/{}/catalog/harnesses/zcode/manifest.json", "a".repeat(40)));
         for path in ["../private.json", "https://evil.example/payload.json", "/catalog/a.json"] {
             entry["payload_path"] = json!(path);
             assert!(official_payload_url(&entry).is_err());

@@ -45,6 +45,10 @@ for(let x=0;x<=40;x+=.25){
  assert.ok(h>=raw.height(x,0)&&h-raw.height(x,0)<=1.2+1e-10,'bounded fill, no excavation');
 }
 assert.equal(graded.height(-10,0),raw.height(-10,0),'water is not reclaimed');
+const shallow={...raw,height:(x,z)=>x < -8 && x > -15?.3:raw.height(x,z)};
+const shallowGraded=gradeRoadLandings(shallow,roads);
+assert.equal(shallowGraded.height(-10,0),.3,'shallow positive-height water under the bridge is not reclaimed');
+assert.equal(shallowGraded.height(0,0),graded.height(0,0),'protecting the channel preserves the abutment pad');
 assert.equal(graded.height(0,60),raw.height(0,60),'remote terrain stays exact');
 for(const delta of [-1e-5,1e-5])assert.ok(Math.abs(graded.height(0,30+delta)-raw.height(0,30+delta))<1e-8,'shoulder rejoins original terrain continuously');
 assert.ok(Number.isFinite(graded.slope(0,0)));assert.ok(graded.slope(0,0)<1e-10,'the graded core is flat');

@@ -4,7 +4,7 @@ version = "1.4.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Agent Vitals read side (layers L2-L3): source configuration, session shims, SQL summary repository, trace, export"
-repository = "https://github.com/MixLabPro/agent-vitals"
+repository = "https://github.com/Oh-Agent-AI/oh-agent"
 license = "MIT"
 
 # W3 第 4 步：从 agent-vitals-runtime 拆出。只能依赖 runtime-core（地基层）与

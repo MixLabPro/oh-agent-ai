@@ -3019,7 +3019,7 @@ session_store={store} fold={fold}"
         };
         let mut status = read("manifest-catalog-update.json").unwrap_or_else(|| {
             serde_json::json!({ "state": "never_checked",
-                "source_url": "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/catalog/index.json" })
+                "source_url": "https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/main/catalog/index.json" })
         });
         let network_enabled = read("manifest-catalog-policy.json")
             .and_then(|policy| policy.get("network_enabled").and_then(|v| v.as_bool()))

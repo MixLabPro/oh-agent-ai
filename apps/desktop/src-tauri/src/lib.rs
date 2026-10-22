@@ -3254,7 +3254,7 @@ fn save_ui_language_config(app: AppHandle, language: String) -> Result<Value, St
 /// 内置底表合并成完整快照入库；旧链路拉的是完整 `pricing.json` 且只存它一份，
 /// 快照里没有 `codex_pricing`，开启更新后 codex 用量会全部算不出金额。
 const PUBLIC_PRICING_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/pricing-sync.json";
+    "https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/main/assets/pricing-sync.json";
 /// 6 小时而非 24 小时：CI 每天发布一次叠加层，24 小时的检查间隔叠上发布时间
 /// 会让新模型的价卡最晚拖近两天才到。拉的是本仓库十几 KB 的静态文件、不带任何
 /// 用户数据，多检查几次没有隐私代价。
@@ -3262,7 +3262,7 @@ const PUBLIC_PRICING_CATALOG_URL: &str =
 /// 与价卡同一个开关、同一类请求：固定公开 HTTPS 地址、纯静态文件、不带任何用户数据；
 /// 校验不过只丢弃，当前生效的汇率（已同步的或内置的）原样保留。
 const PUBLIC_FX_SNAPSHOT_URL: &str =
-    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/fx-sync.json";
+    "https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/main/assets/fx-sync.json";
 const PRICING_CHECK_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
 const PRICING_UPDATE_STATUS_FILE: &str = "pricing-catalog-update.json";
 const PRICING_UPDATE_POLICY_FILE: &str = "pricing-catalog-policy.json";
@@ -4163,8 +4163,8 @@ fn about_diagnostics() -> Value {
     })
 }
 
-const TRUSTED_RELEASES_URL: &str = "https://github.com/MixLabPro/agent-vitals/releases";
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/MixLabPro/agent-vitals/releases/latest";
+const TRUSTED_RELEASES_URL: &str = "https://github.com/Oh-Agent-AI/oh-agent/releases";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/Oh-Agent-AI/oh-agent/releases/latest";
 
 fn parse_latest_release_tag(payload: &Value) -> Result<String, String> {
     let tag = payload

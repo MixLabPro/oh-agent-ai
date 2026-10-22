@@ -24,7 +24,8 @@ permissions:
 jobs:
   catalog_contract:
     name: 官方目录发布契约
-    runs-on: ubuntu-latest
+    # Python 3.9 binaries are published for 24.04; ubuntu-latest now selects 26.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,7 +62,8 @@ jobs:
   # ── 1. Python 侧：oracle 本身必须是绿的 ──────────────────
   python:
     name: Python 套件
-    runs-on: ubuntu-latest
+    # Python 3.9 binaries are published for 24.04; ubuntu-latest now selects 26.04.
+    runs-on: ubuntu-24.04
     env:
       # Broad compatibility tests use the product's explicit Asia/Shanghai
       # fixture timezone; focused timezone tests still exercise other zones.
@@ -102,7 +104,8 @@ jobs:
   # ── 3. 差分：本流水线的重点 ──────────────────────────────
   differential:
     name: 双实现差分
-    runs-on: ubuntu-latest
+    # Python 3.9 binaries are published for 24.04; ubuntu-latest now selects 26.04.
+    runs-on: ubuntu-24.04
     env:
       TZ: Asia/Shanghai
     needs: probe
@@ -150,7 +153,8 @@ jobs:
   # ── 4. 降级：畸形语料不得中断扫描（ENGINEERING §4.5）─────
   degradation:
     name: 畸形语料不中断扫描
-    runs-on: ubuntu-latest
+    # Python 3.9 binaries are published for 24.04; ubuntu-latest now selects 26.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

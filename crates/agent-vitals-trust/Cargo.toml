@@ -4,7 +4,7 @@ version = "1.4.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Agent Vitals runtime layer: trust (W3 split)"
-repository = "https://github.com/MixLabPro/agent-vitals"
+repository = "https://github.com/Oh-Agent-AI/oh-agent"
 license = "MIT"
 
 [lib]

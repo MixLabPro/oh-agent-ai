@@ -4,7 +4,7 @@ version = "1.4.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Agent Vitals runtime foundation (layers L0-L1): HomeResolver, clock, lease, state, pricing cards, tool envelope, event outbox, skills scanner"
-repository = "https://github.com/MixLabPro/agent-vitals"
+repository = "https://github.com/Oh-Agent-AI/oh-agent"
 license = "MIT"
 
 # W3（docs/ARCHITECTURE_OPTIMIZATION_GUIDE.md）：从 agent-vitals-runtime 拆出的

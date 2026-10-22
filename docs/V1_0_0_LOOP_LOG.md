@@ -2037,7 +2037,7 @@
 
 ## Loop 288 · 远端版本发布前置核对
 
-- 核对：`origin` 为 `https://github.com/MixLabPro/agent-vitals.git`，只读执行
+- 核对：`origin` 为 `https://github.com/Oh-Agent-AI/oh-agent.git`，只读执行
   `git ls-remote --tags origin 'refs/tags/app-v*'` 没有返回任何 `app-v*` tag；latest
   Release API 同样返回 404。
 - 结论：正式 workflow 已具备双架构、签名、公证和校验和门禁，但当前没有可验证的

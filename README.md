@@ -7,7 +7,7 @@ an explorable city — and helps you understand the activity and token usage beh
 
 **Your agents built it. Now explore it.**
 
-[Explore the demo](https://ohagent.ai/) · [Source repository](https://github.com/MixLabPro/oh-agent-ai) · [中文](#中文) ·
+[Explore the demo](https://ohagent.ai/) · [Source repository](https://github.com/Oh-Agent-AI/oh-agent) · [中文](#中文) ·
 [Desktop development](apps/desktop/src-tauri/README.md) · [MIT license](LICENSE)
 
 ## What is Oh Agent?
@@ -149,7 +149,7 @@ preserves earlier explanations; its old matrices are not current support guarant
 - **看懂用量与费用：** 订阅费、名义估算与真实支出分开呈现，未知金额不当作零。
 - **让历史更好玩：** 桌面 City 已提供自由飞行、穿环挑战和自由驾驶；公开安装包仍在发布准备中。
 
-源代码与开发历史见 [GitHub 仓库](https://github.com/MixLabPro/oh-agent-ai)。
+源代码与开发历史见 [GitHub 仓库](https://github.com/Oh-Agent-AI/oh-agent)。
 
 **官网演示不等于桌面全部功能。** [ohagent.ai](https://ohagent.ai/?lang=zh)
 使用真实 City 前端和 2000 条模拟会话，不读取你的日志。目前落地页隐藏了游戏入口，
