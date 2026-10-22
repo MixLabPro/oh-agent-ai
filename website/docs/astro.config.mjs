@@ -55,6 +55,8 @@ export default defineConfig({
     starlight({
       title: 'Oh Agent Docs',
       favicon: '/favicon.png',
+      customCss: ['./src/styles/custom.css'],
+      logo: { src: './src/assets/app-icon.png', alt: 'Oh Agent' },
       description: 'Docs for Oh Agent, a free, open-source, local-first app that turns Claude Code and Codex session history into a 3D city. Beta for Apple Silicon Mac, Windows and Linux.',
       // Root locale = English (no prefix). Chinese lives under /docs/zh/.
       defaultLocale: 'root',
