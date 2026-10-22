@@ -872,7 +872,7 @@
       case "about_diagnostics": return { status: "ok", app_version: "browser-mock", cli_version: "browser-mock", engine_version: "browser-mock", architecture: "browser-mock", authority_schema: "browser-mock", statistics_timezone: timezone, pricing: { version: "public-browser-mock", captured_at_ms: Date.now() - 3600000 }, sync: { ok: true, message: "浏览器样式调试数据" } };
       case "open_trusted_releases_page": return { status: "opened", url: "https://example.invalid/releases", automatic_install: false };
       case "restore_authority_backup": return { status: "cancelled" };
-      case "check_for_updates": return { status: "ok", current_version: "browser-mock", latest_tag: "app-v1.0.0", url: "https://example.invalid/releases", automatic_install: false };
+      case "check_for_updates": return { status: "ok", current_version: "browser-mock", latest_tag: "app-v1.0.0", update_available: true, url: "https://example.invalid/releases", automatic_install: false };
       // Shape: apps/desktop/src-tauri/src/lib.rs:2776 quota_reminder_config() -> {status, enabled}
       // 用户补的价卡：{cards: {<provider>: {<model>: {input_uncached,input_cached,output}}}}，
       // 形状与 assets/pricing.json 的 providers 段同形。

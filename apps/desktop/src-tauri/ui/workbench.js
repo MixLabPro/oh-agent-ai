@@ -1678,8 +1678,10 @@ function bindUpdateCheck() {
     try {
       const result = await invoke("check_for_updates");
       status.textContent = result && result.latest_tag
-        ? "当前包 " + (result.current_version || "—") + " · 最新发布 " + result.latest_tag + "；请从可信发布页确认安装。"
-        : "未找到可用的 app-v 发布。";
+        ? (result.update_available
+          ? "有新版本 " + result.latest_tag + "（当前包 " + (result.current_version || "—") + "）；请从可信发布页下载，不会自动安装。"
+          : "当前包 " + (result.current_version || "—") + " · 最新发布 " + result.latest_tag + "；请从可信发布页确认安装。")
+        : (result && result.status === "unavailable" ? "版本检查暂不可用（可能被 GitHub 限流），稍后再试。" : "未找到可用的 app-v 发布。");
     } catch (e) {
       status.textContent = "检查新版本失败：" + errText(e);
     } finally { button.disabled = false; }

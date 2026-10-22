@@ -262,7 +262,7 @@ function AboutSection({ report, loading, error, onReload }: AboutSectionProps) {
   const checkUpdates = async () => {
     if (checking) return;
     setChecking(true); setActionError(null); setMessage(null);
-    try { const result = await checkForUpdates(); if (mounted.current) { setUpdate(result); setMessage(result.status === "ok" && result.latestTag ? tr("about.updateCurrent", { current: result.currentVersion ?? tr("about.notAvailable"), latest: result.latestTag }) : tr(result.status === "no_release" ? "about.updateNoRelease" : "about.updateUnavailable")); } }
+    try { const result = await checkForUpdates(); if (mounted.current) { setUpdate(result); setMessage(result.status === "ok" && result.latestTag ? tr(result.updateAvailable ? "about.updateAvailable" : "about.updateCurrent", { current: result.currentVersion ?? tr("about.notAvailable"), latest: result.latestTag }) : tr(result.status === "no_release" ? "about.updateNoRelease" : "about.updateUnavailable")); } }
     catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, tr("about.updateFailed"))); }
     finally { if (mounted.current) setChecking(false); }
   };

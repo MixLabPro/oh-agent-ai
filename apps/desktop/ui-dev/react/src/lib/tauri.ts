@@ -202,7 +202,7 @@ export type AboutDiagnosticsReport = {
   sync: { state: "ok" | "needs_attention" | "unknown" };
 };
 export type DiagnosticExportReceipt = { status: "saved" | "cancelled"; uploadPerformed: false };
-export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; currentVersion: string | null; latestTag: string | null; automaticInstall: false };
+export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; currentVersion: string | null; latestTag: string | null; updateAvailable: boolean; automaticInstall: false };
 
 export type SkillHarnessSummary = { harness: string; skills_on_disk: number; discoverable_skills: number; runtime_verified_loaded_skills: number | null; unique_discoverable_skills: number; description_budget: { available: boolean; used_chars: number | null; budget_chars: number | null; pct_used: number | null; source: string | null }; trigger_data: "available" | "unavailable" | "unknown" };
 export type SkillDiagnostic = { code: string; name: string; severity: "critical" | "warning" | "info"; skill: string | null; evidence_count: number; impact: string | null; recommendation: string | null; caveats: string[] };
@@ -1361,7 +1361,9 @@ function parseUpdateCheck(value: unknown): UpdateCheckResult {
   const latestTag = root.latest_tag == null ? null : stringField(root.latest_tag, "latest release tag");
   if (latestTag !== null && !/^app-v[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(latestTag)) throw new Error("最新发布标签不安全");
   if (root.automatic_install !== false) throw new Error("自动安装状态不安全");
-  return { status, currentVersion, latestTag, automaticInstall: false };
+  // 后端按通道（beta 用户看 beta + 正式版，正式版用户只看正式版）与 semver 比较后给出；缺省视为无更新。
+  const updateAvailable = status === "ok" && latestTag !== null && root.update_available === true;
+  return { status, currentVersion, latestTag, updateAvailable, automaticInstall: false };
 }
 
 function safeSkillText(value: unknown, label: string): string | null {
@@ -2861,8 +2863,8 @@ export async function saveDiagnosticPackage(): Promise<DiagnosticExportReceipt> 
 
 export async function checkForUpdates(): Promise<UpdateCheckResult> {
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return { status: "no_release", currentVersion: "browser-preview", latestTag: null, automaticInstall: false };
-  try { return parseUpdateCheck(await handler("check_for_updates")); } catch { return { status: "unavailable", currentVersion: null, latestTag: null, automaticInstall: false }; }
+  if (!handler) return { status: "no_release", currentVersion: "browser-preview", latestTag: null, updateAvailable: false, automaticInstall: false };
+  try { return parseUpdateCheck(await handler("check_for_updates")); } catch { return { status: "unavailable", currentVersion: null, latestTag: null, updateAvailable: false, automaticInstall: false }; }
 }
 
 export async function openTrustedReleasesPage(): Promise<{ status: "opened" }> {
