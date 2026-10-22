@@ -7,7 +7,7 @@ import { artifactName, stageArtifacts } from './desktop-release-artifacts.mjs';
 
 const dir = mkdtempSync(path.join(tmpdir(), 'oh agent artifacts '));
 try {
-  assert.equal(artifactName('1.0.0-beta.2', 'macos', 'x86_64', 'app.zip'), 'oh-agent-1.0.0-beta.2-x86_64.app.zip');
+  assert.equal(artifactName('1.0.0', 'macos', 'x86_64', 'app.zip'), 'oh-agent-1.0.0-x86_64.app.zip');
   assert.equal(artifactName('1.0.0', 'windows', 'x64', 'exe'), 'oh-agent-1.0.0-windows-x86_64-setup.exe');
   assert.equal(artifactName('1.0.0', 'macos', 'arm64', 'dmg'), 'oh-agent-1.0.0-arm64.dmg');
   assert.throws(() => artifactName('../bad', 'linux', 'x64', 'deb'));

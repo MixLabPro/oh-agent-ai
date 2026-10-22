@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Durable evidence + queryable projection layer for Agent Vitals (v0.9 Data Foundation)"
-repository = "https://github.com/MixLabPro/agent-vitals"
+repository = "https://github.com/Oh-Agent-AI/oh-agent"
 license = "MIT"
 
 [lib]

@@ -31,8 +31,8 @@ Windows 当前流程没有证书签名接入；未签名不能标为已签名。
 未进行本轮全量 Rust/Python/City 测试，不宣称全绿。远端 Windows/Linux 成功记录为旧 SHA，不是新主线质量证明。菜单栏错误归属已在本机清理，用户确认图标恢复，这是本机设置恢复，不是代码发布证据。
 
 远端证据：
-- Verify 失败：https://github.com/MixLabPro/oh-agent-ai/actions/runs/39234593924
-- 旧版平台包成功：https://github.com/MixLabPro/oh-agent-ai/actions/runs/39234593925
+- Verify 失败：https://github.com/Oh-Agent-AI/oh-agent/actions/runs/39234593924
+- 旧版平台包成功：https://github.com/Oh-Agent-AI/oh-agent/actions/runs/39234593925
 
 ## 建议执行次序
 

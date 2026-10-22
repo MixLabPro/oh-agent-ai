@@ -28,7 +28,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MixLabPro/agent-vitals.git",
+    "url": "git+https://github.com/Oh-Agent-AI/oh-agent.git",
     "directory": "dsh"
   },
   "dsh": {

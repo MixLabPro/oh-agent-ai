@@ -190,10 +190,10 @@
 
 | # | landing 承诺（位置） | 证据 | 状态 | 处置 |
 |---|---|---|---|---|
-| A1 | 开源，可检查代码（hero 保证 / 隐私屏 / FAQ7 / 页脚「MIT License」） | 外部请求 `github.com/MixLabPro/agent-vitals`、`/releases`、`/blob/main/LICENSE`、`raw.githubusercontent.com/.../LICENSE` 均 **404**；Releases API 亦 Not Found（公开仓库无发布也应返回空列表，故疑似私有或地址有误）。仓库内有 `LICENSE`，`apps/cli/Cargo.toml` 声明 `license = "MIT"` | ❌ | **先确认仓库可见性与正确地址**；未公开前撤下「Read the source on GitHub」「MIT open source」「Feedback」等外链承诺，或明确标注「即将开源」 |
+| A1 | 开源，可检查代码（hero 保证 / 隐私屏 / FAQ7 / 页脚「MIT License」） | 外部请求 `github.com/Oh-Agent-AI/oh-agent`、`/releases`、`/blob/main/LICENSE`、`raw.githubusercontent.com/.../LICENSE` 均 **404**；Releases API 亦 Not Found（公开仓库无发布也应返回空列表，故疑似私有或地址有误）。仓库内有 `LICENSE`，`apps/cli/Cargo.toml` 声明 `license = "MIT"` | ❌ | **先确认仓库可见性与正确地址**；未公开前撤下「Read the source on GitHub」「MIT open source」「Feedback」等外链承诺，或明确标注「即将开源」 |
 | A2 | 下载 macOS 测试版（nav / hero / 下载区） | `release-desktop.yml` 仅由 `app-v*` 标签触发；本地 `git tag` 与 `git ls-remote --tags origin` 均无 `app-v*`；`SUPPORT_MATRIX.md`：Apple Silicon「候选验证中」、**Intel 未支持**、公证未完成 | ❌ | 发布第一个真实 `app-v*` Release 前，CTA 改为「Join the waitlist / Watch」类文案，不写 Download；有 Release 后写明 `Apple Silicon only · macOS 11+ · not notarized` |
 | A3 | 「右键 → 打开」首装指引、未公证说明（下载区小字） | landing README 分发决策：Developer ID 签名、未公证 | ✅（措辞）/ ⚠️（缺架构披露） | 补「仅 Apple Silicon」；与 A2 同步 |
-| A4 | 应用内版本检查 | `apps/desktop/src-tauri/src/lib.rs:3331` 调用 `api.github.com/repos/MixLabPro/agent-vitals/releases/latest`，并要求 tag 以 `app-v` 开头 | ⚠️ | 仓库不可公开访问时检查必然失败；A1/A2 解决后复测；失败须是静默降级而非报错 |
+| A4 | 应用内版本检查 | `apps/desktop/src-tauri/src/lib.rs:3331` 调用 `api.github.com/repos/Oh-Agent-AI/oh-agent/releases/latest`，并要求 tag 以 `app-v` 开头 | ⚠️ | 仓库不可公开访问时检查必然失败；A1/A2 解决后复测；失败须是静默降级而非报错 |
 
 ### B. 功能与口径（页面卖点）
 

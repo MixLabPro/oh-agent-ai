@@ -484,7 +484,7 @@ adapter 若未来开放，只能在默认关闭的开发者模式运行，输出
 - **P0.5（官方 recipe 目录拉取，2026-10-01 决策）**：vendor 官方 manifest/
   recipe 目录存放于本仓库 `catalog/`（统一 `index.json` + `harnesses/<slug>.json`，
   index 携带类型、revision 与 sha256），经 GitHub raw——与
-  pricing catalog 完全同源（`raw.githubusercontent.com/MixLabPro/agent-vitals/…`）
+  pricing catalog 完全同源（`raw.githubusercontent.com/Oh-Agent-AI/oh-agent/…`）
   ——按需增量拉取。目的：执行环境格式漂移的修复从「等 app 发版」变为「发一个
   recipe revision」。约束：
   - 只分发数据形态（manifest / recipe 引用 / fixture 索引）；脚本 adapter
