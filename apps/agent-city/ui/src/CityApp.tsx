@@ -3,7 +3,7 @@ import { buildCityModel, type CitySessionRow } from "./cityModel";
 import { prepareCityLayout } from "./engine/cityLayout";
 import { MIAMI_COASTAL } from "./engine/citySeaside";
 import { CityEngine } from "./engine/CityEngine";
-import { tauriCityDataProvider, type CityProjectionV1 } from "./data/provider";
+import { tauriCityDataProvider, cityDataProtocol, type CityProjectionV1 } from "./data/provider";
 import "./city.css";
 import { embedded, connect, observeHealth, publishToolbar, type Tool } from "./host";
 import type { EngineQualityMode } from "./engine/CityEngine";
@@ -20,6 +20,14 @@ import type { PlayTarget } from "./engine/render/playableVehicles";
 import { useRoadAudit } from "./game/useRoadAudit";
 import { RoadAuditPanel } from "./game/ui/RoadAuditPanel";
 import type { PlanningWorkSnapshot } from "./engine/planner/operationBudget";
+
+declare global {
+  interface Window {
+    __AV_CITY_PROBE__?: () => Record<string, unknown>;
+    __AV_CITY_SET_HOVERED__?: (id: string | null) => void;
+    __AV_CITY_SELECT__?: (id: string | null) => void;
+  }
+}
 
 const windowOptions = [7, 30, 90, 366] as const;
 type WindowDays = (typeof windowOptions)[number];
@@ -98,6 +106,9 @@ export function CityApp() {
   planRepairActive.current = planRepair.state.active;
   const appliedWindow = useRef<number | null>(null);
   const fingerprint = useRef("");
+  const geographyKey = useRef("");
+  const geographyAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { geographyAbort.current?.abort(); }, []);
   useEffect(() => observeHealth(() => engineRef.current?.diagnosticState() ?? { engineMissing: true }), []);
   useEffect(() => {
     const invalidated = () => setRefresh((value) => value + 1);
@@ -109,19 +120,24 @@ export function CityApp() {
     let active = true;
     const loading = new AbortController();
     setStatus("正在更新 City 插槽数据…");
-    tauriCityDataProvider.getProjection({ windowDays, signal: loading.signal, onStage: (stage) => {
-      if (active && stage !== "ready") setStatus(stage === "reading_summary" ? "正在读取全窗口统计…" : "正在读取会话建筑…");
-    } }).then((data) => {
-      if (!active) return;
+    const apply = (data: CityProjectionV1, paging = false) => {
       setProjection(data);
       setDataLoaded(true);
       setCityLoad({ stage: "model", work: null });
-      setStatus(projectionStatusLabel(data));
+      setStatus(paging && data.coverage.truncated
+        ? `${projectionStatusLabel(data)} · 继续载入会话建筑`
+        : projectionStatusLabel(data));
+    };
+    tauriCityDataProvider.getProjection({ windowDays, signal: loading.signal, onStage: (stage) => {
+      if (active && stage !== "ready") setStatus(stage === "reading_summary" ? "正在读取全窗口统计…" : "正在读取会话建筑…");
+    }, onPartial: (data) => { if (active) apply(data, true); } }).then((data) => {
+      if (active) apply(data);
     }).catch(() => {
       if (!active) return;
-      setProjection(null);
       setDataLoaded(true);
-      setStatus("City 数据暂不可用");
+      // Keep a city that already rendered; packaged v3 fallback happens inside the provider.
+      setProjection((current) => current ?? null);
+      setStatus((current) => current && !current.startsWith("正在") ? current : "City 数据暂不可用");
     });
     return () => { active = false; loading.abort(); };
   }, [windowDays, refresh]);
@@ -148,7 +164,6 @@ export function CityApp() {
 
   useEffect(() => {
     if (!projection || !engineRef.current || experience.busy || game.active || driving.active) return;
-    const preparation = new AbortController();
     const engine = engineRef.current;
     const from = Date.parse(projection.window.from);
     const to = Date.parse(projection.window.to);
@@ -192,10 +207,21 @@ export function CityApp() {
     });
     experience.modelRef.current = model;
     experience.setModel(model);
-    setCityLoad({ stage: "planning", work: null });
-    const signature = JSON.stringify([projection.window, projection.harnesses, projection.sessions, projection.findings]);
-    if (signature !== fingerprint.current) {
+    // Geography is keyed by window + planned population, not the sessions array.
+    // Occupant-only page updates must not abort the in-flight island plan or hide the first frame.
+    const planned = Math.min(4000, Math.max(projection.sessions.length, projection.coverage.total));
+    const geography = JSON.stringify([projection.window, experience.seed, planned]);
+    const occupants = projection.sessions.map((session) => session.id).join("\0");
+    const signature = `${geography}|${occupants}|${JSON.stringify(projection.findings)}`;
+    if (signature === fingerprint.current) { experience.refreshSelection(); return; }
+    if (geographyKey.current !== geography) {
+      geographyAbort.current?.abort();
+      const preparation = new AbortController();
+      geographyAbort.current = preparation;
+      geographyKey.current = geography;
+      fingerprint.current = "";
       setFirstModelFrame(false);
+      setCityLoad({ stage: "planning", work: null });
       void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal,
         onPlanningProgress: (snapshot: PlanningWorkSnapshot) => {
           const work = Object.values(snapshot.consumed).reduce((sum, value) => sum + value, 0);
@@ -203,7 +229,7 @@ export function CityApp() {
         } }).then(() => {
         if (preparation.signal.aborted || engineRef.current !== engine) return;
         setCityLoad({ stage: "mounting", work: null });
-        engine.applyModel(model, appliedWindow.current === projection.window.days);
+        engine.applyModel(model, false);
         setCityLoad({ stage: "rendering", work: null });
         // applyModel synchronously renders the first frame for this model before returning.
         setFirstModelFrame(true);
@@ -213,10 +239,35 @@ export function CityApp() {
       }).catch(() => {
         if (!preparation.signal.aborted) { setSceneUnavailable(true); setCityLoad({ stage: "data", work: null }); }
       });
+      experience.refreshSelection();
+      return;
     }
+    if (!firstModelFrame) { experience.refreshSelection(); return; }
+    const preparation = new AbortController();
+    void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal }).then(() => {
+      if (preparation.signal.aborted || engineRef.current !== engine) return;
+      engine.applyModel(model, true);
+      fingerprint.current = signature;
+      experience.refreshSelection();
+    }).catch(() => {});
     experience.refreshSelection();
     return () => preparation.abort();
-  }, [projection, experience.busy, experience.seed, game.active, driving.active]);
+  }, [projection, experience.busy, experience.seed, game.active, driving.active, firstModelFrame]);
+
+  useEffect(() => {
+    window.__AV_CITY_PROBE__ = () => {
+      const scene = engineRef.current?.inspectScene() ?? null;
+      return {
+        protocol: cityDataProtocol(), search: location.search, coverage: projection?.coverage ?? null,
+        source: projection?.source ?? null, hasV3Context: !!projection?.v3_context,
+        sessionCount: projection?.sessions.length ?? 0, firstModelFrame, cityLoad, status,
+        selected: experience.selected, details: experience.details, scene,
+      };
+    };
+    window.__AV_CITY_SET_HOVERED__ = (id) => { engineRef.current?.setHovered(id); };
+    window.__AV_CITY_SELECT__ = (id) => { experience.setSelected(id); engineRef.current?.setSelected(id); };
+    return () => { delete window.__AV_CITY_PROBE__; delete window.__AV_CITY_SET_HOVERED__; delete window.__AV_CITY_SELECT__; };
+  });
 
   useEffect(() => {
     if (experience.busy || game.active || driving.active) return;

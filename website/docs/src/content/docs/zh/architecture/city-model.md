@@ -18,7 +18,7 @@ head:
       }
 ---
 
-Agent City 是建在 Agent Vitals 之上的游戏层。它向宿主请求一个投影 `city:v2`（分页版 `city:v3` 需手动开启），里面是所选时间窗内你最近的最多 4000 个会话。纯 TypeScript 的模型（`cityModel.ts`）把每个会话映射成一栋楼，再由规划器和渲染器排布岛屿、用 three.js 画出来。本页讲数据这一侧；每栋楼长什么样，见[城市里每栋楼代表什么](/docs/zh/city-guide)。
+Agent City 是建在 Agent Vitals 之上的游戏层。它默认向宿主请求分页快照 `city:v3`（落地页宿主和 `?cityData=v2` 仍走 `city:v2`），里面是所选时间窗内你最近的最多 4000 个会话。纯 TypeScript 的模型（`cityModel.ts`）把每个会话映射成一栋楼，再由规划器和渲染器排布岛屿、用 three.js 画出来。本页讲数据这一侧；每栋楼长什么样，见[城市里每栋楼代表什么](/docs/zh/city-guide)。
 
 ## 关键事实
 
@@ -27,9 +27,9 @@ Agent City 是建在 Agent Vitals 之上的游戏层。它向宿主请求一个�
 - **1 个会话 = 1 栋楼**。渲染上限同样是 4000，所以载入的每个会话都有自己的楼。
 - **楼高 = 总 Token**：未缓存输入 + 缓存读 + 缓存写 + 输出。
 - **楼高公式**：`clamp(0.75 × (log10(tokens) − 1)^2.2, 2.6, 48)`。1K Token 约 3.4，100K 约 15.8，10M 约 38.6（场景单位）。
-- **岛屿档位**：`ceil(楼数 / 400)`，1 到 10 档；每档规划 `ceil(400 × 档位 × 1.35)` 块地。
+- **岛屿档位**：`ceil(窗口会话数 / 400)`，1 到 10 档，按全窗数量规划，后续分页不会换档重排；每档规划 `ceil(400 × 档位 × 1.35)` 块地。
 - **城区 = 数据源**（Claude Code、Codex……），按总 Token 排序。
-- **费用以估算显示**。每个会话带估算费用和费用状态；无法完整计价时，City 显示原因而不是数字。费用不影响楼高。
+- **费用以估算显示**。v3 楼卡在费用按需加载时提示打开详情查看估价（`load_on_demand`）；v2 仍在列表行带费用。无法完整计价时，City 显示原因而不是数字。费用不影响楼高。
 - **数据设施**：部分公共建筑可以打开数据面板（城市总览、活动与模型、Findings、Skills）。
 
 <!-- source: crates/agent-vitals-query/src/query/app_local.rs（dev bf7196a：SESSION_CAP = 4_000；selection/order；window timezone "UTC"；费用来自 city_v3::cost_breakdown）；city_v3.rs（timezone、rolling、半开区间）；apps/agent-city/ui/src/cityModel.ts；engine/scaleTier.ts；CityExperience.tsx（costLabel）；CityApp.tsx -->
@@ -58,15 +58,15 @@ Agent City 是建在 Agent Vitals 之上的游戏层。它向宿主请求一个�
 
 ### `city:v3` 多了什么？
 
-`city:v3` 是同一份数据的分页、快照版本，有五个操作（见 [App SDK](/docs/zh/vitals/app-sdk)）。只有用开发开关 `?cityData=v3` 打开时，City 才通过它载入整座城市；但即便在默认模式下，Findings 和 Skills 面板也会按需调用它。它新增了：
+`city:v3` 是同一份数据的分页、快照版本，有五个操作（见 [App SDK](/docs/zh/vitals/app-sdk)）。打包后的 City 插件默认走 v3（插件 WebView 没有查询串），v3 出错或快照重试耗尽时回退 `city:v2`。网站落地页宿主只回答 v2；`?cityData=v2` 仍可显式关闭。Findings、Skills 和会话详情按需调用 v3。它新增了：
 
 - **`asset_ref`**：每个会话一个稳定、随机的 City 资产 ID，存在单独的注册表 `~/.agent-vitals/state/plugins/city-assets/` 里，不含标题、摘录、路径或原生 ID。
 - **`layout_order`、`usage_event_count`、`title_state`**，以及分开的“窗口内”和“整个会话”首末事件时间。
 - **按需详情**：`session.detail` 返回单栋楼的费用拆分和摘录，范围是整个会话。
 
-**待确认**：首发前 `city:v3` 会不会成为默认载入方式。仓库自己的方案文档写明原生应用尚未验收。
+首屏只需总览加第一页；后续页写入按全窗规模规划好的岛屿，不换档重排。原生 macOS 包的点击验收仍是独立步骤。
 
-<!-- source: crates/agent-vitals-query/src/query/city_v3.rs；city_assets.rs；apps/agent-city/ui/src/data/provider.ts（cityData !== "v3" → v2；readCityModule 调 v3）；docs/CITY_PROJECTION_DATA_COMPLETION_SPEC.md §11 -->
+<!-- source: crates/agent-vitals-query/src/query/city_v3.rs；city_assets.rs；apps/agent-city/ui/src/data/provider.ts（cityDataProtocol：landing/cityData=v2 → v2，否则 v3 并在失败时回退；onPartial 第一页；readCityModule）；docs/CITY_PROJECTION_DATA_COMPLETION_SPEC.md §12 -->
 
 ## 哪些建筑能打开数据面板？
 

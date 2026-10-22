@@ -341,14 +341,21 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   const initialSession = ui.projection?.sessions.find((s) => s.id === ui.selected);
   const [loadedDetail, setLoadedDetail] = useState<CityProjectionV1["sessions"][number] | null>(null);
   const [detailState, setDetailState] = useState<"idle" | "loading" | "ready" | "unavailable">("idle");
+  const detailRefresh = useRef(false);
   useEffect(() => {
     setLoadedDetail(null); setDetailState("idle");
-    if (!ui.details || !initialSession || !ui.projection) return;
+    if (!ui.details || !initialSession || !ui.projection) { detailRefresh.current = false; return; }
     const request = new AbortController();
     setDetailState("loading");
     void readCitySessionDetail(ui.projection, initialSession.id, request.signal).then((detail) => {
       if (!request.signal.aborted) { setLoadedDetail(detail); setDetailState("ready"); }
-    }).catch(() => { if (!request.signal.aborted) setDetailState("unavailable"); });
+    }).catch(() => {
+      if (request.signal.aborted) return;
+      setDetailState("unavailable");
+      if (detailRefresh.current) return;
+      detailRefresh.current = true;
+      window.dispatchEvent(new Event("__AV_PLUGIN_INVALIDATED__"));
+    });
     return () => request.abort();
   }, [ui.details, initialSession?.id, ui.projection]);
   const session = loadedDetail?.id === initialSession?.id ? loadedDetail ?? initialSession : initialSession;
@@ -442,7 +449,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     {ui.selected === "decor:site:civic" && !dataOpen && !cinema && !gameActive && model && (() => {
       // 市政厅 = 全城的功能性标志：面板展示全城概况（用户：「市政广场的市政厅能提供哪些功能性信息」）。
       const total = model.stats.totalSessions || 1;
-      const tier = scaleTierFor(model.buildings.length);
+      const tier = scaleTierFor(Math.min(4000, Math.max(model.buildings.length, model.stats.totalSessions)));
       const stage = tier >= 8 ? "议会大厦" : tier >= 5 ? "市政中心" : tier >= 3 ? "市政厅" : "镇政厅";
       const ranked = [...model.districts].sort((a, b) => b.sessionCount - a.sessionCount);
       const alerts = ranked.filter((d) => d.anomaly);
@@ -527,7 +534,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
           <dt>模型</dt><dd>{session.model_ids?.length ? session.model_ids.join("、") : "无模型标识"}</dd>
           <dt>费用</dt><dd>{costLabel(session)}</dd><dt>统计截止</dt><dd>{session.last_event_at}</dd></dl>
         {detailState === "loading" && <p role="status">正在读取会话详情…</p>}
-        {detailState === "unavailable" && <p role="status">详情暂不可用；数据可能已更新，请刷新城市后重试。</p>}
+        {detailState === "unavailable" && <p role="status">详情暂不可用；已尝试重新读取快照。若城市仍在更新，请稍候后重开详情。</p>}
         {session.excerpt_scope === "session_lifetime_not_window" && <p>摘录来自整个会话，可能早于当前统计窗口。</p>}
         <p>会话定位号（可能变化）：{session.id}</p>
         {session.asset_ref && <BuildingBookmark key={session.asset_ref} assetRef={session.asset_ref} language={language} windowDays={ui.projection!.window.days} />}
