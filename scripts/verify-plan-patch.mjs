@@ -729,6 +729,15 @@ const snap = (layout) => JSON.stringify({
   assert.ok(!steepNode.blockers.includes("road-too-steep"), `nudging a junction on a road that was already steep is not blocked by its old grade: ${steepNode.blockers}`);
   const flatNode = validateNodeMove(hill, model, "-30:60", { x: -48, z: 60 });
   assert.ok(flatNode.blockers.includes("road-too-steep"), `dragging a flat road's junction up onto the slope is refused: ${flatNode.blockers}`);
+  // 拖路口的「改陡了」按路段各比各的：路口一边是本来就陡（0.5）的路、另一边是平路，把平路拖到 0.33 也要拦。
+  // 回归：曾拿所有被拖路段改前坡度的最大值当一个基准（0.5），平路变 0.33 < 0.5 就放行——画出了车开不上去的新陡路。
+  const slope = makeLayout(); slope.terrain = { ...slope.terrain, height: (x, z) => (Math.hypot(x, z) < 400 ? 2 + Math.max(0, z) * 0.5 : -1) };
+  slope.roadNodes = [...slope.roadNodes, { id: "-50:0", x: -50, z: 0 }, { id: "-50:60", x: -50, z: 60 }, { id: "-100:0", x: -100, z: 0 }];
+  slope.roadEdges = [...slope.roadEdges, road({ x: -50, z: 0 }, { x: -50, z: 60 }), road({ x: -50, z: 0 }, { x: -100, z: 0 })];
+  const mixedNode = validateNodeMove(slope, model, "-50:0", { x: -55, z: 40 });
+  assert.ok(mixedNode.blockers.includes("road-too-steep"), `the flat leg dragged up to ~0.33 is refused even though the other leg was already 0.5: ${mixedNode.blockers}`);
+  const mixedOk = validateNodeMove(slope, model, "-50:0", { x: -55, z: 4 });
+  assert.ok(!mixedOk.blockers.includes("road-too-steep"), `a small nudge that keeps the flat leg gentle is fine: ${mixedOk.blockers} / ${mixedOk.warnings}`);
   const cliff = river(); const flat = cliff.terrain.height; cliff.terrain = { ...cliff.terrain, height: (x, z) => (x > 240 && x < 250 ? flat(x, z) + (250 - x) * 0.6 : flat(x, z)) };
   // 桥台延伸到缓坡（P0-C）：10 宽的陡岸压在加长的桥面下，车从缓坡上桥——原来拦，现在原地就能画。
   assert.deepEqual(validateRoadAdd(cliff, model, { x: 150, z: -100 }, { x: 290, z: -100 }, 8).blockers, [], "a short steep bank is bridged over by a longer abutment");

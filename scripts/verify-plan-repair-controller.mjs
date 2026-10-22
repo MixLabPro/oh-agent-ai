@@ -19,6 +19,7 @@ import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
 const { RepairController, blockerText } = await loadCity({ "planRepair/controller.ts": ["RepairController", "blockerText"] });
+const { repairText } = await loadCity({ "planRepair/repairCopy.ts": ["repairText"] });
 
 function harness(overrides = {}) {
   const log = { moves: [], selected: [], candidateCalls: [], adds: [], drops: [], siteMoves: [], siteRemoves: [], nodeMoves: [], viaducts: [], cuts: [] };
@@ -840,7 +841,7 @@ function harness(overrides = {}) {
   const proposal = { deckId: "bridge", erase: ["bridge", "stub"], erasePolylines: [[{ x: 0, z: 0 }, { x: 100, z: 0 }], [{ x: 100, z: 0 }, { x: 110, z: 5 }]],
     draw: { from: { x: -20, z: 1 }, to: { x: 120, z: 1 }, width: 5, bridgeLength: 78 }, warnings: ["auto-junction:1"], ops: [] };
   const applied = []; const driven = [];
-  deps.proposeBridgeFix = (id) => (id === "bridge" ? { ok: true, proposal } : { ok: false, reason: "no-redraw", detail: "附近找不到一笔合法的直桥（no-road-on-bank×819）" });
+  deps.proposeBridgeFix = (id) => (id === "bridge" ? { ok: true, proposal } : { ok: false, reason: "no-redraw", codes: ["no-road-on-bank", "bridge-approach-steep"], detail: "附近找不到一笔合法的直桥（no-road-on-bank×819 bridge-approach-steep×4）" });
   deps.applyBridgeFix = (p) => { applied.push(p); return { ok: true, patch: {}, warnings: [] }; };
   deps.testDrive = (id) => { driven.push(id); return { verdict: "passed", path: [{ x: -20, z: 1 }, { x: 120, z: 1 }], width: 5, blockedAt: null, reason: "", kind: "bridge" }; };
   controller.enter();
@@ -860,7 +861,14 @@ function harness(overrides = {}) {
   assert.match(controller.snapshot.message.text, /已按方案重建这座桥.*试驾通过/);
   controller.proposeBridgeFix("other");
   assert.equal(controller.snapshot.proposal, null);
-  assert.match(controller.snapshot.message.text, /找不到自动修复方案.*橡皮擦整座擦掉/);
+  assert.match(controller.snapshot.message.text, /找不到自动修复方案：附近找不到一笔合法的直桥（有一岸附近没有能接上的路；岸坡太陡）.*橡皮擦整座擦掉/);
+  // 拒因是结构化码翻成的话，不是诊断串：曾把 detail 原样拼进消息，英文界面露出中文和 no-road-on-bank×819。
+  assert.doesNotMatch(controller.snapshot.message.text, /×|no-road-on-bank/);
+  {
+    const english = repairText(controller.snapshot.message.text, "en");
+    assert.ok(!/[\u4e00-\u9fff]/.test(english), `refusal still Chinese in English: ${english}`);
+    assert.match(english, /No automatic fix found: no valid straight bridge nearby \(no road to join on one of the banks; the bank is too steep\)/);
+  }
   controller.proposeBridgeFix("bridge"); controller.setTool("erase");
   assert.equal(controller.snapshot.proposal, null, "switching tools drops the proposal");
 }

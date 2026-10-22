@@ -227,6 +227,22 @@ const COUNTED_TEXT: Record<string, (n: number) => string> = {
 
 export const blockerText = (code: string): string =>
   code.startsWith("patch-tier-") ? BLOCKER_TEXT["tier-changed"] : code.startsWith("patch-generator-") ? BLOCKER_TEXT["generator-changed"] : BLOCKER_TEXT[code] ?? code;
+/** 一键修复找不到方案时的拒因（planBridgeFix 的 `codes`）：搜索里的拒因码说短话；其余阻断码走 blockerText。 */
+const FIX_REFUSAL_TEXT: Record<string, string> = {
+  "no-road-on-bank": "有一岸附近没有能接上的路",
+  "no-water": "试过的落笔都不跨水",
+  "bridge-approach-steep": "岸坡太陡",
+  "bridge-approach-short": "桥头离路口太近",
+  "road-in-water": "落笔点在水里，或一笔要跨两段水",
+  "bridge-too-long": "水面太宽，地面桥架不过去",
+  "junction-on-bridge": "桥面会穿过别的路",
+  "road-too-steep": "引道太陡",
+  "junction-too-sharp": "接入的路口夹角太小",
+};
+const bridgeFixRefusalText = (result: { reason: string; codes: string[] }): string => {
+  if (result.reason === "no-redraw") return `附近找不到一笔合法的直桥（${result.codes.map((code) => FIX_REFUSAL_TEXT[code] ?? blockerText(code)).join("；") || "没有可试的落笔点"}）`;
+  return result.codes.length ? `这座桥擦不掉（${result.codes.map(blockerText).join("；")}）` : "这里已经不是桥面了";
+};
 /** 编辑失败的说明：优先逐条翻译阻断码，其次翻译 reason（跨档的补丁会以 reason 形式回来）。 */
 const failText = (verb: string, result: { reason: string; blockers?: string[] }) =>
   `${verb}：${result.blockers?.length ? result.blockers.map(blockerText).join("；") : blockerText(result.reason)}`;
@@ -712,7 +728,7 @@ export class RepairController {
   proposeBridgeFix(deckId: string): void {
     if (!this.state.active) return;
     const result = this.deps.proposeBridgeFix(deckId);
-    if (!result.ok) { this.set({ proposal: null, message: { kind: "warn", text: `找不到自动修复方案：${result.detail}——可以用橡皮擦整座擦掉这座桥，再自己画` } }); return; }
+    if (!result.ok) { this.set({ proposal: null, message: { kind: "warn", text: `找不到自动修复方案：${bridgeFixRefusalText(result)}——可以用橡皮擦整座擦掉这座桥，再自己画` } }); return; }
     const { proposal } = result;
     const extra = proposal.erase.length - 1;
     const notes = proposal.warnings.map(warningText).filter(Boolean);

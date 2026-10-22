@@ -367,7 +367,7 @@ export class PlanRepairSession {
   proposeBridgeFix(deckId: string): BridgeFixResult {
     const base = this.working();
     const generated = this.engine.generatedLayout; const current = this.engine.currentLayout; const model = this.engine.currentModel;
-    if (!base.ok || !generated || !current || !model) return { ok: false, reason: "missing-bridge", detail: base.ok ? "city-not-ready" : base.reason };
+    if (!base.ok || !generated || !current || !model) { const code = base.ok ? "city-not-ready" : base.reason; return { ok: false, reason: "missing-bridge", codes: [code], detail: code }; }
     return proposeBridgeFix(generated, current, model, base.patch, deckId);
   }
 

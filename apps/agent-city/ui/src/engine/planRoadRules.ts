@@ -142,12 +142,19 @@ function applyImpact(impact: RoadImpact, blockers: string[], warnings: string[])
 
 /** 非桥路段沿线采样，统计不可建/水面采样点数。 */
 /** 坡度（修复升级 P0-B）：新铺的地面路坡比 > 车的爬坡上限 → 阻断 road-too-steep（物理上开不上去，§15 口径）；> 0.2 → 提示 road-steep。
- *  `before` 给出时只拦「改陡了」的（拖生成器本来就陡的路口不该被拦——体检的 roadSteep 已经列着它）。 */
-function gradeCheck(layout: CityLayout, polylines: readonly (readonly Vec2[])[], blockers: string[], warnings: string[], before = 0): void {
-  const grade = Math.max(0, ...polylines.map((points) => polylineMaxGrade(layout, points).grade));
-  if (grade <= before + 1e-6) return;
-  if (grade > ROAD_MAX_GRADE) blockers.push("road-too-steep");
-  else if (grade > ROAD_STEEP_GRADE) warnings.push("road-steep");
+ *  `before[i]` 给出时第 i 段只拦「改陡了」的（拖生成器本来就陡的路口不该被拦——体检的 roadSteep 已经列着它）。
+ *  每段只和**自己**改前比：曾拿所有被拖路段改前的最大坡度当一个基准，路口一边连着一条本来就陡（0.5）的路时，
+ *  另一边平路被拖到 0.33 也放行了——车开不上去的新陡路就这样画了出来。 */
+function gradeCheck(layout: CityLayout, polylines: readonly (readonly Vec2[])[], blockers: string[], warnings: string[], before: readonly number[] = []): void {
+  let tooSteep = false, steep = false;
+  polylines.forEach((points, i) => {
+    const grade = polylineMaxGrade(layout, points).grade;
+    if (grade <= (before[i] ?? 0) + 1e-6) return;
+    if (grade > ROAD_MAX_GRADE) tooSteep = true;
+    else if (grade > ROAD_STEEP_GRADE) steep = true;
+  });
+  if (tooSteep) blockers.push("road-too-steep");
+  else if (steep) warnings.push("road-steep");
 }
 
 function badSamples(layout: CityLayout, edge: RoadEdge): number {
@@ -188,7 +195,7 @@ export function validateNodeMove(layout: CityLayout, model: CityModel, nodeId: s
   const badBefore = moved.reduce((sum, { before }) => sum + badSamples(layout, before), 0);
   const badAfter = moved.reduce((sum, { after }) => sum + badSamples(layout, after), 0);
   if (badAfter > badBefore) blockers.push("road-in-water");
-  gradeCheck(layout, moved.map(({ after }) => after.points), blockers, warnings, Math.max(0, ...moved.map(({ before }) => polylineMaxGrade(layout, before.points).grade)));
+  gradeCheck(layout, moved.map(({ after }) => after.points), blockers, warnings, moved.map(({ before }) => polylineMaxGrade(layout, before.points).grade));
 
   // 压到的东西：只算这一拖**新**压到的（原来就压着的是生成器残余，不算这一笔的）。
   const list = obstacles(layout, model);

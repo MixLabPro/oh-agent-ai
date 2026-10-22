@@ -26,7 +26,10 @@ export type BridgeFixProposal = {
   /** 写进补丁的操作（drop… + add），会话照此追加。 */
   ops: RoadOp[];
 };
-export type BridgeFixResult = { ok: true; proposal: BridgeFixProposal } | { ok: false; reason: "missing-bridge" | "no-redraw"; detail: string };
+/** 失败：`codes` 是结构化拒因（missing-bridge = 擦桥的阻断码；no-redraw = 搜索里最常见的拒因码，按次数排序，最多 3 个），
+ *  面板据此出文案（controller.ts::bridgeFixRefusalText）；`detail` 只是给脚本/日志看的诊断串，不进面板——
+ *  它曾被原样拼进面板消息，英文界面露出「附近找不到一笔合法的直桥（no-road-on-bank×91）」。 */
+export type BridgeFixResult = { ok: true; proposal: BridgeFixProposal } | { ok: false; reason: "missing-bridge" | "no-redraw"; codes: string[]; detail: string };
 
 const OFFSETS = [0, 4, -4, 8, -8, 12, -12, 16, -16, 24, -24, 32, -32];
 const REACHES = [14, 18, 24, 30, 40, 50, 65, 80, 100];
@@ -56,10 +59,10 @@ function nearestRoadPoint(layout: CityLayout, p: Vec2): Vec2 | null {
  */
 export function proposeBridgeFix(generated: CityLayout, current: CityLayout, model: CityModel, patch: PlanPatchV1, deckId: string): BridgeFixResult {
   const deck = current.roadEdges.find((edge) => edge.id === deckId);
-  if (!deck || !(deck.bridge || deck.structure === "deck")) return { ok: false, reason: "missing-bridge", detail: `${deckId} 不是当前城市里的桥面` };
+  if (!deck || !(deck.bridge || deck.structure === "deck")) return { ok: false, reason: "missing-bridge", codes: [], detail: `${deckId} 不是当前城市里的桥面` };
   const chain = bridgeChain(current.roadEdges, deck);
   const drop = validateEdgeDrop(current, model, deck.id);
-  if (drop.blockers.length) return { ok: false, reason: "missing-bridge", detail: drop.blockers.join(",") };
+  if (drop.blockers.length) return { ok: false, reason: "missing-bridge", codes: drop.blockers, detail: drop.blockers.join(",") };
   // 擦桥，再擦旧桥头留下的岸边残路：连着旧桥端点、且短（≤ 20，伸到水边的残桩会横穿新桥面）或本就是这座桥的引道
   // （生成器标 ground-approach：陡桥头的坡就在引道上——1703294958/2 的引道坡比 1.13，不擦它在原址画不出合格的桥）。
   // 长的过路不擦：它是路网的一部分，新桥接到它上面。
@@ -119,6 +122,6 @@ export function proposeBridgeFix(generated: CityLayout, current: CityLayout, mod
         ops: [...ops, { t: "add", from, to, width: deck.width }] } };
     }
   }
-  const top = Object.entries(refused).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([code, n]) => `${code}×${n}`).join(" ");
-  return { ok: false, reason: "no-redraw", detail: `附近找不到一笔合法的直桥（${top}）` };
+  const top = Object.entries(refused).sort((x, y) => y[1] - x[1]).slice(0, 3);
+  return { ok: false, reason: "no-redraw", codes: top.map(([code]) => code), detail: `附近找不到一笔合法的直桥（${top.map(([code, n]) => `${code}×${n}`).join(" ")}）` };
 }
