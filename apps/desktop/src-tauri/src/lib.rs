@@ -4164,22 +4164,28 @@ fn about_diagnostics() -> Value {
     })
 }
 
-use update_check::TRUSTED_RELEASES_URL;
+use update_check::{
+    classify_releases_http, resolve_open_url, ReleasesHttpClass, SelectOutcome, TRUSTED_RELEASES_URL,
+};
 
 /// 应用内版本检查：拉取 `/releases` 列表（`/releases/latest` 会跳过 prerelease，
 /// beta 用户因此永远收不到下一个 beta），再由 `update_check::select_update`
 /// 按通道与 semver 选候选。只报告、不下载、不安装（automatic_install 恒为 false）。
-/// 列表为空 / 404 → no_release；限流（403/429）或当前版本号无法解析 → unavailable，
-/// 都不当作错误弹给用户。
+/// 列表为空 / 404 / 无 app-v → no_release；真限流（429，或 403 且 remaining=0 /
+/// Retry-After）→ unavailable/rate_limited；其它 403 → unavailable/forbidden。
+/// 正式版用户面对「只有 beta」时是 ok + on_latest_stable，不是 no_release。
+/// 这些都不当作错误弹给用户。CARGO_PKG_VERSION 由 Cargo 保证是 semver。
 #[tauri::command]
 async fn check_for_updates() -> Result<Value, String> {
     let current_version = env!("CARGO_PKG_VERSION");
+    let current = semver::Version::parse(current_version)
+        .expect("CARGO_PKG_VERSION is Cargo-enforced semver");
     let unavailable = |reason: &str| {
         serde_json::json!({
             "status": "unavailable",
             "reason": reason,
             "current_version": current_version,
-            "url": TRUSTED_RELEASES_URL,
+            "release_url": TRUSTED_RELEASES_URL,
             "automatic_install": false,
         })
     };
@@ -4187,12 +4193,9 @@ async fn check_for_updates() -> Result<Value, String> {
         serde_json::json!({
             "status": "no_release",
             "current_version": current_version,
-            "url": TRUSTED_RELEASES_URL,
+            "release_url": TRUSTED_RELEASES_URL,
             "automatic_install": false,
         })
-    };
-    let Ok(current) = semver::Version::parse(current_version) else {
-        return Ok(unavailable("invalid_current_version"));
     };
     let client = reqwest::Client::builder()
         .user_agent(format!("agent-vitals/{current_version}"))
@@ -4205,52 +4208,73 @@ async fn check_for_updates() -> Result<Value, String> {
         .send()
         .await
         .map_err(|error| format!("check updates failed: {error}"))?;
+    let remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = response.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Ok(no_release());
-    }
-    // GitHub 未认证限流返回 403/429：属于"暂时拿不到版本信息"，不是故障。
-    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Ok(unavailable("rate_limited"));
-    }
-    if !status.is_success() {
-        return Err(format!("check updates returned HTTP {status}"));
+    match classify_releases_http(
+        status.as_u16(),
+        remaining.as_deref(),
+        retry_after.as_deref(),
+    ) {
+        ReleasesHttpClass::Ok => {}
+        ReleasesHttpClass::NotFound => return Ok(no_release()),
+        ReleasesHttpClass::RateLimited => return Ok(unavailable("rate_limited")),
+        ReleasesHttpClass::Forbidden => return Ok(unavailable("forbidden")),
+        ReleasesHttpClass::Other => {
+            return Err(format!("check updates returned HTTP {status}"));
+        }
     }
     let payload: Value = response
         .json()
         .await
         .map_err(|error| format!("parse update response failed: {error}"))?;
-    let Some(selection) = update_check::select_update(&current, &payload) else {
-        return Ok(no_release());
-    };
-    Ok(serde_json::json!({
-        "status": "ok",
-        "current_version": current_version,
-        "channel": if current.pre.is_empty() { "stable" } else { "prerelease" },
-        "latest_tag": selection.latest.tag,
-        "latest_prerelease": selection.latest.prerelease,
-        "update_available": selection.update_available,
-        "release_url": selection.latest.release_url,
-        "url": TRUSTED_RELEASES_URL,
-        "automatic_install": false,
-    }))
+    Ok(match update_check::select_update(&current, &payload) {
+        SelectOutcome::Selected(selection) => serde_json::json!({
+            "status": "ok",
+            "current_version": current_version,
+            "latest_tag": selection.latest.tag,
+            "update_available": selection.update_available,
+            "release_url": selection.latest.release_url,
+            "automatic_install": false,
+        }),
+        SelectOutcome::OnLatestStable => serde_json::json!({
+            "status": "ok",
+            "current_version": current_version,
+            "update_available": false,
+            "reason": "on_latest_stable",
+            "release_url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        }),
+        SelectOutcome::None => no_release(),
+    })
 }
 
+/// 只打开可信发布根，或检查结果里已经过 `resolve_open_url` 校验的 tag 页。
+/// 前端传入的 `url` 不可信：命令侧会再校验一遍，非法值回落到根。
 #[tauri::command]
-fn open_trusted_releases_page() -> Result<Value, String> {
+fn open_trusted_releases_page(url: Option<String>) -> Result<Value, String> {
+    let target = resolve_open_url(url.as_deref());
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("open")
-        .arg(TRUSTED_RELEASES_URL)
+        .arg(&target)
         .status()
         .map_err(|e| format!("open trusted releases page failed: {e}"))?;
     #[cfg(target_os = "linux")]
     let status = std::process::Command::new("xdg-open")
-        .arg(TRUSTED_RELEASES_URL)
+        .arg(&target)
         .status()
         .map_err(|e| format!("open trusted releases page failed: {e}"))?;
     #[cfg(target_os = "windows")]
     let status = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", TRUSTED_RELEASES_URL])
+        .args(["url.dll,FileProtocolHandler", target.as_str()])
         .status()
         .map_err(|e| format!("open trusted releases page failed: {e}"))?;
     if !status.success() {
@@ -4258,7 +4282,7 @@ fn open_trusted_releases_page() -> Result<Value, String> {
     }
     Ok(serde_json::json!({
         "status": "opened",
-        "url": TRUSTED_RELEASES_URL,
+        "url": target,
         "automatic_install": false,
     }))
 }
