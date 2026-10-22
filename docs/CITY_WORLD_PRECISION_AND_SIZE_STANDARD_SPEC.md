@@ -318,12 +318,12 @@ export const EXPRESSWAY_DECK_WIDTH: number;
 | 类型、导入边界、补丁/文案/控制器 | 通过；补丁新增 4.2 / 10 / 非正数 / NaN / Infinity 拒绝回归，5/8/12 正常通过 |
 | `verify-city-suite full` | 已完成前 36 阶段且均通过（含 31 种子地理、20 种子海滨）；在 `seaside-tier10` 阶段停止，未完成全量，不能标为全绿，原因见下 |
 
-全量验收的既有阻塞已用未修改的 `d0ccd045` 源码副本与本轮工作区分别重跑确认：
+全量验收曾有两项既有阻塞，已在本轮修正守卫并补上可复现的证据：
 
-- `verify-city-ground-surface`：`straight` 的实际摘要均为 `5df8cb02…`，旧基线均为 `713dda6d…`。
-- `verify-city-road-terrain`：`(158.7, 429.1)` 均得到 `blocked`，测试预期为 `drivable`。
+- `verify-city-ground-surface`：旧基线使用 1.2 m 人行道；`48381b95` 有意将其加宽到标准 1.8 m。守卫现以 1.2 m 反事实编译逐个复现全部旧夹具摘要，再验证新旧路面/路口层逐字节相同；15 个当前生成布局另以 generator v6、1.8 m 标准单独固定摘要，并通过逐三角形地形偏差和拓扑检查。命令 `node scripts/verify-city-ground-surface.mjs --cities` 通过，15/15 布局人行道边界完整，最大采样偏差 0.0193（限值 0.035）。
+- `verify-city-road-terrain`：旧坐标 `(158.7, 429.1)` 来自 `c9d84b15` 的 seed 1 空城，之后道路已随生成器更新而移动。守卫现使用版本化局部历史地形夹具重建旧 192/384 分段表面：192 分段稳定复现 8/32 个朝向的 wheel-twist 拒绝，384 分段支持 32/32，最大残差 0.009144，轮面阈值仍为 0.06。当前 seed 1 空城的 148,225 个渲染地形顶点与地形源一致，真实碰撞集上的双向连续驾驶通过。命令 `node scripts/verify-city-road-terrain.mjs` 通过。
 
-因此本轮交付为接口迁移与专项验收完成，步骤 4 的「全量全绿」门禁仍未完成。上述两项需单独调查几何/夹具来源，不能直接刷新快照掩盖。完整跑法仍为 `node scripts/verify-city-suite.mjs full`。
+这两项专项守卫已通过，但此前的 `verify-city-suite full` 在 `seaside-tier10` 阶段停止，尚未完成全量门禁；修复守卫并不等于全量套件已全绿。完整跑法仍为 `node scripts/verify-city-suite.mjs full`。已知道路实际问题 7/2 和 1703310796/2m 歌剧院桥头仍留在场景/规划验收记录中，未由本轮测试夹具工作修复。
 
 仍未实施：第 5 步 B2 碰撞小件裁剪，先提交实体清单评审。最小厚度不等于高度：细而高的墙/栏杆可能真实挡车，不能仅按最短边阈值直接删除。车辆与桥坡、净空的新增硬阈值也不在本轮范围。
 
