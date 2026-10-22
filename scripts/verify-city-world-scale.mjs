@@ -10,11 +10,12 @@ import { loadCity } from "./city-kit/index.mjs";
 import { installCanvasShim } from "./city-kit/scene-hash.mjs";
 
 installCanvasShim();
-const { THREE, LANDMARK_BUILDERS, buildAirport, createMaterialFactory, SIZE_POLICY, toMeters, m, REAL, VISUAL_BOOST, CAR_DIMENSIONS, CarVisuals, FlightVisuals, flightParamsFor, parkedCar, parkedPlane } = await loadCity({
+const { THREE, LANDMARK_BUILDERS, buildAirport, createMaterialFactory, SIZE_POLICY, toMeters, m, REAL, VISUAL_BOOST, CAR_DIMENSIONS, CarVisuals, FlightVisuals, flightParamsFor, parkedCar, parkedPlane, roadWidthFor } = await loadCity({
   "pkg:three": ["* as THREE"],
   "engine/render/landmarkMaterials.ts": ["createMaterialFactory"],
   "engine/render/landmarkBuilders.ts": ["LANDMARK_BUILDERS"],
   "engine/cityAirport.ts": ["buildAirport"],
+  "engine/roadStandard.ts": ["roadWidthFor"],
   "engine/worldScale.ts": ["SIZE_POLICY", "toMeters", "m", "REAL", "VISUAL_BOOST"],
   "game/carDimensions.ts": ["CAR_DIMENSIONS"],
   "game/CarVisuals.ts": ["CarVisuals"],
@@ -80,7 +81,7 @@ for (const diagonal of [100, 5000]) {
 near(sizeOf(parkedCar("d", "#ffffff", [])).z, car.x * VISUAL_BOOST.parkedCar, 0.01, "停车场的车长（车头朝 +z、朝街）");
 near(sizeOf(parkedPlane(5000, [])).z, 4.2 * flightParamsFor(5000).planeRadius * VISUAL_BOOST.parkedPlane, 0.01, "机坪飞机翼展");
 // ── 车辆 ↔ 路桥约束（规范 V3 表里已定值的两行）：支路 5 单位（= 10 m）放得下两车道；背景车道中线在路面内。──
-const LOCAL_ROAD = 5, LATERAL_MARGIN = 0.2, AMBIENT_LANE_OFFSET = 1.2; // ambientSystem：车道中线偏路中心 1.2
+const LOCAL_ROAD = roadWidthFor("local"), LATERAL_MARGIN = 0.2, AMBIENT_LANE_OFFSET = 1.2; // ambientSystem：车道中线偏路中心 1.2
 if (!(LOCAL_ROAD >= 2 * (CAR_DIMENSIONS.width + 2 * LATERAL_MARGIN))) failures.push(`支路 ${LOCAL_ROAD} 放不下两条玩家车道（需 ${2 * (CAR_DIMENSIONS.width + 2 * LATERAL_MARGIN)}）`);
 if (!(AMBIENT_LANE_OFFSET + m(REAL.car.width) / 2 <= LOCAL_ROAD / 2)) failures.push(`背景车道中线 ${AMBIENT_LANE_OFFSET} + 半车宽超出支路半宽 ${LOCAL_ROAD / 2}`);
 if (report) console.log(`玩家车 ${CAR_DIMENSIONS.length}×${CAR_DIMENSIONS.width}×${CAR_DIMENSIONS.height}（×${Object.values(VISUAL_BOOST.playerCar).map((k) => k.toFixed(2)).join("/")}）· 造型 ${[car.x, car.z, car.y].map((v) => v.toFixed(2)).join("×")}`);

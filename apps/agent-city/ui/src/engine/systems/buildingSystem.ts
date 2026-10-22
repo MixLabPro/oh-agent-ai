@@ -2,6 +2,7 @@
  * 会话楼系统：自 cityParts.ts 原样搬出（纯搬迁，见 docs/CITY_ENGINE_SPLIT_SPEC.md §4-6）。
  * 函数体与原方法逐字一致，仅 `this.` → `host.`；cityParts 里保留同名一行转发。
  */
+import { atLeast } from "../roadStandard";
 import { m, REAL } from "../worldScale";
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../../cityModel";
@@ -682,7 +683,7 @@ export function buildRoadsideSigns(host: BuildingSystemHost, rooftopCount: numbe
     // 按合并后的整条路取候选：路网被 T 路口切分、滨海路按 ~15 细分后，单条路段几乎没有 ≥60 的，
     // 曾因此一块牌都没立（实例全藏在 y=-40，建筑说明取景时发现）。整条路 ≥60 时取其最长一段的中点。
     const candidates = roadPaintPlan(host.layout.roadEdges ?? [])
-      .runs.filter((run) => run.kind === "arterial" && run.width >= 8)
+      .runs.filter((run) => run.kind === "arterial" && atLeast(run, "collector"))
       .flatMap((run) => {
         let best: { a: Vec2; b: Vec2; len: number } | null = null; let total = 0;
         for (let i = 1; i < run.points.length; i += 1) {

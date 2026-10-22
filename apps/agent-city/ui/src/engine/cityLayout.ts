@@ -1,3 +1,4 @@
+import { atLeast } from "./roadStandard";
 import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { runPlanningJob, type PlanningWorkerPort } from "./planningWorker/planningJob";
@@ -694,7 +695,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     });
   }
   // 地价场（S5，参照 Lechner 等的用地价值）：城区中心 50%、城市核心 20%、临主干道 15%、临海 15%。
-  const primaryRoads = plan.roadEdges.filter((edge) => edge.width >= 12 && !edge.bridge);
+  const primaryRoads = plan.roadEdges.filter((edge) => atLeast(edge, "arterial") && !edge.bridge);
   const landValueAt = (p: Vec2, anchor: Vec2) => {
     const clamp = (v: number) => Math.max(0, Math.min(1, v));
     const centre = 1 - clamp(Math.hypot(p.x - anchor.x, p.z - anchor.z) / 180);
@@ -799,7 +800,7 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
     });
   };
   // 骨架（宽 12、桥）永远保留；宽 ≤8 的街道只在服务活动区时保留。
-  const selection = new Set(plan.roadEdges.filter((edge) => edge.bridge || edge.width >= 12 || serves(edge)).map((edge) => edge.id));
+  const selection = new Set(plan.roadEdges.filter((edge) => edge.bridge || atLeast(edge, "arterial") || serves(edge)).map((edge) => edge.id));
   // Retain the exact accepted frontage host and its proved route, not a new
   // nearest-road approximation after display pruning.
   const serviceSelection = new Set(selection);

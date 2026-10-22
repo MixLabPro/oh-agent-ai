@@ -1,3 +1,4 @@
+import { atLeast } from "./roadStandard";
 import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /**
  * Seeded, data-independent geography and municipal land reservations.
@@ -619,7 +620,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const identity = (finding: { site?: string; at?: Vec2; detail?: string }) => JSON.stringify([finding.site, finding.at, finding.detail]);
     const baseline = new Map(ownerRules.map((rule) => [rule.id, new Set(rule.measure(view(network, publicSites)).map(identity))]));
     const assigned = assignConnectedSite({ ...geo, core, turn,
-      trunkRuns: [...edges.values()].filter((edge) => !edge.bridge && edge.width >= 8).map((edge) => edge.points),
+      trunkRuns: [...edges.values()].filter((edge) => !edge.bridge && atLeast(edge, "collector")).map((edge) => edge.points),
       ringRuns, bridges, placed: reservations(), height, inRiver, riverBank: footprintGeo.riverBank },
       connectorWorld, specByKind(programme[1])!, obligation.ownerId,
       primaryAnchorNodeIds.find((id) => nodes.has(id)) ?? null, (owner, candidate) => {

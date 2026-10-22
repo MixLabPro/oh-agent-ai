@@ -1,6 +1,6 @@
 # 世界精度与统一尺寸规范（路桥 · 建筑物 · 交通工具）：标准表 + 尺寸统一 + 验收
 
-> 状态：设计稿（2026-10-22）。世界精度的根因修复已经合入 `dev`（590c8b30），其余部分尚未实施。
+> 状态：实施中（2026-10-22）。世界精度修复与回归、车辆尺寸登记、道路标准表已在 `dev`；本轮完成宽度接口迁移、入口校验及城市矩阵验收。建筑物碰撞裁剪和第二期几何阈值仍待单独评审。
 > 起因：
 > - 地标岛改造时，种子 7 的平台桥栏杆被碰撞索引拒绝（`collision-index-invalid-input`）。用户指出：
 >   「如果是浮点精度导致的问题，那么可能不只有这个建筑物有问题……这是个系统问题」；
@@ -205,6 +205,10 @@ export function roadClassSpec(id: RoadClassId): RoadClassSpec;
 /** 严格反查：只认三档标准宽度，其余返回 null（不再用 >= 8 / >= 12 区间猜）。 */
 export function roadClassOfWidth(width: number): RoadClassId | null;
 export function isStandardRoadWidth(width: number): boolean;
+/** 宽度对应的两级 kind；旧数据的非标宽度保留原区间语义。 */
+export function kindOfWidth(width: number): "local" | "arterial";
+export function roadWidthFor(id: RoadClassId): number;
+export function isStandardEdge(edge: { width: number; kind: "local" | "arterial" }): boolean;
 /** 等级比较，替代散落的 width >= 8 / width >= 12。 */
 export function atLeast(edge: { width: number }, id: RoadClassId): boolean;
 export const EXPRESSWAY_DECK_WIDTH: number;
@@ -216,7 +220,7 @@ export const EXPRESSWAY_DECK_WIDTH: number;
 
 | 现状写法 | 改为 | 涉及（举例） |
 |---|---|---|
-| `width >= 8 ? "arterial" : "local"` | `roadClassSpec(roadClassOfWidth(w)).kind` | planPatch.ts:458/494/559，planRoadRules.ts:470/535 |
+| `width >= 8 ? "arterial" : "local"` | `kindOfWidth(w)`；新增/改路先校验标准宽度 | planPatch.ts:458/494/559，planRoadRules.ts:470/535 |
 | `width >= 12` | `atLeast(e, "arterial")` | landing、deadEnds、coastalRingRoad、junctionRings、networkRepairs、report、cityLayout:697/802 等 |
 | `width >= 8` | `atLeast(e, "collector")` | siteFrontage、highwayRamps、coastalRingRoad:81、planRoadRules:600 |
 | `width !== 12` | `roadClassOfWidth(w) !== "arterial"` | skeleton.ts:34，networkRepairs.ts:358 |
@@ -289,6 +293,39 @@ export const EXPRESSWAY_DECK_WIDTH: number;
 - 某处 `>= 8` 的真实意图其实是「不小于次干道，包括将来更宽的路」。严格反查会改变这种语义。
   替换时逐处确认，表达这种意图的一律用 `atLeast`。
 - `access.ts` 的主干道兜底宽度是在没有路网时的近似值，替换后要确认它仍然只是近似。
+
+---
+
+### 5.1 实施记录（2026-10-22）
+
+- 第 0、1 步：`51fa19b3` / `d0ccd045`，远原点精度回归、车辆登记与标准表单测已落地。
+- 第 2 步：规划器、布局、修复工具、道路渲染/标线/照明和试驾已改用标准表；高架全宽与半宽、修复高架的额外净空、人行道带宽共用来源。保留各调用处原来的比较方向，不把场地尺寸、缓和段长度、建筑退距当作路宽替换。
+- 第 3 步：直线/弧线预览、改路预览和补丁重放均拒绝非标准宽度，返回 `non-standard-width`；中英文原因已接入。无效操作在拆路和增节点之前拒绝。读取旧布局时保留已有非标准路段；导入的新增/改路操作仍需通过入口校验。
+- 第 4 步：标准守卫默认执行完整城市矩阵，`--unit` 仅供开发快速检查；此前已经登记在 planning/full 清单中。新增 AST 扫描，避免把注释误当代码；补丁守卫验证直线、弧线、改路、存档重放和失败不留残片。
+- 第 6 步：比例尺注释和 `CITY_MODULE.md` 指向标准表。
+
+本轮验证记录：
+
+| 验证 | 结果 |
+|---|---|
+| 迁移前后指纹比较 | 15 规划 + 3 海滨规划 + 10 完整布局，共 28 组序列化结果逐字节一致；未刷新 golden 或几何 fixture |
+| `verify-city-road-standard` | 15 规划 + 3 海滨完整布局 + 10 完整布局，共 28 城、20,792 条道路全为标准档；133 座桥的桥面全宽与路段等级一致 |
+| 桥头接入等宽（仅报告） | 225 个有地面路接入的桥端，215 个所有接入路均等宽；另 10 个路口含不同等级支路，不代表这 10 处不可通行；平台端无地面路者不计分母 |
+| `verify-city-structure-surface --cities` | 15 城渲染/物理几何基线保持一致；27 座桥中 26 座完整穿越，7/2 既有岸端问题如实报告；4/4 高架匝道双向通过 |
+| `verify-city-landmark-platforms` | 18 城全部平台端对齐连通；机场 18/18 双向通过，歌剧院 16/18，既有岸端问题为 7/2、1703310796/2m |
+| `verify-city-road-report` | 10 座规划城 + 1 展示图通过 |
+| `verify-plan-repair-drivability` | 100 个工具接受的编辑，451 次试驾，99/100 双向通过；既有 1 处绕岛/路缘受阻保留报告 |
+| 类型、导入边界、补丁/文案/控制器 | 通过；补丁新增 4.2 / 10 / 非正数 / NaN / Infinity 拒绝回归，5/8/12 正常通过 |
+| `verify-city-suite full` | 已完成前 36 阶段且均通过（含 31 种子地理、20 种子海滨）；在 `seaside-tier10` 阶段停止，未完成全量，不能标为全绿，原因见下 |
+
+全量验收的既有阻塞已用未修改的 `d0ccd045` 源码副本与本轮工作区分别重跑确认：
+
+- `verify-city-ground-surface`：`straight` 的实际摘要均为 `5df8cb02…`，旧基线均为 `713dda6d…`。
+- `verify-city-road-terrain`：`(158.7, 429.1)` 均得到 `blocked`，测试预期为 `drivable`。
+
+因此本轮交付为接口迁移与专项验收完成，步骤 4 的「全量全绿」门禁仍未完成。上述两项需单独调查几何/夹具来源，不能直接刷新快照掩盖。完整跑法仍为 `node scripts/verify-city-suite.mjs full`。
+
+仍未实施：第 5 步 B2 碰撞小件裁剪，先提交实体清单评审。最小厚度不等于高度：细而高的墙/栏杆可能真实挡车，不能仅按最短边阈值直接删除。车辆与桥坡、净空的新增硬阈值也不在本轮范围。
 
 ---
 

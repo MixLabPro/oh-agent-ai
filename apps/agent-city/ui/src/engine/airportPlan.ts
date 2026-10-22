@@ -5,6 +5,7 @@
  * 曾经只在 cityParts 渲染期调 planAirport：堤道是一排水平箱体拼的台阶（顶面 2.9→4.2、起点高出岸上路面近 2），
  * 平台顶面 0.4 而跑道 / 航站楼底在 1.4（整组悬空 1），驾驶面里根本没有它——看得见的桥，车开不上去。
  */
+import { roadWidthFor, kindOfWidth } from "./roadStandard";
 import { DetMath as Math } from "./detMath"; // 布局期：跨引擎确定性（detMath.ts）
 import type { Vec2 } from "./cityLayout";
 
@@ -12,7 +13,7 @@ import type { Vec2 } from "./cityLayout";
 export const AIRPORT_PLATFORM = Object.freeze({ length: 240, width: 110, top: 1.4 });
 /** 堤道桥面最窄宽度（路网桥段宽度；渲染护栏/桥墩由普通桥梁渲染器按它画）。实际取起桥路口上最宽那条路的宽度：
  *  桥面比来路宽（曾固定 10，岸上支路 5），桥头拐角处路面口门接不上，试驾在岸端就 no-surface。 */
-export const AIRPORT_CAUSEWAY_WIDTH = 5;
+export const AIRPORT_CAUSEWAY_WIDTH = roadWidthFor("local");
 /** 堤道落在平台内侧这么深（端头必须在平台里，才算落到平台上）。 */
 export const AIRPORT_CAUSEWAY_INSET = 4;
 
@@ -163,6 +164,6 @@ export function layoutAirport(input: {
   const toId = `${to.x}:${to.z}`;
   const fromId = airport.causeway.fromNode; const from = { x: airport.causeway.from.x, z: airport.causeway.from.z };
   const width = Math.max(AIRPORT_CAUSEWAY_WIDTH, ...ground.filter((e) => e.from === fromId || e.to === fromId).map((e) => e.width));
-  const edge: LayoutRoadEdge = { id: `${fromId}/${toId}`, from: fromId, to: toId, width, kind: width >= 8 ? "arterial" : "local", points: [from, to], bridge: true, structure: "deck" };
+  const edge: LayoutRoadEdge = { id: `${fromId}/${toId}`, from: fromId, to: toId, width, kind: kindOfWidth(width), points: [from, to], bridge: true, structure: "deck" };
   return { airport: { ...airport, causeway: { ...airport.causeway, to } }, roadEdges: [...input.roadEdges, edge], roadNodes: [...input.roadNodes, { ...to, id: toId }] };
 }
