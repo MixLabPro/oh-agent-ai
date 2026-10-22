@@ -62,8 +62,15 @@ function validate(layout, input) {
     assert(visited.has(site.access.nodeId), `${site.id}: declared plot gate must survive display pruning on the primary network`);
   }
   const groundNodes = new Set(layout.roadEdges.filter((edge) => !edge.bridge).flatMap((edge) => [edge.from, edge.to]));
+  const airportCauseway = layout.airport?.causeway;
+  const airportPlatformNode = airportCauseway ? `${airportCauseway.to.x}:${airportCauseway.to.z}` : null;
+  const airportCausewayEdgeId = airportCauseway ? `${airportCauseway.fromNode}/${airportPlatformNode}` : null;
   for (const edge of layout.roadEdges) if (edge.bridge) for (const id of [edge.from, edge.to]) {
-    assert(groundNodes.has(id) || layout.retentionReport.missingBridgeLandings.includes(id), `${edge.id}: display pruning lost a planned ground landing at ${id}`);
+    const declaredAirportPlatformLanding = edge.id === airportCausewayEdgeId
+      && edge.from === airportCauseway.fromNode
+      && edge.to === airportPlatformNode
+      && id === airportPlatformNode;
+    assert(groundNodes.has(id) || declaredAirportPlatformLanding || layout.retentionReport.missingBridgeLandings.includes(id), `${edge.id}: display pruning lost a planned ground landing at ${id}`);
   }
   for (const [, parcel] of all) {
     assert(Number.isFinite(layout.terrain.height(parcel.x, parcel.z)));
