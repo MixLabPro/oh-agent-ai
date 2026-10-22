@@ -8,6 +8,26 @@ use super::{app_local,session_ref::{load_or_create_salt,session_ref}};
 const SEMANTICS: &str = "city-window-v3.1";
 struct Watcher { file_id: String, conn: Connection, nonce: String }
 static WATCHERS: OnceLock<Mutex<BTreeMap<PathBuf,Watcher>>> = OnceLock::new();
+/// Logical snapshot index: ordered session keys and global layout ranks.
+/// Pages reuse this so they never re-run window_summary or OFFSET over the whole window.
+struct SnapshotIndex { keys: Vec<String>, layout_order: BTreeMap<String,i64> }
+static SNAPSHOTS: OnceLock<Mutex<BTreeMap<(PathBuf,String),SnapshotIndex>>> = OnceLock::new();
+
+fn snapshot_index(home: &Path, context: &str, conn: &Connection, from: i64, to: i64) -> Result<SnapshotIndex,&'static str> {
+    let key = (home.to_path_buf(), context.to_string());
+    if let Some(cached) = SNAPSHOTS.get_or_init(|| Mutex::new(BTreeMap::new())).lock().map_err(|_| "data_unavailable")?.get(&key) {
+        return Ok(SnapshotIndex { keys: cached.keys.clone(), layout_order: cached.layout_order.clone() });
+    }
+    let ordered = stats::session_order(conn,from,to).map_err(|_| "data_unavailable")?;
+    let mut by_first = ordered.iter().map(|(key,first,_)| (first,key.as_str())).collect::<Vec<_>>();
+    by_first.sort_unstable();
+    let layout_order = by_first.into_iter().enumerate().map(|(index,(_,key))| (key.to_string(), index as i64 + 1)).collect::<BTreeMap<_,_>>();
+    let built = SnapshotIndex { keys: ordered.into_iter().map(|(key,_,_)| key).collect(), layout_order };
+    let mut cache = SNAPSHOTS.get_or_init(|| Mutex::new(BTreeMap::new())).lock().map_err(|_| "data_unavailable")?;
+    if cache.len() >= 8 { cache.clear(); }
+    cache.insert(key, SnapshotIndex { keys: built.keys.clone(), layout_order: built.layout_order.clone() });
+    Ok(built)
+}
 
 /// A retained, non-transactional SQLite connection makes data_version comparable across IPCs.
 /// It catches commits that bypass authority_revision, including title/excerpt/catalog edits.
@@ -35,6 +55,17 @@ fn timestamp(ms: i64) -> Result<String,&'static str> {
 fn state(data: Value, generated: &str) -> Value {
     json!({"state":"ready","supported":true,"data":data,"freshness":{"read_at":generated,
         "source_state":"unknown","reason":"source_freshness_not_measured"}})
+}
+
+fn findings_module(conn: &Connection, from: i64, end: i64, identities: &BTreeMap<String, super::app_harnesses::Identity>,
+    harness: Option<&str>, generated: &str) -> Result<Value,&'static str> {
+    let available=|rows:Vec<Value>| rows.into_iter().filter(|r| harness.map_or(true,|id|r["harness"].as_str()==Some(id)) && identities.get(r["harness"].as_str().unwrap_or("")).is_some_and(|id|id.findings)).collect::<Vec<_>>();
+    let backlog=available(stats::finding_counts(conn,from,end,"current_backlog").map_err(|_| "module_unavailable")?);
+    let new=available(stats::finding_counts(conn,from,end,"window_new").map_err(|_| "module_unavailable")?);
+    let mut module=state(json!({"current_backlog":backlog,"window_new":new,
+        "capabilities":super::app_harnesses::public_identities(identities).into_iter().filter(|row|harness.map_or(true,|id|row["id"].as_str()==Some(id))).collect::<Vec<_>>(),"detail_state":"unsupported"}),generated);
+    if backlog.is_empty() && new.is_empty() { module["state"]=json!("empty"); }
+    Ok(module)
 }
 
 pub(crate) fn cost_breakdown(buckets: &[Value], total_tokens: i64) -> Result<Value,&'static str> {
@@ -137,20 +168,28 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
                 if signature!=cursor_tag(number) { return Err("invalid_cursor"); }
                 number
             };
-            let summary=stats::window_summary(db.conn(),from,end).map_err(|_|"data_unavailable")?;
-            let matched=summary["session_count"].as_u64().ok_or("data_unavailable")?;
+            let index=snapshot_index(home,&context_tag,db.conn(),from,end)?;
+            let matched=index.keys.len() as u64;
             if offset as u64>matched { return Err("invalid_cursor"); }
-            let rows=stats::session_page(db.conn(),from,end,limit as usize,offset).map_err(|_|"data_unavailable")?;
-            let keys:Vec<String>=rows.iter().filter_map(|r|r["session_key"].as_str().map(str::to_string)).collect();
-            let models=stats::model_distribution(db.conn(),from,end,if initial {None} else {Some(&keys)}).map_err(|_|"data_unavailable")?;
-            let assets=super::city_assets::publish(home,db.conn(),&keys)?;
+            let end_index=(offset+(limit as usize)).min(index.keys.len());
+            let page_keys=index.keys.get(offset..end_index).unwrap_or(&[]).to_vec();
+            // Page rows are fetched by keyset membership, not SQL OFFSET, so deep pages
+            // do not re-group the whole window. Overview stats stay off this path.
+            let rows=if page_keys.is_empty() { Vec::new() } else {
+                stats::session_page_for_keys(db.conn(),from,end,page_keys.len(),0,Some(&page_keys)).map_err(|_| "data_unavailable")?
+            };
+            let models=stats::model_distribution(db.conn(),from,end,if initial {None} else {Some(&page_keys)}).map_err(|_| "data_unavailable")?;
+            let assets=super::city_assets::publish(home,db.conn(),&page_keys)?;
             let mut model_groups:BTreeMap<&str,Vec<Value>>=BTreeMap::new();
             for model in &models { if let Some(key)=model["session_key"].as_str() { model_groups.entry(key).or_default().push(model.clone()); } }
+            let mut by_key:BTreeMap<&str,&Value>=BTreeMap::new();
+            for row in &rows { if let Some(key)=row["session_key"].as_str() { by_key.insert(key,row); } }
             let mut sessions=Vec::new();
-            for row in rows {
-                let key=row["session_key"].as_str().ok_or("data_unavailable")?;
-                let mut projected=app_local::projected_session(&row,model_groups.get(key).map(Vec::as_slice).unwrap_or(&[]),&salt,
+            for key in &page_keys {
+                let row=by_key.get(key.as_str()).ok_or("data_unavailable")?;
+                let mut projected=app_local::projected_session(row,model_groups.get(key.as_str()).map(Vec::as_slice).unwrap_or(&[]),&salt,
                     identities.contains_key(row["harness"].as_str().unwrap_or("")))?;
+                projected["layout_order"]=json!(index.layout_order.get(key).copied().unwrap_or(0));
                 projected["asset_ref"]=json!(assets.by_session.get(key).ok_or("asset_state_unavailable")?);
                 projected["details"]=json!({"state":"unavailable","reason":"load_on_demand"});
                 projected["cost_status"]=json!({"state":"unavailable","reason":"load_on_demand","has_unresolved":false});
@@ -161,14 +200,14 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
                 "coverage":{"matched":matched,"returned":sessions.len(),"offset":offset,"has_more":(next as u64)<matched,
                     "render_budget":4000,"selection":"window_last_event_desc_session_key_asc","order":"window_last_event_desc_session_key_asc"}});
             if initial {
-                let mut overview=summary;
+                let mut overview=stats::window_summary(db.conn(),from,end).map_err(|_| "data_unavailable")?;
                 overview["models"]=app_local::model_summary(&models)?;
-                overview["time_classification"]=stats::time_coverage(db.conn()).map_err(|_|"data_unavailable")?;
+                overview["time_classification"]=stats::time_coverage(db.conn()).map_err(|_| "data_unavailable")?;
                 let mut overview_module=state(overview,&generated);
                 if matched==0 { overview_module["state"]=json!("empty"); }
                 result["modules"]=json!({"overview":overview_module,
                     "activity":match app_local::activity(db.conn(),from,to,&timezone) {Ok(v)=>state(v,&generated),Err(reason)=>json!({"state":"unavailable","supported":true,"reason":reason})},
-                    "findings":{"state":"unavailable","supported":true,"reason":"load_on_demand"},
+                    "findings":findings_module(db.conn(),from,end,&identities,None,&generated)?,
                     "skills":{"state":"ready","supported":true,"load":"on_demand"},
                     "workflow":{"state":"ready","supported":true,"load":"on_demand"}});
                 result["harnesses"]=json!(super::app_harnesses::public_identities(&identities));
@@ -230,15 +269,7 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
                     if rows.is_empty() { module["state"]=json!("empty"); }
                     module
                 }
-                "findings"=>{
-                    let available=|rows:Vec<Value>| rows.into_iter().filter(|r| harness.map_or(true,|id|r["harness"].as_str()==Some(id)) && identities.get(r["harness"].as_str().unwrap_or("")).is_some_and(|id|id.findings)).collect::<Vec<_>>();
-                    let backlog=available(stats::finding_counts(db.conn(),from,end,"current_backlog").map_err(|_|"module_unavailable")?);
-                    let new=available(stats::finding_counts(db.conn(),from,end,"window_new").map_err(|_|"module_unavailable")?);
-                    let mut module=state(json!({"current_backlog":backlog,"window_new":new,
-                        "capabilities":super::app_harnesses::public_identities(&identities).into_iter().filter(|row|harness.map_or(true,|id|row["id"].as_str()==Some(id))).collect::<Vec<_>>(),"detail_state":"unsupported"}),&generated);
-                    if backlog.is_empty() && new.is_empty() { module["state"]=json!("empty"); }
-                    module
-                }
+                "findings"=>findings_module(db.conn(),from,end,&identities,harness,&generated)?,
                 _=>return Err("invalid_module"),
             };
         }

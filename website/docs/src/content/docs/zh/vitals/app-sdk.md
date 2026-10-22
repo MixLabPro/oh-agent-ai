@@ -56,10 +56,10 @@ Agent City 是构建在 Agent Vitals 引擎上的第一个应用，以插件的�
 
 ## Agent City 怎么用它？
 
-1. City 的数据 provider 构造一个 `PluginRequestV1`，`method` 是 `"data.read"`，`payload` 是 `{projection: "city", version: 2, windowDays}`，通过宿主通道发出。打开开发开关 `?cityData=v3` 时，改为逐页读取 `city:v3`。
-2. 宿主确认请求来自 City 当前活动的 WebView、且声明了 `city:v2`，然后在 Rust 里执行 `query::app_local::city_projection`。
-3. City 用 `validateCityProjectionV2` 校验响应，在 `cityModel.ts` 里把每个会话映射成一栋楼。见[城市模型](/docs/zh/architecture/city-model)。
-4. Findings、Skills 面板，以及开启 v3 时的单栋楼详情，会按需调用 `city:v3`。
+1. City 的数据 provider 构造一个 `PluginRequestV1`，`method` 是 `"data.read"`，`payload` 是 `{projection: "city", version: 3, operation: "overview", windowDays, …}`，然后分页读取 `city:v3`。落地页宿主和 `?cityData=v2` 仍请求 `{projection: "city", version: 2, windowDays}`。
+2. 宿主确认请求来自 City 当前活动的 WebView、且声明了 `city:v3`（或 `city:v2`），然后在 Rust 里执行 `query::city_v3::read` 或 `query::app_local::city_projection`。
+3. City 把 v3 页适配成 v2 UI DTO，用 `validateCityProjectionV2` 校验，再在 `cityModel.ts` 里把每个会话映射成一栋楼。见[城市模型](/docs/zh/architecture/city-model)。
+4. Findings、Skills 面板和单栋楼详情按需调用 `city:v3`。
 5. 在浏览器里（官网演示、独立预览），同一个 provider 返回 `source: "fixture"` 的合成数据，从不调用宿主。
 
 <!-- source: apps/agent-city/ui/src/data/provider.ts; apps/agent-city/ui/src/CityApp.tsx; docs/CITY_LOCAL_DATA_PROJECTION.md (MVP 契约) -->

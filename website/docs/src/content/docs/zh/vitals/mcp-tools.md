@@ -48,6 +48,7 @@ Oh Agent 的数据层 Agent Vitals 带一个本地 MCP 服务。运行 `agent-vi
 | `issues_summary` / `skills_summary` | 行为发现和 skill 使用摘要 |
 | `control_plane` | 数据源状态、其他目录、排除项、保留期、时区、暂停/运行同步、目录策略（写入要加参数） |
 | `trust_profile_*` | 信任审计配置的 schema、列表、校验、暂存和状态 |
+| `get_building` / `preview_building` / `set_building_model` / `reset_building` | 读取、校验、替换或重置一栋 Agent City 会话楼的模型（`session-kit/v1`，最多 64 个件）。写入需要 `--allow-local-writes`。城里的施工动画要等 city:v3 默认加载器落地后才会播放 |
 
 另外三个工具（`query_sql_readonly`、`billing_workflow`、`authority_audit`）只有在启用内部 `mcp-internal` feature 时才会编译进去，正常构建里没有。
 

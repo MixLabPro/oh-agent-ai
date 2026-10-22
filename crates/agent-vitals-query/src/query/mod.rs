@@ -15,4 +15,5 @@ pub mod summary;
 pub mod trace_service;
 
 pub mod city_assets;
+pub mod city_building;
 pub mod city_v3;

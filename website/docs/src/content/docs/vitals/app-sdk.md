@@ -56,10 +56,10 @@ Contract types are generated from JSON Schemas in `docs/schemas/` (`npm run gene
 
 ## How does Agent City use it?
 
-1. City's data provider builds a `PluginRequestV1` with `method: "data.read"` and `payload: {projection: "city", version: 2, windowDays}`, then sends it through the host transport. With the developer switch `?cityData=v3` it reads `city:v3` page by page instead.
-2. The host checks that the request came from City's active WebView, that `city:v2` is declared, and runs `query::app_local::city_projection` in Rust.
-3. City validates the response with `validateCityProjectionV2` and maps each session to a building in `cityModel.ts`. See [City model](/docs/architecture/city-model).
-4. The Findings and Skills panels, and per-building details when v3 is on, call `city:v3` on demand.
+1. City's data provider builds a `PluginRequestV1` with `method: "data.read"` and `payload: {projection: "city", version: 3, operation: "overview", windowDays, …}`, then pages `city:v3`. The landing host and `?cityData=v2` still request `{projection: "city", version: 2, windowDays}`.
+2. The host checks that the request came from City's active WebView, that `city:v3` (or `city:v2`) is declared, and runs `query::city_v3::read` or `query::app_local::city_projection` in Rust.
+3. City adapts v3 pages into the v2 UI DTO, validates with `validateCityProjectionV2`, and maps each session to a building in `cityModel.ts`. See [City model](/docs/architecture/city-model).
+4. The Findings and Skills panels, and per-building details, call `city:v3` on demand.
 5. In the browser (website demo, standalone preview), the same provider returns a synthetic fixture with `source: "fixture"` and never calls a host.
 
 <!-- source: apps/agent-city/ui/src/data/provider.ts (CityDataProvider; PluginRequestV1/PluginResponseV1 import; fixtureProjection source: "fixture"); apps/agent-city/ui/src/CityApp.tsx (projection → buildCityModel); docs/CITY_LOCAL_DATA_PROJECTION.md (MVP 契约: method "data.read", payload { projection: "city", version: 2, windowDays }) -->

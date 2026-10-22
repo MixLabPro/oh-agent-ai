@@ -259,17 +259,22 @@ function AboutSection({ report, loading, error, onReload }: AboutSectionProps) {
     catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, tr("about.exportFailed"))); }
     finally { if (mounted.current) setExporting(false); }
   };
+  const describeUpdate = (result: UpdateCheckResult): string => {
+    if (result.onLatestStable) return tr("about.updateLatestStable");
+    if (result.status === "ok" && result.latestTag) return tr(result.updateAvailable ? "about.updateAvailable" : "about.updateCurrent", { current: result.currentVersion ?? tr("about.notAvailable"), latest: result.latestTag });
+    return tr(result.status === "no_release" ? "about.updateNoRelease" : "about.updateUnavailable");
+  };
   const checkUpdates = async () => {
     if (checking) return;
     setChecking(true); setActionError(null); setMessage(null);
-    try { const result = await checkForUpdates(); if (mounted.current) { setUpdate(result); setMessage(result.status === "ok" && result.latestTag ? tr("about.updateCurrent", { current: result.currentVersion ?? tr("about.notAvailable"), latest: result.latestTag }) : tr(result.status === "no_release" ? "about.updateNoRelease" : "about.updateUnavailable")); } }
+    try { const result = await checkForUpdates(); if (mounted.current) { setUpdate(result); setMessage(describeUpdate(result)); } }
     catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, tr("about.updateFailed"))); }
     finally { if (mounted.current) setChecking(false); }
   };
   const openReleases = async () => {
     if (opening) return;
     setOpening(true); setActionError(null);
-    try { await openTrustedReleasesPage(); if (mounted.current) setMessage(tr("about.releasesOpened")); }
+    try { await openTrustedReleasesPage(update?.updateAvailable ? update.releaseUrl : null); if (mounted.current) setMessage(tr("about.releasesOpened")); }
     catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, tr("about.releasesFailed"))); }
     finally { if (mounted.current) setOpening(false); }
   };
@@ -277,7 +282,7 @@ function AboutSection({ report, loading, error, onReload }: AboutSectionProps) {
     <div className="settings-section-heading"><div><p className="eyebrow">{tr("about.title")}</p><h3 id="settings-about-title">{tr("about.title")}</h3><p>{tr("about.description")}</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{tr(loading ? "billing.loading" : "about.reload")}</button></div>
     {error && <div className="error-banner" role="alert">{tr("about.unavailable", { error })}<button className="button button-secondary button-small" type="button" onClick={onReload}>{tr("billing.retryButton")}</button></div>}
     <SettingsLoadingState loading={loading} hasData={Boolean(report)} title={tr("about.versions")} detail={tr("about.localOnly")} />
-    {report && <div className="settings-about-card"><dl className="settings-version-list"><div><dt>App</dt><dd>{versionText(report.appVersion ?? null)}</dd></div><div><dt>CLI</dt><dd>{versionText(report.cliVersion ?? null)}</dd></div><div><dt>Engine</dt><dd>{versionText(report.engineVersion ?? null)}</dd></div><div><dt>Authority schema</dt><dd>{versionText(report.authoritySchema ?? null)}</dd></div><div><dt>{tr("about.pricing")}</dt><dd>{report.pricing?.version ? `${report.pricing.version}${report.pricing.capturedAtMs ? ` · ${new Date(report.pricing.capturedAtMs).toLocaleString()}` : ""}` : tr("about.noSnapshot")}</dd></div><div><dt>{tr("about.statisticsTimezone")}</dt><dd>{report.statisticsTimezone ?? tr("about.notAvailable")}</dd></div><div><dt>{tr("about.sync")}</dt><dd>{tr(report.sync.state === "ok" ? "about.syncOk" : report.sync.state === "needs_attention" ? "about.syncAttention" : "about.syncUnknown")}</dd></div></dl><div className="settings-about-actions"><button className="button button-secondary" type="button" onClick={exportDiagnostics} disabled={exporting}>{tr(exporting ? "about.exporting" : "about.export")}</button><button className="button button-secondary" type="button" onClick={checkUpdates} disabled={checking}>{tr(checking ? "about.checking" : "about.checkUpdates")}</button><button className="button button-secondary" type="button" onClick={openReleases} disabled={opening}>{tr(opening ? "about.opening" : "about.openReleases")}</button></div>{update && <p className="settings-about-update" role="status">{update.status === "unavailable" ? tr("about.updateNotAutomatic") : update.status === "no_release" ? tr("about.releaseNotFound") : tr("about.releaseConfirmed", { latest: update.latestTag ?? tr("about.notAvailable") })}</p>}</div>}
+    {report && <div className="settings-about-card"><dl className="settings-version-list"><div><dt>App</dt><dd>{versionText(report.appVersion ?? null)}</dd></div><div><dt>CLI</dt><dd>{versionText(report.cliVersion ?? null)}</dd></div><div><dt>Engine</dt><dd>{versionText(report.engineVersion ?? null)}</dd></div><div><dt>Authority schema</dt><dd>{versionText(report.authoritySchema ?? null)}</dd></div><div><dt>{tr("about.pricing")}</dt><dd>{report.pricing?.version ? `${report.pricing.version}${report.pricing.capturedAtMs ? ` · ${new Date(report.pricing.capturedAtMs).toLocaleString()}` : ""}` : tr("about.noSnapshot")}</dd></div><div><dt>{tr("about.statisticsTimezone")}</dt><dd>{report.statisticsTimezone ?? tr("about.notAvailable")}</dd></div><div><dt>{tr("about.sync")}</dt><dd>{tr(report.sync.state === "ok" ? "about.syncOk" : report.sync.state === "needs_attention" ? "about.syncAttention" : "about.syncUnknown")}</dd></div></dl><div className="settings-about-actions"><button className="button button-secondary" type="button" onClick={exportDiagnostics} disabled={exporting}>{tr(exporting ? "about.exporting" : "about.export")}</button><button className="button button-secondary" type="button" onClick={checkUpdates} disabled={checking}>{tr(checking ? "about.checking" : "about.checkUpdates")}</button><button className="button button-secondary" type="button" onClick={openReleases} disabled={opening}>{tr(opening ? "about.opening" : "about.openReleases")}</button></div>{update && <p className="settings-about-update" role="status">{update.status === "unavailable" ? tr("about.updateNotAutomatic") : update.onLatestStable ? tr("about.releaseLatestStable") : update.status === "no_release" ? tr("about.releaseNotFound") : tr("about.releaseConfirmed", { latest: update.latestTag ?? tr("about.notAvailable") })}</p>}</div>}
     {actionError && <div className="error-banner" role="alert">{actionError}</div>}{message && <p className="settings-about-message" role="status" aria-live="polite">{message}</p>}
   </section>;
 }

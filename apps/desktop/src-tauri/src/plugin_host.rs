@@ -106,6 +106,43 @@ fn definitions() -> &'static [PluginDefinition] {
     }).plugins
 }
 
+/// Linux WebKitGTK: `.incognito(true)` makes wry ignore the shared WebContext
+/// and build an ephemeral one. tauri-runtime-wry then skips custom-protocol
+/// registration (those schemes are already marked on the host context), so the
+/// child loads `tauri://localhost/…` with no handler and WebKit shows
+/// "The URL can't be shown". The host later maps a failed `set_bounds` / boot
+/// timeout onto `plugin_layout_failed`.
+///
+/// A dedicated data directory gives the plugin its own WebContext so protocols
+/// are registered, and incognito stays off so that context is actually used
+/// (retries reuse it). macOS WKWebView does not have this skip, so it keeps
+/// the non-persistent store.
+pub(crate) fn apply_plugin_webview_platform(app: &tauri::AppHandle, builder: WebviewBuilder<tauri::Wry>) -> WebviewBuilder<tauri::Wry> {
+    #[cfg(target_os = "linux")]
+    {
+        let dir = app.path().app_cache_dir().unwrap_or_else(|_| std::env::temp_dir()).join("plugin-webview");
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            agent_vitals_runtime::logging::log_warn("plugin_host", &format!("plugin webview data dir: {error}"));
+        }
+        builder.data_directory(dir).incognito(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        builder.incognito(true)
+    }
+}
+
+fn set_plugin_bounds(view: &Webview, bounds: &Bounds) -> Result<(), String> {
+    view.set_bounds(tauri::Rect {
+        position: tauri::LogicalPosition::new(bounds.x, bounds.y).into(),
+        size: tauri::LogicalSize::new(bounds.width, bounds.height).into(),
+    }).map_err(|error| {
+        agent_vitals_runtime::logging::log_error("plugin_host", &format!("set_bounds failed: {error}"));
+        "plugin_layout_failed".into()
+    })
+}
+
 fn native_create_failure_code(error: &tauri::Error) -> &'static str {
     match error {
         tauri::Error::AssetNotFound(_) => "plugin_assets_missing",
@@ -312,10 +349,7 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
             if bounds_only && state.0.lock().unwrap().current.as_ref().is_some_and(|i| i.suspended || i.failed.is_some()) {
                 return Err("plugin_instance_unavailable".into());
             }
-            view.set_bounds(tauri::Rect {
-                position: tauri::LogicalPosition::new(bounds.x, bounds.y).into(),
-                size: tauri::LogicalSize::new(bounds.width, bounds.height).into(),
-            }).map_err(|_| "plugin_layout_failed")?;
+            set_plugin_bounds(&view, &bounds)?;
             // P0: record layout sync timing on the hot bounds-only path.
             // js_ts is an epoch-ms timestamp from the frontend (performance.timeOrigin + performance.now()).
             if bounds_only {
@@ -328,7 +362,10 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
                 }
                 return Ok(id);
             }
-            view.show().map_err(|_| "plugin_layout_failed")?;
+            view.show().map_err(|error| {
+                agent_vitals_runtime::logging::log_error("plugin_host", &format!("show failed: {error}"));
+                "plugin_layout_failed"
+            })?;
             ensure_native_attachment(&app, &view)?;
             let _ = view.eval(format!("window.__AV_PLUGIN_LOCALE__ = '{}'; window.dispatchEvent(new Event('__AV_PLUGIN_LOCALE_CHANGED__'));", locale));
             let _ = view.eval("window.dispatchEvent(new Event('__AV_PLUGIN_RESUMED__'))");
@@ -356,15 +393,15 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
     };
     let initialization = format!("window.__AV_PLUGIN_INSTANCE__ = {}; window.__AV_PLUGIN_LOCALE__ = '{}';", serde_json::to_string(&id).unwrap(), locale);
     let allow_local_exports = definition.allow_local_exports;
-    let builder = WebviewBuilder::new(&id, WebviewUrl::App(definition.entry.clone().into()))
+    let builder = apply_plugin_webview_platform(&app, WebviewBuilder::new(&id, WebviewUrl::App(definition.entry.clone().into()))
         // Resize white flash: the WebView's own NSView background must match
         // the City theme's dark surface, not the system default white.
         .background_color(tauri::utils::config::Color(22, 40, 61, 255))
         // An active child shares a window with the host WebView. WebKit's
         // inactive scheduling must not suspend its health timer/first frame.
         // Leaving the tab hides/pauses the retained instance.
-        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
-        .incognito(true).initialization_script(initialization)
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled))
+        .initialization_script(initialization)
         .on_download(move |view, event| {
             if let tauri::webview::DownloadEvent::Requested { url, destination } = event {
                 if !allow_local_exports || url.scheme() != "blob" { return false; }
@@ -394,6 +431,7 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
         });
     #[cfg(all(feature = "plugin-isolation-probe", target_os = "macos"))]
     let builder = builder.initialization_script(crate::plugin_isolation_probe::OBSERVER);
+    agent_vitals_runtime::logging::log_info("plugin_host", &format!("add_child id={id} entry={}", definition.entry));
     let result = app.get_window("workbench").ok_or("plugin_window_unavailable")?.add_child(
         builder,
         tauri::LogicalPosition::new(bounds.x, bounds.y), tauri::LogicalSize::new(bounds.width, bounds.height),
@@ -437,10 +475,7 @@ pub fn plugin_set_bounds(
     };
     if let Some(view) = app.get_webview(&current_id) {
         let t_start = std::time::Instant::now();
-        view.set_bounds(tauri::Rect {
-            position: tauri::LogicalPosition::new(bounds.x, bounds.y).into(),
-            size: tauri::LogicalSize::new(bounds.width, bounds.height).into(),
-        }).map_err(|_| "plugin_layout_failed")?;
+        set_plugin_bounds(&view, &bounds)?;
         let rx_to_set = t_start.elapsed().as_millis() as u64;
         if let Some(i) = state.0.lock().unwrap().current.as_mut() {
             note_layout_sync(i, 0, rx_to_set, seq.unwrap_or(0));

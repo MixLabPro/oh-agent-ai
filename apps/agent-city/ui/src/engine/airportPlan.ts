@@ -134,14 +134,58 @@ export function layoutAirport(input: {
   for (const e of ground) for (const id of [e.from, e.to]) degree.set(id, (degree.get(id) ?? 0) + 1);
   const half = AIRPORT_CAUSEWAY_WIDTH / 2;
   const obstacles = [...input.publicSites, ...input.landmarks].filter((s) => (s.radius ?? 0) > 0);
+  const byNode = new Map<string, LayoutRoadEdge[]>();
+  for (const e of input.roadEdges) {
+    const from = byNode.get(e.from); if (from) from.push(e); else byNode.set(e.from, [e]);
+    const to = byNode.get(e.to); if (to) to.push(e); else byNode.set(e.to, [e]);
+  }
+  // Causeway-vs-road tests used to scan every edge. Bin segments so a candidate
+  // only looks at nearby carriageways; AABB pad is the exact clearance radius.
+  const CELL = 40;
+  const segs: Array<{ a: Vec2; b: Vec2; pad: number; from: string; to: string; minX: number; maxX: number; minZ: number; maxZ: number }> = [];
+  const cells = new Map<string, number[]>();
+  for (const e of input.roadEdges) {
+    if (e.points.length < 2) continue;
+    const pad = half + e.width / 2 + 1.5;
+    for (let i = 1; i < e.points.length; i += 1) {
+      const a = e.points[i - 1], b = e.points[i];
+      const minX = Math.min(a.x, b.x) - pad, maxX = Math.max(a.x, b.x) + pad;
+      const minZ = Math.min(a.z, b.z) - pad, maxZ = Math.max(a.z, b.z) + pad;
+      const index = segs.length;
+      segs.push({ a, b, pad, from: e.from, to: e.to, minX, maxX, minZ, maxZ });
+      for (let gx = Math.floor(minX / CELL); gx <= Math.floor(maxX / CELL); gx += 1)
+        for (let gz = Math.floor(minZ / CELL); gz <= Math.floor(maxZ / CELL); gz += 1) {
+          const key = `${gx}:${gz}`;
+          const list = cells.get(key);
+          if (list) list.push(index); else cells.set(key, [index]);
+        }
+    }
+  }
+  const causewayBlocked = (start: Vec2, end: Vec2, nodeId: string) => {
+    const minX = Math.min(start.x, end.x), maxX = Math.max(start.x, end.x);
+    const minZ = Math.min(start.z, end.z), maxZ = Math.max(start.z, end.z);
+    const seen = new Set<number>();
+    for (let gx = Math.floor(minX / CELL); gx <= Math.floor(maxX / CELL); gx += 1)
+      for (let gz = Math.floor(minZ / CELL); gz <= Math.floor(maxZ / CELL); gz += 1) {
+        for (const index of cells.get(`${gx}:${gz}`) ?? []) {
+          if (seen.has(index)) continue;
+          seen.add(index);
+          const seg = segs[index];
+          if (seg.from === nodeId || seg.to === nodeId) continue;
+          if (seg.maxX < minX || seg.minX > maxX || seg.maxZ < minZ || seg.minZ > maxZ) continue;
+          if (segmentGap(start, end, seg.a, seg.b) < seg.pad) return true;
+        }
+      }
+    return obstacles.some((s) => segmentGap(start, end, s, s) < (s.radius ?? 0) + half);
+  };
   const connect: AirportCausewayConnector = (shorePoint, end) => {
     const nodes = input.roadNodes.filter((n) => degree.has(n.id) && Math.hypot(n.x - shorePoint.x, n.z - shorePoint.z) <= CONNECT_RADIUS)
-      .sort((a, b) => Math.hypot(a.x - shorePoint.x, a.z - shorePoint.z) - Math.hypot(b.x - shorePoint.x, b.z - shorePoint.z) || (a.id < b.id ? -1 : 1));
+      .sort((a, b) => Math.hypot(a.x - shorePoint.x, a.z - shorePoint.z) - Math.hypot(b.x - shorePoint.x, b.z - shorePoint.z) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     let best: { node: LayoutRoadNode; skew: number } | null = null;
     for (const node of nodes) {
       const len = Math.hypot(end.x - node.x, end.z - node.z); if (len < 20) continue;
       const ux = (end.x - node.x) / len, uz = (end.z - node.z) / len;
-      const incident = input.roadEdges.filter((e) => e.from === node.id || e.to === node.id);
+      const incident = byNode.get(node.id) ?? [];
       if (incident.some((e) => e.bridge || e.structure === "deck")) continue;
       // 每条路离开路口的方向与「上桥方向 u」/「下桥方向 −u」的夹角：
       const angles = incident.map((e) => {
@@ -152,9 +196,7 @@ export function layoutAirport(input: {
       const skew = Math.min(...angles.map((a) => Math.PI - a));               // 最顺的那条来路偏多少
       if (skew > STRAIGHT_ON) continue;                                       // 没有顺接的来路：下桥得急转
       const start = { x: node.x + ux * 8, z: node.z + uz * 8 };
-      const blocked = input.roadEdges.some((e) => e.from !== node.id && e.to !== node.id && e.points.some((p, i) => i > 0 && segmentGap(start, end, e.points[i - 1], p) < half + e.width / 2 + 1.5))
-        || obstacles.some((s) => segmentGap(start, end, s, s) < (s.radius ?? 0) + half);
-      if (!blocked && (!best || skew < best.skew - 1e-9)) best = { node, skew };
+      if (!causewayBlocked(start, end, node.id) && (!best || skew < best.skew - 1e-9)) best = { node, skew };
     }
     return best ? { at: { x: best.node.x, z: best.node.z }, nodeId: best.node.id } : null;
   };

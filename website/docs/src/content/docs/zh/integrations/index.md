@@ -73,15 +73,16 @@ Oh Agent 构建在开源的 Agent Vitals 引擎之上，Agent City 是它的第�
 
 下面这些在 `dev` 分支 `bf7196a` 的代码里都还没有，上线前一律标为待确认。
 
+- **待确认：增量热更新**。现在数据一变，City 会重新读取完整投影并重建整个场景，布局保持稳定、带生长动画（见[数据管线](/docs/zh/architecture/data-pipeline#有新会话时-agen
 - **待确认：让 Agent 帮你建城（MCP）**。设想是你的 AI Agent 通过 MCP 帮你塑造城市。现有的 Data MCP 服务能读用量数据、改有类型约束的设置，但没有任何编辑城市或地图的工具。
-- **待确认：增量热更新**。现在数据一变，City 会重新读取完整投影并重建整个场景，布局保持稳定、带生长动画（见[数据管线](/docs/zh/architecture/data-pipeline#有新会话时-agent-city-怎么更新)）。像 Vite 那样只传变化的会话、只更新单栋楼，还没有实现。分页的 `city:v3`（用 `?cityData=v3` 开启）是朝这个方向走了一步，但仍会整体重新读取。
+- **待确认：增量热更新**。现在数据一变，City 会重新读取投影并重建场景，布局保持稳定、带生长动画（见[数据管线](/docs/zh/architecture/data-pipeline#有新会话时-agent-city-怎么更新)）。像 Vite 那样只传变化的会话、只更新单栋楼，还没有实现。默认的 `city:v3` 分页已经能在不重排岛屿的前提下追加后续页。
 - **待确认：城市作品廊（UGC）**，分享和浏览别人的城市。仓库里没有相关代码。
 - **待确认：人人可用的地图编辑器**。城市“修复”编辑器已经有了，P0 在 2026-10-12 完成；但做成正式功能（去掉开发开关、中英文、新手引导）和地图修改的导入导出，都排在后面的 P3。
 - **待确认：官方 manifest 目录**。下载通道和校验都有了，但 `catalog/index.json` 目前没有条目。
 - **未承诺**：manifest 的脚本适配器（P1.5）、表达式语言（P2）和社区 manifest 目录（P3）只是设计预留。
 - **评估过、没实现**：仓库里有把 Cline、Pi、Hermes 作为会话数据源的评估文档（`docs/*_HARNESS_ASSESSMENT.md`）。**待确认**：有没有计划接入。
 
-<!-- source: crates/agent-vitals-mcp/src/mcp/mod.rs (no city/map tool); docs/CITY_MAP_EDITOR_ROADMAP_SPEC.md; docs/HARNESS_MANIFEST_DSL_SPEC.md §1; catalog/README.md; docs/*_HARNESS_ASSESSMENT.md -->
+<!-- source: crates/agent-vitals-mcp/src/mcp/mod.rs (city building tools); docs/CITY_MAP_EDITOR_ROADMAP_SPEC.md; docs/HARNESS_MANIFEST_DSL_SPEC.md §1; catalog/README.md; docs/*_HARNESS_ASSESSMENT.md -->
 
 ## 相关
 

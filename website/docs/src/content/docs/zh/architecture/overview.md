@@ -164,7 +164,7 @@ ohagent.ai 内嵌的是 `apps/agent-city/ui` 的真实 City 前端，由 `tools/
 
 以下内容在 `dev` 分支 `bf7196a` 的代码里都还没有，列出来是为了不让读者把规划当成已有功能。
 
-- **待确认**：让 Agent 通过 MCP 帮你建城。现有的 Data MCP 服务能读用量数据、改有类型约束的设置，但没有任何编辑城市的工具。
+- **部分完成**：MCP 可以 get / preview / set / reset 一栋会话楼的模型（`docs/CITY_BUILDING_MCP.md`）。城里的施工播放和 city:v3 加载器接线要等该默认加载器落地。
 - **待确认**：增量热更新。每次同步后 City 会自动刷新，但会重新读取完整投影并重建场景；只传变化的会话、只更新单栋楼还没有实现。见[数据管线](/docs/zh/architecture/data-pipeline#有新会话时-agent-city-怎么更新)。
 - **待确认**：城市作品廊（UGC）。仓库里没有相关代码。
 - **待确认**：签名的公开安装包。GitHub Releases 目前还是空的。

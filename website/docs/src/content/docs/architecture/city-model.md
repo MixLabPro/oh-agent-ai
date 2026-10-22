@@ -18,7 +18,7 @@ head:
       }
 ---
 
-Agent City is the game layer on top of Agent Vitals. It asks the host for one projection, `city:v2` (a paged `city:v3` is opt-in), which holds up to 4,000 of your most recent sessions in the chosen time window. A pure TypeScript model (`cityModel.ts`) maps each session to one building. Then the planner and renderer lay out the island and draw it with three.js. This page covers the data side. For what each building looks like, see [What each building means](/docs/city-guide).
+Agent City is the game layer on top of Agent Vitals. It asks the host for a paged `city:v3` snapshot by default (the landing host and `?cityData=v2` still use `city:v2`), which holds up to 4,000 of your most recent sessions in the chosen time window. A pure TypeScript model (`cityModel.ts`) maps each session to one building. Then the planner and renderer lay out the island and draw it with three.js. This page covers the data side. For what each building looks like, see [What each building means](/docs/city-guide).
 
 ## Key facts
 
@@ -27,9 +27,9 @@ Agent City is the game layer on top of Agent Vitals. It asks the host for one pr
 - **1 session = 1 building.** The render cap is also 4,000, so every loaded session gets its own building.
 - **Height = total tokens**: uncached input + cache read + cache write + output.
 - **Height curve:** `clamp(0.75 × (log10(tokens) − 1)^2.2, 2.6, 48)`, so about 3.4 units at 1K tokens, 15.8 at 100K and 38.6 at 10M.
-- **Island tier:** `ceil(buildings / 400)`, from 1 to 10. Each tier plans `ceil(400 × tier × 1.35)` lots.
+- **Island tier:** `ceil(windowSessions / 400)`, from 1 to 10, using the full window count so later pages do not retier the island. Each tier plans `ceil(400 × tier × 1.35)` lots.
 - **Districts = sources** (Claude Code, Codex, …), ordered by total tokens.
-- **Cost is shown as an estimate.** Each session carries an estimated cost and a cost status. When a session can't be priced in full, City shows the reason instead of a number. Cost never affects height.
+- **Cost is shown as an estimate.** v3 building cards ask you to open details for the estimate (`load_on_demand`); v2 still ships a cost on the list row. When a session can't be priced in full, City shows the reason instead of a number. Cost never affects height.
 - **Data facilities:** some public buildings open data panels (city overview, activity and models, findings, skills).
 
 <!-- source: crates/agent-vitals-query/src/query/app_local.rs (dev bf7196a: matches!(days, 7|30|90|366); SESSION_CAP = 4_000; selection "window_last_event_desc_session_key_asc", order "window_first_event_asc_session_key_asc"; window timezone "UTC"; cost via city_v3::cost_breakdown) -->
@@ -65,16 +65,16 @@ By default City reads one JSON object (`protocol: "city:v2"`) per window:
 
 ### What does `city:v3` add?
 
-`city:v3` is a paged, snapshot-based version of the same data, with five operations (see [App SDK](/docs/vitals/app-sdk)). City loads the whole city through it only when opened with `?cityData=v3`, a developer switch. The findings and skills panels use it on demand even in the default mode. It adds:
+`city:v3` is a paged, snapshot-based version of the same data, with five operations (see [App SDK](/docs/vitals/app-sdk)). The packaged City plugin loads through v3 by default (the plugin WebView has no query string) and falls back to `city:v2` if v3 errors or exhausts snapshot retries. The website landing host only answers v2; `?cityData=v2` remains an explicit override. Findings, skills, and session details use v3 on demand. It adds:
 
 - **`asset_ref`:** a stable, random City asset ID per session, kept in a separate registry under `~/.agent-vitals/state/plugins/city-assets/`. It holds no title, excerpt, path or native ID.
 - **`layout_order`, `usage_event_count`, `title_state`**, and separate window and lifetime first/last event times.
 - **Lazy details:** `session.detail` returns one building's cost breakdown and excerpts, scoped to the whole session.
 
-**TBD:** whether `city:v3` becomes the default loader before the first release. The repo's own spec says native-app acceptance isn't done.
+The first page is enough to render; later pages append into a stable island planned for the full window. Native click-through on a macOS bundle is still a separate acceptance.
 
-<!-- source: crates/agent-vitals-query/src/query/city_v3.rs; city_assets.rs ("No title, excerpt, path, native id or reward is persisted here"; home.join("state/plugins/city-assets")); apps/agent-city/ui/src/data/provider.ts (cityData !== "v3" → v2; readCityModule calls v3 overview + module.read) -->
-<!-- source: docs/CITY_PROJECTION_DATA_COMPLETION_SPEC.md §11 ("默认真实入口仍走 v2；v3 通过 ?cityData=v3 验证 … 原生 App … 未验收") -->
+<!-- source: crates/agent-vitals-query/src/query/city_v3.rs; city_assets.rs ("No title, excerpt, path, native id or reward is persisted here"; home.join("state/plugins/city-assets")); apps/agent-city/ui/src/data/provider.ts (cityDataProtocol: landing/cityData=v2 → v2, else v3 with v2 fallback; onPartial first page; readCityModule) -->
+<!-- source: docs/CITY_PROJECTION_DATA_COMPLETION_SPEC.md §12 (v3 default; landing stays v2; packaged fallback) -->
 
 ## Which buildings open data panels?
 

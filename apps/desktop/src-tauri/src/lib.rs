@@ -13,6 +13,7 @@ mod quota_alerts;
 mod plugin_host;
 mod plugin_projections;
 mod plugin_state;
+mod update_check;
 // 「测试」板 Claude IP 风险自检：全部出站探测收敛在此模块（离线包契约：React
 // 源码不得含远端 URL / 网络客户端），并按 scutil --proxy 对齐系统代理路由。
 mod ip_check;
@@ -4163,73 +4164,117 @@ fn about_diagnostics() -> Value {
     })
 }
 
-const TRUSTED_RELEASES_URL: &str = "https://github.com/Oh-Agent-AI/oh-agent/releases";
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/Oh-Agent-AI/oh-agent/releases/latest";
+use update_check::{
+    classify_releases_http, resolve_open_url, ReleasesHttpClass, SelectOutcome, TRUSTED_RELEASES_URL,
+};
 
-fn parse_latest_release_tag(payload: &Value) -> Result<String, String> {
-    let tag = payload
-        .get("tag_name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "trusted release response has no tag_name".to_string())?;
-    if !tag.starts_with("app-v") {
-        return Err(format!("trusted release tag is not an app release: {tag}"));
-    }
-    Ok(tag.to_string())
-}
-
+/// 应用内版本检查：拉取 `/releases` 列表（`/releases/latest` 会跳过 prerelease，
+/// beta 用户因此永远收不到下一个 beta），再由 `update_check::select_update`
+/// 按通道与 semver 选候选。只报告、不下载、不安装（automatic_install 恒为 false）。
+/// 列表为空 / 404 / 无 app-v → no_release；真限流（429，或 403 且 remaining=0 /
+/// Retry-After）→ unavailable/rate_limited；其它 403 → unavailable/forbidden。
+/// 正式版用户面对「只有 beta」时是 ok + on_latest_stable，不是 no_release。
+/// 这些都不当作错误弹给用户。CARGO_PKG_VERSION 由 Cargo 保证是 semver。
 #[tauri::command]
 async fn check_for_updates() -> Result<Value, String> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current = semver::Version::parse(current_version)
+        .expect("CARGO_PKG_VERSION is Cargo-enforced semver");
+    let unavailable = |reason: &str| {
+        serde_json::json!({
+            "status": "unavailable",
+            "reason": reason,
+            "current_version": current_version,
+            "release_url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        })
+    };
+    let no_release = || {
+        serde_json::json!({
+            "status": "no_release",
+            "current_version": current_version,
+            "release_url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        })
+    };
     let client = reqwest::Client::builder()
-        .user_agent(format!("agent-vitals/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("agent-vitals/{current_version}"))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|error| format!("build update client failed: {error}"))?;
     let response = client
-        .get(LATEST_RELEASE_API)
+        .get(update_check::RELEASES_API)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
         .map_err(|error| format!("check updates failed: {error}"))?;
+    let remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = response.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Ok(serde_json::json!({
-            "status": "no_release",
-            "current_version": env!("CARGO_PKG_VERSION"),
-            "url": TRUSTED_RELEASES_URL,
-            "automatic_install": false,
-        }));
-    }
-    if !status.is_success() {
-        return Err(format!("check updates returned HTTP {status}"));
+    match classify_releases_http(
+        status.as_u16(),
+        remaining.as_deref(),
+        retry_after.as_deref(),
+    ) {
+        ReleasesHttpClass::Ok => {}
+        ReleasesHttpClass::NotFound => return Ok(no_release()),
+        ReleasesHttpClass::RateLimited => return Ok(unavailable("rate_limited")),
+        ReleasesHttpClass::Forbidden => return Ok(unavailable("forbidden")),
+        ReleasesHttpClass::Other => {
+            return Err(format!("check updates returned HTTP {status}"));
+        }
     }
     let payload: Value = response
         .json()
         .await
         .map_err(|error| format!("parse update response failed: {error}"))?;
-    let tag = parse_latest_release_tag(&payload)?;
-    Ok(serde_json::json!({
-        "status": "ok",
-        "current_version": env!("CARGO_PKG_VERSION"),
-        "latest_tag": tag,
-        "url": TRUSTED_RELEASES_URL,
-        "automatic_install": false,
-    }))
+    Ok(match update_check::select_update(&current, &payload) {
+        SelectOutcome::Selected(selection) => serde_json::json!({
+            "status": "ok",
+            "current_version": current_version,
+            "latest_tag": selection.latest.tag,
+            "update_available": selection.update_available,
+            "release_url": selection.latest.release_url,
+            "automatic_install": false,
+        }),
+        SelectOutcome::OnLatestStable => serde_json::json!({
+            "status": "ok",
+            "current_version": current_version,
+            "update_available": false,
+            "reason": "on_latest_stable",
+            "release_url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        }),
+        SelectOutcome::None => no_release(),
+    })
 }
 
+/// 只打开可信发布根，或检查结果里已经过 `resolve_open_url` 校验的 tag 页。
+/// 前端传入的 `url` 不可信：命令侧会再校验一遍，非法值回落到根。
 #[tauri::command]
-fn open_trusted_releases_page() -> Result<Value, String> {
+fn open_trusted_releases_page(url: Option<String>) -> Result<Value, String> {
+    let target = resolve_open_url(url.as_deref());
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("open")
-        .arg(TRUSTED_RELEASES_URL)
+        .arg(&target)
         .status()
         .map_err(|e| format!("open trusted releases page failed: {e}"))?;
     #[cfg(target_os = "linux")]
     let status = std::process::Command::new("xdg-open")
-        .arg(TRUSTED_RELEASES_URL)
+        .arg(&target)
         .status()
         .map_err(|e| format!("open trusted releases page failed: {e}"))?;
     #[cfg(target_os = "windows")]
     let status = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", TRUSTED_RELEASES_URL])
+        .args(["url.dll,FileProtocolHandler", target.as_str()])
         .status()
         .map_err(|e| format!("open trusted releases page failed: {e}"))?;
     if !status.success() {
@@ -4237,7 +4282,7 @@ fn open_trusted_releases_page() -> Result<Value, String> {
     }
     Ok(serde_json::json!({
         "status": "opened",
-        "url": TRUSTED_RELEASES_URL,
+        "url": target,
         "automatic_install": false,
     }))
 }
@@ -4466,7 +4511,7 @@ Any MCP client (`mcpServers` JSON):
 {{ "mcpServers": {{ "agent-vitals": {{ "command": "{bin}", "args": ["data-mcp", "serve", "--allow-local-writes"] }} }} }}
 ```
 
-Drop `--allow-local-writes` for a strictly read-only server. With it, the only writes are typed local actions (price cards, billing declarations, budget settings, source controls) — never SQL, never files, never URLs.
+Drop `--allow-local-writes` for a strictly read-only server. With it, the only writes are typed local actions (price cards, billing declarations, budget settings, source controls, city building model overrides) — never SQL, never files, never URLs.
 
 ## Ground rules — keep the numbers honest
 
@@ -4492,6 +4537,8 @@ Every response is an envelope with `data`, `coverage`, `freshness` and `warnings
 **Data health** — `data_status` (sync, integrity, `unresolved_tokens_month`, `unpriced_metered_tokens_month`) + `data_quality_issues`; list what needs the user's hand, most valuable first.
 
 **Session drill-down** — `sessions_search` (window / harness / model) → `session_detail` / `session_trace` by `session_ref`. Never ask for or echo native session ids or paths.
+
+**Edit one Agent City session building** — `sessions_search` → `get_building` with that `session_ref` (or the `ca_…` `asset_ref`) → `preview_building` until `data.ok` → `set_building_model` with `expected_revision`. Confirm via returned `revision` + `build_event_id`. `reset_building` restores the default. Mutations need `--allow-local-writes`. On failure read structured `data.error` (`validation` vs `conflict`); do not depend on screenshots. City UI construction playback is queued, not yet wired.
 
 **Hourly pattern** — `usage_hourly` for one day (tokens only; cost per hour lives in `cost_breakdown`).
 
@@ -7977,15 +8024,5 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"keep-current");
         assert!(!root.join("authority.sqlite.pre-restore-43.bak").exists());
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn latest_release_parser_accepts_only_app_tags() {
-        assert_eq!(
-            parse_latest_release_tag(&serde_json::json!({"tag_name": "app-v1.0.0"})).unwrap(),
-            "app-v1.0.0"
-        );
-        assert!(parse_latest_release_tag(&serde_json::json!({})).is_err());
-        assert!(parse_latest_release_tag(&serde_json::json!({"tag_name": "v1.0.0"})).is_err());
     }
 }
