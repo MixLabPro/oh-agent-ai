@@ -4,7 +4,7 @@ version = "1.4.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Browser wasm build of agent-vitals: pure behavior audit over in-memory events"
-repository = "https://github.com/MixLabPro/agent-vitals"
+repository = "https://github.com/Oh-Agent-AI/oh-agent"
 license = "MIT"
 
 [lib]

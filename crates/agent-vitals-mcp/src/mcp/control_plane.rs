@@ -336,7 +336,7 @@ fn sync_state(data_home: &Path) -> Result<Value, ToolError> {
 }
 
 const PUBLIC_PRICING_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/pricing.json";
+    "https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/main/assets/pricing.json";
 const PRICING_UPDATE_STATUS_FILE: &str = "pricing-catalog-update.json";
 const PRICING_UPDATE_POLICY_FILE: &str = "pricing-catalog-policy.json";
 
@@ -381,7 +381,7 @@ fn save_pricing_catalog_policy(data_home: &Path, network_enabled: bool) -> Resul
 }
 
 const MANIFEST_CATALOG_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/catalog/index.json";
+    "https://raw.githubusercontent.com/Oh-Agent-AI/oh-agent/main/catalog/index.json";
 const MANIFEST_CATALOG_STATUS_FILE: &str = "manifest-catalog-update.json";
 const MANIFEST_CATALOG_POLICY_FILE: &str = "manifest-catalog-policy.json";
 

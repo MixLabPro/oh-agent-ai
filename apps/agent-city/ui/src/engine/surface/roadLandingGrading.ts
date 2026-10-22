@@ -2,7 +2,7 @@
  * terrain is shared by every renderer and surface compiler, never a decal lift. */
 import { DetMath as Math } from "../detMath";
 import type { RoadEdge, TerrainField, Vec2 } from "../cityLayout";
-export const ROAD_LANDING_GRADING_VERSION = 1;
+export const ROAD_LANDING_GRADING_VERSION = 2;
 const cache = new WeakMap<TerrainField,WeakMap<object,TerrainField>>();
 /** graded → the raw field it was graded from. Earthworks follow the road set: when a plan
  * patch replaces roads (a player erases a bridge and draws another), the patched layout
@@ -57,6 +57,12 @@ export function gradeRoadLandings(base:TerrainField,roads:readonly RoadEdge[]):T
       zones.set(key(end),{x:end.x,z:end.z,core,outer:core+12,target:Math.min(h+1.2,target)});
     }
   }
+  // Keep the channel under each span open. The approach pad may raise a dry
+  // abutment, but must not reclaim shallow water between the two landings.
+  const channels=valid.filter(road=>road.bridge).flatMap(road=>{
+    const a=road.points[0],b=road.points[road.points.length-1],length=Math.hypot(b.x-a.x,b.z-a.z);
+    return length>0&&Number.isFinite(length)?[{a,dx:(b.x-a.x)/length,dz:(b.z-a.z)/length,length,half:road.width/2,landing:Math.min(3,length/3),blend:Math.min(1,length/12)}]:[];
+  });
   const ordered=[...zones.values()].sort((a,b)=>a.x-b.x||a.z-b.z);
   const height=(x:number,z:number)=>{
     const raw=base.height(x,z);
@@ -70,7 +76,16 @@ export function gradeRoadLandings(base:TerrainField,roads:readonly RoadEdge[]):T
       weighted+=weight*zone.target;total+=weight;
     }
     if(total===0)return raw;
-    return raw+Math.min(1,total)*smooth(raw/0.2)*Math.max(0,Math.min(1.2,weighted/total-raw));
+    let channel=0;
+    if(raw<0.7)for(const span of channels){
+      const dx=x-span.a.x,dz=z-span.a.z,along=dx*span.dx+dz*span.dz;
+      const endDistance=Math.min(along,span.length-along),lateral=Math.abs(dx*span.dz-dz*span.dx);
+      // Keep the same bounded landing zone as bridgeDeckProfile, including
+      // short spans; fade to the channel within one unit and two at its sides.
+      const protectedWeight=smooth((endDistance-span.landing)/span.blend)*(1-smooth((lateral-span.half)/2))*(1-smooth((raw-0.5)/0.2));
+      channel=Math.max(channel,protectedWeight);
+    }
+    return raw+(1-channel)*Math.min(1,total)*smooth(raw/0.2)*Math.max(0,Math.min(1.2,weighted/total-raw));
   };
   const terrain=ordered.length?{...base,height,slope:(x:number,z:number)=>Math.hypot(height(x+1,z)-height(x-1,z),height(x,z+1)-height(x,z-1))/2}:base;
   if(terrain!==base)ungraded.set(terrain,base);

@@ -26,7 +26,7 @@ agent-vitals doctor --harness claude-code
 If the standalone binary is not on PATH yet, use a repository checkout instead:
 
 ```bash
-git clone https://github.com/MixLabPro/agent-vitals
+git clone https://github.com/Oh-Agent-AI/oh-agent
 cd agent-vitals
 python3 scripts/scan.py doctor --harness claude-code
 ```
