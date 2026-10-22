@@ -332,3 +332,36 @@ export type DrivingSpawnSpecV1 = Readonly<{
 - cannon-es 官方 RaycastVehicle 示例：<https://github.com/pmndrs/cannon-es/blob/master/examples/raycast_vehicle.html>。
 - GTA 式 Three.js 城市切片：<https://github.com/depixeled-chris/gta7>。
 - mini-gta-3d：<https://github.com/YukihiroKimuraJ/mini-gta-3d>（许可未确认，不复制）。
+
+### 2026-10-22：普通汽车 / 喷气飞车正式游玩入口
+
+当前入口：City 工具栏「驾车」→「普通汽车」或「喷气飞车」→ 准备就绪
+→「开始驾驶」。选择面板支持键盘与 Esc 取消；尚未选择时不获取场景租约、
+不绑定驾驶输入。两种模式共享同一运行时、局部出生点检查和互斥约束。
+
+| 输入 | 普通汽车 | 喷气飞车 |
+| --- | --- | --- |
+| W/S、A/D 或方向键 | 加速、刹车/倒车、转向 | 相同，空中亦可控制 |
+| Space | 暂停/继续 | 长按喷升，松开下降；不触发暂停 |
+| Esc | 暂停/继续 | 暂停/继续 |
+
+HUD 按模式显示对应按键；飞车显示高度与助推余量。地面回充、有限助推、
+空中严格实体碰撞和天花板限制沿用 VTOL 内核。模式按本次入场请求传入，
+不依赖等待 React 更新 options，普通汽车及审计默认物理保持不变。
+
+VTOL 物理版本升为 2：起飞前尚未超过离地阈值的短阶段，水平轮面求解
+使用本层有效支撑姿态，垂直累积高度仍由喷升路径保留，避免下一 tick 的
+`invalid-start-support`。仅有明确 VTOL 部分喷升状态、且高度差在离地
+阈值内才适用；不放宽普通驾驶或空中碰撞校验。共享暂停面板退出时尊重
+已显式聚焦的游戏画布，不再把焦点抢回旧按钮。
+
+验证：`verify-city-driving-entry` 从真实 free-drive 工厂分别创建两种模式，
+推进 60 tick，确认普通汽车不能升空、飞车升空且消耗助推、起飞过程没有
+无效支撑，并正常释放租约。`verify-city-driving-vtol`、shared-runtime、
+shared-game-ux 及 typecheck/build 为关联回归。
+
+浏览器 `?demo=1` 实测：选择喷气飞车后成功准备并起飞，HUD 显示飞行、
+高度上升与助推消耗；Esc 暂停和退出正常。再入普通汽车，Space 仍暂停；
+选择面板 Esc 取消后恢复城市按钮。无控制台错误。入口与试飞证据分别为
+`/tmp/ohagent-jet-mode-entry.png`、`/tmp/ohagent-jet-flight-accepted.png`。
+本轮未重新打包或安装原生 App。

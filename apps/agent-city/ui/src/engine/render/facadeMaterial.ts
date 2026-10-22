@@ -1,5 +1,14 @@
 import * as THREE from "three";
 
+/** Shared sky sampling for facade and civic glass. */
+export const FACADE_SKY_GLSL = /* glsl */ `vec3 facadeSky(vec3 dir) {
+  dir = normalize(dir);
+  vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+  vec3 photo = texture2D(uEnv, uv).rgb;
+  vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
+  return mix(photo, photo * tint * 1.55, uGradeAmount);
+}`;
+
 /** 每块立面平铺里的窗格数（列 × 行）：与 makeFacadeTexture 画的窗格对齐，亮灯按窗格取 hash。 */
 export const FACADE_GRIDS: Array<[number, number]> = [[5, 4], [1, 4], [4, 4], [1, 2]];
 
@@ -72,13 +81,7 @@ uniform float uWindowGlow;
 uniform vec2 uGrid;
 float facadeWindow = 0.0;
 float cellHash(vec2 c, float s) { return fract(sin(dot(c, vec2(127.1, 311.7)) + s * 91.7) * 43758.5453); }
-vec3 facadeSky(vec3 dir) {
-  dir = normalize(dir);
-  vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
-  vec3 photo = texture2D(uEnv, uv).rgb;
-  vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
-  return mix(photo, photo * tint * 1.55, uGradeAmount);
-}`)
+${FACADE_SKY_GLSL}`)
       .replace("#include <map_fragment>", `#ifdef USE_MAP
   vec4 facadeTexel = texture2D( map, vMapUv );
   // 窗格遮罩：程序化立面里窗是暗格、墙是亮底。只让窗反光——整面反光的楼像一面镜子。

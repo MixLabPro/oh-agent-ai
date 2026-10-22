@@ -13,7 +13,7 @@ import { resolveDrivingCollision, type SupportedPose } from "./DrivingCollisionS
 import { DEFAULT_SWEEP_LIMITS, sweepBody, type BodyPose, type SweepLimits } from "./DrivingCollision";
 import type { CollisionDimensions, Solid } from "./CollisionIndex";
 import { ContinuousDrivingEnvironment, type ContinuousMotionParams, type ContinuousWorldBinding } from "./ContinuousDrivingEnvironment";
-import type { VtolAirMotion, VtolAirResult, VtolLiftResult } from "./vtolDriving";
+import { VTOL_PARAMS, type VtolAirMotion, type VtolAirResult, type VtolLiftResult, type VtolDrivingState } from "./vtolDriving";
 
 export type { ContinuousWorldBinding, ContinuousMotionParams };
 export type VtolEnvironmentPolicy = Readonly<{ boundarySlide?: boolean; mountablePolicy?: "disabled" | "gameplay" }>;
@@ -58,7 +58,19 @@ export class VtolDrivingEnvironment {
   }
 
   /** 地面水平段：与连续环境完全一致（含支撑/可越/边界滑动语义）。 */
-  move(previous: DrivingState, desired: DrivingMotion): DrivingMoveResult { return this.inner.move(previous, desired); }
+  move(previous: DrivingState, desired: DrivingMotion): DrivingMoveResult {
+    // During the short pre-liftoff phase, vertical lift has deliberately raised
+    // y above the road. The horizontal wheel solver still needs its exact road
+    // pose; otherwise the next tick reports invalid-start-support forever.
+    const vtol = previous as Partial<VtolDrivingState>;
+    if (vtol.airborne === false && (vtol.verticalSpeed ?? 0) > 0) {
+      const support = this.inner.place(previous.x, previous.z, previous.heading, previous.surfaceId, previous.y);
+      if (support && previous.y >= support.y && previous.y - support.y <= VTOL_PARAMS.liftoffMargin + 1e-6) {
+        return this.inner.move({ ...previous, ...support }, desired);
+      }
+    }
+    return this.inner.move(previous, desired);
+  }
   /** 出生/复位校验与连续环境同源（VTOL 车在地面上按完全相同的规则放置）。 */
   place(x: number, z: number, heading: number, regionId: string, y?: number) { return this.inner.place(x, z, heading, regionId, y); }
 

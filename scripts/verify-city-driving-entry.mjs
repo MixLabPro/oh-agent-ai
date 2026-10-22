@@ -17,7 +17,7 @@ assert.match(drivingHook, /createCityCarSession\(host, runtime, \{ \.\.\.request
   "formal session coordinates must come from the confirmed sealed credential");
 assert.match(drivingHook, /mode === "free-drive" \? await createCityCarFreeDriveSession/,
   "the player entry must use the bounded free-drive spawn path");
-assert.match(playHook, /enterFreeDrive\(\)/, "the normal City driving control enters free drive");
+assert.match(playHook, /enterFreeDrive\(\{ vtol: fly \}\)/, "the normal City driving control enters free drive");
 assert.doesNotMatch(playHook, /enterDiagnostic|UAT/, "the player-facing control is independent of the diagnostic build flag");
 assert.match(cityApp, /\{ id: "car", commandId: "city\.car", label: driving\.active \? "退出驾驶" : "驾车"/,
   "the normal City toolbar exposes driving without a UAT flag");
@@ -58,6 +58,22 @@ function hostFixture(overrides = {}) {
   assert.ok(Number.isFinite(entry.adapter.snapshot.x), "safe spawn is derived from the current compiled road surface");
   runtime.exit(); assert.equal(f.state.releases, 1);
 }
+// The real free-drive factory must forward the chosen vehicle to the kernel.
+for (const vtol of [false,true]) {
+  const f=hostFixture(), runtime=new m.GameRuntime();let pose=null;let invalidSupport=0;
+  const entry=await m.createCityCarFreeDriveSession(f.host,runtime,{...request,vtol,present:(frame)=>{pose=frame.state;if(frame.reason==="invalid-start-support")invalidSupport++;}});
+  assert.equal(entry.status,"ready");
+  f.state.hook(1/60);const baseY=pose.y;
+  assert.equal(runtime.resume(),true);
+  runtime.setInput({forward:false,backward:false,left:false,right:false,thruster:true});
+  for(let i=0;i<60;i++)f.state.hook(1/60);
+  assert.equal(runtime.snapshot.phase,"running");
+  assert.equal(invalidSupport,0,"pre-liftoff height must not invalidate wheel support");
+  if(vtol){assert(pose.y>baseY+0.5,"jet mode actually climbs");assert(pose.boost<1&&pose.boost>=0,"boost is finite and consumed");}
+  else{assert.equal(pose.y,baseY,"standard car cannot lift");assert.equal(pose.boost,undefined);}
+  runtime.exit();assert.equal(f.state.releases,1);
+}
+
 // 1) 入场成功：paused 起步（入场暂停）、租约保持、帧钩子已注册。
 {
   const f = hostFixture(); const runtime = new m.GameRuntime();

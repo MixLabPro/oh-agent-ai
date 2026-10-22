@@ -9,7 +9,7 @@
 import { DRIVING_DT, DRIVING_PARAMS, initialDrivingState, stepDriving,
   type DrivingEnvironment, type DrivingInputState, type DrivingMotion, type DrivingMoveResult, type DrivingState } from "../DrivingSimulation";
 
-export const VTOL_PHYSICS_VERSION = 1;
+export const VTOL_PHYSICS_VERSION = 2;
 export const VTOL_PARAMS = Object.freeze({
   liftAccel: 6,           // u/s² 喷升
   liftMax: 8,             // u/s 垂直速度上限（≤ maxForward：共享内核每步界）

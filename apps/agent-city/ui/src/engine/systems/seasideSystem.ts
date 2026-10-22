@@ -11,6 +11,8 @@ import { SegmentIndex, polygonDistance } from "../cityPlan";
 import { validRuns } from "../citySeaside";
 import { mergeGeometries } from "../render/shared";
 import type { NightLights } from "../render/types";
+import { clipConvexToTerrain, terrainFit } from "../surface/terrainClip";
+import { ROAD_SURFACE_LIFT } from "../surface/groundRoadCompiler";
 
 /** 本系统读写的 CityParts 成员（精确清单；CityParts 以 `this as unknown as SeasideHost` 传入）。 */
 export interface SeasideHost {
@@ -381,6 +383,10 @@ export function buildBeachRibbon(host: SeasideHost): void {
     return { p, nx, nz, depth };
   });
   const positions: number[] = []; const colors: number[] = [];
+  // Sand is a terrain overlay, below the road layer. Sampling procedural
+  // heights + 0.05 put it ABOVE asphalt (+0.04), and broad triangles cut
+  // through the rendered terrain near bridgeheads. Share its triangulation.
+  const fit = terrainFit(host.layout, ROAD_SURFACE_LIFT / 4);
   const bands: Array<[number, number, THREE.Color]> = [];
   // 水线外侧曾铺一条 7 宽的不透明近白「浪花」带（#eef5f2，−6…+1）：均匀、不动、不透明，读作水边一圈白水泥
   // （用户截图「湿沙外接近水的区域为什么是白色」）。浪花交给水面着色器的岸线涟漪（动态、不规则、随深度淡出）；
@@ -388,7 +394,7 @@ export function buildBeachRibbon(host: SeasideHost): void {
   const swash = new THREE.Color("#b39b70"); const wetSand = new THREE.Color("#cdb487"); const drySand = new THREE.Color("#f3e5c2");
   const point = (x: number, z: number, nx: number, nz: number, d: number) => {
     const px = x + nx * d; const pz = z + nz * d;
-    return [px, terrain.height(px, pz) + 0.05, pz];
+    return { x: px, z: pz };
   };
   for (let i = 0; i < n; i += 1) {
     const a = vertex[i]; const b = vertex[(i + 1) % n];
@@ -408,7 +414,18 @@ export function buildBeachRibbon(host: SeasideHost): void {
         const to1 = color === drySand ? s1.depth : to;
         const q = [point(s0.x, s0.z, s0.nx, s0.nz, from), point(s1.x, s1.z, s1.nx, s1.nz, from),
                    point(s1.x, s1.z, s1.nx, s1.nz, to1), point(s0.x, s0.z, s0.nx, s0.nz, to)];
-        for (const index of [0, 2, 1, 0, 3, 2]) { positions.push(...q[index]); colors.push(color.r, color.g, color.b); }
+        for (const triangle of [[q[0],q[2],q[1]],[q[0],q[3],q[2]]]) {
+          for (const piece of clipConvexToTerrain(fit.grid, triangle)) {
+            for (let j=1;j+1<piece.length;j++) {
+              const a=piece[0],b=piece[j],c=piece[j+1];
+              if (Math.abs((b.x-a.x)*(c.z-a.z)-(b.z-a.z)*(c.x-a.x))<1e-10) continue;
+              for (const p of [piece[0],piece[j],piece[j+1]]) {
+                positions.push(p.x,fit.heightAt(p.x,p.z),p.z);
+                colors.push(color.r,color.g,color.b);
+              }
+            }
+          }
+        }
       }
     }
   }

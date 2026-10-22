@@ -82,3 +82,25 @@ for (const count of [380, 1600]) {
   } finally { parts.dispose(); }
 }
 console.log("City site registry scenes: 380/1600 full-backdrop × day/night instance classification, unchanged pickable mesh set and civic/district identity passed.");
+
+// Retire filler hotels, not the real sessions using seaside parcels.
+{
+  const model=modelFor(280);
+  const auto=layoutCity(model,null,74031,MIAMI_COASTAL,"auto");
+  const off=layoutCity(model,null,74031,MIAMI_COASTAL,"off");
+  const addresses=layout=>layout.districts.flatMap(d=>[...d.slots.entries()].map(([id,slot])=>[id,slot.id,slot.x,slot.z])).sort((a,b)=>a[0].localeCompare(b[0]));
+  assert.deepEqual(addresses(auto),addresses(off),"background settings never remove or relocate sessions");
+  const coastal=auto.districts.flatMap(d=>[...d.slots.entries()]).filter(([,slot])=>/^(hotel:|oceandrive:)/.test(slot.blockId));
+  assert(coastal.length>0,"fixture must include actual coastal sessions");
+  for(const layout of [auto,off]){
+    const parts=new CityParts(model,layout,null);
+    try{
+      parts.group.traverse(mesh=>assert(!mesh.name.startsWith("city-ocean-drive-"),"no retired decorative row in any background mode"));
+      for(const [id] of coastal){
+        assert(parts.anchorFor(id),"coastal sessions retain their identity/anchor");
+        assert(parts.shaftIdByInstance.some(map=>[...map.values()].includes(id)),"coastal sessions remain selectable data buildings");
+      }
+    }finally{parts.dispose();}
+  }
+  console.log(`Retired Ocean Drive filler: absent in auto/off; ${coastal.length} coastal sessions retain addresses, anchors and picking.`);
+}

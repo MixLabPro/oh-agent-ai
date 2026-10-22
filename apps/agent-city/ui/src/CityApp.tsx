@@ -312,9 +312,9 @@ export function CityApp() {
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} /></div>
       <CityMinimap engine={engineRef} language={language} driving={{ active: driving.active, pose: driving.pose }}
         hidden={!sceneReady || cinema || game.active || !!experience.film || driving.hud.phase === "preparing" || driving.hud.phase === "error"} />
-      <DrivingHud model={{ active: driving.active, entryError: driving.entryError,
+      <DrivingHud model={{ active: driving.active, choosingVehicle: driving.choosingVehicle, vtol: driving.vtol, entryError: driving.entryError,
         initialPaused: driving.initialPaused, hud: driving.hud, preparationProgress: driving.preparationProgress, events: driving.events, diagnostics: driving.diagnostics() }}
-        actions={{ clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,
+        actions={{ selectVehicle: driving.selectVehicle, clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,
           resume: driving.resume, openUiContext: driving.openUiContext }}
         locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />
       {roadAuditEnabled && roadAuditOpen && <RoadAuditPanel snapshot={roadAudit.snapshot} run={() => { void roadAudit.run(); }} cancel={() => roadAudit.cancel()}

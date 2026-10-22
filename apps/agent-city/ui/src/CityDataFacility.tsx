@@ -1,27 +1,23 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, type ComponentProps } from "react";
 import type { CityModuleV3 } from "@agent-vitals/app-sdk";
 import { readCityModule, type CityProjectionV1 } from "./data/provider";
 import { cityText } from "./i18n";
+import { CityPanel } from "./CityPanel";
 import { CITY_DATA_PLACES, type CityDataPlaceId } from "./cityDataPlaces";
 
-type Props = { harness?: string | null; id: CityDataPlaceId; projection: CityProjectionV1; language: string; onClose(): void; onLocate(id: string): boolean };
+type Props = { harness?: string | null; id: CityDataPlaceId; projection: CityProjectionV1; language: string; onClose(): void; onLocate(id: string): boolean;
+  back?: ComponentProps<typeof CityPanel>["back"] };
 const rows = (value: unknown): Array<Record<string, unknown>> => Array.isArray(value)
   ? value.filter((row) => row && typeof row === "object" && !Array.isArray(row)) : [];
 
-export function CityDataFacility({ id, projection, language, onClose, onLocate, harness }: Props) {
+export function CityDataFacility({ id, projection, language, onClose, onLocate, harness, back }: Props) {
   const en = language === "en";
   const place = CITY_DATA_PLACES.find((item) => item.id === id)!;
-  const panel = useRef<HTMLElement>(null);
   const [loaded, setLoaded] = useState<{ module: CityModuleV3; from: string; to: string; generated: string | null; timezone: string } | null>(null);
   const [pending, setPending] = useState(false);
   const [retry, setRetry] = useState(0);
   const [missing, setMissing] = useState(false);
   const [visibleDays, setVisibleDays] = useState(30);
-  useEffect(() => {
-    const previous = document.activeElement;
-    panel.current?.focus();
-    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
-  }, []);
   useEffect(() => {
     setLoaded(null); setMissing(false); setVisibleDays(30);
     if (id === "overview" || id === "activity") { setPending(false); return; }
@@ -47,12 +43,10 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate, 
     <strong>{projection.harnesses.find((h) => h.id === row.harness)?.display_name ?? String(row.harness ?? "")}</strong>
     <span>{String(row.severity ?? "")} · {String(row.category ?? cityText("汇总", language))}</span><b>{number(row.count)}</b>
   </li>)}</ul> : <p>{cityText("此分类没有已记录问题。", language)}</p>;
-  return <aside className="city-detail-panel city-data-facility" ref={panel} tabIndex={-1} aria-labelledby="city-facility-heading" aria-busy={pending}
-    onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
-    <button className="city-close" aria-label={cityText("关闭数据设施", language)} onClick={onClose}>×</button>
-    <p className="city-facility-eyebrow">{cityText("公共服务 · 数据窗口", language)}</p>
-    <p>{harness ? projection.harnesses.find((h) => h.id === harness)?.display_name ?? harness : cityText("全城", language)}</p>
-    <h2 id="city-facility-heading">{en ? place.englishTitle : place.title}</h2>
+  return <CityPanel className="city-data-facility" focusOnOpen busy={pending} onClose={onClose} back={back} closeLabel={cityText("关闭数据设施", language)}
+    eyebrow={cityText("公共服务 · 数据窗口", language)}
+    context={harness ? projection.harnesses.find((h) => h.id === harness)?.display_name ?? harness : cityText("全城", language)}
+    title={en ? place.englishTitle : place.title}>
     <p>{en ? place.englishDescription : place.description}</p>
     <p className="city-context-note">{projection.source === "fixture" ? cityText("合成演示数据", language) : cityText("本机只读数据", language)} · {loaded?.timezone ?? projection.activity?.timezone ?? "UTC"}</p>
     <p className="city-facility-window">{loaded?.from ?? projection.window.from}<br />{loaded?.to ?? projection.window.to}</p>
@@ -135,5 +129,5 @@ export function CityDataFacility({ id, projection, language, onClose, onLocate, 
     {missing && <p role="status">{cityText("当前规模尚未生成该设施，仍可在这里查看数据。", language)}</p>}
     <p className="city-context-note">{cityText("这里不会发放游戏收入、关闭真实问题或执行技能。", language)}</p>
     <button onClick={onClose}>{cityText("返回城市", language)}</button>
-  </aside>;
+  </CityPanel>;
 }

@@ -20,6 +20,7 @@ import { cityText, cityView, useCityLanguage } from "./i18n";
 import { GameHud } from "./game/GameHud";
 import { BuildingBookmark } from "./BuildingBookmark";
 import { CityDataFacility } from "./CityDataFacility";
+import { CityPanel } from "./CityPanel";
 import { CITY_DATA_PLACES, cityDataPlaceForDecor, type CityDataPlaceId } from "./cityDataPlaces";
 import { gameText } from "./game/gameCopy";
 import { prewarmAudioContext } from "./game/GameSfx";
@@ -272,12 +273,32 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   const [dataPlace, setDataPlace] = useState<CityDataPlaceId | null>(null);
   const [dataDistrict, setDataDistrict] = useState<string | null>(null);
   const [dataPlaceFromDirectory, setDataPlaceFromDirectory] = useState(false);
+  const [dataPlaceFromSelection, setDataPlaceFromSelection] = useState(false);
   const openDataPlace = (id: CityDataPlaceId | null, fromDirectory = false, districtId: string | null = null) => {
     setDataDistrict(districtId);
-    setDataPlaceFromDirectory(fromDirectory); setDataPlace(id);
+    setDataPlaceFromDirectory(fromDirectory); setDataPlaceFromSelection(false); setDataPlace(id);
     if (fromDirectory) setSummaryOpen(false);
   };
-  useEffect(() => setDataPlace(null), [ui.selected, cinema, gameActive]);
+  // 医院/学校等数据设施：点击直接进数据窗口（一层弹窗）。曾先出说明面板、再点「打开设施数据」才见数据，
+  // 用户要多走一步。市政厅自带全城概况面板，不走这里。
+  useEffect(() => {
+    const place = ui.selected && ui.selected !== "decor:site:civic" && !cinema && !gameActive ? cityDataPlaceForDecor(ui.selected) : null;
+    setDataPlaceFromDirectory(false);
+    setDataPlaceFromSelection(place !== null);
+    setDataDistrict(place && ui.selected ? ui.serviceDistrict(ui.selected) : null);
+    setDataPlace(place);
+  }, [ui.selected, cinema, gameActive]);
+  // 右侧只有一个面板位，下钻是原地替换而不是叠弹窗：数据窗口开着时详情面板让位，「‹ 返回」回到它。
+  const dataOpen = dataPlace !== null && !!ui.projection;
+  // 建筑说明与建筑面板同占右侧，互斥：说明开着时点了楼 → 说明让位，楼的面板给「返回建筑说明」；
+  // 从工具栏打开说明 → 放下当前选中。曾两者同时开着，面板盖在说明上。
+  const [catalogReturn, setCatalogReturn] = useState(false);
+  useEffect(() => {
+    if (!ui.selected) { setCatalogReturn(false); return; }
+    if (ui.catalog) { setCatalogReturn(true); ui.setCatalog(false); }
+  }, [ui.selected]);
+  useEffect(() => { if (ui.catalog && ui.selected) ui.clearSelection(); }, [ui.catalog]);
+  const backToCatalog = catalogReturn ? { label: "返回建筑说明", onBack: () => { ui.clearSelection(); ui.setCatalog(true); } } : undefined;
   const [replayOpen, setReplayOpen] = useState(false);
   const summaryButton = useRef<HTMLButtonElement>(null);
   const replayButton = useRef<HTMLButtonElement>(null);
@@ -338,6 +359,10 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
   const detailsRef = useRef<HTMLDialogElement>(null);
   useEffect(() => { if (ui.options) settingsRef.current?.showModal(); else settingsRef.current?.close(); }, [ui.options]);
   useEffect(() => { if (ui.details && session) detailsRef.current?.showModal(); else detailsRef.current?.close(); }, [ui.details, session?.id]);
+  const dataBack = dataPlaceFromDirectory ? { label: "返回城市摘要", onBack: () => { setDataPlace(null); setSummaryOpen(true); } }
+    : !dataPlaceFromSelection && ui.selected ? { label: ui.selected === "decor:site:civic" ? "返回市政厅"
+      : <>返回 {model?.districts.find((d) => d.id === decorDistrictId(ui.selected))?.label ?? ""}</>, onBack: () => setDataPlace(null) }
+    : backToCatalog;
   return cityView(<>
     <div className="city-tooltip" ref={ui.tooltipRef} aria-hidden="true" />
     {!cinema && !gameActive && <button ref={summaryButton} className="city-summary-trigger" aria-label="城市摘要" aria-expanded={summaryOpen} aria-controls="city-summary-panel" onClick={() => { ui.clearSelection(); ui.setCatalog(false); setSummaryOpen(!summaryOpen); }}>
@@ -403,16 +428,14 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <div className="city-cinema-top" /><div className="city-cinema-bottom"><span style={{ transform: `scaleX(${ui.progress})` }} /></div>
       {card && <div className="city-cinema-card"><p>{"eyebrow" in card ? card.eyebrow : ""}</p><h2>{card.title}</h2><p>{card.subtitle}</p></div>}
     </div>}
-    {ui.selected === "decor:site:civic" && !cinema && !gameActive && model && (() => {
+    {ui.selected === "decor:site:civic" && !dataOpen && !cinema && !gameActive && model && (() => {
       // 市政厅 = 全城的功能性标志：面板展示全城概况（用户：「市政广场的市政厅能提供哪些功能性信息」）。
       const total = model.stats.totalSessions || 1;
       const tier = scaleTierFor(model.buildings.length);
       const stage = tier >= 8 ? "议会大厦" : tier >= 5 ? "市政中心" : tier >= 3 ? "市政厅" : "镇政厅";
       const ranked = [...model.districts].sort((a, b) => b.sessionCount - a.sessionCount);
       const alerts = ranked.filter((d) => d.anomaly);
-      return <aside className="city-detail-panel" aria-label="建筑详情">
-        <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
-        <p>市政厅 · 全城概况</p><h2>{stage}</h2>
+      return <CityPanel eyebrow="市政厅 · 全城概况" title={stage} closeLabel="关闭建筑详情" onClose={ui.clearSelection} back={backToCatalog}>
         <button onClick={() => openDataPlace("overview")}>打开全窗口统计</button>
         <button onClick={() => openDataPlace("findings")}>打开诊断中心</button>
         <dl><dt>会话</dt><dd>{model.stats.totalSessions}</dd><dt>今日活跃</dt><dd>{model.stats.activeCount}</dd>
@@ -426,16 +449,14 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         {alerts.length ? <><h3>异常</h3>{alerts.map((d) => <p key={d.id}>{d.label} · {d.anomaly!.severity} · {d.anomaly!.count} 条（部分投影）</p>)}</> : <p>{ui.projection?.coverage.findings_state === "partial" ? "当前没有城区异常。" : "问题统计尚未载入，请打开诊断中心。"}</p>}
         <p>市政厅随岛屿档位升级；广场前的城区旗高度表示各城区会话占比，穹顶信标表示有城区异常。</p>
         {decorCamera}
-      </aside>;
+      </CityPanel>;
     })()}
-    {ui.selected && decorDistrictId(ui.selected) !== null && !cinema && !gameActive && (() => {
+    {ui.selected && decorDistrictId(ui.selected) !== null && !dataOpen && !cinema && !gameActive && (() => {
       // 城区地标 = 城区的功能性标志：面板展示该执行环境城区的数据（用户：把城区信息放到「城区地标」说明上）。
       const districtId = decorDistrictId(ui.selected);
       const district = model?.districts.find((d) => d.id === districtId);
       if (!district) return null;
-      return <aside className="city-detail-panel" aria-label="建筑详情">
-        <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
-        <p>城区地标 · 执行环境城区</p><h2>{district.label}</h2>
+      return <CityPanel eyebrow="城区地标 · 执行环境城区" title={district.label} closeLabel="关闭建筑详情" onClose={ui.clearSelection} back={backToCatalog}>
         <dl><dt>会话</dt><dd>{district.sessionCount}</dd><dt>今日活跃</dt><dd>{district.activeCount}</dd>
           {district.anomaly && <><dt>异常</dt><dd>{district.anomaly.severity} · {district.anomaly.count} 条（部分投影）</dd></>}</dl>
         <p>{cityText("城区公共服务", language)} · {ui.districtServices(district.id).includes("hospital") ? cityText("医院已建成", language) : cityText("医院缺建：用地受限", language)} · {ui.districtServices(district.id).includes("school") ? cityText("学校已建成", language) : cityText("学校缺建：用地受限", language)}</p>
@@ -447,26 +468,22 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
         <p>地标高度随本区会话数增长：会话越多，地标越高。</p>
         <button disabled={locked} onClick={() => ui.focusDistrict(district.id)}>聚焦城区</button>
         {decorCamera}
-      </aside>;
+      </CityPanel>;
     })()}
-    {ui.selected && isDecorId(ui.selected) && decorDistrictId(ui.selected) === null && ui.selected !== "decor:site:civic" && !cinema && !gameActive && (() => {
+    {ui.selected && isDecorId(ui.selected) && decorDistrictId(ui.selected) === null && ui.selected !== "decor:site:civic" && !dataOpen && !cinema && !gameActive && (() => {
       const info = describeDecor(ui.selected);
       if (!info) return null;
-      return <aside className="city-detail-panel" aria-label="建筑详情">
-        <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
-        <p>{info.category}</p><h2>{info.title}</h2>
+      return <CityPanel eyebrow={info.category} title={info.title} closeLabel="关闭建筑详情" onClose={ui.clearSelection} back={backToCatalog}>
         <p>{info.body}</p>
         {cityDataPlaceForDecor(ui.selected) && <button onClick={() => openDataPlace(cityDataPlaceForDecor(ui.selected), false, ui.serviceDistrict(ui.selected))}>打开设施数据</button>}
         <p>这不是会话楼：没有 token、时间或会话详情可钻取。</p>
         {decorCamera}
-      </aside>;
+      </CityPanel>;
     })()}
-    {selected && !cinema && !gameActive && <aside className="city-detail-panel" aria-label="建筑详情">
-      <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
-      <p>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</p>
+    {/* 楼名（V32）：会话标题优先；无标题证据时回退城区名（聚合楼没有标题，恒走回退）。 */}
+    {selected && !dataOpen && !cinema && !gameActive && <CityPanel eyebrow={<>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</>} closeLabel="关闭建筑详情" onClose={ui.clearSelection} back={backToCatalog}
+      title={session?.title ?? model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}>
       {model && selected.tokensTotal >= Math.max(...model.buildings.map((b) => b.tokensTotal)) && <p className="city-hero-note">全城之最：本窗口 token 最多的会话。它戴尖顶冠，夜里顶上亮一道探照光柱，方便在全城找到它。</p>}
-      {/* 楼名（V32）：会话标题优先；无标题证据时回退城区名（聚合楼没有标题，恒走回退）。 */}
-      <h2>{session?.title ?? model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}</h2>
       {session?.title && <p className="city-session-title-source">标题来自{titleSourceLabel(session.title_source) ?? "未知来源"}</p>}
       <dl><dt>Token</dt><dd>{tokens(selected.tokensTotal)}</dd><dt>状态</dt><dd>{selected.active ? "活跃 · 施工中" : "非活跃 · 已封顶"}</dd>
         <dt>进度估算</dt><dd>{Math.round(selected.builtFraction * 100)}%</dd><dt>起始时间</dt><dd>{dateLabel(selected.startedAt)}</dd>
@@ -481,7 +498,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       {session && <button onClick={() => ui.setDetails(true)}>查看会话详情</button>}
       {selected.aggregated && <p>此建筑代表 {selected.extraCount} 个会话，不支持单独钻取。</p>}
       <p>建筑和施工仅为数据隐喻。</p>
-    </aside>}
+    </CityPanel>}
     <dialog className="city-dialog" ref={detailsRef} onCancel={(event) => { event.preventDefault(); event.stopPropagation(); ui.setDetails(false); }} onClose={() => ui.setDetails(false)} aria-label="会话详情">
       <header className="city-dialog-header"><h2>会话详情</h2><button className="city-close" aria-label="关闭会话详情" onClick={() => ui.setDetails(false)}>×</button></header>
       <div className="city-dialog-body">
@@ -514,7 +531,7 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <div className="city-dialog-actions"><button disabled={ui.projection?.source !== "local"} onClick={() => void ui.openHostSession()}>在宿主打开完整会话详情</button></div>
     </dialog>
     {dataPlace && ui.projection && !cinema && !gameActive && <CityDataFacility id={dataPlace} harness={dataDistrict} projection={ui.projection} language={language}
-      onClose={() => { setDataPlace(null); if (dataPlaceFromDirectory) { setSummaryOpen(true); summaryButton.current?.focus(); } }} onLocate={ui.focusCatalog} />}
+      back={dataBack} onClose={() => { setDataPlace(null); ui.clearSelection(); }} onLocate={ui.focusCatalog} />}
     <dialog className="city-dialog" ref={settingsRef} onCancel={(event) => { event.preventDefault(); event.stopPropagation(); ui.setOptions(false); }} onClose={() => ui.setOptions(false)} aria-label="城市设置">
       <header className="city-dialog-header"><h2>城市设置</h2><button className="city-close" aria-label="关闭城市设置" onClick={() => ui.setOptions(false)}>×</button></header>
       <div className="city-dialog-body">

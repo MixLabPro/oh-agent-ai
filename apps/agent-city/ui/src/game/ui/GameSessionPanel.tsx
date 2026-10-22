@@ -23,7 +23,10 @@ export function GameSessionPanel({ locale, title, description, children, actions
     (first ?? dialog)?.focus({ preventScroll: true });
     return () => {
       const target = previousFocus.current;
-      if (target?.isConnected) target.focus({ preventScroll: true });
+      // Resume may explicitly focus the canvas before this panel unmounts.
+      // Restore only abandoned/modal focus, never steal that new owner.
+      const active = document.activeElement;
+      if (target?.isConnected && (!active || active === document.body || dialog?.contains(active))) target.focus({ preventScroll: true });
     };
   }, []);
   return <div className="city-game-panel" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>

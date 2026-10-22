@@ -53,7 +53,7 @@ import { artDecoTowerGeometry, BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESS
 import type { BuildingRuntime, Car, CarPath, NightLights, QualityLevel } from "./render/types";
 export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
-import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildOceanDrive, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
+import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
 
 /** 静态城（只依赖 seed 的部分：地形/基建/高架/公共设施/地标/远山/树/水面/
  *  车/船/云/花园）。模块级缓存——数据刷新重建时整段复用，重建成本只剩建筑层；
@@ -87,6 +87,9 @@ type StaticCity = {
   landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }>;
   nightLights: NightLights | null;
   context: { bodies: THREE.InstancedMesh; crowns: THREE.InstancedMesh; matrices: Float32Array } | null;
+  /** 配套网格随静态城复用，拾取索引与落成进度也必须带回：曾漏带，缓存命中后点医院/学校只剩通用「城市配套」，
+   * 没有「打开设施数据」，回放时配套也不再按进度长出。进度数组与网格矩阵同一份状态，共享引用而非拷贝。 */
+  civics: { pieces: CityParts["civicPieces"]; meshes: THREE.InstancedMesh[]; progress: number[]; target: number[] };
 };
 let staticCityCache: StaticCity | null = null;
 
@@ -191,7 +194,7 @@ export class CityParts {
       && staticCityCache.layout.coastalConfigKey === layout.coastalConfigKey
       && staticCityCache.layout.activityKey === layout.activityKey // G1：建成区变化 → 地面与路网重画
       && staticCityCache.layout.highways === layout.highways
-      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings, staticCityCache.layout.oceanDrive]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings, layout.oceanDrive]) ? staticCityCache : null;
+      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings]) ? staticCityCache : null;
     if (!staticCity) {
       staticCityCache?.disposables.forEach((disposable) => disposable.dispose());
       const staticBucket: Array<{ dispose: () => void }> = [];
@@ -220,7 +223,6 @@ export class CityParts {
       this.buildTrussBridges();
       this.registerDrivingRoots("landmark", () => this.buildDistrictLandmarks());
       this.registerDrivingRoots("context", () => this.buildUrbanContext());
-      buildOceanDrive(this as unknown as BuildingSystemHost);
       this.buildSeaMountains();
       this.buildBeachRibbon();
       const seaside = this.layout.seaside;
@@ -267,6 +269,7 @@ export class CityParts {
         context: this.context,
         landmarkWindows: this.landmarkWindows,
         lifeguardGlowMaterial: this.lifeguardGlowMaterial,
+        civics: { pieces: this.civicPieces, meshes: this.civicMeshes, progress: this.civicProgress, target: this.civicTarget },
       };
       staticCityCache = staticCity;
       // this.group 曾是静态组：让位给动态组，静态组挂为其子节点。
@@ -298,6 +301,10 @@ export class CityParts {
     // 夜间材质随静态城一起复用：曾只缓存网格不缓存这两个引用，缓存命中后救生塔灯与地标亮窗夜里不再亮。
     this.landmarkWindows = staticCity.landmarkWindows;
     this.lifeguardGlowMaterial = staticCity.lifeguardGlowMaterial;
+    this.civicPieces = staticCity.civics.pieces;
+    this.civicMeshes = staticCity.civics.meshes;
+    this.civicProgress = staticCity.civics.progress;
+    this.civicTarget = staticCity.civics.target;
     this.captureAnimationOrigin();
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };

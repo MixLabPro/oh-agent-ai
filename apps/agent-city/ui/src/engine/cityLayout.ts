@@ -5,9 +5,10 @@ import type { PlanningWorkSnapshot } from "./planner/operationBudget";
 import { PLANNING_WORK_UNITS } from "./planner/operationBudget";
 import { hashSeed, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
+import { gradeRoadLandings } from "./surface/roadLandingGrading";
 import { clearsHighways, polygonDistance } from "./roadGeometry";
 import { scaleTierFor } from "./scaleTier";
-import { oceanDriveSplitZ, oceanDriveWall, seasideHotelLots, seasideStripContains, type CoastalConfig, type OceanDriveBuilding } from "./citySeaside";
+import { oceanDriveSplitZ, oceanDriveWall, seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
 import { preserveDemandPaths, preserveDisplayJunctions, retainBridgeLandings } from "./planner/retention";
 import { diagnoseNetwork } from "./planner/intent";
 import type { ParcelFrontageProof } from "./planner/roadBlocks";
@@ -129,8 +130,6 @@ export type CityLayout = {
   coastalConfig: CoastalConfig | null;
   /** 低数据量也保留城市轮廓；这些环境楼明确不代表会话。 */
   contextBuildings: ContextBuilding[];
-  /** Ocean Drive Art Deco 街墙（开湾时东岛南段酒店线；背景楼，不占会话、不进统计）。 */
-  oceanDrive?: OceanDriveBuilding[];
   gardens: GardenSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
@@ -229,6 +228,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       while (plans.size > CITY_PLAN_CACHE_CONFIG.maxEntries) plans.delete(plans.keys().next().value!);
     }
   }
+  // Earthworks precede all placement heights. Keep the cached geographical
+  // plan immutable; render terrain, beach, bridge landings and driving support
+  // subsequently share this one graded height field.
+  plan = { ...plan, terrain: gradeRoadLandings(plan.terrain, plan.roadEdges) };
   // 海滨酒店地块并入可落楼街区（单地块合成街区，朝海、宽 20–29）：酒店只在有会话落户时才出现。
   // 只进本函数的落楼候选，不改缓存的 plan、不进返回的 layout.blocks（地面贴图/规划守卫看到的规划不变），
   // 配套选址与背景楼仍只看 plan.blocks——酒店地块留给会话。
@@ -237,13 +240,13 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const lotClearOfRoads = (lot: { x: number; z: number; yaw: number; width: number; depth: number }) => {
     return lotClearsRoads(lot, plan.roadEdges);
   };
-  // 开湾时南段（Ocean Beach / Washington Beach）的酒店线让给 Art Deco 街墙（oceanDrive，背景楼），会话酒店只留北段。
+  // 开湾时南段（Ocean Beach / Washington Beach）的酒店线让给 Art Deco 街墙（只供会话使用），会话酒店只留北段。
   const oceanDriveSplit = (coastal?.bayHalfWidth ?? 0) > 0 ? oceanDriveSplitZ(plan.seaside) : -Infinity;
   const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).filter(lotClearOfRoads).filter((lot) => lot.z >= oceanDriveSplit).map((lot) => ({
     id: lot.id, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
     parcels: [{ id: `${lot.id}/0`, blockId: lot.id, x: lot.x, z: lot.z, yaw: lot.yaw, zone: "waterfront" as Zone, width: lot.width, depth: lot.depth }],
   }));
-  // Ocean Drive 街墙地块（用户定：会话楼优先占用、空位再补背景 Art Deco 酒店）：沿南段酒店线连续排，
+  // Ocean Drive 街墙地块（仅供会话占用，不再补装饰酒店）：沿南段酒店线连续排，
   // 海滨地块（facadeFor：海滨 + 楼高 ≤ 36 → Art Deco 立面；C-1：楼高 > 26 让到内陆），属于东岛城区的扇区。
   // 压路（含横街）、压公共用地/地标的位置不排，读作街墙在路口处断开。
   const oceanLots = coastal && oceanDriveSplit > -Infinity ? oceanDriveWall(plan.seaside, coastal, seed, (lot) => {
@@ -677,9 +680,6 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       if (selected.length >= target) break;
     }
   }
-  // 会话没占用的街墙地块补背景 Art Deco 酒店（2–6 层）：街墙始终连续，会话越多真实数据占比越高。
-  const civicParcels = new Set(civics.map((civic) => civic.parcelId));
-  const oceanDrive = oceanLots.filter((lot) => !used.has(`${lot.id}/0`) && !civicParcels.has(`${lot.id}/0`) && !civicParcels.has(`oceandrive:${lot.id}`));
   {
     // 数据窗口缺省（测试夹具/旧调用方）时退回会话起始时刻的范围，绝不产出 NaN。
     const starts = model.buildings.map((building) => building.startedAt).filter(Number.isFinite);
@@ -758,7 +758,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
     sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
     aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
-  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: layoutCoastalKey(coastal), coastalConfig: coastal, contextBuildings: contextOffRoad, oceanDrive };
+  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: layoutCoastalKey(coastal), coastalConfig: coastal, contextBuildings: contextOffRoad };
 }
 
 /**

@@ -110,3 +110,35 @@ N1（半天，立刻见效）→ N2（1 天）→ N3（1–2 天，地面叠层�
 
 机位复现方式：时间游标（30 天窗，滑标值 = 1000 − (now−目标时刻)/窗长×1000）+ 画布滚轮/拖拽；
 禁用生成式概念图，只认真 GPU 截图。
+
+## 2026-10-22：光斑贴地修复与基线
+
+地面光斑不再用原始地形高度的单张切平面圆片，而是沿渲染地形的三角剖分裁剪，使用与道路一致的 `terrainSurfaceHeight`。接收面高于道路 0.08 单位，保留深度测试、不写深度，并使用有界 polygon offset；建筑、路缘和上层桥面仍可遮挡光斑。高架光斑保留桥面高度，不采样桥下地形。灯位、半径、强度预算和驾驶近景解析灯的交叉淡化未改变。
+
+`verify-city-night` 已覆盖曲面三角形内部的净空、朝上绕序、UV 和高架层隔离。光斑从实例圆片变为一个合并网格，场景基线的预期变化为 `street-light-pools` 新节点、原 `unnamed:Mesh` 减少一个，以及原实例所属 `city-infrastructure-decorative` 的哈希变化；380/1600 会话、昼/夜四种场景均核对同一差异范围后更新基线。此基线检查不代替所有机位的 GPU 动态闪烁验收。
+
+### GTAO 覆盖材质回归修复
+
+贴地网格属于发光装饰，不是实体表面。GTAO 的 `scene.overrideMaterial` 会忽略其透明渐变、加法混合和深度写入设置，用不透明法线/深度材质重画整个圆面，造成道路上周期性的黑色圆斑。`street-light-pools` 现在通过绘制回调在覆盖材质期间将 drawRange 设为 0，完成后恢复；正常颜色绘制前再次恢复，防止中断留下隐藏状态。不关闭全城 AO，不改变正常光斑的深度测试。`verify-city-night` 使用实际建出的网格检查覆盖绘制为零、正常绘制恢复、昼夜切换和中断恢复；浏览器近景已确认白天黑圆斑消失。
+
+### Civic signs and glass: daytime receiver correction (2026-10-22)
+
+Civic window/sign glow boxes previously reused the opaque landmark neon material.
+When night intensity fell toward zero, their black faces covered the solid red
+hospital cross and blue window bands. Civic overlays now use a dedicated additive,
+non-depth-writing material sharing the live night color. They emit no instances
+in override-material passes, so GTAO cannot turn the overlay into a dark occluder.
+The shared landmark neon material is unchanged.
+
+Explicitly marked civic window/door instances sample the same sky panorama and
+live time/weather grade uniforms as session-building glass. Walls, mullions and
+red crosses retain their diffuse materials. This is sky environment reflection,
+not a reflection of neighboring geometry or vehicle interiors; the existing three
+civic instance batches, growth transforms and geometry stay unchanged.
+
+Acceptance: `verify-city-night.mjs` exercises a real hospital mesh, glass masks,
+solid red cross arms, off/on/off intensity, interrupted override restoration and
+shared environment uniform identity. Layout envelopes and 380/1600 day/night site
+registry checks pass. The scene baseline changes only `city-civic-glow` material
+transparency in four scenes. Browser demo acceptance shows a red cross and blue
+reflective windows with no shader errors (`/tmp/ohagent-hospital-daylight-fixed.png`).
