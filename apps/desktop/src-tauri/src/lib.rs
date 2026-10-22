@@ -4511,7 +4511,7 @@ Any MCP client (`mcpServers` JSON):
 {{ "mcpServers": {{ "agent-vitals": {{ "command": "{bin}", "args": ["data-mcp", "serve", "--allow-local-writes"] }} }} }}
 ```
 
-Drop `--allow-local-writes` for a strictly read-only server. With it, the only writes are typed local actions (price cards, billing declarations, budget settings, source controls) — never SQL, never files, never URLs.
+Drop `--allow-local-writes` for a strictly read-only server. With it, the only writes are typed local actions (price cards, billing declarations, budget settings, source controls, city building model overrides) — never SQL, never files, never URLs.
 
 ## Ground rules — keep the numbers honest
 
@@ -4537,6 +4537,8 @@ Every response is an envelope with `data`, `coverage`, `freshness` and `warnings
 **Data health** — `data_status` (sync, integrity, `unresolved_tokens_month`, `unpriced_metered_tokens_month`) + `data_quality_issues`; list what needs the user's hand, most valuable first.
 
 **Session drill-down** — `sessions_search` (window / harness / model) → `session_detail` / `session_trace` by `session_ref`. Never ask for or echo native session ids or paths.
+
+**Edit one Agent City session building** — `sessions_search` → `get_building` with that `session_ref` (or the `ca_…` `asset_ref`) → `preview_building` until `data.ok` → `set_building_model` with `expected_revision`. Confirm via returned `revision` + `build_event_id`. `reset_building` restores the default. Mutations need `--allow-local-writes`. On failure read structured `data.error` (`validation` vs `conflict`); do not depend on screenshots. City UI construction playback is queued, not yet wired.
 
 **Hourly pattern** — `usage_hourly` for one day (tokens only; cost per hour lives in `cost_breakdown`).
 

@@ -76,15 +76,15 @@ Before Agent City, the project shipped a skill auditor, and it's still in the re
 
 None of these are in the code at `dev` `bf7196a`. They are marked TBD until they ship.
 
-- **TBD: Agents that help build your city (MCP).** The idea is that your AI agent could help shape your city through MCP. Today's Data MCP server can read usage data and change typed settings, but it has no tool that edits the city or its map.
-- **TBD: Incremental hot update.** Today a data change makes City reload the projection and rebuild the scene, with a stable layout and growth animation (see [Data pipeline](/docs/architecture/data-pipeline#how-does-agent-city-update-when-new-sessions-arrive)). Sending only changed sessions and patching single buildings, Vite-style, isn't implemented. Default `city:v3` paging already appends later pages without relaying out the island.
+- **Partial: Agents that help build your city (MCP).** `get_building` / `preview_building` / `set_building_model` / `reset_building` persist a `session-kit/v1` override keyed by `asset_ref`. City UI construction playback is not wired yet (deferred until the city:v3 default loader). See `docs/CITY_BUILDING_MCP.md`.
+- **TBD: Incremental hot update.** Today a data change makes City reload the full projection and rebuild the whole scene, with a stable layout and growth animation (see [Data pipeline](/docs/architecture/data-pipeline#how-does-agent-city-update-when-new-sessions-arrive)). Sending only changed sessions and patching single buildings, Vite-style, isn't implemented. The paged `city:v3` (opt-in via `?cityData=v3`) is a step toward it but still reloads - **TBD: Agents that help build your city (MCP).** The idea is that your AI agent could help shape your e, with a stable layout and growth animation (see [Data pipeline](/docs/architecture/data-pipeline#how-does-agent-city-update-when-new-sessions-arrive)). Sending only changed sessions and patching single buildings, Vite-style, isn't implemented. Default `city:v3` paging already appends later pages without relaying out the island.
 - **TBD: City gallery (UGC).** Sharing and browsing other people's cities. There is no code for this in the repo.
 - **TBD: Map editor for everyone.** A city "repair" editor exists. Its first priorities (P0) were finished on 2026-10-12, but turning it into a product feature (removing developer switches, translations, onboarding) and importing/exporting map edits are scheduled for later (P3).
 - **TBD: Official manifest catalog.** The download channel and checks exist, but `catalog/index.json` has no entries yet.
 - **Not promised:** script adapters for manifests (P1.5), a manifest expression language (P2) and a community manifest catalog (P3) are design reservations, not commitments.
 - **Assessed, not built:** the repo has assessment notes for Cline, Pi and Hermes as session sources (`docs/*_HARNESS_ASSESSMENT.md`). **TBD:** whether any of them is planned.
 
-<!-- source: apps/cli/src/mcp.rs + crates/agent-vitals-mcp/src/mcp/mod.rs (tool list: no city/map tool) -->
+<!-- source: apps/cli/src/mcp.rs + crates/agent-vitals-mcp/src/mcp/mod.rs (city building tools: get_building / preview_building / set_building_model / reset_building) -->
 <!-- source: docs/CITY_MAP_EDITOR_ROADMAP_SPEC.md ("P0 已完成（2026-10-12）；P1 起待排期"; P3 #10 地图修改导入/导出, #12 产品化) -->
 <!-- source: docs/HARNESS_MANIFEST_DSL_SPEC.md §1 (脚本 adapter P1.5 未承诺; DSL P2; 社区目录 P3 未承诺); catalog/README.md -->
 <!-- source: docs/CLINE_HARNESS_ASSESSMENT.md, docs/PI_HARNESS_ASSESSMENT.md, docs/HERMES_HARNESS_ASSESSMENT.md (exist; content not reviewed for this page) -->
