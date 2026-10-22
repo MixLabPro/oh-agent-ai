@@ -98,17 +98,17 @@ flowchart LR
 2. **Sync.** New facts are committed in one transaction, which moves the database revision forward.
 3. **Invalidate.** The desktop app emits one `Invalidated` event per new revision. A repeated revision is swallowed, so there's no time-based debounce here.
 4. **Notify City.** The workbench calls `plugin_invalidate`, which fires `__AV_PLUGIN_INVALIDATED__` in City's WebView. A City tab that was hidden gets the same call when you switch back.
-5. **Refetch.** City asks for the full `city:v2` projection again (up to 4,000 sessions). It doesn't fetch only the changed sessions.
-6. **Rebuild.** If the data changed, City throws away the scene and builds it again. The previous layout is reused, so within one island tier existing buildings keep their lots. Buildings you already saw keep their height; new ones grow from the ground.
+5. **Refetch.** City asks for `city:v3` overview plus the first page, then appends later pages from the same snapshot (up to 4,000 sessions). The landing host still serves `city:v2`. It doesn't fetch only the changed sessions.
+6. **Rebuild.** If the geography changed, City throws away the scene and builds it again. The previous layout is reused, so within one island tier existing buildings keep their lots. Paging appends and mid-load revision changes keep the current city on screen. Buildings you already saw keep their height; new ones grow from the ground.
 
-- **Opt-in paging:** with `?cityData=v3`, the same refresh reads `city:v3` page by page from one snapshot. A data change during loading restarts the read instead of mixing two versions.
+- **Paged default:** `city:v3` reads page by page from one snapshot. A data change during loading keeps the visible city and restarts the unread pages instead of mixing two versions. `?cityData=v2` forces the compatibility projection.
 - **Not implemented:** incremental diffs (only changed sessions) and patching single buildings. **TBD:** whether this is planned; see the [Roadmap](/docs/integrations#roadmap--规划中).
 
 <!-- source: crates/agent-vitals-ingest/src/ingest/watch.rs (DEBOUNCE = 1_200 ms; MAX_DEBOUNCE = 5 s; "正确性仍由 tick 指纹对账保证") -->
 <!-- source: apps/desktop/src-tauri/src/lib.rs (InvalidationPublisher: "权威 revision 严格前进才向 webview 发 Invalidated … 取代了 FoldCompleted + 200ms 去抖"; publish_invalidation) -->
 <!-- source: apps/desktop/ui-dev/react/src/app/plugins/usePlugin.tsx (listenAppEvents: Invalidated | SourceDataDeleted → plugin_invalidate; resume → plugin_invalidate); apps/desktop/src-tauri/src/plugin_host.rs (plugin_invalidate → __AV_PLUGIN_INVALIDATED__) -->
 <!-- source: apps/agent-city/ui/src/CityApp.tsx (listener → setRefresh → getProjection; signature compare; engine.applyModel); apps/agent-city/ui/src/engine/CityEngine.ts (parts.dispose + new CityParts; layoutCity(model, previous…); displaySnapshot "回访的楼保持高度…新到的楼从 0 长入"); apps/agent-city/ui/src/engine/cityLayout.ts ("档位内刷新/分页不改地图") -->
-<!-- source: apps/agent-city/ui/src/data/provider.ts (cityData !== "v3" → v2; v3 revision_changed retry); dev bf7196a -->
+<!-- source: apps/agent-city/ui/src/data/provider.ts (cityDataProtocol; v3 onPartial + v2 fallback; revision_changed retry); dev bf7196a -->
 
 ## Where do session titles come from?
 

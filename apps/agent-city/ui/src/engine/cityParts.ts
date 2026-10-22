@@ -8,7 +8,7 @@
  */
 
 import * as THREE from "three";
-import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
+import { builtFractionAt, hashSeed, RENDER_CAP, type CityBuilding, type CityModel } from "../cityModel";
 import { promenadeSegments, validRuns } from "./citySeaside";
 import { HOTEL_CROWN_MAX_FINS, hotelCrownPlan, type CrownPiece } from "./cityHotelCrown";
 import { roadsideSignPlan, rooftopSignPlan, type RooftopSignPlan } from "./citySkylineProps";
@@ -52,7 +52,14 @@ import { artDecoTowerGeometry, BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESS
 import type { BuildingRuntime, Car, CarPath, NightLights, QualityLevel } from "./render/types";
 export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
-import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
+import { appendRuntimes, applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, occupantsCanAppend, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
+export { occupantsCanAppend };
+
+export type OccupancySnapshot = {
+  runtimeCount: number;
+  shaftUuids: string[];
+  byId: Record<string, { shaftPrimary: number; shaftUpper: number; podium: number; roof: number; x: number; z: number; facade: number }>;
+};
 
 /** 静态城（只依赖 seed 的部分：地形/基建/高架/公共设施/地标/远山/树/水面/
  *  车/船/云/花园）。模块级缓存——数据刷新重建时整段复用，重建成本只剩建筑层；
@@ -93,6 +100,10 @@ type StaticCity = {
 let staticCityCache: StaticCity | null = null;
 
 export class CityParts {
+  static constructCount = 0;
+  static appendCount = 0;
+  static resetMountCounters(): void { CityParts.constructCount = 0; CityParts.appendCount = 0; }
+
   private drivingRoots: RenderedSolidRoot[] = [];
   private drivingFreezeCount = 0;
   private drivingFrozenSource: CitySurfaceSource | null = null;
@@ -185,8 +196,12 @@ export class CityParts {
   selectedId: string | null = null;
 
   constructor(private model: CityModel, private layout: CityLayout, previousDisplays: Map<string, number> | null = null) {
+    CityParts.constructCount += 1;
     this.previousDisplays = previousDisplays;
     const total = model.buildings.length;
+    // 分页追加预留到规划人口：InstancedMesh 的 max 在构造时钉死，先按全窗会话数开槽，
+    // 后面的页只提高 count / 必要时 grow，不必拆掉整层建筑网格。
+    const planned = Math.min(RENDER_CAP, Math.max(total, Number.isFinite(model.stats?.totalSessions) ? model.stats.totalSessions : 0));
 
     // ── 静态城（seed 决定）：缓存命中则整段复用，重建只花在建筑层 ──────
     let staticCity = staticCityCache && staticCityCache.seed === layout.seed && staticCityCache.layout.scaleTier === layout.scaleTier
@@ -331,7 +346,7 @@ export class CityParts {
       facadeCounts[this.facadeFor(building)] += this.formOf(building) === "tower" || this.formOf(building) === "landmark" ? 2 : 1;
     }
     facades.forEach((texture, variant) => {
-      const capacity = facadeCounts[variant] + 8;
+      const capacity = Math.max(facadeCounts[variant] + 8, planned * 2 + 8);
       const geometry = BOX.clone();
       geometry.setAttribute("aFloors", new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1));
       geometry.setAttribute("aLight", new THREE.InstancedBufferAttribute(new Float32Array(capacity * 2), 2)); // x = 办公用途(0/1)，y = 活跃会话(0/1)
@@ -381,21 +396,21 @@ export class CityParts {
     const spire = new THREE.ConeGeometry(0.5, 1, 4, 1).rotateY(Math.PI / 4).translate(0, 0.5, 0);
     const profileGeometries = [pitched, spire, BOX, BOX];
     profileGeometries.forEach((geometry, index) => {
-      const mesh = this.makeInstanced(geometry, selfLitMaterial(0.18), total);
+      const mesh = this.makeInstanced(geometry, selfLitMaterial(0.18), planned);
       mesh.castShadow = true;
       mesh.name = `city-roof-profile-${index + 1}`;
       this.roofProfiles.push(mesh);
     });
-    this.gardenTreeMesh = this.makeInstanced(new THREE.IcosahedronGeometry(1, 0).translate(0, 1, 0), new THREE.MeshLambertMaterial({ color: activeTheme().foliage }), total * 3);
+    this.gardenTreeMesh = this.makeInstanced(new THREE.IcosahedronGeometry(1, 0).translate(0, 1, 0), new THREE.MeshLambertMaterial({ color: activeTheme().foliage }), planned * 3);
     this.gardenTreeMesh.castShadow = true;
-    const decoCount = facadeCounts[3] + 4;
+    const decoCount = Math.max(facadeCounts[3] + 4, planned);
     this.decoTrimMesh = this.makeInstanced(BOX, selfLitMaterial(0.24), decoCount * 2);
     this.decoCornerMesh = this.makeInstanced(CYLINDER, selfLitMaterial(0.24), decoCount);
-    this.podiumMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e8e2d5" }), total);
-    this.roofMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), total);
-    this.neonMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), total);
+    this.podiumMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e8e2d5" }), planned);
+    this.roofMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), planned);
+    this.neonMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), planned);
     this.neonMesh.castShadow = false;
-    this.scaffoldMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e0a83f", transparent: true, opacity: 0.24, depthWrite: false }), total);
+    this.scaffoldMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e0a83f", transparent: true, opacity: 0.24, depthWrite: false }), planned);
     this.scaffoldMesh.castShadow = false;
     {
       // L-6 圆筒玻璃塔（backlog）：竖向条纹幕墙，夜里亮窗（landmarkWindows 同一套白天/夜间贴图切换）。
@@ -774,6 +789,47 @@ export class CityParts {
   private buildWater(): THREE.Mesh { return buildWater(this as unknown as TerrainHost); }
 
   private buildRuntimes(): void { buildRuntimes(this as unknown as BuildingSystemHost); }
+
+  /** Later session pages: add only new buildings into the existing instanced layer. */
+  appendOccupants(model: CityModel, layout: CityLayout): number {
+    this.model = model;
+    this.layout = layout;
+    const zoneById = new Map<string, string>();
+    for (const district of layout.districts) {
+      for (const [id, parcel] of district.slots) zoneById.set(id, parcel.zone);
+    }
+    this.zoneById = zoneById;
+    if (this.landValueCache) {
+      for (const district of layout.districts) {
+        const ranked = [...(district.landValue ?? [])].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
+        ranked.forEach(([id], index) => {
+          if (!this.landValueCache!.has(id)) this.landValueCache!.set(id, ranked.length > 1 ? index / (ranked.length - 1) : 0.5);
+        });
+      }
+    }
+    for (const building of model.buildings) {
+      const existing = this.runtimeById.get(building.id);
+      if (existing) existing.building = building;
+    }
+    const added = appendRuntimes(this as unknown as BuildingSystemHost);
+    CityParts.appendCount += 1;
+    return added.length;
+  }
+
+  occupancySnapshot(): OccupancySnapshot {
+    const byId: OccupancySnapshot["byId"] = {};
+    for (const runtime of this.runtimes) {
+      byId[runtime.building.id] = {
+        shaftPrimary: runtime.shaftPrimary, shaftUpper: runtime.shaftUpper, podium: runtime.podium, roof: runtime.roof,
+        x: runtime.slot.x, z: runtime.slot.z, facade: runtime.facade,
+      };
+    }
+    return { runtimeCount: this.runtimes.length, shaftUuids: this.shaftMeshes.map((mesh) => mesh.uuid), byId };
+  }
+
+  canAppend(nextModel: CityModel, nextLayout: CityLayout): boolean {
+    return occupantsCanAppend(this.model, nextModel, this.layout, nextLayout);
+  }
 
   /** 路边双柱广告牌（L-2）：主干道长段中点的外侧净空点，静态摆件；牌位编址接在屋顶牌之后。
    *  与屋顶牌共用四批次网格，但不动施工状态——路面和牌不随会话生长。 */

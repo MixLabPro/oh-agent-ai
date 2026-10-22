@@ -82,7 +82,10 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
               layoutSeq += 1;
               await invoke("plugin_set_bounds", { instanceId: id, bounds: next, seq: layoutSeq });
               lastBounds = key;
-            } catch { if (!cancelled) setError("plugin_layout_failed"); }
+            } catch (reason) { if (!cancelled) {
+              const code = pluginCreationCode(reason);
+              setError(code === "plugin_create_failed" ? "plugin_layout_failed" : code);
+            } }
           });
         };
         syncLayoutRef.current = syncLayout;

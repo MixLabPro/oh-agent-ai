@@ -90,10 +90,10 @@ flowchart LR
 2. **同步**：新事实在一个事务里提交，数据库 revision 前进。
 3. **失效通知**：每个新 revision，桌面应用只发一次 `Invalidated` 事件，同一 revision 重复出现会被吞掉，这一步不靠时间去抖。
 4. **通知 City**：工作台调用 `plugin_invalidate`，在 City 的 WebView 里触发 `__AV_PLUGIN_INVALIDATED__`。如果 City 标签页之前被隐藏，切回来时也会收到同样的调用。
-5. **重新读取**：City 重新请求完整的 `city:v2` 投影（最多 4000 个会话），不是只取变化的会话。
-6. **重建**：数据有变化时，City 丢掉旧场景重新构建。上一次的布局会被复用，所以在同一岛屿档位内，已有的楼保持在原来的地块上。看过的楼保持原高度，新楼从地面长出来。
+5. **重新读取**：City 请求 `city:v3` 总览和第一页，再从同一快照追加后续页（最多 4000 个会话）。落地页宿主仍提供 `city:v2`。不是只取变化的会话。
+6. **重建**：地理信息变了才丢掉旧场景重新构建。上一次的布局会被复用，所以在同一岛屿档位内，已有的楼保持在原来的地块上。分页追加和载入中途的 revision 变化会保留当前城市。看过的楼保持原高度，新楼从地面长出来。
 
-- **可选分页**：用 `?cityData=v3` 打开时，同样的刷新改为从同一快照逐页读取 `city:v3`。读取过程中数据变了，会整体重来，而不是把两个版本拼在一起。
+- **默认分页**：`city:v3` 从同一快照逐页读取。载入过程中数据变了会保留已显示的城市并重新读取未完成的页，而不是把两个版本拼在一起。`?cityData=v2` 强制走兼容投影。
 - **尚未实现**：增量差异（只传变化的会话）和单栋楼的局部更新。**待确认**：是否在计划中，见 [Roadmap](/docs/zh/integrations#roadmap--规划中)。
 
 <!-- source: crates/agent-vitals-ingest/src/ingest/watch.rs（DEBOUNCE = 1_200 ms；MAX_DEBOUNCE = 5 s）；apps/desktop/src-tauri/src/lib.rs（InvalidationPublisher：revision 严格前进才发 Invalidated）；apps/desktop/ui-dev/react/src/app/plugins/usePlugin.tsx；apps/desktop/src-tauri/src/plugin_host.rs（plugin_invalidate）；apps/agent-city/ui/src/CityApp.tsx；apps/agent-city/ui/src/engine/CityEngine.ts（displaySnapshot）；engine/cityLayout.ts（档位内刷新不改地图）；data/provider.ts；dev bf7196a -->
