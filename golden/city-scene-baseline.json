@@ -1,6 +1,6 @@
 {
  "380/day": {
-  "all": "1ddd12142cb5e8ca",
+  "all": "71d5c24ea2127a57",
   "sections": {
    "city-beach": "1:944722f410bf",
    "city-beach-furniture": "3:aabd8546bcee",
@@ -9,7 +9,7 @@
    "city-channel-islands": "1:b08a9307945b",
    "city-civic-boxes": "1:d74ec05e4d65",
    "city-civic-cylinders": "1:676a514ccd9e",
-   "city-civic-glow": "1:df6330ac2de3",
+   "city-civic-glow": "1:df6253e6b9e7",
    "city-culdesac-bulb-disc": "1:d49bd1c12b19",
    "city-culdesac-bulb-rim": "1:8a4d241fc7fa",
    "city-flags": "1:f4f6c9189d2c",
@@ -69,7 +69,7 @@
   }
  },
  "380/night": {
-  "all": "f710a491e247d4d2",
+  "all": "f4c38ff7c5db88fe",
   "sections": {
    "city-beach": "1:944722f410bf",
    "city-beach-furniture": "3:aabd8546bcee",
@@ -78,7 +78,7 @@
    "city-channel-islands": "1:b08a9307945b",
    "city-civic-boxes": "1:d74ec05e4d65",
    "city-civic-cylinders": "1:676a514ccd9e",
-   "city-civic-glow": "1:7588d296736f",
+   "city-civic-glow": "1:4d93ef10e530",
    "city-culdesac-bulb-disc": "1:d49bd1c12b19",
    "city-culdesac-bulb-rim": "1:8a4d241fc7fa",
    "city-flags": "1:f4f6c9189d2c",
@@ -138,7 +138,7 @@
   }
  },
  "1600/day": {
-  "all": "15bb94cbf445ee55",
+  "all": "5f7634f610b1202c",
   "sections": {
    "city-beach": "1:9c86895925bb",
    "city-beach-furniture": "3:4dda9432ea9a",
@@ -147,7 +147,7 @@
    "city-channel-islands": "1:4f9490632b47",
    "city-civic-boxes": "1:bbb9f3865316",
    "city-civic-cylinders": "1:b2c7707d967a",
-   "city-civic-glow": "1:15788c93f4f1",
+   "city-civic-glow": "1:eb4299e95297",
    "city-culdesac-bulb-disc": "1:24f64a1cfe22",
    "city-culdesac-bulb-rim": "1:20e647b5f264",
    "city-district-expressway-deck": "1:f39dc791ac6f",
@@ -216,7 +216,7 @@
   }
  },
  "1600/night": {
-  "all": "fc2c90e88d180ce6",
+  "all": "e00c43e02b017076",
   "sections": {
    "city-beach": "1:9c86895925bb",
    "city-beach-furniture": "3:4dda9432ea9a",
@@ -225,7 +225,7 @@
    "city-channel-islands": "1:4f9490632b47",
    "city-civic-boxes": "1:bbb9f3865316",
    "city-civic-cylinders": "1:b2c7707d967a",
-   "city-civic-glow": "1:96f539676584",
+   "city-civic-glow": "1:989352a1545a",
    "city-culdesac-bulb-disc": "1:24f64a1cfe22",
    "city-culdesac-bulb-rim": "1:20e647b5f264",
    "city-district-expressway-deck": "1:f39dc791ac6f",

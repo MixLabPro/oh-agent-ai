@@ -105,5 +105,35 @@ for(const glow of [0,1,0,1]){
 }
 scene.overrideMaterial=override;before(); // Simulate an interrupted pass without after.
 scene.overrideMaterial=null;before();assert.equal(pool.geometry.drawRange.count,pool.geometry.index.count,"the next color pass recovers even after an interrupted override");
-for(const resource of new Set(host.disposables))resource.dispose();override.dispose();
 console.log("Street pool GTAO regression: zero override triangles, additive restoration, interrupted-pass recovery and day/night toggles passed.");
+
+// Daytime civic signs/glass must survive turning their night overlay off.
+const civic=await loadCity({"engine/systems/civicSystem.ts":["buildCivics","writeCivic"]});
+host.layout.civics=[{id:"hospital",kind:"hospital",x:0,z:0,y:0.3,yaw:0.4,width:30,depth:24}];
+host.civicPieces=[];host.civicMeshes=[];host.civicProgress=[];host.civicTarget=[];
+const sky={uEnv:{value:null},uEnvStrength:{value:0},uGradeTop:{value:new T.Color("#adcddd")},uGradeHorizon:{value:new T.Color("#d4e0e4")},uGradeAmount:{value:0},uSkyYaw:{value:0}};
+host.facadeUniforms=[null,sky];host.writeCivic=(index)=>civic.writeCivic(host,index);
+civic.buildCivics(host);
+const [walls,,glows]=host.civicMeshes,mask=walls.geometry.getAttribute("aCivicGlass");
+assert.equal(mask.count,walls.count,"glass mask stays aligned with the instance batch");
+assert(Array.from(mask.array).some(v=>v===1)&&Array.from(mask.array).some(v=>v===0),"only glass is reflective");
+const red=new T.Color("#e0352b"),color=new T.Color();let crosses=0;
+for(let i=0;i<walls.count;i++){walls.getColorAt(i,color);if(Math.abs(color.r-red.r)+Math.abs(color.g-red.g)+Math.abs(color.b-red.b)<1e-6){crosses++;assert.equal(mask.getX(i),0,"red sign stays diffuse");}}
+assert(crosses>=2,"hospital contains solid red cross arms");
+assert(glows.material.transparent&&glows.material.blending===T.AdditiveBlending&&!glows.material.depthWrite,"off overlays cannot cover signs with opaque black");
+assert.notEqual(glows.material,host.nightLights.neon,"civic blend state does not mutate shared landmark material");
+assert.equal(glows.material.color,host.nightLights.neon.color,"night intensity remains live");
+const glowScene=new T.Scene();
+for(const level of [0,1,0]){
+ night.setNightGlow(host,level);
+ glowScene.overrideMaterial=override;glows.onBeforeRender(null,glowScene);assert.equal(glows.count,0,"glows do not occlude GTAO");
+ glowScene.overrideMaterial=null;glows.onBeforeRender(null,glowScene);assert(glows.count>0,"normal pass recovers without after callback");
+}
+const shader={uniforms:{},vertexShader:T.ShaderLib.lambert.vertexShader,fragmentShader:T.ShaderLib.lambert.fragmentShader};
+walls.material.onBeforeCompile(shader,{});
+assert.equal(shader.uniforms.uEnv,sky.uEnv,"async sky assets propagate by uniform identity");
+assert.equal(shader.uniforms.uGradeAmount,sky.uGradeAmount,"weather/time grading stays shared");
+assert(shader.fragmentShader.includes("reflect(viewDir,n)")&&shader.fragmentShader.includes("if(vCivicGlass>0.5)"),"reflection is limited to glass");
+assert(!shader.fragmentShader.includes("#include <opaque_fragment>\n#include <opaque_fragment>"));
+for(const resource of new Set(host.disposables))resource.dispose();override.dispose();
+console.log("Civic signs/glass: red base, glass-only mask, additive night toggles, GTAO exclusion and shared sky uniforms passed.");

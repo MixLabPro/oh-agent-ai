@@ -120,3 +120,25 @@ N1（半天，立刻见效）→ N2（1 天）→ N3（1–2 天，地面叠层�
 ### GTAO 覆盖材质回归修复
 
 贴地网格属于发光装饰，不是实体表面。GTAO 的 `scene.overrideMaterial` 会忽略其透明渐变、加法混合和深度写入设置，用不透明法线/深度材质重画整个圆面，造成道路上周期性的黑色圆斑。`street-light-pools` 现在通过绘制回调在覆盖材质期间将 drawRange 设为 0，完成后恢复；正常颜色绘制前再次恢复，防止中断留下隐藏状态。不关闭全城 AO，不改变正常光斑的深度测试。`verify-city-night` 使用实际建出的网格检查覆盖绘制为零、正常绘制恢复、昼夜切换和中断恢复；浏览器近景已确认白天黑圆斑消失。
+
+### Civic signs and glass: daytime receiver correction (2026-10-22)
+
+Civic window/sign glow boxes previously reused the opaque landmark neon material.
+When night intensity fell toward zero, their black faces covered the solid red
+hospital cross and blue window bands. Civic overlays now use a dedicated additive,
+non-depth-writing material sharing the live night color. They emit no instances
+in override-material passes, so GTAO cannot turn the overlay into a dark occluder.
+The shared landmark neon material is unchanged.
+
+Explicitly marked civic window/door instances sample the same sky panorama and
+live time/weather grade uniforms as session-building glass. Walls, mullions and
+red crosses retain their diffuse materials. This is sky environment reflection,
+not a reflection of neighboring geometry or vehicle interiors; the existing three
+civic instance batches, growth transforms and geometry stay unchanged.
+
+Acceptance: `verify-city-night.mjs` exercises a real hospital mesh, glass masks,
+solid red cross arms, off/on/off intensity, interrupted override restoration and
+shared environment uniform identity. Layout envelopes and 380/1600 day/night site
+registry checks pass. The scene baseline changes only `city-civic-glow` material
+transparency in four scenes. Browser demo acceptance shows a red cross and blue
+reflective windows with no shader errors (`/tmp/ohagent-hospital-daylight-fixed.png`).

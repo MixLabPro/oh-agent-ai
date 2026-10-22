@@ -9,6 +9,8 @@ import { paletteFor } from "../cityTextures";
 import { civicFlagLocalX, civicGroundFootprint, stationCanopyLocalZ, stationEntranceLocal, stationHallLocal } from "../models/publicSiteGeometry";
 import { BOX, CYLINDER, selfLitMaterial } from "../render/shared";
 import type { NightLights } from "../render/types";
+import type { FacadeUniforms } from "../render/facadeMaterial";
+import { civicGlassMaterial } from "../render/civicGlassMaterial";
 import { gardenFlagPosition, GARDEN_RENDER_GEOMETRY, CIVIC_RENDER_GEOMETRY } from "../models/layoutPlacementGeometry";
 
 export interface CivicSystemHost {
@@ -19,6 +21,7 @@ export interface CivicSystemHost {
   disposables: Array<{ dispose: () => void }>;
   nightLights: NightLights | null;
   flagTime: { value: number } | null;
+  facadeUniforms?: FacadeUniforms[];
   civicPieces: Array<{ civic: number; mesh: 0 | 1 | 2; index: number; x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; baseY: number }>;
   civicMeshes: THREE.InstancedMesh[];
   civicProgress: number[];
@@ -424,6 +427,7 @@ export function buildCivics(host: CivicSystemHost): void {
   const cylinders: Piece[] = [];
   const glows: Piece[] = [];
   const colors: [string[], string[], string[]] = [[], [], []];
+  const glassMask: number[] = [];
   civics.forEach((civic, civicIndex) => {
     const cos = Math.cos(civic.yaw);
     const sin = Math.sin(civic.yaw);
@@ -434,7 +438,7 @@ export function buildCivics(host: CivicSystemHost): void {
     const box = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: string) => {
       const q = at(lx, lz);
       boxes.push({ civic: civicIndex, mesh: 0, index: boxes.length, x: q.x, y: base + ly, z: q.z, sx, sy, sz, yaw: civic.yaw, baseY: base });
-      colors[0].push(color);
+      colors[0].push(color); glassMask.push(0);
     };
     const cyl = (lx: number, ly: number, lz: number, r: number, h: number, color: string) => {
       const q = at(lx, lz);
@@ -457,6 +461,7 @@ export function buildCivics(host: CivicSystemHost): void {
           const off = face === "n" ? -d / 2 : face === "s" ? d / 2 : face === "w" ? -w / 2 : w / 2;
           const fx = alongX ? cx : cx + off + Math.sign(off) * 0.08; const fz = alongX ? cz + off + Math.sign(off) * 0.08 : cz;
           box(fx, y, fz, alongX ? len : 0.16, 1.25, alongX ? 0.16 : len, glass);
+          glassMask[boxes.length-1]=1;
           // 夜间亮窗：窗带外侧一条暖色发光带（夜灯批次，白天隐藏）——曾只有深色玻璃，夜里配套建筑一片黑。
           glow(fx + (alongX ? 0 : Math.sign(off) * 0.06), y + 0.15, fz + (alongX ? Math.sign(off) * 0.06 : 0), alongX ? len * 0.98 : 0.05, 0.95, alongX ? 0.05 : len * 0.98, (Math.floor(y) + face.charCodeAt(0)) % 5 === 0 ? "#3a4a55" : "#7a6244");
           const count = Math.max(2, Math.floor(len / 2.4));
@@ -470,7 +475,7 @@ export function buildCivics(host: CivicSystemHost): void {
     // 正门：门洞（深色）+ 两扇玻璃门 + 雨篷 + 台阶，开在 +z 立面。
     const entrance = (cx: number, faceZ: number, w: number, canopy: string) => {
       box(cx, 0, faceZ + 0.1, w, 3, 0.2, "#2c3a42");
-      for (const k of [-1, 1]) box(cx + k * w * 0.22, 0, faceZ + 0.22, w * 0.38, 2.6, 0.06, "#7fb6c8");
+      for (const k of [-1, 1]) { box(cx + k * w * 0.22, 0, faceZ + 0.22, w * 0.38, 2.6, 0.06, "#7fb6c8"); glassMask[boxes.length-1]=1; }
       box(cx, 3.2, faceZ + 1.2, w * 1.3, 0.3, 2.4, canopy);
       box(cx, 0, faceZ + 1.6, w * 1.2, 0.3, 1.6, "#d8d3c6");
     };
@@ -533,7 +538,9 @@ export function buildCivics(host: CivicSystemHost): void {
     }
   });
   const build = (geometry: THREE.BufferGeometry, pieces: Piece[], palette: string[], name: string) => {
-    const mesh = host.makeInstanced(geometry.clone(), selfLitMaterial(0.18), Math.max(1, pieces.length));
+    const cloned=geometry.clone();
+    if(pieces===boxes)cloned.setAttribute("aCivicGlass",new THREE.InstancedBufferAttribute(new Float32Array(glassMask),1));
+    const mesh = host.makeInstanced(cloned, pieces===boxes ? civicGlassMaterial(host.facadeUniforms?.[1]) : selfLitMaterial(0.18), Math.max(1, pieces.length));
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.count = pieces.length;
@@ -542,18 +549,21 @@ export function buildCivics(host: CivicSystemHost): void {
     mesh.name = name;
     return mesh;
   };
-  const glowMesh = host.nightLights
-    ? new THREE.InstancedMesh(BOX.clone(), host.nightLights.neon, Math.max(1, glows.length))
-    : build(BOX, glows, colors[2], "city-civic-glow");
-  glowMesh.count = glows.length;
-  if (host.nightLights) {
-    colors[2].forEach((color, index) => glowMesh.setColorAt(index, host.color.set(color)));
-    if (glowMesh.instanceColor) glowMesh.instanceColor.needsUpdate = true;
-    glowMesh.frustumCulled = false;
-    glowMesh.name = "city-civic-glow";
-    host.group.add(glowMesh);
-    host.disposables.push(glowMesh.geometry);
-  }
+  // A dim/off emissive layer must never become a black opaque cover over
+  // red signage or glass. Share live night color, but use additive blending.
+  const glowMaterial=new THREE.MeshBasicMaterial({transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,toneMapped:false});
+  if(host.nightLights)glowMaterial.color=host.nightLights.neon.color;
+  const glowMesh=new THREE.InstancedMesh(BOX.clone(),glowMaterial,Math.max(1,glows.length));
+  glowMesh.count=glows.length;
+  colors[2].forEach((color,index)=>glowMesh.setColorAt(index,host.color.set(color)));
+  if(glowMesh.instanceColor)glowMesh.instanceColor.needsUpdate=true;
+  glowMesh.frustumCulled=false;
+  glowMesh.name="city-civic-glow";
+  // Transparent overlays are not physical occluders in GTAO's override pass.
+  glowMesh.onBeforeRender=(_renderer,scene)=>{glowMesh.count=scene.overrideMaterial?0:glows.length;};
+  glowMesh.onAfterRender=()=>{glowMesh.count=glows.length;};
+  host.group.add(glowMesh);
+  host.disposables.push(glowMesh.geometry,glowMaterial);
   host.civicMeshes = [build(BOX, boxes, colors[0], "city-civic-boxes"), build(CYLINDER, cylinders, colors[1], "city-civic-cylinders"), glowMesh];
   host.civicPieces = [...boxes, ...cylinders, ...glows];
   host.civicProgress = civics.map(() => 1);
