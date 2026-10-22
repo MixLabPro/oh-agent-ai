@@ -1261,6 +1261,11 @@ export class CityEngine {
     this.parts?.setSelected(id?.startsWith("decor:") ? null : id);
   }
 
+  setHovered(id: string | null): void {
+    this.hoveredId = id;
+    this.parts?.setHovered(id);
+  }
+
   /** 时间游标：null = live（跟随现在）；play = 以 speed 倍率回放。 */
   setTimeCursor(ms: number | null, options?: { playing?: boolean; speed?: number }): void {
     this.cursorMs = ms;
@@ -1576,6 +1581,15 @@ export class CityEngine {
       loopScheduled: !!this.raf, modelApplied: !!this.model,
       frameAgeMs: Math.round(performance.now() - this.lastRenderAt),
       width: this.renderer.domElement.width, height: this.renderer.domElement.height };
+  }
+
+  inspectScene() {
+    const occupancy = this.parts?.occupancySnapshot() ?? { runtimeCount: 0, byId: {} as Record<string, { x: number; z: number; shaftPrimary: unknown }> };
+    const positions: Record<string, { x: number; z: number; shaftPrimary: unknown }> = {};
+    for (const [id, row] of Object.entries(occupancy.byId)) positions[id] = { x: row.x, z: row.z, shaftPrimary: row.shaftPrimary };
+    return { lastApplyMode: this.lastApplyMode, scaleTier: this.layout?.scaleTier ?? null,
+      selectedId: this.selectedId, hoveredId: this.hoveredId, camera: this.photoView(),
+      occupantCount: occupancy.runtimeCount, positions };
   }
 
   private stopLoop(): void {
