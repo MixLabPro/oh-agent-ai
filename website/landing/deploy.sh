@@ -23,6 +23,8 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
 cp index.html styles.css exploration.css app.js i18n.js city-host.js robots.txt sitemap.xml 404.html BingSiteAuth.xml "$STAGE"/
+# IndexNow key file (public by design) lives at the site root.
+cp 3c04062f7bc54e2b928e35bd99565348.txt "$STAGE"/
 mkdir -p "$STAGE"/zh && cp zh/index.html "$STAGE"/zh/
 rsync -a --exclude=".DS_Store" --exclude="shots/" assets/ "$STAGE"/assets/
 rsync -a --exclude=".DS_Store" city3d/ "$STAGE"/city3d/
@@ -37,3 +39,7 @@ find "$STAGE" -maxdepth 2 -name index.html | sort
 
 echo "== deploy =="
 npx wrangler pages deploy "$STAGE" --project-name=oh-agent-landing --branch=main
+
+echo "== indexnow =="
+# Tell Bing/Yandex/etc. to recrawl. Set INDEXNOW=0 to skip.
+if [ "${INDEXNOW:-1}" != "0" ]; then node tools/indexnow.mjs "$STAGE" || echo "indexnow: failed (non-fatal)"; fi
