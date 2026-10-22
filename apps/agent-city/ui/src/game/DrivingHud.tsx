@@ -14,6 +14,7 @@ import "./game.css";
 
 export type DrivingHudModel = Readonly<{
   active: boolean;
+  choosingVehicle?: boolean; vtol?: boolean;
   entryError: string | null;
   initialPaused: boolean;
   preparationProgress: PreparationProgress | null;
@@ -27,13 +28,12 @@ export type DrivingHudModel = Readonly<{
   diagnostics: RuntimeDiagnosticSnapshot | null;
 }>;
 export type DrivingHudActions = Readonly<{
-  clearEntryError(): void; exit(): void; pause(): void; resume(): void; openUiContext(): void;
+  selectVehicle(vtol: boolean): void; clearEntryError(): void; exit(): void; pause(): void; resume(): void; openUiContext(): void;
 }>;
 
 const DRIVING_CONTROLS: readonly GameControlRow[] = [
   { keys: "W / ↑", description: "加速" }, { keys: "S / ↓", description: "刹车；停车后倒车" },
   { keys: "A / D / ← / →", description: "左右转向" }, { keys: "Esc", description: "暂停 / 继续" },
-  { keys: "Space", description: "（飞行车模式）长按喷升起空 · 松开下坠；助推耗尽后落地行驶即回充" },
   { keys: "拖动 / 滚轮", description: "环绕汽车 / 拉近拉远（双击复位）" },
 ];
 
@@ -43,8 +43,14 @@ export function DrivingHud({ model, actions, locale, sound }: {
   const [helpOpen, setHelpOpen] = useState(false);
   const [soundOpen, setSoundOpen] = useState(false);
   const { hud } = model;
+  const controls: readonly GameControlRow[] = [...DRIVING_CONTROLS, { keys: "Space", description: model.vtol ? "（飞行车模式）长按喷升起空 · 松开下坠；助推耗尽后落地行驶即回充" : "暂停 / 继续" }];
   const t = (text: string) => gameText(text, locale);
   const openUi = () => actions.openUiContext();
+  if (model.choosingVehicle) return <GameSessionPanel locale={locale} title="选择驾驶模式"
+    description={t("普通汽车沿道路驾驶；喷气飞车可长按空格升空，松开后下降。")}
+    onKeyDown={(event) => { if (event.code === "Escape") { event.preventDefault(); actions.exit(); } }}
+    actions={[{ label: "普通汽车", onAction: () => actions.selectVehicle(false) },
+      { label: "喷气飞车", onAction: () => actions.selectVehicle(true) }, { label: "取消", tone: "danger", onAction: actions.exit }]} />;
   const closeError = !model.active && model.entryError;
   if (!model.active && !closeError) return null;
   const entryDescription = model.entryError?.startsWith("暂不能开始驾驶：") && locale === "en"
@@ -79,19 +85,19 @@ export function DrivingHud({ model, actions, locale, sound }: {
   else if (hud.phase === "paused") panel = <GameSessionPanel locale={locale}
     title={hud.reason === "camera-safety" ? "相机安全检查已暂停驾驶" : hud.reason === "long-frame" ? "帧间隔过长，已暂停" : model.initialPaused ? "准备就绪" : "已暂停"}
     description={hud.reason === "camera-safety" ? t("相机安全检查无法确认，驾驶已暂停。") : model.initialPaused ? t("出生点已通过本地支撑与净空检查；城市道路尚未完成全量认证。") : hud.reason === "long-frame" ? t("帧间隔恢复后，可显式继续驾驶") : undefined}
-    children={<><GameControlsHelp locale={locale} rows={DRIVING_CONTROLS} className="city-game-panel-help" />
+    children={<><GameControlsHelp locale={locale} rows={controls} className="city-game-panel-help" />
       {sound && <GameSoundPanel locale={locale} sound={sound} />}</>}
     actions={[{ label: model.initialPaused ? "开始驾驶" : "继续", onAction: actions.resume }, { label: "退出驾驶", tone: "danger", onAction: actions.exit}]} />;
 
   const title = <>
-    <div className="city-game-chip"><strong>{t("自由驾驶")}</strong></div>
+    <div className="city-game-chip"><strong>{t(model.vtol ? "喷气飞车" : "自由驾驶")}</strong></div>
     <div className="city-game-chip city-game-uat-mark" aria-label={t("城市道路尚未完成全量认证")}>{t("道路认证中")}</div>
     {hud.phase === "running" && <button className="city-game-compact-action" type="button" onClick={() => { openUi(); actions.pause(); }}>{t("暂停")}</button>}
   </>;
   const blocked = hud.blocked ? t("前方有障碍") : hud.reason === "long-frame" ? t("帧间隔过长，已自动暂停") : undefined;
   // Keep an opened disclosure mounted when opening it pauses the car. Otherwise
   // the native <details> vanishes with the running HUD while the modal is hidden.
-  const help = hud.phase === "running" || helpOpen ? <GameControlsHelp locale={locale} rows={DRIVING_CONTROLS}
+  const help = hud.phase === "running" || helpOpen ? <GameControlsHelp locale={locale} rows={controls}
     onOpenChange={(open) => { setHelpOpen(open); if (open) openUi(); }} /> : undefined;
   const soundDisclosure = (hud.phase === "running" || soundOpen) && sound?.sfx ? <GameSoundPanel locale={locale} sound={sound}
     onOpenChange={(open) => { setSoundOpen(open); if (open) openUi(); }} /> : undefined;
