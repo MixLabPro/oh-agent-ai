@@ -7,9 +7,9 @@
 //! Writes require `--allow-local-writes`. Validation errors share the same
 //! `{kind, rule, parts, message, suggested_fix}` shape on preview and set.
 //!
-//! TODO(city:v3-default / PR #6): do not hook these tools into the city
-//! projection bootstrap. Construction events are persisted (`construction.ui
-//! = deferred_until_city_v3_default`) until that loader lands.
+//! After a successful persist the query layer notifies PluginHost
+//! (socket and mailbox) with a shared `CityEntityChanged` envelope.
+//! `construction.ui` is `pushed` or `queued`.
 
 use std::path::Path;
 
@@ -60,7 +60,7 @@ fn revision_prop() -> Value {
 pub fn get_spec() -> ToolSpec {
     spec(
         "get_building",
-        "Return the current Agent City model for one session building (override or default). Includes asset_ref, parts (≤64), revision, kit_version, and a geometric summary. Parcel layout is unavailable until the city:v3 default loader lands. Primary feedback is JSON, not an image.",
+        "Return the current Agent City model for one session building (override or default). Includes asset_ref, parts (≤64), revision, kit_version, and a geometric summary. Primary feedback is JSON, not an image.",
         json!({ "session_id": session_id_prop() }),
         &["session_id"],
     )
@@ -78,7 +78,7 @@ pub fn preview_spec() -> ToolSpec {
 pub fn set_spec() -> ToolSpec {
     spec(
         "set_building_model",
-        "Replace one session building's model. Requires --allow-local-writes and expected_revision for optimistic concurrency. On success persists atomically, bumps revision, and returns build_event_id. Construction animation is queued for the city UI (playback deferred until city:v3 default / PR #6).",
+        "Replace one session building's model. Requires --allow-local-writes and expected_revision for optimistic concurrency. On success persists atomically, bumps revision, notifies the open City window, and returns build_event_id for the block-by-block construction animation.",
         json!({
             "session_id": session_id_prop(),
             "model": model_prop(),
@@ -91,7 +91,7 @@ pub fn set_spec() -> ToolSpec {
 pub fn reset_spec() -> ToolSpec {
     spec(
         "reset_building",
-        "Clear a session building override and restore the default model. Requires --allow-local-writes and expected_revision. Bumps revision and queues a construction event.",
+        "Clear a session building override and restore the default model. Requires --allow-local-writes and expected_revision. Bumps revision, notifies the open City window, and queues a construction replay of the default.",
         json!({
             "session_id": session_id_prop(),
             "expected_revision": revision_prop()
@@ -305,6 +305,7 @@ mod tests {
         assert!(event.starts_with("be_"));
         assert_eq!(set["construction"]["mode"], "block-by-block");
         assert_eq!(set["construction"]["replayable"], true);
+        assert!(matches!(set["construction"]["ui"].as_str(), Some("pushed") | Some("queued")));
 
         let confirm = data(&dispatch("get_building", &json!({"session_id": session_id}), &home).unwrap()).clone();
         assert_eq!(confirm["ok"], true);

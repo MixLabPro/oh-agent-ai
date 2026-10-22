@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use serde_json::{Value,json};
 use agent_vitals_data::authority::{AuthorityDb,default_authority_path};
-use agent_vitals_query::query::{app_local,city_v3,city_assets};
+use agent_vitals_query::query::{app_local,city_assets,city_building,city_v3};
 
 struct Fixture { home:PathBuf, db:AuthorityDb, now:i64 }
 impl Fixture {
@@ -383,4 +383,41 @@ fn city_detail_prices_pre_snapshot_usage_as_dated_reference_only() {
     assert_eq!(cost["breakdown"][0]["amount_minor"],20);
     assert_eq!(cost["coverage"]["unpriced_tokens"],100);
     assert_eq!(cost["reference_prices"][0]["pricing_version"],"later-local-card");
+}
+
+#[test]
+fn buildings_overrides_reads_the_city_owned_store_without_changing_pages() {
+    let f=Fixture::new(); f.session("a"); f.fact("a","f",Some(f.now-1),None,"delta");
+    let first=f.overview(200);
+    let asset=first["page"]["sessions"][0]["asset_ref"].as_str().unwrap().to_string();
+    let session_id=first["page"]["sessions"][0]["id"].as_str().unwrap().to_string();
+    let empty=city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","asset_refs":[asset]})),f.now).unwrap();
+    assert!(empty["page"].is_null());
+    assert_eq!(empty["result"]["overrides"].as_array().unwrap().len(),0);
+    assert_eq!(empty["result"]["poll_hint_ms"],2_000);
+    let proposed=json!({"kit_version":"session-kit/v1","params":{"form":"tower"},"parts":[
+        {"id":"base","kind":"box","role":"structure","at":[0.0,0.0,0.0],"size":[3.0,2.0,3.0]},
+        {"id":"cap","kind":"cone","role":"roof","at":[0.0,2.0,0.0],"size":[2.0,1.5,2.0]}
+    ]});
+    let set=city_building::set_building_model(&f.home,f.db.conn(),&session_id,&proposed,0).unwrap();
+    assert_eq!(set["ok"],true);
+    let loaded=city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","asset_refs":[asset]})),f.now).unwrap();
+    let overrides=loaded["result"]["overrides"].as_array().unwrap();
+    assert_eq!(overrides.len(),1);
+    assert_eq!(overrides[0]["asset_ref"],asset);
+    assert_eq!(overrides[0]["revision"],1);
+    assert_eq!(overrides[0]["model"]["parts"][1]["id"],"cap");
+    let events=loaded["result"]["events"].as_array().unwrap();
+    assert_eq!(events[0]["build_event_id"],set["build_event_id"]);
+    assert_eq!(events[0]["type"],"CityEntityChanged");
+    assert_eq!(events[0]["entity_kind"],"building");
+    assert_eq!(events[0]["entity_id"],asset);
+    assert_eq!(events[0]["action"],"set");
+    assert_eq!(events[0]["event_id"],set["build_event_id"]);
+    let mailbox=&loaded["result"]["mailbox"];
+    assert_eq!(mailbox["type"],"CityEntityChanged");
+    assert_eq!(mailbox["entity_kind"],"building");
+    assert_eq!(mailbox["action"],"set");
+    assert!(first["page"]["sessions"][0].get("building_override").is_none());
+    assert_eq!(city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","bogus":true})),f.now),Err("invalid_parameter"));
 }

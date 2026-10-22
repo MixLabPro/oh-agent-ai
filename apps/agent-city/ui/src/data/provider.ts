@@ -1,5 +1,6 @@
 import { invokeHost } from "../host";
 import { validateCityProjectionV2, validateCityProjectionV3, type CitySnapshotV3, type CityProjectionV3, type CityModuleV3, type CitySessionV3, type PluginRequestV1, type PluginResponseV1, type CityUiProjectionV2 } from "@agent-vitals/app-sdk";
+import { entityChangedFromBuilding, parseKitModel, type BuildingChangedEvent, type KitModel } from "../engine/sessionKitConstruction";
 
 export type CityProjectionV1 = CityUiProjectionV2;
 
@@ -172,6 +173,68 @@ async function readV3(payload: Record<string, unknown>, signal?: AbortSignal): P
 function continuation(context: CitySnapshotV3): Record<string, unknown> {
   return { expected_revision: context.data_revision, snapshot: context.snapshot, context: context.context,
     query_semantics: context.query_semantics, window: context.window };
+}
+
+export type BuildingOverrideRow = { asset_ref: string; revision: number; kit_version: string; source: string; model: KitModel };
+export type BuildingEventRow = BuildingChangedEvent & { created_at_ms?: number };
+export type BuildingOverridesResult = { overrides: BuildingOverrideRow[]; events: BuildingEventRow[] };
+
+async function readV3Raw(payload: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  if (signal?.aborted) throw new Error("city_request_cancelled");
+  const request: PluginRequestV1 = { version: 1, instanceId: window.__AV_PLUGIN_INSTANCE__ ?? "city-standalone",
+    requestId: `city-request-${++requestSequence}`, method: "data.read", payload: { projection: "city", version: 3, ...payload } };
+  const response = await invokeHost<PluginResponseV1<Record<string, unknown>>>("plugin_request", { request });
+  if (signal?.aborted) throw new Error("city_request_cancelled");
+  if (response.version !== 1 || response.requestId !== request.requestId) throw new Error("plugin_response_invalid");
+  if (!response.ok || !response.result) throw new Error(response.error?.code ?? "plugin_request_failed");
+  return response.result;
+}
+
+function parseOverrideRow(raw: unknown): BuildingOverrideRow | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row.asset_ref !== "string" || !/^ca_[0-9a-f]{32}$/.test(row.asset_ref)) return null;
+  if (typeof row.revision !== "number" || !Number.isSafeInteger(row.revision) || row.revision < 0) return null;
+  const model = parseKitModel(row.model);
+  if (!model) return null;
+  return { asset_ref: row.asset_ref, revision: row.revision, kit_version: typeof row.kit_version === "string" ? row.kit_version : "session-kit/v1",
+    source: typeof row.source === "string" ? row.source : "override", model };
+}
+
+/** city:v3 buildings.overrides — load-path + poll fallback. Floats are legal in kit models, so this skips validateCityProjectionV3. */
+export async function readBuildingOverrides(context: CitySnapshotV3, assetRefs: string[], sinceMs?: number, signal?: AbortSignal): Promise<BuildingOverridesResult> {
+  const overrides: BuildingOverrideRow[] = [];
+  const events: BuildingEventRow[] = [];
+  const seen = new Set<string>();
+  const refs = [...new Set(assetRefs.filter((id) => /^ca_[0-9a-f]{32}$/.test(id)))];
+  const chunks = refs.length ? refs : [null];
+  for (let offset = 0; offset < chunks.length; offset += 200) {
+    const slice = refs.length ? refs.slice(offset, offset + 200) : [];
+    const payload: Record<string, unknown> = { ...continuation(context), operation: "buildings.overrides" };
+    if (slice.length) payload.asset_refs = slice;
+    if (sinceMs !== undefined) payload.since_ms = sinceMs;
+    const response = await readV3Raw(payload, signal);
+    const result = response.result && typeof response.result === "object" && !Array.isArray(response.result) ? response.result as Record<string, unknown> : {};
+    for (const item of Array.isArray(result.overrides) ? result.overrides : []) {
+      const row = parseOverrideRow(item);
+      if (row && !seen.has(row.asset_ref)) { seen.add(row.asset_ref); overrides.push(row); }
+    }
+    for (const item of Array.isArray(result.events) ? result.events : []) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      const action = row.action === "reset" || row.kind === "reset" ? "reset" : row.action === "set" || row.kind === "set" ? "set" : null;
+      const asset_ref = typeof row.entity_id === "string" ? row.entity_id : typeof row.asset_ref === "string" ? row.asset_ref : "";
+      const event_id = typeof row.event_id === "string" ? row.event_id : typeof row.build_event_id === "string" ? row.build_event_id : "";
+      if (!action || !event_id.startsWith("be_") || !/^ca_[0-9a-f]{32}$/.test(asset_ref)) continue;
+      if (typeof row.revision !== "number" || !Number.isSafeInteger(row.revision)) continue;
+      events.push({
+        ...entityChangedFromBuilding({ asset_ref, event_id, revision: row.revision, kind: action }),
+        created_at_ms: typeof row.created_at_ms === "number" ? row.created_at_ms : undefined,
+      });
+    }
+    if (!refs.length) break;
+  }
+  return { overrides, events };
 }
 function mapSessionDetail(detail: NonNullable<CityProjectionV3["detail"]>): CityProjectionV1["sessions"][number] {
   return { ...detail, cost_minor: detail.cost.cost_minor, cost_breakdown: detail.cost.breakdown, cost_complete: detail.cost.complete, cost_reference_prices: detail.cost.reference_prices,

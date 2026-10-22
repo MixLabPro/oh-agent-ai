@@ -3,7 +3,9 @@ import { buildCityModel, type CitySessionRow } from "./cityModel";
 import { prepareCityLayout } from "./engine/cityLayout";
 import { MIAMI_COASTAL } from "./engine/citySeaside";
 import { CityEngine } from "./engine/CityEngine";
-import { tauriCityDataProvider, cityDataProtocol, type CityProjectionV1 } from "./data/provider";
+import { tauriCityDataProvider, cityDataProtocol, readBuildingOverrides, type CityProjectionV1 } from "./data/provider";
+import { dispatchEntityChanged, ENTITY_CHANGED_EVENT, parseEntityChanged } from "./engine/entityEvents";
+import { entityChangedFromBuilding } from "./engine/sessionKitConstruction";
 import "./city.css";
 import { embedded, connect, observeHealth, publishToolbar, type Tool } from "./host";
 import type { EngineQualityMode } from "./engine/CityEngine";
@@ -26,6 +28,7 @@ declare global {
     __AV_CITY_PROBE__?: () => Record<string, unknown>;
     __AV_CITY_SET_HOVERED__?: (id: string | null) => void;
     __AV_CITY_SELECT__?: (id: string | null) => void;
+    __AV_CITY_REPLAY_BUILD__?: (assetOrSession?: string) => boolean;
   }
 }
 
@@ -108,6 +111,8 @@ export function CityApp() {
   const fingerprint = useRef("");
   const geographyKey = useRef("");
   const geographyAbort = useRef<AbortController | null>(null);
+  const liveCity = useRef(false);
+  const seenEntityEvents = useRef(new Set<string>());
   useEffect(() => () => { geographyAbort.current?.abort(); }, []);
   useEffect(() => observeHealth(() => engineRef.current?.diagnosticState() ?? { engineMissing: true }), []);
   useEffect(() => {
@@ -115,6 +120,19 @@ export function CityApp() {
     window.addEventListener("__AV_PLUGIN_INVALIDATED__", invalidated);
     return () => window.removeEventListener("__AV_PLUGIN_INVALIDATED__", invalidated);
   }, []);
+  useEffect(() => {
+    const onEntity = (event: Event) => {
+      const parsed = parseEntityChanged((event as CustomEvent).detail);
+      if (!parsed || seenEntityEvents.current.has(parsed.event_id)) return;
+      seenEntityEvents.current.add(parsed.event_id);
+      dispatchEntityChanged(parsed, {
+        building: (changed) => { engineRef.current?.applyBuildingChanged(changed, liveCity.current); },
+      });
+    };
+    window.addEventListener(ENTITY_CHANGED_EVENT, onEntity);
+    return () => window.removeEventListener(ENTITY_CHANGED_EVENT, onEntity);
+  }, []);
+  useEffect(() => { liveCity.current = firstModelFrame; }, [firstModelFrame]);
 
   useEffect(() => {
     let active = true;
@@ -170,6 +188,7 @@ export function CityApp() {
     setCityLoad({ stage: "model", work: null });
     const rows: CitySessionRow[] = projection.sessions.map((session) => ({
       session_ref: session.id,
+      asset_ref: session.asset_ref ?? null,
       harness: session.harness,
       title: session.title ?? null,
       title_source: session.title_source ?? null,
@@ -255,6 +274,52 @@ export function CityApp() {
   }, [projection, experience.busy, experience.seed, game.active, driving.active, firstModelFrame]);
 
   useEffect(() => {
+    if (!projection?.v3_context || !embedded()) return;
+    let active = true;
+    const context = projection.v3_context;
+    const refs = projection.sessions.map((session) => session.asset_ref).filter((id): id is string => typeof id === "string");
+    const applyOverrides = async (animate: boolean) => {
+      const { overrides, events } = await readBuildingOverrides(context, refs);
+      if (!active) return;
+      for (const event of events) seenEntityEvents.current.add(event.event_id);
+      for (const row of overrides) {
+        const latest = events.find((event) => event.entity_id === row.asset_ref && event.action === "set" && event.revision === row.revision);
+        engineRef.current?.applyBuildingChanged(entityChangedFromBuilding({
+          asset_ref: row.asset_ref,
+          event_id: latest?.event_id,
+          revision: row.revision,
+          kind: "set",
+          source: "override",
+          model: row.model,
+        }), animate && liveCity.current);
+      }
+    };
+    void applyOverrides(false).catch(() => {});
+    const timer = window.setInterval(() => {
+      if (document.hidden || !liveCity.current) return;
+      void (async () => {
+        try {
+          const { overrides, events } = await readBuildingOverrides(context, refs);
+          for (const event of events) {
+            if (seenEntityEvents.current.has(event.event_id)) continue;
+            seenEntityEvents.current.add(event.event_id);
+            const row = overrides.find((item) => item.asset_ref === event.entity_id);
+            if (event.action === "reset") {
+              engineRef.current?.applyBuildingChanged(event, true);
+            } else if (row) {
+              engineRef.current?.applyBuildingChanged(entityChangedFromBuilding({
+                asset_ref: row.asset_ref, event_id: event.event_id, revision: event.revision,
+                kind: "set", source: "override", model: row.model,
+              }), true);
+            }
+          }
+        } catch { /* poll is a backup; push is preferred */ }
+      })();
+    }, 8_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [projection]);
+
+  useEffect(() => {
     window.__AV_CITY_PROBE__ = () => {
       const scene = engineRef.current?.inspectScene() ?? null;
       return {
@@ -266,7 +331,15 @@ export function CityApp() {
     };
     window.__AV_CITY_SET_HOVERED__ = (id) => { engineRef.current?.setHovered(id); };
     window.__AV_CITY_SELECT__ = (id) => { experience.setSelected(id); engineRef.current?.setSelected(id); };
-    return () => { delete window.__AV_CITY_PROBE__; delete window.__AV_CITY_SET_HOVERED__; delete window.__AV_CITY_SELECT__; };
+    window.__AV_CITY_REPLAY_BUILD__ = (assetOrSession) => {
+      const engine = engineRef.current;
+      if (!engine) return false;
+      if (assetOrSession) return engine.replayBuilding(assetOrSession);
+      const kits = engine.inspectScene().kits as Array<{ sessionId: string }> | undefined;
+      const first = kits?.[0]?.sessionId;
+      return first ? engine.replayBuilding(first) : false;
+    };
+    return () => { delete window.__AV_CITY_PROBE__; delete window.__AV_CITY_SET_HOVERED__; delete window.__AV_CITY_SELECT__; delete window.__AV_CITY_REPLAY_BUILD__; };
   });
 
   useEffect(() => {

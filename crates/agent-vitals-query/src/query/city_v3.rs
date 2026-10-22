@@ -109,14 +109,15 @@ pub(crate) fn cost_breakdown(buckets: &[Value], total_tokens: i64) -> Result<Val
 /// Only called by the explicitly registered city:v3 handler. No arbitrary query dispatch.
 pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str> {
     let operation = request["operation"].as_str().ok_or("invalid_operation")?;
-    if !matches!(operation,"overview"|"sessions.page"|"session.detail"|"module.read"|"assets.resolve") { return Err("invalid_operation"); }
+    if !matches!(operation,"overview"|"sessions.page"|"session.detail"|"module.read"|"assets.resolve"|"buildings.overrides") { return Err("invalid_operation"); }
     let mut allowed=vec!["projection","version","operation"];
     if operation=="overview" { allowed.extend(["windowDays","timezone","calendar_mode","page_size"]); }
     else {
         allowed.extend(["expected_revision","snapshot","context","query_semantics","window"]);
         allowed.extend(match operation {
             "sessions.page"=>vec!["page_size","cursor"], "session.detail"=>vec!["id","include_excerpts"],
-            "module.read"=>vec!["module","harness"], "assets.resolve"=>vec!["save_id","asset_refs"], _=>vec![],
+            "module.read"=>vec!["module","harness"], "assets.resolve"=>vec!["save_id","asset_refs"],
+            "buildings.overrides"=>vec!["asset_refs","since_ms"], _=>vec![],
         });
     }
     if request.as_object().ok_or("invalid_request")?.keys().any(|key| !allowed.contains(&key.as_str())) { return Err("invalid_parameter"); }
@@ -278,6 +279,24 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
                 .iter().map(|r|r.as_str().map(str::to_string).ok_or("invalid_asset_request")).collect::<Result<Vec<_>,_>>()?;
             let save=request["save_id"].as_str().filter(|s|!s.is_empty() && s.len()<=100).ok_or("invalid_asset_request")?;
             result["result"]=super::city_assets::resolve(home,db.conn(),save,&refs,from,end)?;
+        }
+        "buildings.overrides" => {
+            let refs=match request.get("asset_refs") {
+                None=>Vec::new(),
+                Some(value)=>{
+                    let items=value.as_array().filter(|r|r.len()<=200).ok_or("invalid_asset_request")?;
+                    items.iter().map(|r|r.as_str().map(str::to_string).ok_or("invalid_asset_request")).collect::<Result<Vec<_>,_>>()?
+                }
+            };
+            let since=match request.get("since_ms") {
+                None=>None,
+                Some(value)=>Some(value.as_i64().filter(|n|*n>=0).ok_or("invalid_parameter")?),
+            };
+            let overrides=super::city_building::list_overrides(home,&refs).map_err(|_| "data_unavailable")?;
+            let events=super::city_building::list_build_events(home,&refs,since,50).map_err(|_| "data_unavailable")?;
+            result["result"]=json!({"overrides":overrides,"events":events,
+                "mailbox":super::city_building::read_mailbox(home),
+                "poll_hint_ms":2_000});
         }
         _=>unreachable!(),
     }

@@ -15,6 +15,8 @@ import { DetMath as Math } from "./engine/detMath"; // 跨引擎确定性：见 
 
 export type CitySessionRow = {
   session_ref: string;
+  /** Stable City asset id (`ca_` + 32 hex) from city:v3. Used to join MCP building overrides. */
+  asset_ref?: string | null;
   harness: string;
   /** 会话标题（V32 楼名）：codex thread_name / claude ai-title / dsh workspace
    *  title 的脱敏截断投影；null = 无标题证据（面板走 harness + 日期 fallback）。 */
@@ -66,6 +68,8 @@ export type BuildingArchetype = "tower" | "slab" | "midrise" | "block" | "landma
 export type CityBuilding = {
   /** session_ref；聚合楼为 `fill:<harness>:<n>`。 */
   id: string;
+  /** city:v3 `asset_ref` when this occupant is a real session (not a fill). */
+  assetRef?: string;
   districtId: string;
   archetype: BuildingArchetype;
   /** 立面变体 0..2（punched / banded / glass），由 harness 风格与 seed 决定。 */
@@ -291,6 +295,7 @@ export function buildCityModel(input: CityModelInput): CityModel {
       const tokensPerHour = row.tokens.total / ageHours;
       buildings.push({
         id: row.session_ref,
+        assetRef: row.asset_ref ?? undefined,
         districtId: harnessId,
         archetype: archetypeFor(seed, height, landmark && height > 24),
         facade: Math.floor(seed * 997) % 3,
