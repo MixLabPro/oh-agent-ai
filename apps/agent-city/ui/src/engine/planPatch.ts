@@ -30,6 +30,7 @@ import { clearsHighways, roadNodeId, segmentDistance } from "./cityPlan";
 import type { CityLayout, RoadEdge, RoadNode, Vec2 } from "./cityLayout";
 import { CITY_GENERATOR_VERSION } from "./generatorVersion";
 import { applySiteOps, type SiteOp } from "./planSites";
+import { regradeRoadLandings } from "./surface/roadLandingGrading";
 import { bridgeChain, buildingRect, clearanceRoads, edgeLocked, parcelIndex, quantize, rectClearOfEdges, rectClearOfRoads, rectsOverlap, reservedParcelIds, reservedParcelIdsShared, slotIndex, VIADUCT_DECK_WIDTH, wetSpan, curvePoints } from "./planGeometry";
 
 export type { SiteOp } from "./planSites";
@@ -718,6 +719,14 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   const replayed = patch.roadOps.length ? replayRoadOps(layout, patch.roadOps, stale) : null;
   const roadNodes = replayed ? replayed.nodes : layout.roadNodes;
   const roadEdges = replayed ? replayed.edges : layout.roadEdges;
+  // 桥头土方（surface/roadLandingGrading）是生成器的路自带的：补丁改了路，就从原始地形按补丁后仍在的**生成器桥**重新平整——
+  // 擦掉的桥，它的土台随之撤掉；玩家新画的桥不自动垫土。后者不是遗漏：画桥的校验（validateRoadAdd / wetSpan 桥台延伸 /
+  // 岸坡判断）都在没有新土台的地形上做，提交后再垫土就是事后改了校验通过的几何，桥面是按两端地形取平的一块，
+  // 土台的过渡带让旁边的路面跟着起伏，叠到桥面下就是 height-conflict。要给玩家的桥动土方，得是一个先预览、再校验的工具。
+  // 回归（2026-10-22，ceaa2cce 之后）：只在生成布局上平整、补丁不重算，旧桥头的土台留在原地，新桥两头都撞 height-conflict，
+  // 一键修复从此一座桥也修不好。
+  const generatedDecks = new Set(layout.roadEdges.filter((edge) => edge.bridge).map((edge) => edge.id));
+  const terrain = replayed ? regradeRoadLandings(layout.terrain, roadEdges.filter((edge) => !edge.bridge || generatedDecks.has(edge.id))) : layout.terrain;
   const highways = patch.highwayOps?.length ? replayHighwayOps(layout.highways ?? [], patch.highwayOps, stale) : layout.highways;
   const coastRoads = replayed ? deriveCoastRoads(layout, roadEdges) : layout.coastRoads;
   // 画路生成的地面桥登记进 bridges（渲染层的桁架装饰读它，与生成器的跨河桥同构）；整座擦掉的桥从登记里撤掉——
@@ -747,6 +756,11 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
 
   // ── 3. buildingMoves：目标缺失/被占（按套用顺序先到先得）→ stale；否则换 slot 重算地面高度 ──
   const districts = layout.districts.map((district) => ({ ...district, slots: new Map(district.slots), grounds: new Map(district.grounds), carPaths: district.carPaths }));
+  // 重新平整了：城区共用同一份地形，楼的地面高度与生成时同口径（terrain.height(地块)）重取。
+  if (terrain !== layout.terrain) for (const district of districts) {
+    if (district.terrain === layout.terrain) district.terrain = terrain;
+    for (const [id, slot] of district.slots) district.grounds.set(id, terrain.height(slot.x, slot.z));
+  }
   if (Object.keys(patch.buildingMoves).length) {
     const parcels = parcelIndex(view);
     const taken = reservedParcelIds(view, patch.suppressedContext);
@@ -761,7 +775,7 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
       taken.delete(home.slots.get(buildingId)!.id);
       taken.add(targetId);
       home.slots.set(buildingId, target);
-      home.grounds.set(buildingId, layout.terrain.height(target.x, target.z));
+      home.grounds.set(buildingId, terrain.height(target.x, target.z));
     }
   }
 
@@ -804,5 +818,5 @@ export function applyPlanPatch(layout: CityLayout, patch: PlanPatchV1): PatchedL
   // 悬索桥是「最长过河桥」的塔架与主缆（地标）：它下面的桥被整座擦掉，塔与缆一起拆（校验提示 erases-suspension-bridge）。
   const unhung = (l: CityLayout["landmarks"][number]) => l.kind === "suspension-bridge" && !!l.to && erasedSpan({ from: l, to: l.to });
   const landmarks = decksDropped && (view.landmarks ?? []).some(unhung) ? view.landmarks.filter((l) => !unhung(l)) : view.landmarks;
-  return { layout: { ...view, roadNodes, roadEdges, districts, culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}), ...(bridges !== layout.bridges ? { bridges } : {}), ...(landmarks !== view.landmarks ? { landmarks } : {}) }, stale, patchHash };
+  return { layout: { ...view, roadNodes, roadEdges, districts, ...(terrain !== layout.terrain ? { terrain } : {}), culDeSacEnds, contextBuildings, activityKey, ...(coastRoads !== layout.coastRoads ? { coastRoads } : {}), ...(bridges !== layout.bridges ? { bridges } : {}), ...(landmarks !== view.landmarks ? { landmarks } : {}) }, stale, patchHash };
 }

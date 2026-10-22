@@ -18,6 +18,7 @@ const kit = await loadCity({
   "engine/planRoadRules.ts": ["validateRoadAdd", "validateEdgeDrop", "snapPoint"],
   "engine/planAudit.ts": ["auditLayout"],
   "planRepair/testDrive.ts": ["testDrive"],
+  "engine/surface/roadLandingGrading.ts": ["regradeRoadLandings"],
   "engine/surface/compileSurface.ts": ["compileCitySurface", "landingConnectivity"],
   "engine/surface/SurfaceIndex.ts": ["buildSurfaceIndex"],
   "engine/surface/surfaceRegions.ts": ["buildSurfaceRegions"],
@@ -101,6 +102,13 @@ for (const x of bad) {
   const drop = { ...kit.emptyPlanPatch(base.seed, base.scaleTier), roadOps: [{ t: "drop", edge: x.deck.id }] };
   const erased = kit.applyPlanPatch(base, drop);
   assert.deepEqual(erased.stale, [], `${x.deck.id}: the erase replays cleanly`);
+  // 桥头土方跟着路走（planPatch：补丁改路就从原始地形重新平整）：擦掉的桥，土台一起撤。
+  // 回归（ceaa2cce 之后）：补丁不重算，旧土台留在原地，重画的桥两头 height-conflict，一键修复一座也修不好。
+  const raw = kit.regradeRoadLandings(base.terrain, []);
+  for (const p of x.chain.flatMap((c) => [c.points[0], c.points[c.points.length - 1]])) {
+    assert.equal(erased.layout.terrain.height(p.x, p.z), raw.height(p.x, p.z), `${x.deck.id}: the erased bridge's landing pad is gone at ${p.x}:${p.z}`);
+  }
+  assert.equal(kit.applyPlanPatch(base, kit.emptyPlanPatch(base.seed, base.scaleTier)).layout.terrain, base.terrain, "a patch with no road edits keeps the generated earthworks as they are");
   assert.ok(!erased.layout.roadEdges.some((e) => x.chain.some((c) => c.id === e.id)), "every deck piece of the bridge is gone");
   assert.equal(erased.layout.bridges.length, base.bridges.length - base.bridges.filter((g) => x.chain.some((c) => {
     const mid = { x: (g.from.x + g.to.x) / 2, z: (g.from.z + g.to.z) / 2 };
@@ -121,6 +129,10 @@ for (const x of bad) {
   // 从桥头前 4 开到桥尾后 4：考的是两个桥头本身（路口里的渠化导流岛在路中线上，沿中线开的领航员会撞岛——那是路口的事）。
   const newDeck = repaired.layout.roadEdges.find((e) => e.bridge && !base.roadEdges.some((o) => o.id === e.id));
   assert.ok(newDeck, "the redraw lays a new deck");
+  // 玩家画的桥不自动垫土：画桥校验看到的地形就是车开的地形。
+  for (const p of [newDeck.points[0], newDeck.points[newDeck.points.length - 1]]) {
+    assert.equal(repaired.layout.terrain.height(p.x, p.z), raw.height(p.x, p.z), `the player's new bridge gets no automatic landing pad at ${p.x}:${p.z}`);
+  }
   const [d0, d1] = [newDeck.points[0], newDeck.points[newDeck.points.length - 1]];
   const near = (p) => Math.hypot(p.x - drawn.from.x, p.z - drawn.from.z);
   const [deckFrom, deckTo] = near(d0) < near(d1) ? [d0, d1] : [d1, d0];

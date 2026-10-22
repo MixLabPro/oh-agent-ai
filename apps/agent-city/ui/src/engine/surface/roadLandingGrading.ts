@@ -4,6 +4,14 @@ import { DetMath as Math } from "../detMath";
 import type { RoadEdge, TerrainField, Vec2 } from "../cityLayout";
 export const ROAD_LANDING_GRADING_VERSION = 1;
 const cache = new WeakMap<TerrainField,WeakMap<object,TerrainField>>();
+/** graded → the raw field it was graded from. Earthworks follow the road set: when a plan
+ * patch replaces roads (a player erases a bridge and draws another), the patched layout
+ * must be regraded from the raw field, not stacked on pads left by the generator's roads. */
+const ungraded = new WeakMap<TerrainField,TerrainField>();
+/** Regrade a (possibly already graded) field for a new road set. */
+export function regradeRoadLandings(terrain:TerrainField,roads:readonly RoadEdge[]):TerrainField {
+  return gradeRoadLandings(ungraded.get(terrain)??terrain,roads);
+}
 const smooth = (x:number) => { const t=Math.max(0,Math.min(1,x)); return t*t*(3-2*t); };
 export function gradeRoadLandings(base:TerrainField,roads:readonly RoadEdge[]):TerrainField {
   const prior=cache.get(base)?.get(roads); if(prior)return prior;
@@ -65,6 +73,7 @@ export function gradeRoadLandings(base:TerrainField,roads:readonly RoadEdge[]):T
     return raw+Math.min(1,total)*smooth(raw/0.2)*Math.max(0,Math.min(1.2,weighted/total-raw));
   };
   const terrain=ordered.length?{...base,height,slope:(x:number,z:number)=>Math.hypot(height(x+1,z)-height(x-1,z),height(x,z+1)-height(x,z-1))/2}:base;
+  if(terrain!==base)ungraded.set(terrain,base);
   let worlds=cache.get(base);if(!worlds){worlds=new WeakMap();cache.set(base,worlds);}worlds.set(roads,terrain);
   return terrain;
 }
