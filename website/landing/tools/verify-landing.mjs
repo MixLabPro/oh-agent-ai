@@ -165,11 +165,15 @@ function host({ desktop = false, reduced = false, protocol = 'http:' } = {}) {
     send('plugin_request', { request: { version: 1, instanceId, requestId: 'dto', method: 'data.read', payload: { projection: 'city', version: 2, windowDays: days } } });
     return created.sent.at(-1).result.result;
   };
+  const runtimeError = () => {
+    const instanceId = new URL(created.src, 'http://localhost').searchParams.get('instanceId');
+    send('plugin_message', { message: { version: 1, instanceId, type: 'runtime.error', code: 'webgl_unavailable' } });
+  };
   const toolbar = (enabled) => {
     const instanceId = new URL(created.src, 'http://localhost').searchParams.get('instanceId');
     send('plugin_message', { message: { version: 1, instanceId, type: 'toolbar.update', items: [{ commandId: 'city.reset', enabled }] } });
   };
-  return { elements, events, timers, send, readProjection, toolbar, resolveFetch,
+  return { elements, events, timers, send, readProjection, toolbar, runtimeError, resolveFetch,
     requested: () => requested, frame: () => created, start: () => events['av:explore-city']() };
 }
 const h = host();
@@ -220,7 +224,9 @@ assert.equal(missing.elements['.city-window'].dataset.cityState, 'error', 'Missi
 const unsupported = host(); unsupported.start(); unsupported.resolveFetch({ ok: true });
 await Promise.resolve(); await Promise.resolve();
 unsupported.toolbar(false);
-assert.equal(unsupported.elements['.city-window'].dataset.cityState, 'error', 'Unavailable renderer readiness must show fallback');
+assert.equal(unsupported.elements['.city-window'].dataset.cityState, 'loading', 'An initial toolbar with reset disabled is still loading, not a failure');
+unsupported.runtimeError();
+assert.equal(unsupported.elements['.city-window'].dataset.cityState, 'error', 'Unavailable renderer (runtime.error) must show fallback');
 const desktop = host({ desktop: true });
 assert.equal(desktop.requested(), 1, 'Desktop hero starts the production City frontend automatically');
 const reduced = host({ desktop: true, reduced: true });

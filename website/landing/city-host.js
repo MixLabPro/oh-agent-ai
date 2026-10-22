@@ -112,9 +112,10 @@
       if (message.type === 'toolbar.update' && Array.isArray(message.items)) {
         const usable = message.items.some((item) => item.commandId === 'city.reset' && item.enabled);
         if (!usable) {
-          // Rebuilding terrain temporarily disables reset. It is not a crash.
-          if (!initialWindowSent) fail();
-          else reset.disabled = true;
+          // The first toolbar update (before the scene is built) and terrain rebuilds
+          // report reset as disabled. That means "still loading", not a crash: only
+          // runtime.error and the startup timeout are failures.
+          if (initialWindowSent) reset.disabled = true;
           return;
         }
         if (!initialWindowSent) {
