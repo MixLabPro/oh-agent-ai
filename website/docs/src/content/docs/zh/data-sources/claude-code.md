@@ -56,7 +56,7 @@ Claude Code 把会话记录存在 `~/.claude/projects/` 下面，每个项目一
 ## 为什么 Claude Code 城区是空的，或者比预期小？
 
 - **时间范围里没有会话**：桌面版城市显示近 7、30、90 或 366 天，可以把范围调大。
-- **旧记录被清理了**：只有日志文件还在这台电脑 上的会话才能显示。Claude Code 默认 30 天后删除会话记录，见[为什么 Agent City 里缺了较早的会话？](#为什么-agent-city-里缺了较早的会话)
+- **旧记录被清理了**：如果 Claude Code 在 Oh Agent 导入之前就删除了记录，该会话将无法导入。已经导入的统计在 Oh Agent 的保留期内仍可显示；删除源日志只会使对应原文无法查看。Claude Code 默认 30 天后删除会话记录，见[为什么 Agent City 里缺了较早的会话？](#为什么-agent-city-里缺了较早的会话)
 - **在别的电脑上用的**：其他设备上的历史不会合并进来。
 - **改过配置目录**：设置了 `CLAUDE_CONFIG_DIR` 后，Claude Code 会把会话历史存到那个目录，不再放在 `~/.claude`（见 [Anthropic 设置文档](https://docs.anthropic.com/en/docs/claude-code/settings)）。Oh Agent 1.0.0-beta.3 不跟随这个变量。可以在“设置 → 其他读取位置”里添加目录，但每个目录都会按 `<目录>/.claude/projects` 去读，所以多数自定义配置目录还是读不到。
 - **会话超过 4000 次**：每个时间范围只载入最近的 4000 次。
@@ -80,7 +80,7 @@ Claude Code 会自己删除旧的会话记录。它的 `cleanupPeriodDays` 设�
 
 取值是整数天数，最小为 1。`0` 不被接受；想长期保留，Anthropic 建议填一个很大的值，比如 `3650`。这个设置只对还在的记录生效，已经删掉的找不回来。
 
-Oh Agent 已经导入过的会话，在 Claude Code 删除日志文件后仍保存在 Oh Agent 自己的数据库里。只有 Oh Agent 自己的保留期（默认 13 个月）到期，或你在设置里删除某个数据源的数据时，才会被移除。
+Oh Agent 已导入的统计，在 Claude Code 删除日志文件后仍保存在本地数据库里，受 Oh Agent 的保留期（默认 13 个月）和设置中的显式数据删除操作约束。原始对话仍保存在 Claude Code 的日志文件中；源文件被删除后，原文无法查看，但保留下来的统计仍可在所选时间范围内显示于 City。
 
 <!-- source（外部）：https://code.claude.com/docs/en/settings-reference#cleanupperioddays，“Default: 30 … Setting 0 fails validation, so pick a large value such as 3650”；User 作用域为 ~/.claude/settings.json（2026-10-21 读取） -->
 <!-- source: sync_service.rs（文件消失只记为遍历错误，不删除数据）；apps/desktop/src-tauri/src/lib.rs（delete_imported_source_data 是用户显式操作）；retention.rs（DEFAULT_RETENTION_MONTHS = 13） -->

@@ -57,7 +57,7 @@ The Agent City view never receives full prompts, file paths, working directories
 ## Why is my Claude Code district empty or smaller than expected?
 
 - **No sessions yet in the window.** The desktop city shows the last 7, 30, 90 or 366 days; widen the window.
-- **Old transcripts were cleaned up.** Oh Agent can only show sessions whose log files still exist on this computer. By default Claude Code deletes transcripts after 30 days; see [Why are my older sessions missing?](#why-are-my-older-sessions-missing-from-agent-city)
+- **Old transcripts were cleaned up.** If Claude Code deleted a transcript before Oh Agent imported it, that session cannot be imported. Statistics already imported remain available within Oh Agent's retention window; deleting the source log only makes its original conversation unavailable. By default Claude Code deletes transcripts after 30 days; see [Why are my older sessions missing?](#why-are-my-older-sessions-missing-from-agent-city)
 - **Another device.** History from other computers isn't merged.
 - **Custom config folder.** If you set `CLAUDE_CONFIG_DIR`, Claude Code stores session history there instead of `~/.claude` (per [Anthropic's settings docs](https://docs.anthropic.com/en/docs/claude-code/settings)). Oh Agent 1.0.0-beta.3 doesn't follow that variable. You can add extra folders in Settings → Additional read locations, but each one is read as `<folder>/.claude/projects`, so it doesn't cover most custom config folders.
 - **More than 4,000 sessions.** The most recent 4,000 sessions in the window are loaded.
@@ -83,7 +83,7 @@ To keep more history, raise the value in `~/.claude/settings.json`:
 
 The value is a whole number of days, at least 1. `0` is rejected; for very long retention, Anthropic suggests a large value such as `3650`. The setting only affects transcripts that still exist. It can't bring back deleted ones.
 
-Sessions Oh Agent has already imported stay in its own database after Claude Code deletes the log file. They are removed by Oh Agent's own retention (13 months by default) or when you delete a source's data in Settings.
+Statistics Oh Agent has already imported stay in its own database after Claude Code deletes the log file, subject to Oh Agent's retention (13 months by default) and explicit source-data deletion in Settings. The original conversation stays in Claude Code's log file; if that file is gone, original-text viewing is unavailable, while the retained statistics can still appear in City within the selected time window.
 
 <!-- source (external): https://code.claude.com/docs/en/settings-reference#cleanupperioddays — "Set how many days Claude Code keeps session transcripts … Default: 30 … Setting 0 fails validation, so pick a large value such as 3650"; scope Any file, User = ~/.claude/settings.json (fetched 2026-10-21) -->
 <!-- source: crates/agent-vitals-ingest/src/ingest/sync_service.rs (a vanished file is a traversal error, not a delete); apps/desktop/src-tauri/src/lib.rs (delete_imported_source_data is an explicit user action); crates/agent-vitals-runtime-core/src/core/retention.rs (DEFAULT_RETENTION_MONTHS = 13) -->
