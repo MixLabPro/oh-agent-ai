@@ -18,6 +18,8 @@ synthetic.push(...newGeometryStages);
 synthetic.push("verify-city-operation-budget");
 synthetic.push("verify-city-planning-job");
 groups.planning.push("verify-city-planning-job");
+synthetic.push("verify-city-plan-disk-cache");
+groups.planning.push("verify-city-plan-disk-cache");
 groups.planning.push("verify-city-operation-budget");
 synthetic.push("verify-city-layout-capacity");
 synthetic.push("verify-city-model-envelope");

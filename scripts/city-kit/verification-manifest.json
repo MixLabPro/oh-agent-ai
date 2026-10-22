@@ -6,6 +6,12 @@
     "shared": false
   },
   {
+    "id": "verify-city-plan-disk-cache",
+    "file": "verify-city-plan-disk-cache.mjs",
+    "env": {},
+    "shared": false
+  },
+  {
     "id": "verify-city-operation-budget",
     "file": "verify-city-operation-budget.mjs",
     "env": {},

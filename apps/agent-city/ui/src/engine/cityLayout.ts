@@ -2,6 +2,8 @@ import { atLeast } from "./roadStandard";
 import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { runPlanningJob, type PlanningWorkerPort } from "./planningWorker/planningJob";
+import { hydratePlanningPlan, serializePlanningPlan, type PlanningParameters } from "./planningWorker/planningProtocol";
+import { deleteCityPlanSnapshot, readCityPlanSnapshot, writeCityPlanSnapshot } from "./planningWorker/cityPlanDiskCache";
 import type { PlanningWorkSnapshot } from "./planner/operationBudget";
 import { PLANNING_WORK_UNITS } from "./planner/operationBudget";
 import { hashSeed, RENDER_CAP, type CityModel } from "../cityModel";
@@ -167,6 +169,14 @@ const plans = new Map<string, ReturnType<typeof createCityPlan>>();
 export const CITY_PLAN_CACHE_CONFIG = { version: 1, maxEntries: 8 } as const;
 export const cityPlanCacheSize = () => plans.size;
 export function clearCityPlanCache(): void { plans.clear(); }
+export type PreparePlanSource = "memory" | "disk" | "compute";
+let lastPrepareSource: PreparePlanSource | null = null;
+export function takePreparePlanSource(): PreparePlanSource | null {
+  const source = lastPrepareSource;
+  lastPrepareSource = null;
+  return source;
+}
+export { CITY_PLAN_DISK_CACHE, clearCityPlanDiskCache, createMemoryCityPlanStore, setCityPlanDiskStore } from "./planningWorker/cityPlanDiskCache";
 
 type GrownNetwork = {
   roadEdges: RoadEdge[];
@@ -332,21 +342,45 @@ function layoutPopulation(model: CityModel): number {
   return Math.min(RENDER_CAP, Math.max(model.buildings.length, Number.isFinite(planned) ? planned : 0));
 }
 
+function rememberPlan(key: string, plan: ReturnType<typeof createCityPlan>, seed: number, coastal: CoastalConfig | null) {
+  plans.set(key, plan);
+  while (plans.size > CITY_PLAN_CACHE_CONFIG.maxEntries) plans.delete(plans.keys().next().value!);
+  warmOccupancyScratch(plan, seed, coastal);
+}
+
 export async function prepareCityLayout(model: CityModel, seed: number, coastal: CoastalConfig | null,
   options: { signal: AbortSignal; workerFactory?: () => PlanningWorkerPort; onPlanningProgress?: (snapshot: PlanningWorkSnapshot) => void }): Promise<void> {
   if (options.signal.aborted) throw new Error("layout-preparation-cancelled");
   const tier = scaleTierFor(layoutPopulation(model)), key = layoutPlanKey(seed, tier, coastal);
-  if (plans.has(key)) { warmOccupancyScratch(plans.get(key)!, seed, coastal); return; }
+  if (plans.has(key)) {
+    lastPrepareSource = "memory";
+    warmOccupancyScratch(plans.get(key)!, seed, coastal);
+    return;
+  }
   // Existing synchronous planning has no aggregate work cap. Transport accounting
   // preserves that policy; worker cancellation/heartbeat remains independently bounded.
   const limits = Object.fromEntries(PLANNING_WORK_UNITS.map(unit => [unit, Number.MAX_SAFE_INTEGER])) as Record<typeof PLANNING_WORK_UNITS[number], number>;
+  const parameters: PlanningParameters = { seed, tier, coastal, limits };
+  try {
+    const snapshot = await readCityPlanSnapshot(parameters);
+    if (options.signal.aborted) throw new Error("layout-preparation-cancelled");
+    if (snapshot) {
+      rememberPlan(key, hydratePlanningPlan(snapshot, parameters), seed, coastal);
+      lastPrepareSource = "disk";
+      return;
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "layout-preparation-cancelled") throw error;
+    await deleteCityPlanSnapshot(parameters).catch(() => { /* recompute; a corrupt snapshot must not stick */ });
+  }
   const { onPlanningProgress, ...workerOptions } = options;
-  const result = await runPlanningJob({ seed, tier, coastal, limits }, { ...workerOptions, onProgress: onPlanningProgress });
+  const result = await runPlanningJob(parameters, { ...workerOptions, onProgress: onPlanningProgress });
   if (options.signal.aborted || result.status === "cancelled") throw new Error("layout-preparation-cancelled");
   if (result.status !== "computed") throw new Error(`layout-preparation:${result.reason}`);
-  plans.set(key, result.plan);
-  while (plans.size > CITY_PLAN_CACHE_CONFIG.maxEntries) plans.delete(plans.keys().next().value!);
-  warmOccupancyScratch(result.plan, seed, coastal);
+  rememberPlan(key, result.plan, seed, coastal);
+  lastPrepareSource = "compute";
+  try { await writeCityPlanSnapshot(parameters, serializePlanningPlan(result.plan, parameters)); }
+  catch { /* first paint still uses the in-memory plan; disk is a restart accelerator */ }
 }
 
 /** Cache the geography plan without occupying parcels — same LRU as layoutCity. */
