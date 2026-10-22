@@ -1,0 +1,50 @@
+name: Build docs
+
+on:
+  pull_request:
+    paths:
+      - 'website/docs/**'
+      - '.github/workflows/docs.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'website/docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: website/docs/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website/docs
+        run: npm ci
+
+      - name: Check content (regenerate privacy pages)
+        working-directory: website/docs/tools
+        run: |
+          python3 gen_privacy_en.py
+          python3 gen_privacy_zh.py
+
+      - name: Build documentation site
+        working-directory: website/docs
+        run: npm run build
+
+      - name: Check build output
+        working-directory: website/docs
+        run: |
+          echo "Build output:"
+          ls -lh dist/
+          echo "Total pages:"
+          find dist/ -name "*.html" | wc -l
+          echo "Sitemap:"
+          ls -la dist/sitemap*
