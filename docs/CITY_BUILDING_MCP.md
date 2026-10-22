@@ -1,6 +1,6 @@
 # Agent City building MCP (MVP)
 
-External agents can read, preview, replace, and reset **one session building's 3D model** through Data MCP. Persistence is a City-owned SQLite override keyed by stable `asset_ref`. The city:v3 loader / in-city construction playback is **not** wired in this PR (deferred until [PR #6](https://github.com/Oh-Agent-AI/oh-agent/pull/6) lands on `dev`).
+External agents can read, preview, replace, and reset **one session building's 3D model** through Data MCP. Persistence is a City-owned SQLite override keyed by stable `asset_ref`. After a successful set/reset the write path **persists → pushes a shared host event → City plays construction**.
 
 ## Tools
 
@@ -67,7 +67,36 @@ Preview and set share one shape inside `data` (check `data.ok`; this is not a JS
 - `overrides(asset_ref, revision, kit_version, model_json, updated_at_ms)` — `model_json` NULL means default.
 - `build_events(build_event_id, asset_ref, revision, kind, part_count, created_at_ms)` — queued, replayable construction records.
 
-Atomic `BEGIN IMMEDIATE` check-and-commit. Survives app restart. Parcel/lot metadata is reported `unavailable` until the city loader can supply it (PR #6).
+Atomic `BEGIN IMMEDIATE` check-and-commit. Survives app restart. Parcel/lot metadata is reported `unavailable` until the city loader can supply it.
+
+## UI bridge (persist → push → animate)
+
+MCP is a separate stdio process, so it cannot emit a Tauri event directly. After COMMIT the query layer:
+
+1. Writes `state/plugins/city-buildings/notify.json` (durable mailbox).
+2. Best-effort JSON line to `state/plugins/city-buildings/host.sock` when PluginHost is listening.
+3. PluginHost evals **one shared CustomEvent** on the City webview: `__AV_PLUGIN_ENTITY_CHANGED__`.
+4. City dispatches on `entity_kind`. `"building"` applies the session-kit overlay and plays block-by-block construction. Other kinds are ignored until a handler exists.
+
+Host → City envelope (reusable; this PR implements `building`):
+
+```json
+{
+  "type": "CityEntityChanged",
+  "schema_version": 1,
+  "entity_kind": "building",
+  "entity_id": "ca_…",
+  "action": "set",
+  "revision": 1,
+  "event_id": "be_…"
+}
+```
+
+Building payloads also carry MCP/SQLite aliases (`asset_ref`, `build_event_id`, `kind`) plus the kit `model`. Tool JSON still returns `build_event_id`. `construction.ui` is `pushed` (socket accepted) or `queued` (mailbox + poll).
+
+Load path: city:v3 `buildings.overrides` (not stuffed into session pages — kit floats must not go through the integer-only v3 validator). Cold open **snaps** current overrides. Live host/poll events **animate**. City also polls `build_events` every 8s if the eval landed before the listener.
+
+PluginHost delivers each `event_id` at most once while the City webview is ready.
 
 ## Try it
 
@@ -77,7 +106,7 @@ python3 scripts/verify-city-building-mcp.py
 python3 scripts/verify-city-building-mcp.py --bin target/debug/agent-vitals
 ```
 
-Against a real install (after `sync-facts` so sessions exist):
+Against a real install (after `sync-facts` so sessions exist), with City open:
 
 ```bash
 agent-vitals data-mcp serve --allow-local-writes
@@ -92,10 +121,9 @@ agent-vitals data-mcp serve --allow-local-writes
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"set_building_model","arguments":{"session_id":"sr_…","expected_revision":0,"model":{…}}}}
 ```
 
-Copy `session_ref` from `sessions_search` into `session_id`. On set success, `get_building` must show the new `revision` and parts.
+Copy `session_ref` from `sessions_search` into `session_id`. With City open, set should push `__AV_PLUGIN_ENTITY_CHANGED__` and play construction; `get_building` must show the new `revision` and parts. Restart still shows the override. `reset_building` restores the default with animation.
 
 ## Deferred (not in this PR)
 
-- City UI construction animation playback (events are queued: `construction.ui = deferred_until_city_v3_default`).
-- city:v3 projection bootstrap / loader integration (conflicts with PR #6).
+- Road / vehicle write-path animation (the envelope and channel are ready; no handlers yet).
 - Parcel/lot coordinates, screenshots, resident metrics, multi-bot locks beyond `revision`.

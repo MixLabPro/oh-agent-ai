@@ -1,15 +1,15 @@
 //! Session-building model overrides for Agent City (MCP MVP).
 //!
 //! Persistence is a City-owned SQLite file keyed by stable `asset_ref`, separate
-//! from the analytical authority DB and from the city:v3 projection. Validation
-//! is pure: `session-kit/v1` is params + ≤64 parts, no scripts.
+//! from the analytical authority DB. Validation is pure: `session-kit/v1` is
+//! params + ≤64 parts, no scripts.
 //!
-//! TODO(city:v3-default / PR #6): after the city:v3 default loader lands, the
-//! City UI should read `build_events` here and play the queued block-by-block
-//! construction animation. This module must not grow a projection/bootstrap hook
-//! until that PR is merged — colliding with city load path is out of band.
+//! After a successful set/reset commit the same write path notifies the desktop
+//! PluginHost (unix socket push + durable mailbox) using the shared
+//! `CityEntityChanged` envelope (`entity_kind=building` today). City dispatches
+//! on kind and plays construction. `build_events` remains the poll fallback.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -19,6 +19,12 @@ use super::session_ref::{self, session_ref};
 
 pub const KIT_VERSION: &str = "session-kit/v1";
 pub const MAX_PARTS: usize = 64;
+
+/// Shared host → City CustomEvent name. Keep in lockstep with
+/// `apps/agent-city/ui/src/engine/entityEvents.ts`.
+pub const ENTITY_CHANGED_EVENT: &str = "__AV_PLUGIN_ENTITY_CHANGED__";
+pub const ENTITY_CHANGED_TYPE: &str = "CityEntityChanged";
+pub const ENTITY_KIND_BUILDING: &str = "building";
 
 const KINDS: &[&str] = &["box", "cylinder", "cone"];
 const ROLES: &[&str] = &["wall", "trim", "roof", "glass", "structure"];
@@ -397,7 +403,7 @@ pub fn default_model(tokens_total: i64) -> Value {
 }
 
 fn open_store(home: &Path) -> Result<Connection, BuildingError> {
-    let dir = home.join("state/plugins/city-buildings");
+    let dir = store_dir(home);
     std::fs::create_dir_all(&dir).map_err(|_| store_unavailable())?;
     #[cfg(unix)] {
         use std::os::unix::fs::PermissionsExt;
@@ -471,18 +477,232 @@ fn new_build_event_id(db: &Connection) -> Result<String, BuildingError> {
     Ok(format!("be_{hex}"))
 }
 
-fn construction_stub(kind: &str, part_count: usize, build_event_id: &str) -> Value {
+fn construction_stub(kind: &str, part_count: usize, build_event_id: &str, ui: &str) -> Value {
     json!({
         "mode": "block-by-block",
         "replayable": true,
-        "status": "queued",
+        "status": if ui == "pushed" { "notified" } else { "queued" },
         "kind": kind,
         "part_count": part_count,
         "build_event_id": build_event_id,
-        // TODO(city:v3-default / PR #6): City UI should consume queued build_events
-        // and play this construction. Do not hook the city loader in this PR.
-        "ui": "deferred_until_city_v3_default",
+        // pushed = host socket accepted the event; queued = mailbox only (City
+        // or PluginHost poll of build_events / notify.json is the backup).
+        "ui": ui,
     })
+}
+
+/// Directory that owns the override SQLite, the notify mailbox, and the host socket.
+pub fn store_dir(home: &Path) -> PathBuf {
+    home.join("state/plugins/city-buildings")
+}
+
+pub fn store_path(home: &Path) -> PathBuf {
+    store_dir(home).join("overrides.sqlite")
+}
+
+pub fn mailbox_path(home: &Path) -> PathBuf {
+    store_dir(home).join("notify.json")
+}
+
+pub fn socket_path(home: &Path) -> PathBuf {
+    store_dir(home).join("host.sock")
+}
+
+/// Host event contract: PluginHost evals this JSON as `__AV_PLUGIN_ENTITY_CHANGED__`.
+/// Generic fields (`entity_kind` / `entity_id` / `action` / `revision` / `event_id`)
+/// are the reusable shape; building aliases (`asset_ref`, `build_event_id`, `kind`)
+/// stay so MCP + SQLite vocabulary round-trips.
+pub fn entity_changed_payload(
+    entity_kind: &str,
+    entity_id: &str,
+    action: &str,
+    revision: u64,
+    event_id: &str,
+) -> Map<String, Value> {
+    let mut out = Map::new();
+    out.insert("type".into(), json!(ENTITY_CHANGED_TYPE));
+    out.insert("schema_version".into(), json!(1));
+    out.insert("entity_kind".into(), json!(entity_kind));
+    out.insert("entity_id".into(), json!(entity_id));
+    out.insert("action".into(), json!(action));
+    out.insert("revision".into(), json!(revision));
+    out.insert("event_id".into(), json!(event_id));
+    out
+}
+
+pub fn building_changed_payload(identity: &BuildingIdentity, revision: u64, build_event_id: &str, kind: &str, body: Value) -> Value {
+    let mut payload = entity_changed_payload(
+        ENTITY_KIND_BUILDING, &identity.asset_ref, kind, revision, build_event_id,
+    );
+    payload.insert("asset_ref".into(), json!(identity.asset_ref));
+    payload.insert("session_id".into(), json!(identity.session_id));
+    payload.insert("build_event_id".into(), json!(build_event_id));
+    payload.insert("kind".into(), json!(kind));
+    if let Some(extra) = body.as_object() {
+        for (key, value) in extra { payload.insert(key.clone(), value.clone()); }
+    }
+    Value::Object(payload)
+}
+
+pub fn entity_event_id(payload: &Value) -> Option<&str> {
+    payload.get("event_id").and_then(Value::as_str).filter(|s| !s.is_empty())
+        .or_else(|| payload.get("build_event_id").and_then(Value::as_str).filter(|s| !s.is_empty()))
+}
+
+pub fn is_entity_changed(payload: &Value) -> bool {
+    payload.get("type").and_then(Value::as_str) == Some(ENTITY_CHANGED_TYPE)
+        && payload.get("entity_kind").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+        && payload.get("entity_id").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+        && matches!(payload.get("action").and_then(Value::as_str), Some("set") | Some("reset"))
+        && payload.get("revision").and_then(Value::as_u64).is_some()
+        && entity_event_id(payload).is_some()
+}
+
+fn write_mailbox(home: &Path, payload: &Value) -> Result<(), BuildingError> {
+    let dir = store_dir(home);
+    std::fs::create_dir_all(&dir).map_err(|_| store_unavailable())?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = mailbox_path(home);
+    let tmp = dir.join("notify.json.tmp");
+    std::fs::write(&tmp, payload.to_string()).map_err(|_| store_unavailable())?;
+    std::fs::rename(&tmp, &path).map_err(|_| store_unavailable())?;
+    Ok(())
+}
+
+/// Best-effort push to the desktop PluginHost. Returns true when the host socket
+/// accepted a full JSON line. Failure is not an error: mailbox + build_events stay.
+pub fn try_push_socket(home: &Path, payload: &Value) -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+        let Ok(mut stream) = UnixStream::connect(socket_path(home)) else { return false; };
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+        let line = format!("{payload}\n");
+        stream.write_all(line.as_bytes()).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (home, payload);
+        false
+    }
+}
+
+/// Persist-path notify: mailbox always, socket when the host is listening.
+/// `"pushed"` / `"queued"` become `construction.ui`.
+pub fn notify_city_ui(home: &Path, payload: &Value) -> &'static str {
+    let _ = write_mailbox(home, payload);
+    if try_push_socket(home, payload) { "pushed" } else { "queued" }
+}
+
+pub fn read_mailbox(home: &Path) -> Option<Value> {
+    let raw = std::fs::read_to_string(mailbox_path(home)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Current overrides (model_json NOT NULL). Missing store → empty, not an error.
+pub fn list_overrides(home: &Path, asset_refs: &[String]) -> Result<Vec<Value>, BuildingError> {
+    let Some(db) = open_existing(home)? else { return Ok(Vec::new()); };
+    if asset_refs.len() > 200 {
+        return Err(BuildingError::validation(
+            "invalid_model", vec![], "at most 200 asset_refs", "split the request",
+        ));
+    }
+    let mut out = Vec::new();
+    if asset_refs.is_empty() {
+        let mut stmt = db.prepare(
+            "SELECT asset_ref, revision, kit_version, model_json, updated_at_ms
+             FROM overrides WHERE model_json IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 200",
+        ).map_err(|_| store_unavailable())?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?))
+        }).map_err(|_| store_unavailable())?;
+        for row in rows {
+            let (asset_ref, revision, kit_version, model_json, updated_at_ms) = row.map_err(|_| store_unavailable())?;
+            let model: Value = serde_json::from_str(&model_json).map_err(|_| store_unavailable())?;
+            out.push(json!({
+                "asset_ref": asset_ref, "revision": revision, "kit_version": kit_version,
+                "source": "override", "model": model, "updated_at_ms": updated_at_ms,
+            }));
+        }
+        return Ok(out);
+    }
+    for asset_ref in asset_refs {
+        if !is_asset_ref(asset_ref) { continue; }
+        let stored = load_override(&db, asset_ref)?;
+        let Some(model) = stored.model else { continue; };
+        out.push(json!({
+            "asset_ref": asset_ref,
+            "revision": stored.revision,
+            "kit_version": stored.kit_version,
+            "source": "override",
+            "model": model,
+        }));
+    }
+    Ok(out)
+}
+
+/// Queued construction records. Missing store → empty.
+pub fn list_build_events(home: &Path, asset_refs: &[String], since_ms: Option<i64>, limit: usize) -> Result<Vec<Value>, BuildingError> {
+    let Some(db) = open_existing(home)? else { return Ok(Vec::new()); };
+    let limit = limit.clamp(1, 200) as i64;
+    let since = since_ms.unwrap_or(0);
+    let mut out = Vec::new();
+    if asset_refs.is_empty() {
+        let mut stmt = db.prepare(
+            "SELECT build_event_id, asset_ref, revision, kind, part_count, created_at_ms
+             FROM build_events WHERE created_at_ms >= ?1
+             ORDER BY created_at_ms DESC, build_event_id DESC LIMIT ?2",
+        ).map_err(|_| store_unavailable())?;
+        let rows = stmt.query_map(params![since, limit], event_row).map_err(|_| store_unavailable())?;
+        for row in rows { out.push(row.map_err(|_| store_unavailable())?); }
+        return Ok(out);
+    }
+    for asset_ref in asset_refs {
+        if !is_asset_ref(asset_ref) { continue; }
+        let mut stmt = db.prepare(
+            "SELECT build_event_id, asset_ref, revision, kind, part_count, created_at_ms
+             FROM build_events WHERE asset_ref=?1 AND created_at_ms >= ?2
+             ORDER BY created_at_ms DESC, build_event_id DESC LIMIT ?3",
+        ).map_err(|_| store_unavailable())?;
+        let rows = stmt.query_map(params![asset_ref, since, limit], event_row).map_err(|_| store_unavailable())?;
+        for row in rows { out.push(row.map_err(|_| store_unavailable())?); }
+    }
+    Ok(out)
+}
+
+fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let build_event_id: String = r.get(0)?;
+    let asset_ref: String = r.get(1)?;
+    let revision: i64 = r.get(2)?;
+    let kind: String = r.get(3)?;
+    Ok(json!({
+        "type": ENTITY_CHANGED_TYPE,
+        "entity_kind": ENTITY_KIND_BUILDING,
+        "entity_id": asset_ref,
+        "action": kind,
+        "revision": revision,
+        "event_id": build_event_id,
+        "build_event_id": build_event_id,
+        "asset_ref": asset_ref,
+        "kind": kind,
+        "part_count": r.get::<_, i64>(4)?,
+        "created_at_ms": r.get::<_, i64>(5)?,
+    }))
+}
+
+fn is_asset_ref(value: &str) -> bool {
+    value.starts_with("ca_") && value.len() == 35 && value.as_bytes()[3..].iter().all(|b| b.is_ascii_hexdigit())
+}
+
+fn open_existing(home: &Path) -> Result<Option<Connection>, BuildingError> {
+    if !store_path(home).exists() { return Ok(None); }
+    Ok(Some(open_store(home)?))
 }
 
 fn observe_text(source: &str, summary: &Value, revision: u64) -> String {
@@ -510,7 +730,12 @@ pub fn resolve_identity(home: &Path, conn: &Connection, session_id: &str) -> Res
     } else if session_id.starts_with("sr_") && session_id.len() == 35
         && session_id.as_bytes()[3..].iter().all(|b| b.is_ascii_hexdigit())
     {
-        session_ref::resolve(&salt, session_id, keys.clone()).ok_or_else(|| BuildingError::not_found(session_id))?
+        session_ref::resolve(&salt, session_id, keys.clone())
+            .or_else(|| {
+                // city:v3 page `id` is HMAC("app:city:{session_key}"), not MCP session_ref.
+                keys.into_iter().find(|key| session_ref(&salt, &format!("app:city:{key}")) == session_id)
+            })
+            .ok_or_else(|| BuildingError::not_found(session_id))?
     } else {
         return Err(BuildingError::not_found(session_id));
     };
@@ -546,7 +771,7 @@ fn projection_meta(identity: &BuildingIdentity, summary: &Value, kit_status: &st
         "session_id": identity.session_id,
         "harness": identity.harness,
         "height": summary["height"],
-        "parcel": { "state": "unavailable", "reason": "city_layout_deferred_until_v3_default" },
+        "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
         "kit_status": kit_status,
         "screenshot": { "state": "unavailable", "reason": "optional_vision_attachment_not_in_mvp" },
     })
@@ -603,7 +828,7 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, model:
                 "asset_ref": identity.asset_ref,
                 "session_id": identity.session_id,
                 "harness": identity.harness,
-                "parcel": { "state": "unavailable", "reason": "city_layout_deferred_until_v3_default" },
+                "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
             },
         })),
     }
@@ -694,6 +919,11 @@ fn apply_override(
     }
     db.execute_batch("COMMIT").map_err(|_| store_unavailable())?;
     let source = if model.is_some() { "override" } else { "default" };
+    let payload = building_changed_payload(identity, next, &build_event_id, kind, json!({
+        "source": source, "kit_version": kit_version, "part_count": summary["part_count"],
+        "model": applied, "summary": summary,
+    }));
+    let ui = notify_city_ui(home, &payload);
     Ok(json!({
         "ok": true,
         "error": Value::Null,
@@ -705,7 +935,8 @@ fn apply_override(
         "model": applied,
         "summary": summary,
         "observe": { "text": observe_text(source, &summary, next), "summary": summary },
-        "construction": construction_stub(kind, part_count as usize, &build_event_id),
+        "construction": construction_stub(kind, part_count as usize, &build_event_id, ui),
+        "notify": { "channel": if ui == "pushed" { "host-socket" } else { "mailbox" }, "ui": ui },
         "projection": projection_meta(identity, &summary, "current"),
     }))
 }
@@ -820,6 +1051,24 @@ mod tests {
         assert!(set["build_event_id"].as_str().unwrap().starts_with("be_"));
         assert_eq!(set["construction"]["mode"], "block-by-block");
         assert_eq!(set["construction"]["replayable"], true);
+        assert_eq!(set["construction"]["ui"], "queued");
+        assert_eq!(set["notify"]["channel"], "mailbox");
+        let mail = read_mailbox(&home).expect("mailbox after persist");
+        assert!(is_entity_changed(&mail));
+        assert_eq!(mail["type"], ENTITY_CHANGED_TYPE);
+        assert_eq!(mail["entity_kind"], ENTITY_KIND_BUILDING);
+        assert_eq!(mail["entity_id"], asset);
+        assert_eq!(mail["action"], "set");
+        assert_eq!(mail["event_id"], set["build_event_id"]);
+        assert_eq!(mail["asset_ref"], asset);
+        assert_eq!(mail["build_event_id"], set["build_event_id"]);
+        assert_eq!(mail["revision"], 1);
+        assert_eq!(mail["kind"], "set");
+        let listed = list_overrides(&home, std::slice::from_ref(&asset)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["model"]["parts"][1]["id"], "cap");
+        let events = list_build_events(&home, &[], None, 10).unwrap();
+        assert_eq!(events[0]["build_event_id"], set["build_event_id"]);
 
         drop(db);
         let db = AuthorityDb::open(&default_authority_path(&home), 1_700_000_000_000).unwrap();
@@ -836,5 +1085,61 @@ mod tests {
         assert_eq!(after["source"], "default");
         assert_eq!(after["revision"], 2);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_pushes_host_socket_when_listening() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        let (home, db, session_id) = seed();
+        std::fs::create_dir_all(store_dir(&home)).unwrap();
+        let listener = UnixListener::bind(socket_path(&home)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("host accept");
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            let _ = tx.send(line);
+        });
+        let proposed = valid_model(vec![valid_part("a", 0.0)]);
+        let set = set_building_model(&home, db.conn(), &session_id, &proposed, 0).unwrap();
+        assert_eq!(set["ok"], true);
+        assert_eq!(set["construction"]["ui"], "pushed");
+        assert_eq!(set["notify"]["channel"], "host-socket");
+        let line = rx.recv_timeout(std::time::Duration::from_secs(2)).expect("socket payload");
+        let payload: Value = serde_json::from_str(line.trim()).unwrap();
+        assert!(is_entity_changed(&payload));
+        assert_eq!(payload["type"], ENTITY_CHANGED_TYPE);
+        assert_eq!(payload["entity_kind"], ENTITY_KIND_BUILDING);
+        assert_eq!(payload["action"], "set");
+        assert_eq!(payload["event_id"], set["build_event_id"]);
+        assert_eq!(payload["build_event_id"], set["build_event_id"]);
+        assert_eq!(payload["revision"], 1);
+        assert_eq!(payload["kind"], "set");
+        assert!(payload["entity_id"].as_str().unwrap().starts_with("ca_"));
+        assert!(payload["asset_ref"].as_str().unwrap().starts_with("ca_"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn envelope_is_reusable_not_building_named() {
+        let payload = Value::Object(entity_changed_payload(
+            "building", "ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "set", 3, "be_cccccccccccccccccccccccccccccccc",
+        ));
+        assert!(is_entity_changed(&payload));
+        assert_eq!(payload["type"], ENTITY_CHANGED_TYPE);
+        assert_ne!(payload["type"], "CityBuildingChanged");
+        assert_eq!(payload["entity_kind"], ENTITY_KIND_BUILDING);
+        assert_eq!(payload["entity_id"], "ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(payload["action"], "set");
+        assert_eq!(payload["event_id"], "be_cccccccccccccccccccccccccccccccc");
+        let road = Value::Object(entity_changed_payload("road", "rd_1", "set", 1, "ev_1"));
+        assert!(is_entity_changed(&road));
+        assert_eq!(road["entity_kind"], "road");
+        assert_eq!(entity_event_id(&road), Some("ev_1"));
+        let mut incomplete = payload.clone();
+        incomplete["entity_kind"] = json!("");
+        assert!(!is_entity_changed(&incomplete));
     }
 }

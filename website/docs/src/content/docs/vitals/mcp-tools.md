@@ -48,7 +48,7 @@ Agent Vitals, the data layer of Oh Agent, has a local MCP server. Run `agent-vit
 | `issues_summary` / `skills_summary` | Behaviour findings and skill-usage summaries |
 | `control_plane` | Source status, extra folders, exclusions, retention, time zone, sync pause/run, catalog policy (writes need the flag) |
 | `trust_profile_*` | Schema, list, validate, stage and status for Trust audit profiles |
-| `get_building` / `preview_building` / `set_building_model` / `reset_building` | Read, validate, replace, or reset one Agent City session building model (`session-kit/v1`, ≤64 parts). Writes need `--allow-local-writes`. In-city construction playback is queued until the city:v3 default loader lands |
+| `get_building` / `preview_building` / `set_building_model` / `reset_building` | Read, validate, replace, or reset one Agent City session building model (`session-kit/v1`, ≤64 parts). Writes need `--allow-local-writes`. An open City window plays construction from the shared `CityEntityChanged` host event |
 
 Three more tools (`query_sql_readonly`, `billing_workflow`, `authority_audit`) are only compiled in with the internal `mcp-internal` feature, so they aren't in normal builds.
 

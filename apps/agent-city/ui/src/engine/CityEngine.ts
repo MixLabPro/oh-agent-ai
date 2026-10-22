@@ -29,6 +29,7 @@ import { WebmFilmWriter, type WebmCodec } from "./webmMuxer";
 import { layoutCity, type CityLayout, type BackdropMode } from "./cityLayout";
 import { applyPlanPatch, layoutPinsFor, type PatchedLayout, type PlanPatchV1 } from "./planPatch";
 import { CityParts, occupantsCanAppend, type QualityLevel } from "./cityParts";
+import { applyBuildingEvent, parseBuildingChanged, replayDecision, type BuildingChangedEvent, type OverlayDecision } from "./sessionKitConstruction";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { MIAMI_COASTAL } from "./citySeaside";
 import { CityAurora } from "./cityAurora";
@@ -113,6 +114,8 @@ export class CityEngine {
   private parts: CityParts | null = null;
   /** Last applyModel path: mount rebuilds CityParts; append keeps the scene and adds occupants. */
   lastApplyMode: "mount" | "append" = "mount";
+  private readonly kitDecisions = new Map<string, OverlayDecision>();
+  private readonly pendingKits = new Map<string, { event: BuildingChangedEvent; animate: boolean }>();
   /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
   /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
@@ -804,6 +807,7 @@ export class CityEngine {
       this.parts.snapToTargets();
       this.parts.setSelected(this.selectedId?.startsWith("decor:") ? null : this.selectedId);
       this.parts.setHovered(this.hoveredId);
+      this.reapplyKits("append");
       if (!this.options.headless && !this.contextLost) {
         this.updateScene(0);
         this.renderFrame();
@@ -838,6 +842,7 @@ export class CityEngine {
     const parts = this.parts;
     this.floraReady = loadBiomeFlora(layout.biome).then((flora) => { if (this.parts === parts && !this.disposed) parts.applyFlora(flora); });
     this.scene.add(this.parts.group, this.parts.water);
+    this.reapplyKits("mount");
 
     this.cityCenter = { x: (layout.urbanBounds.left + layout.urbanBounds.right) / 2, z: (layout.urbanBounds.north + layout.urbanBounds.south) / 2 };
     this.aurora?.dispose();
@@ -1589,7 +1594,52 @@ export class CityEngine {
     for (const [id, row] of Object.entries(occupancy.byId)) positions[id] = { x: row.x, z: row.z, shaftPrimary: row.shaftPrimary };
     return { lastApplyMode: this.lastApplyMode, scaleTier: this.layout?.scaleTier ?? null,
       selectedId: this.selectedId, hoveredId: this.hoveredId, camera: this.photoView(),
-      occupantCount: occupancy.runtimeCount, positions };
+      occupantCount: occupancy.runtimeCount, positions, kits: this.parts?.kitSnapshot() ?? [] };
+  }
+
+  applyBuildingChanged(raw: unknown, animate: boolean): OverlayDecision | null {
+    const event = parseBuildingChanged(raw);
+    if (!event) return null;
+    const assetRef = event.entity_id;
+    const sessionId = event.session_id
+      ?? this.parts?.sessionIdForAsset(assetRef)
+      ?? this.model?.buildings.find((building) => building.assetRef === assetRef)?.id;
+    if (!sessionId) {
+      this.pendingKits.set(assetRef, { event, animate });
+      return null;
+    }
+    const next = applyBuildingEvent(this.kitDecisions.get(sessionId) ?? null, event, sessionId, animate);
+    if (!next) return null;
+    this.kitDecisions.set(sessionId, next);
+    this.pendingKits.delete(assetRef);
+    this.parts?.applySessionKit(next);
+    return next;
+  }
+
+  replayBuilding(assetOrSession: string): boolean {
+    const sessionId = this.kitDecisions.has(assetOrSession)
+      ? assetOrSession
+      : [...this.kitDecisions.values()].find((decision) => decision.assetRef === assetOrSession)?.sessionId;
+    if (!sessionId) return false;
+    const current = this.kitDecisions.get(sessionId);
+    if (!current) return false;
+    const next = replayDecision(current);
+    this.kitDecisions.set(sessionId, next);
+    return this.parts?.replaySessionKit(sessionId) ?? false;
+  }
+
+  private reapplyKits(mode: "mount" | "append"): void {
+    if (!this.parts) return;
+    const present = new Set(this.parts.kitSnapshot().map((row) => row.sessionId));
+    for (const decision of this.kitDecisions.values()) {
+      if (mode === "append" && present.has(decision.sessionId)) continue;
+      this.parts.applySessionKit({ ...decision, animate: false });
+    }
+    for (const [assetRef, pending] of [...this.pendingKits]) {
+      if (!this.parts.sessionIdForAsset(assetRef)) continue;
+      this.pendingKits.delete(assetRef);
+      this.applyBuildingChanged(pending.event, pending.animate);
+    }
   }
 
   private stopLoop(): void {

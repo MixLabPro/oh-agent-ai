@@ -289,10 +289,89 @@ fn notify_host(app: &tauri::AppHandle) {
     }
 }
 
+/// PluginHost → City: shared entity channel. Same CustomEvent hook as
+/// plugin_command / plugin_invalidate. Keep the name in lockstep with
+/// `agent_vitals_runtime::query::city_building::ENTITY_CHANGED_EVENT`.
+pub(crate) fn entity_event_script(payload: &serde_json::Value) -> String {
+    let channel = agent_vitals_runtime::query::city_building::ENTITY_CHANGED_EVENT;
+    format!("window.dispatchEvent(new CustomEvent('{channel}', {{detail: {payload}}}));")
+}
+
+static ENTITY_DELIVERED: OnceLock<Mutex<String>> = OnceLock::new();
+static ENTITY_BRIDGE: OnceLock<()> = OnceLock::new();
+
+fn city_view_id(app: &tauri::AppHandle) -> Option<String> {
+    let host = app.state::<PluginHost>();
+    let guard = host.0.lock().unwrap();
+    guard.current.as_ref().and_then(|i| {
+        if i.plugin_id == "city" && i.ready && i.failed.is_none() && !i.suspended { Some(i.id.clone()) } else { None }
+    })
+}
+
+fn deliver_entity_event(app: &tauri::AppHandle, payload: &serde_json::Value) -> bool {
+    use agent_vitals_runtime::query::city_building::{entity_event_id, is_entity_changed};
+    if !is_entity_changed(payload) { return false; }
+    let Some(event_id) = entity_event_id(payload) else { return false; };
+    {
+        let delivered = ENTITY_DELIVERED.get_or_init(|| Mutex::new(String::new())).lock().unwrap();
+        if delivered.as_str() == event_id { return true; }
+    }
+    let Some(id) = city_view_id(app) else { return false; };
+    let Some(view) = app.get_webview(&id) else { return false; };
+    if view.eval(entity_event_script(payload)).is_err() { return false; }
+    *ENTITY_DELIVERED.get_or_init(|| Mutex::new(String::new())).lock().unwrap() = event_id.to_string();
+    let kind = payload.get("entity_kind").and_then(Value::as_str).unwrap_or("entity");
+    agent_vitals_runtime::logging::log_info("plugin_host", &format!("{kind} event {event_id}"));
+    true
+}
+
+fn poll_building_mailbox(app: &tauri::AppHandle) {
+    let home = crate::overview::data_home();
+    let Some(payload) = agent_vitals_runtime::query::city_building::read_mailbox(&home) else { return; };
+    let _ = deliver_entity_event(app, &payload);
+}
+
+fn start_building_bridge(app: &tauri::AppHandle) {
+    if ENTITY_BRIDGE.set(()).is_err() { return; }
+    #[cfg(unix)]
+    {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let home = crate::overview::data_home();
+            let dir = agent_vitals_runtime::query::city_building::store_dir(&home);
+            let _ = std::fs::create_dir_all(&dir);
+            let sock = agent_vitals_runtime::query::city_building::socket_path(&home);
+            let _ = std::fs::remove_file(&sock);
+            match UnixListener::bind(&sock) {
+                Ok(listener) => {
+                    let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
+                    agent_vitals_runtime::logging::log_info("plugin_host", "city building host.sock listening");
+                    for stream in listener.incoming() {
+                        let Ok(stream) = stream else { continue; };
+                        let mut line = String::new();
+                        if BufReader::new(stream).read_line(&mut line).is_err() { continue; }
+                        let Ok(payload) = serde_json::from_str::<Value>(line.trim()) else { continue; };
+                        let _ = deliver_entity_event(&app, &payload);
+                    }
+                }
+                Err(error) => {
+                    agent_vitals_runtime::logging::log_warn("plugin_host", &format!("city building socket: {error}"));
+                }
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    { let _ = app; }
+}
+
 fn start_watchdog(app: &tauri::AppHandle, state: &PluginHost) {
     let mut host = state.0.lock().unwrap();
     if host.watchdog_started { return; }
     host.watchdog_started = true;
+    start_building_bridge(app);
     let app = app.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(500));
@@ -302,6 +381,7 @@ fn start_watchdog(app: &tauri::AppHandle, state: &PluginHost) {
             host.current.as_mut().is_some_and(refresh_fault)
         };
         if changed { notify_host(&app); }
+        poll_building_mailbox(&app);
     });
 }
 
@@ -780,6 +860,25 @@ mod tests {
         assert!(valid_tools("metrics", &tools));
         assert!(!valid_tools("city", &tools));
         assert!(!definitions().is_empty());
+    }
+
+    #[test]
+    fn entity_event_script_is_the_shared_city_custom_event_hook() {
+        let payload = json!({
+            "type":"CityEntityChanged","schema_version":1,
+            "entity_kind":"building","entity_id":"ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "action":"set","revision":3,"event_id":"be_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "asset_ref":"ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","build_event_id":"be_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","kind":"set"
+        });
+        let script = entity_event_script(&payload);
+        assert!(script.contains("__AV_PLUGIN_ENTITY_CHANGED__"));
+        assert!(!script.contains("__AV_PLUGIN_BUILDING_CHANGED__"));
+        assert!(script.contains("\"entity_kind\":\"building\""));
+        assert!(script.contains("ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(script.contains("be_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        assert!(script.contains("\"revision\":3"));
+        let road = json!({"type":"CityEntityChanged","entity_kind":"road","entity_id":"rd_1","action":"set","revision":1,"event_id":"ev_1"});
+        assert!(entity_event_script(&road).contains("__AV_PLUGIN_ENTITY_CHANGED__"));
     }
 
     #[test]

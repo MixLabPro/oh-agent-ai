@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Verify Agent City building MCP: get → preview fail → preview pass → set conflict → set → get → reset.
+"""Verify Agent City building MCP + UI bridge: persist → push envelope → apply path.
 
-Primary gate is the Rust tests (no city:v3 loader). Optional --bin checks tools/list
-on a live data-mcp process.
+Primary gate is the Rust tests plus the no-WebGL entity-bridge script. Optional
+--bin checks tools/list on a live data-mcp process.
 
     python3 scripts/verify-city-building-mcp.py
     python3 scripts/verify-city-building-mcp.py --bin target/debug/agent-vitals
@@ -71,8 +71,12 @@ def main() -> int:
     args = parser.parse_args()
 
     run_cargo(["test", "-p", "agent-vitals-query", "--lib", "query::city_building::", "--", "--test-threads=1"])
+    run_cargo(["test", "-p", "agent-vitals-query", "--test", "city_v3", "buildings_overrides", "--", "--test-threads=1"])
     run_cargo(["test", "-p", "agent-vitals-mcp", "--lib", "city_building::", "--", "--test-threads=1"])
     print("Rust ReACT loop: get → preview fail → preview pass → set conflict → set → get → reset")
+    print("+ node scripts/verify-city-entity-bridge.mjs", flush=True)
+    subprocess.check_call(["node", str(ROOT / "scripts/verify-city-entity-bridge.mjs")], cwd=ROOT)
+    print("Entity envelope + building apply path (no WebGL)")
 
     if args.bin:
         names = tools_list(args.bin)

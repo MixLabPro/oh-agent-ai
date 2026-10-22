@@ -54,6 +54,8 @@ export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
 import { appendRuntimes, applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, occupantsCanAppend, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
 export { occupantsCanAppend };
+import { createKitRuntime, disposeKitRuntime, replayKitRuntime, stepKitRuntime, type KitRuntime } from "./sessionKitOverride";
+import type { OverlayDecision } from "./sessionKitConstruction";
 
 export type OccupancySnapshot = {
   runtimeCount: number;
@@ -117,6 +119,7 @@ export class CityParts {
   readonly water: THREE.Mesh;
   private readonly runtimes: BuildingRuntime[] = [];
   private readonly runtimeById = new Map<string, BuildingRuntime>();
+  private readonly kitBySession = new Map<string, KitRuntime>();
   private readonly shaftMeshes: THREE.InstancedMesh[] = [];
   private zoneById: Map<string, string> = new Map();
   private readonly shaftIdByInstance: Array<Map<number, string>> = [];
@@ -816,6 +819,55 @@ export class CityParts {
     return added.length;
   }
 
+  sessionIdForAsset(assetRef: string): string | null {
+    for (const building of this.model.buildings) {
+      if (building.assetRef === assetRef) return building.id;
+    }
+    for (const [id, row] of this.model.rows) {
+      if (row.asset_ref === assetRef) return id;
+    }
+    return null;
+  }
+
+  applySessionKit(decision: OverlayDecision): boolean {
+    const sessionId = this.runtimeById.has(decision.sessionId) ? decision.sessionId : (this.sessionIdForAsset(decision.assetRef) ?? decision.sessionId);
+    const runtime = this.runtimeById.get(sessionId);
+    if (!runtime) return false;
+    const existing = this.kitBySession.get(sessionId);
+    if (existing) {
+      disposeKitRuntime(existing);
+      this.kitBySession.delete(sessionId);
+    }
+    if (decision.kind === "reset" && decision.parts.length === 0) {
+      runtime.settled = !decision.animate;
+      if (decision.animate) runtime.display = 0;
+      this.applyConstruction(runtime, !decision.animate);
+      return true;
+    }
+    const palette = `#${runtime.paletteWall.getHexString()}`;
+    const kit = createKitRuntime({ ...decision, sessionId }, runtime, palette);
+    this.group.add(kit.group);
+    this.kitBySession.set(sessionId, kit);
+    this.hideAll(runtime);
+    return true;
+  }
+
+  replaySessionKit(sessionId: string): boolean {
+    const kit = this.kitBySession.get(sessionId);
+    if (!kit) return false;
+    replayKitRuntime(kit);
+    const runtime = this.runtimeById.get(sessionId);
+    if (runtime) this.hideAll(runtime);
+    return true;
+  }
+
+  kitSnapshot(): Array<{ sessionId: string; assetRef: string; revision: number; buildEventId: string; kind: string; progress: number }> {
+    return [...this.kitBySession.entries()].map(([sessionId, kit]) => ({
+      sessionId, assetRef: kit.decision.assetRef, revision: kit.decision.revision,
+      buildEventId: kit.decision.buildEventId, kind: kit.decision.kind, progress: kit.progress,
+    }));
+  }
+
   occupancySnapshot(): OccupancySnapshot {
     const byId: OccupancySnapshot["byId"] = {};
     for (const runtime of this.runtimes) {
@@ -1024,6 +1076,11 @@ export class CityParts {
     let dirty = false;
     const rate = Math.min(1, dt * 1.35);
     for (const runtime of this.runtimes) {
+      const kit = this.kitBySession.get(runtime.building.id);
+      if (kit && kit.decision.kind === "set") {
+        this.hideAll(runtime);
+        continue;
+      }
       if (Math.abs(runtime.display - runtime.target) > 0.0012) {
         runtime.display += (runtime.target - runtime.display) * rate;
         this.applyConstruction(runtime, false);
@@ -1034,6 +1091,9 @@ export class CityParts {
         this.applyConstruction(runtime, false);
         dirty = true;
       }
+    }
+    for (const kit of this.kitBySession.values()) {
+      if (stepKitRuntime(kit, dt)) dirty = true;
     }
     if (dirty || Number.isNaN(this.cursor)) {
       for (const mesh of this.shaftMeshes) mesh.instanceMatrix.needsUpdate = true;
@@ -1217,6 +1277,8 @@ export class CityParts {
     if (staticCityCache && staticCityCache.seed === this.layout.seed) {
       this.group.remove(staticCityCache.group);
     }
+    for (const kit of this.kitBySession.values()) disposeKitRuntime(kit);
+    this.kitBySession.clear();
     for (const disposable of this.disposables) disposable.dispose();
   }
 }
