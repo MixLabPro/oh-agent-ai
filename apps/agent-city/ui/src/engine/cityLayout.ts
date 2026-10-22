@@ -6,6 +6,7 @@ import { PLANNING_WORK_UNITS } from "./planner/operationBudget";
 import { hashSeed, type CityModel } from "../cityModel";
 import { createCityPlan, type Biome, type Landmark } from "./cityPlan";
 import { gradeRoadLandings } from "./surface/roadLandingGrading";
+import { layoutAirport, type AirportPlan } from "./airportPlan";
 import { clearsHighways, polygonDistance } from "./roadGeometry";
 import { scaleTierFor } from "./scaleTier";
 import { oceanDriveSplitZ, oceanDriveWall, seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
@@ -125,6 +126,8 @@ export type CityLayout = {
   landmarks: Landmark[];
   /** VICE B1 海滨带：提供 coastal config 时存在；无配置为 null（旧行为）。 */
   seaside: import("./citySeaside").SeasideBand | null;
+  /** 机场岛（L-4，airportPlan.layoutAirport）：布局期规划，堤道（若接得上路网）已作为桥段加进 roadEdges。 */
+  airport?: AirportPlan | null;
   /** 海滨配置参数指纹，用于静态场景缓存失效。 */
   coastalConfigKey: string;
   coastalConfig: CoastalConfig | null;
@@ -754,11 +757,18 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   // 只保留最终路网里仍是度 1 非桥路端的点（与 classifyEndpoints 的度口径一致）。
   const liveDegree = new Map<string, number>();
   for (const edge of grown.roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) liveDegree.set(id, (liveDegree.get(id) ?? 0) + 1);
-  const culDeSacEnds = (plan.culDeSacEnds ?? []).filter((end) => liveDegree.get(`${end.x}:${end.z}`) === 1);
+  // 机场堤道挂在最终显示的路网上（生长剪枝之后）：起点路口从此接着一座桥，不再画回车圈。
+  const airportRoads = layoutAirport({ coast: plan.coast, core: plan.core ?? { x: 0, z: 0 }, roadEdges: grown.roadEdges, roadNodes: grown.roadNodes,
+    publicSites: plan.publicSites, landmarks: plan.landmarks,
+    seasideWaterlines: plan.seaside && !plan.seaside.degraded ? plan.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [],
+    isWater: (x, z) => plan.terrain.height(x, z) < -0.6 });
+  const causewayFrom = airportRoads.airport?.causeway?.fromNode;
+  const culDeSacEnds = (plan.culDeSacEnds ?? []).filter((end) => liveDegree.get(`${end.x}:${end.z}`) === 1 && `${end.x}:${end.z}` !== causewayFrom);
   const sessionCapacity = measureLayoutCapacity({ parcelIds: parcels.map(parcel => parcel.id), usedParcelIds: [...used],
     sessionIds: model.buildings.map(building => building.id), assignments: [...assigned].map(([id, parcel]) => [id, parcel.id] as const),
     aggregatedSessionCount: massing.reduce((sum, block) => sum + block.count, 0) });
-  return { ...plan, ...grown, landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: layoutCoastalKey(coastal), coastalConfig: coastal, contextBuildings: contextOffRoad };
+  return { ...plan, ...grown, roadEdges: airportRoads.roadEdges as RoadEdge[], roadNodes: airportRoads.roadNodes as RoadNode[], airport: airportRoads.airport,
+    landmarks: [...plan.landmarks, ...isletVillas(plan)], culDeSacEnds, districtLandmarks, districts, seed, massing, civics, gardens, placementReport, placementBudget, sessionCapacity, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: layoutCoastalKey(coastal), coastalConfig: coastal, contextBuildings: contextOffRoad };
 }
 
 /**
