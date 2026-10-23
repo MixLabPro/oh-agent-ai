@@ -388,6 +388,10 @@ fn city_detail_prices_pre_snapshot_usage_as_dated_reference_only() {
 #[test]
 fn buildings_overrides_reads_the_city_owned_store_without_changing_pages() {
     let f=Fixture::new(); f.session("a"); f.fact("a","f",Some(f.now-1),None,"delta");
+    f.db.conn().execute(
+        "UPDATE usage_facts SET uncached_input_tokens=50000, output_tokens=50000 WHERE session_key='a'",
+        [],
+    ).unwrap();
     let first=f.overview(200);
     let asset=first["page"]["sessions"][0]["asset_ref"].as_str().unwrap().to_string();
     let session_id=first["page"]["sessions"][0]["id"].as_str().unwrap().to_string();
@@ -395,20 +399,20 @@ fn buildings_overrides_reads_the_city_owned_store_without_changing_pages() {
     assert!(empty["page"].is_null());
     assert_eq!(empty["result"]["overrides"].as_array().unwrap().len(),0);
     assert_eq!(empty["result"]["poll_hint_ms"],2_000);
-    let proposed=json!({"kit_version":"session-kit/v1","params":{"catalog_id":"kit-low-block","floors":2,"story_height":2.8},"parts":[
-        {"id":"base","kind":"box","role":"structure","at":[0.0,0.0,0.0],"size":[5.0,2.8,6.0]},
-        {"id":"cap","kind":"box","role":"wall","at":[0.0,2.8,0.0],"size":[4.5,2.8,5.5]},
-        {"id":"door","kind":"box","role":"door","at":[0.0,0.0,3.0],"size":[1.2,2.0,0.2]},
-        {"id":"window","kind":"box","role":"window","at":[0.0,3.5,3.0],"size":[1.4,1.2,0.15]}
-    ]});
+    let proposed=json!({
+        "kit_version":"session-kit/inheritance/v1",
+        "base":{"kind":"projection"},
+        "overrides":{}
+    });
     let set=city_building::set_building_model(&f.home,f.db.conn(),&session_id,&proposed,0).unwrap();
-    assert_eq!(set["ok"],true);
-    let loaded=city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","asset_refs":[asset]})),f.now).unwrap();
+    assert!(set["ok"]==true,"set failed: {}",set["error"]);
+    let loaded=city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","asset_refs":[asset]})),f.now)
+        .unwrap_or_else(|e| panic!("buildings.overrides read failed: {e}"));
     let overrides=loaded["result"]["overrides"].as_array().unwrap();
     assert_eq!(overrides.len(),1);
     assert_eq!(overrides[0]["asset_ref"],asset);
     assert_eq!(overrides[0]["revision"],1);
-    assert_eq!(overrides[0]["model"]["parts"][1]["id"],"cap");
+    assert_eq!(overrides[0]["model"]["parts"][1]["id"],"shaft");
     let events=loaded["result"]["events"].as_array().unwrap();
     assert_eq!(events[0]["build_event_id"],set["build_event_id"]);
     assert_eq!(events[0]["type"],"CityEntityChanged");

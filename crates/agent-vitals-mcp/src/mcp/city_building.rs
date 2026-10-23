@@ -4,6 +4,9 @@
 //! (confirm `revision` + `build_event_id`) → `get_building`. Observe is a
 //! structured summary; screenshots are not part of this MVP.
 //!
+//! Agent-facing preview/set accept **inheritance rewrites only** (layer 2) —
+//! not full mesh replace. Full mesh remains available to internal callers/tests.
+//!
 //! Writes require `--allow-local-writes`. Validation errors share the same
 //! `{kind, rule, parts, message, suggested_fix}` shape on preview and set.
 //!
@@ -42,10 +45,10 @@ fn session_id_prop() -> Value {
     })
 }
 
-fn model_prop() -> Value {
+fn inheritance_prop() -> Value {
     json!({
         "type": "object",
-        "description": "session-kit/v1 payload: {kit_version, params, parts}. parts ≤ 64; kinds box|cylinder|cone; roles include door|window; params may include catalog_id, floors, story_height, build_cost; no scripts."
+        "description": "session-kit/inheritance/v1 rewrite: {kit_version, base: {kind: projection|catalog, catalog_id?}, overrides: {params, parts_replace, parts_add, parts_remove}} or {kit_version, reset: true}. Server resolves base → merges overrides → runs compliance + detail regression on the merged mesh. Full mesh replace is not accepted on this tool surface."
     })
 }
 
@@ -60,7 +63,7 @@ fn revision_prop() -> Value {
 pub fn get_spec() -> ToolSpec {
     spec(
         "get_building",
-        "Return the current Agent City model for one session building (override or default). Includes asset_ref, parts (≤64), revision, kit_version, and a geometric summary. Primary feedback is JSON, not an image.",
+        "Return the current Agent City model for one session building (override or default). Includes asset_ref, resolved parts (≤64), optional inheritance subclass, revision, kit_version, and a geometric summary. Primary feedback is JSON, not an image.",
         json!({ "session_id": session_id_prop() }),
         &["session_id"],
     )
@@ -69,22 +72,22 @@ pub fn get_spec() -> ToolSpec {
 pub fn preview_spec() -> ToolSpec {
     spec(
         "preview_building",
-        "Validate a proposed session-kit/v1 building model without writing. Returns the same structured error shape as set_building_model (rule, parts, suggested_fix) plus a geometric summary on success.",
-        json!({ "session_id": session_id_prop(), "model": model_prop() }),
-        &["session_id", "model"],
+        "Validate a proposed inheritance rewrite without writing. Resolves base → merges overrides → runs the same compliance and detail-regression gates as set_building_model.",
+        json!({ "session_id": session_id_prop(), "inheritance": inheritance_prop() }),
+        &["session_id", "inheritance"],
     )
 }
 
 pub fn set_spec() -> ToolSpec {
     spec(
         "set_building_model",
-        "Replace one session building's model. Requires --allow-local-writes and expected_revision for optimistic concurrency. On success persists atomically, bumps revision, notifies the open City window, and returns build_event_id for the block-by-block construction animation.",
+        "Apply an inheritance rewrite to one session building. Requires --allow-local-writes and expected_revision for optimistic concurrency. Persists the subclass document (not a full mesh dump). On success bumps revision, notifies the open City window, and returns build_event_id for block-by-block construction.",
         json!({
             "session_id": session_id_prop(),
-            "model": model_prop(),
+            "inheritance": inheritance_prop(),
             "expected_revision": revision_prop()
         }),
-        &["session_id", "model", "expected_revision"],
+        &["session_id", "inheritance", "expected_revision"],
     )
 }
 
@@ -117,6 +120,16 @@ fn required_object<'a>(args: &'a Value, name: &str) -> Result<&'a Value, ToolErr
         Some(value) if value.is_object() => Ok(value),
         _ => Err(ToolError::new("invalid_argument", format!("`{name}` must be a JSON object"))),
     }
+}
+
+fn reject_full_mesh_replace(args: &Value) -> Result<(), ToolError> {
+    if args.get("model").is_some() {
+        return Err(ToolError::new(
+            "invalid_argument",
+            "full mesh replace via `model` is not supported on agent tools; send an `inheritance` rewrite (base + overrides) instead",
+        ));
+    }
+    Ok(())
 }
 
 fn writes_denied() -> ToolError {
@@ -156,10 +169,11 @@ pub fn run_get(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 }
 
 pub fn run_preview(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
+    reject_full_mesh_replace(args)?;
     let session_id = required_string(args, "session_id")?;
-    let model = required_object(args, "model")?;
+    let inheritance = required_object(args, "inheritance")?;
     let handle = AuthorityHandle::open(data_home)?;
-    match city_building::preview_building(data_home, handle.conn(), session_id, model) {
+    match city_building::preview_building(data_home, handle.conn(), session_id, inheritance) {
         Ok(data) => Ok(envelope(&handle, data)),
         Err(error) => map_error(error),
     }
@@ -167,11 +181,12 @@ pub fn run_preview(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 
 pub fn run_set(args: &Value, data_home: &Path, allow_local_writes: bool) -> Result<Value, ToolError> {
     if !allow_local_writes { return Err(writes_denied()); }
+    reject_full_mesh_replace(args)?;
     let session_id = required_string(args, "session_id")?;
-    let model = required_object(args, "model")?;
+    let inheritance = required_object(args, "inheritance")?;
     let expected = required_u64(args, "expected_revision")?;
     let handle = AuthorityHandle::open(data_home)?;
-    match city_building::set_building_model(data_home, handle.conn(), session_id, model, expected) {
+    match city_building::set_building_model(data_home, handle.conn(), session_id, inheritance, expected) {
         Ok(data) => Ok(envelope(&handle, data)),
         Err(error) => map_error(error),
     }
@@ -193,6 +208,7 @@ mod tests {
     use super::*;
     use agent_vitals_data::authority::AuthorityDb;
     use crate::mcp::{dispatch, dispatch_with_permissions};
+    use crate::query::city_building_inheritance::INHERITANCE_KIT_VERSION;
 
     fn tmp_home() -> std::path::PathBuf {
         let home = std::env::temp_dir().join(format!(
@@ -219,7 +235,7 @@ mod tests {
             "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key,
                  source_event_id, observation_kind, event_ts_ms, uncached_input_tokens, cache_read_tokens,
                  cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
-             VALUES ('fc', 'codex', 'ns', 'native-city', 'sess-city', 'e1', 'assistant-usage', 1, 200, 0, 0, 80, 'run', 1, 1)",
+             VALUES ('fc', 'codex', 'ns', 'native-city', 'sess-city', 'e1', 'assistant-usage', 1, 50000, 0, 0, 50000, 'run', 1, 1)",
             [],
         ).unwrap();
         drop(db);
@@ -229,27 +245,23 @@ mod tests {
 
     fn data(env: &Value) -> &Value { &env["data"] }
 
-    fn stacked() -> Value {
+    fn catalog_inheritance(catalog_id: &str) -> Value {
         json!({
-            "kit_version": "session-kit/v1",
-            "params": {"catalog_id": "kit-low-block", "floors": 2, "story_height": 2.8},
-            "parts": [
-                {"id": "base", "kind": "box", "role": "structure", "at": [0, 0, 0], "size": [5, 2.8, 6]},
-                {"id": "cap", "kind": "box", "role": "wall", "at": [0, 2.8, 0], "size": [4.5, 2.8, 5.5]},
-                {"id": "door", "kind": "box", "role": "door", "at": [0, 0, 3], "size": [1.2, 2, 0.2]},
-                {"id": "window", "kind": "box", "role": "window", "at": [0, 3.5, 3], "size": [1.4, 1.2, 0.15]}
-            ]
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "catalog", "catalog_id": catalog_id },
+            "overrides": {}
         })
     }
 
-    fn overlapping() -> Value {
+    fn overlapping_inheritance() -> Value {
         json!({
-            "kit_version": "session-kit/v1",
-            "params": {},
-            "parts": [
-                {"id": "a", "kind": "box", "role": "wall", "at": [0, 0, 0], "size": [2, 1, 2]},
-                {"id": "b", "kind": "box", "role": "wall", "at": [0, 0.2, 0], "size": [2, 1, 2]}
-            ]
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "catalog", "catalog_id": "kit-low-block" },
+            "overrides": {
+                "parts_add": [
+                    {"id": "a", "kind": "box", "role": "wall", "at": [0, 0.2, 0], "size": [2, 1, 2]}
+                ]
+            }
         })
     }
 
@@ -260,11 +272,17 @@ mod tests {
 
         let denied = dispatch_with_permissions(
             "set_building_model",
-            &json!({"session_id": session_id, "model": stacked(), "expected_revision": 0}),
+            &json!({"session_id": session_id, "inheritance": catalog_inheritance("kit-low-block"), "expected_revision": 0}),
             &home,
             false,
         ).unwrap_err();
         assert_eq!(denied.code, "permission_denied");
+
+        let mesh_denied = dispatch("preview_building", &json!({
+            "session_id": session_id,
+            "model": catalog_inheritance("kit-low-block"),
+        }), &home).unwrap_err();
+        assert_eq!(mesh_denied.code, "invalid_argument");
 
         let got = data(&dispatch("get_building", &json!({"session_id": session_id}), &home).unwrap()).clone();
         assert_eq!(got["ok"], true);
@@ -274,19 +292,24 @@ mod tests {
         assert!(asset.starts_with("ca_"));
         assert_eq!(got["observe"]["summary"]["part_count"], 5);
 
-        let fail = data(&dispatch("preview_building", &json!({"session_id": session_id, "model": overlapping()}), &home).unwrap()).clone();
+        let fail = data(&dispatch("preview_building", &json!({"session_id": session_id, "inheritance": overlapping_inheritance()}), &home).unwrap()).clone();
         assert_eq!(fail["ok"], false);
         assert_eq!(fail["error"]["kind"], "validation");
         assert_eq!(fail["error"]["rule"], "overlap");
         assert!(fail["error"]["suggested_fix"].as_str().unwrap().contains("shrink"));
 
-        let pass = data(&dispatch("preview_building", &json!({"session_id": session_id, "model": stacked()}), &home).unwrap()).clone();
+        let projection_inheritance = json!({
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "projection" },
+            "overrides": {}
+        });
+        let pass = data(&dispatch("preview_building", &json!({"session_id": session_id, "inheritance": projection_inheritance}), &home).unwrap()).clone();
         assert_eq!(pass["ok"], true);
         assert_eq!(pass["persisted"], false);
 
         let conflict = data(&dispatch_with_permissions(
             "set_building_model",
-            &json!({"session_id": session_id, "model": stacked(), "expected_revision": 7}),
+            &json!({"session_id": session_id, "inheritance": projection_inheritance, "expected_revision": 7}),
             &home,
             true,
         ).unwrap()).clone();
@@ -297,7 +320,7 @@ mod tests {
 
         let set = data(&dispatch_with_permissions(
             "set_building_model",
-            &json!({"session_id": session_id, "model": stacked(), "expected_revision": 0}),
+            &json!({"session_id": session_id, "inheritance": projection_inheritance, "expected_revision": 0}),
             &home,
             true,
         ).unwrap()).clone();
@@ -313,7 +336,8 @@ mod tests {
         assert_eq!(confirm["ok"], true);
         assert_eq!(confirm["revision"], 1);
         assert_eq!(confirm["source"], "override");
-        assert_eq!(confirm["model"]["parts"][1]["id"], "cap");
+        assert_eq!(confirm["model"]["parts"][1]["id"], "shaft");
+        assert!(confirm["inheritance"].is_object());
         assert_eq!(confirm["projection"]["asset_ref"], set["projection"]["asset_ref"]);
 
         let by_asset = data(&dispatch("get_building", &json!({"session_id": asset}), &home).unwrap()).clone();

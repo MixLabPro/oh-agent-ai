@@ -49,9 +49,11 @@ def permission_denied_without_writes(bin_path: str) -> None:
         "params": {"name": "set_building_model", "arguments": {
             "session_id": "sr_00000000000000000000000000000000",
             "expected_revision": 0,
-            "model": {"kit_version": "session-kit/v1", "params": {}, "parts": [
-                {"kind": "box", "role": "wall", "at": [0, 0, 0], "size": [1, 1, 1]},
-            ]},
+            "inheritance": {
+                "kit_version": "session-kit/inheritance/v1",
+                "base": {"kind": "projection"},
+                "overrides": {},
+            },
         }},
     }]) + "\n"
     proc = subprocess.run(

@@ -1,6 +1,6 @@
 # Agent City building MCP (MVP)
 
-External agents can read, preview, replace, and reset **one session building's 3D model** through Data MCP. Persistence is a City-owned SQLite override keyed by stable `asset_ref`. After a successful set/reset the write path **persists → pushes a shared host event → City plays construction**.
+External agents can read, preview, apply, and reset **one session building's 3D model** through Data MCP. Persistence is a City-owned SQLite override keyed by stable `asset_ref`. After a successful set/reset the write path **persists → pushes a shared host event → City plays construction**.
 
 ## Tools
 
@@ -13,14 +13,18 @@ Server: `agent-vitals data-mcp serve --allow-local-writes` (get/preview work wit
 
 | Tool | Writes? | Contract |
 |---|---|---|
-| `get_building` | no | Current model (override or default), `revision`, `kit_version`, parts, geometric `summary`, `observe.text` |
-| `preview_building` | no | Validate only. Same structured errors as set. |
-| `set_building_model` | yes | Optimistic concurrency on `expected_revision`. Success → new `revision` + `build_event_id` |
+| `get_building` | no | Resolved mesh (override or default), optional stored `inheritance` subclass, `revision`, `kit_version`, parts, geometric `summary`, `observe.text` |
+| `preview_building` | no | Validate an **inheritance rewrite** only (no full mesh). Same structured errors as set. |
+| `set_building_model` | yes | Persist a subclass document. Optimistic concurrency on `expected_revision`. Success → new `revision` + `build_event_id` |
 | `reset_building` | yes | Clear override, restore default, bump `revision`, queue a build event |
 
 ReACT loop: **get → preview → set → get**. Confirm the set by matching `revision` and `build_event_id`. Observation is structured JSON (`data.observe`); screenshots are optional and **not** in this MVP.
 
-## Model (`session-kit/v1`)
+**Agent tool surface:** `preview_building` and `set_building_model` accept **`inheritance` rewrites only** — not a full `{kit_version, params, parts}` mesh replace. Full mesh replace remains available to internal/debug callers only. Passing `model` on MCP returns `invalid_argument`.
+
+## Model (`session-kit/v1` resolved mesh)
+
+`get_building.model` is always the **resolved** mesh after base + overrides merge:
 
 ```json
 {
@@ -39,11 +43,45 @@ ReACT loop: **get → preview → set → get**. Confirm the set by matching `re
 - `params.form`: `tower` | `slab` | `block` | `midrise`. Optional `params.palette`, `params.catalog_id`, `params.build_cost`, `params.floors`, `params.story_height`, `params.detail_tier` (`coarse` | `standard` | `detailed` or `0`..`2`).
 - No scripts, no extra fields. Unknown `kit_version` is a validation error. Stored overrides keep their `kit_version` so old rows are not silently migrated.
 
+## Inheritance (layer 2 — agent writes)
+
+Stored subclass (`kit_version: session-kit/inheritance/v1`). Also returned on `get_building` when present.
+
+```json
+{
+  "kit_version": "session-kit/inheritance/v1",
+  "base": { "kind": "catalog", "catalog_id": "kit-fine-midrise" },
+  "overrides": {
+    "params": { "palette": "#c47a54", "story_height": 3.2, "detail_tier": "detailed" },
+    "parts_replace": [{ "id": "door", "part": { "id": "door", "kind": "box", "role": "door", "at": [0, 0, 3.11], "size": [1.3, 2.2, 0.2] } }],
+    "parts_add": [{ "id": "sign", "kind": "box", "role": "trim", "at": [0, 8.1, 3], "size": [1.2, 0.4, 0.2] }],
+    "parts_remove": ["cornice"]
+  }
+}
+```
+
+**Base (re-base):**
+
+| `base.kind` | Meaning |
+|---|---|
+| `projection` | Session token-derived default kit (same as no override) |
+| `catalog` | Built-in catalog mesh; requires `base.catalog_id` from `get_building.projection.compliant_catalog` |
+
+**Override kinds:** `overrides.params` (scalar merge), `parts_replace` (`{id, part}`), `parts_add`, `parts_remove` (id list).
+
+**Reset subclass:** `{ "kit_version": "session-kit/inheritance/v1", "reset": true }` on preview/set clears the stored override (same effect as `reset_building` on set). `reset_building` remains the explicit tool.
+
+**Server path (preview + set):** resolve `base` → merge `overrides` → `validate_model` → **model compliance (#9)** → **detail regression (#10)** on the merged mesh. Persist the **inheritance document**, not the resolved mesh.
+
+**Fine catalog samples** (for re-base and `parts_add` tests): `kit-fine-midrise`, `kit-fine-storefront` — detailed tiers, door/window roles, richer part layouts. Legacy ids: `kit-low-block`, `kit-midrise`, `kit-tower`, `kit-wide-slab`.
+
+Legacy SQLite rows may still store a full `session-kit/v1` mesh from before layer 2; `get_building` and City `buildings.overrides` resolve them as-is.
+
 **Geometry checks:** finite numbers, parts ≤64, lot envelope (±4 x, ±6 z, height 0–48 world units), AABB overlap.
 
 **Model compliance (preview + set, same path):** derived lot footprint (min coverage + max bounds), session height class + story height (`params.story_height` / `params.floors`, reject pillar-like single shafts), construction budget (`estimate` or `params.build_cost` vs session `budget_cap`; catalog `cost` when `catalog_id` set), and required `door` / `window` part roles for occupiable models (waived when `catalog_id` points at a kit that provides them). Failures use `rule: invalid_model` and may include `compliant_models` (catalog ids). `get_building.projection` returns `lot`, `compliant_catalog`, and `required_part_roles`.
 
-**Detail regression (layer 1, after compliance):** compare a cheap **detail score** for the session’s **current** model (override or default) vs the proposal. Inputs: part count, door/window presence (or catalog kit that provides them), and `params.detail_tier` (`coarse` | `standard` | `detailed` or `0`..`2`; otherwise derived from part count or catalog). **Hold-or-improve:** proposed score must be ≥ current. Failures use `rule: detail_regression` and may list `compliant_models` catalog ids that would not regress. Inheritance overrides and revision snapshots are deferred.
+**Detail regression (layer 1, after compliance):** compare a cheap **detail score** for the session’s **current** model (override or default) vs the **merged** proposal. Inputs: part count, door/window presence (or catalog kit that provides them), and `params.detail_tier` (`coarse` | `standard` | `detailed` or `0`..`2`; otherwise derived from part count or catalog). **Hold-or-improve:** proposed score must be ≥ current. Failures use `rule: detail_regression` and may list `compliant_models` catalog ids that would not regress.
 
 ## Errors
 
@@ -62,13 +100,13 @@ Preview and set share one shape inside `data` (check `data.ok`; this is not a JS
 }
 ```
 
-`kind` is `validation` or `conflict` (`revision_conflict` — retry with `get_building.revision`). Unknown `session_id` is MCP `not_found`. Mutations without `--allow-local-writes` are `permission_denied`.
+Inheritance shape errors use `rule: invalid_inheritance`. `kind` is `validation` or `conflict` (`revision_conflict` — retry with `get_building.revision`). Unknown `session_id` is MCP `not_found`. Mutations without `--allow-local-writes` are `permission_denied`.
 
 ## Persistence
 
 `~/.agent-vitals/state/plugins/city-buildings/overrides.sqlite` (or `$AGENT_VITALS_HOME/...`):
 
-- `overrides(asset_ref, revision, kit_version, model_json, updated_at_ms)` — `model_json` NULL means default.
+- `overrides(asset_ref, revision, kit_version, model_json, updated_at_ms)` — `model_json` NULL means default. Layer 2 stores the inheritance JSON; legacy rows store a full mesh.
 - `build_events(build_event_id, asset_ref, revision, kind, part_count, created_at_ms)` — queued, replayable construction records.
 
 Atomic `BEGIN IMMEDIATE` check-and-commit. Survives app restart. Parcel/lot metadata is reported `unavailable` until the city loader can supply it.
@@ -96,9 +134,9 @@ Host → City envelope (reusable; this PR implements `building`):
 }
 ```
 
-Building payloads also carry MCP/SQLite aliases (`asset_ref`, `build_event_id`, `kind`) plus the kit `model`. Tool JSON still returns `build_event_id`. `construction.ui` is `pushed` (socket accepted) or `queued` (mailbox + poll).
+Building payloads also carry MCP/SQLite aliases (`asset_ref`, `build_event_id`, `kind`) plus the resolved kit `model`. Tool JSON still returns `build_event_id`. `construction.ui` is `pushed` (socket accepted) or `queued` (mailbox + poll).
 
-Load path: city:v3 `buildings.overrides` (not stuffed into session pages — kit floats must not go through the integer-only v3 validator). Cold open **snaps** current overrides. Live host/poll events **animate**. City also polls `build_events` every 8s if the eval landed before the listener.
+Load path: city:v3 `buildings.overrides` (not stuffed into session pages — kit floats must not go through the integer-only v3 validator). Cold open **snaps** current overrides (resolved `model` + optional `inheritance`). Live host/poll events **animate**. City also polls `build_events` every 8s if the eval landed before the listener.
 
 PluginHost delivers each `event_id` at most once while the City webview is ready.
 
@@ -121,13 +159,16 @@ agent-vitals data-mcp serve --allow-local-writes
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sessions_search","arguments":{"limit":1}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_building","arguments":{"session_id":"sr_…"}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"preview_building","arguments":{"session_id":"sr_…","model":{…}}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"set_building_model","arguments":{"session_id":"sr_…","expected_revision":0,"model":{…}}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"preview_building","arguments":{"session_id":"sr_…","inheritance":{"kit_version":"session-kit/inheritance/v1","base":{"kind":"catalog","catalog_id":"kit-fine-midrise"},"overrides":{"params":{"palette":"#c47a54"}}}}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"set_building_model","arguments":{"session_id":"sr_…","expected_revision":0,"inheritance":{"kit_version":"session-kit/inheritance/v1","base":{"kind":"catalog","catalog_id":"kit-fine-midrise"},"overrides":{}}}}}
 ```
 
-Copy `session_ref` from `sessions_search` into `session_id`. With City open, set should push `__AV_PLUGIN_ENTITY_CHANGED__` and play construction; `get_building` must show the new `revision` and parts. Restart still shows the override. `reset_building` restores the default with animation.
+Copy `session_ref` from `sessions_search` into `session_id`. With City open, set should push `__AV_PLUGIN_ENTITY_CHANGED__` and play construction; `get_building` must show the new `revision`, resolved parts, and stored `inheritance`. Restart still shows the override. `reset_building` restores the default with animation.
 
 ## Deferred (not in this PR)
 
+- Ghost preview / fail-flash UI (separate UI knife).
+- Pin/snapshot revision (layer 3).
+- OT/CRDT, aesthetic judge.
 - Road / vehicle write-path animation (the envelope and channel are ready; no handlers yet).
 - Parcel/lot coordinates, screenshots, resident metrics, multi-bot locks beyond `revision`.

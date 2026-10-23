@@ -16,5 +16,7 @@ pub mod trace_service;
 
 pub mod city_assets;
 pub mod city_building;
+pub mod city_building_catalog;
 pub mod city_building_compliance;
+pub mod city_building_inheritance;
 pub mod city_v3;
