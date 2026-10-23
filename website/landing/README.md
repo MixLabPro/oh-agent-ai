@@ -18,7 +18,7 @@ From this directory:
 python3 -m http.server 5180 --bind 127.0.0.1
 ```
 
-Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. The page is a static site; the interactive City requires HTTP serving. Opening `index.html` as a local file still offers product images and text. It now explicitly explains that the interactive City needs HTTP, disables its launch button, and avoids a failed iframe fetch or startup timeout.
+Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. Blog pages: `http://127.0.0.1:5180/blog/` and `http://127.0.0.1:5180/blog/multi-agent-shared-notes/`. The page is a static site; the interactive City requires HTTP serving. Opening `index.html` as a local file still offers product images and text. It now explicitly explains that the interactive City needs HTTP, disables its launch button, and avoids a failed iframe fetch or startup timeout.
 
 ## Page and data
 
@@ -52,7 +52,7 @@ node tools/build-zh.mjs        # regenerate the prerendered Chinese page zh/inde
 node tools/verify-landing.mjs   # also fails if zh/index.html is stale
 ```
 
-`deploy.sh` regenerates `/zh/`, verifies, builds the docs (`website/docs`, Node 22.22+) and stages them under `/docs`, so one Cloudflare Pages deploy serves the landing, `/zh/` and `/docs`. `robots.txt` lists both `/sitemap.xml` (landing, en + zh) and `/docs/sitemap-index.xml` (docs, published pages only).
+`deploy.sh` regenerates `/zh/`, verifies, builds the docs (`website/docs`, Node 22.22+) and stages them under `/docs`, and copies `/blog`, so one Cloudflare Pages deploy serves the landing, `/zh/`, `/blog` and `/docs`. `robots.txt` lists both `/sitemap.xml` (landing, en + zh + blog) and `/docs/sitemap-index.xml` (docs, published pages only). The blog is static English HTML at the landing root (not under `/docs`). To add a post, add `blog/<slug>/index.html`, link it from `blog/index.html`, and list the URL in `sitemap.xml`.
 
 Checks cover actual translation keys, local assets and deployment staging, anchor targets, truthful sample/cost/release labels, three-way exploration selection, file-preview handling, script syntax, and a simulated host exercising the v2 contract, deterministic windows, origin/method rejection, readiness, timeout, stale responses, retry and teardown. This command is a local implementation check, **not** permission to publish and not a substitute for browser interaction or public-download verification.
 

@@ -85,8 +85,10 @@ assert.doesNotMatch(html, /health score|framework-agnostic|burning money|saves y
 assert.match(html, /<h1 id="hero-title"><span data-i18n="hero.line1">Your agents work\.<\/span><br><em data-i18n="hero.line2">Your world grows\.<\/em><\/h1>/, 'Headline must stay exactly as approved');
 assert.match(i18n, /'hero\.line1': "Agent 在工作，", 'hero\.line2': "你的世界在生长。"/);
 const navBlock = html.match(/<nav aria-label="Main navigation"[\s\S]*?<\/nav>/)[0];
+assert.match(navBlock, /<a href="\/blog\/" data-i18n="nav\.blog">Blog<\/a>/, 'Nav links to the blog');
 assert.match(navBlock, /<a href="\/docs\/" data-href-zh="\/docs\/zh\/" data-i18n="nav\.docs">Docs<\/a>/, 'Nav links to the docs (en /docs/, zh /docs/zh/)');
 assert.match(navBlock, /href="https:\/\/github\.com\/Oh-Agent-AI\/oh-agent" target="_blank" rel="noopener">GitHub ↗<\/a>/, 'Nav links to GitHub');
+assert.match(i18n, /'nav\.blog': '博客'/);
 assert.match(i18n, /'nav\.docs': '文档'/);
 assert.match(html, /id="hero-download" href="#download" data-i18n="cta\.download">Download the beta · v1\.0\.0-beta\.3</);
 assert.match(i18n, /'cta\.download': '下载测试版 · v1\.0\.0-beta\.3'/);
@@ -124,10 +126,26 @@ for (const [, source] of zhHtml.matchAll(/<(?:img|script)[^>]+src="([^"]+)"/g)) 
   execFileSync(process.execPath, [path.join(root, 'tools/build-zh.mjs'), '--check'], { stdio: 'pipe' });
 }
 assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/zh\/<\/loc>/);
-assert.match(read('sitemap.xml'), /<lastmod>2026-10-22<\/lastmod>/);
+assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/blog\/<\/loc>/);
+assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/blog\/multi-agent-shared-notes\/<\/loc>/);
+assert.match(read('sitemap.xml'), /<lastmod>2026-10-23<\/lastmod>/);
 assert.match(read('robots.txt'), /Sitemap: https:\/\/ohagent\.ai\/docs\/sitemap-index\.xml/);
 assert.match(read('deploy.sh'), /rsync -a --exclude="\.DS_Store" \.\.\/docs\/dist\/ "\$STAGE"\/docs\//, 'deploy.sh stages the docs under /docs');
+assert.match(read('deploy.sh'), /rsync -a --exclude="\.DS_Store" blog\/ "\$STAGE"\/blog\//, 'deploy.sh stages /blog');
 assert.match(read('deploy.sh'), /cp zh\/index\.html "\$STAGE"\/zh\//, 'deploy.sh stages /zh/');
+{
+  const blogIndex = read('blog/index.html');
+  const blogPost = read('blog/multi-agent-shared-notes/index.html');
+  assert.match(blogIndex, /href="\/blog\/multi-agent-shared-notes\/"/);
+  assert.match(blogIndex, /href="\/styles\.css/);
+  assert.match(blogPost, /arxiv\.org\/abs\/2610\.22319/);
+  assert.match(blogPost, /x\.com\/eggbaby\/status\/2111388911985475975/);
+  assert.match(blogPost, /undefined-ui\/second-brain-os/);
+  assert.match(blogPost, /\(MIT\)/);
+  assert.match(blogPost, /href="\/styles\.css/);
+  assert.match(blogPost, /<link rel="canonical" href="https:\/\/ohagent\.ai\/blog\/multi-agent-shared-notes\/">/);
+  assert.doesNotMatch(blogIndex + blogPost, /<script[^>]+src="https?:/, 'Blog pages stay same-origin');
+}
 
 // Execute localization against all actual translation-bearing elements.
 function translated(lang) {
