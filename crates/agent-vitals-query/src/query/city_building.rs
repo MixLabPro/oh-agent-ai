@@ -1441,14 +1441,14 @@ mod tests {
             "parts_add": [{"id": "sign", "kind": "box", "role": "trim", "at": [0.0, 6.2, 2.5], "size": [0.8, 0.3, 0.2]}]
         }));
         let set = set_building_model(&home, db.conn(), &session_id, &fine, 0).unwrap();
-        assert!(set["ok"] == true, "set error: {}", set["error"]);
+        assert_eq!(set["ok"], true);
         let got = get_building(&home, db.conn(), &session_id).unwrap();
         assert!(got["inheritance"].is_object());
         assert!(got["model"]["parts"].as_array().unwrap().iter().any(|p| p["id"] == "sign"));
 
         let reset_doc = json!({ "kit_version": INHERITANCE_KIT_VERSION, "reset": true });
         let reset = set_building_model(&home, db.conn(), &session_id, &reset_doc, 1).unwrap();
-        assert!(reset["ok"] == true, "reset error: {}", reset["error"]);
+        assert_eq!(reset["ok"], true);
         assert_eq!(reset["source"], "default");
         let after = get_building(&home, db.conn(), &session_id).unwrap();
         assert_eq!(after["source"], "default");

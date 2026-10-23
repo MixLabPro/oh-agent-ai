@@ -405,9 +405,8 @@ fn buildings_overrides_reads_the_city_owned_store_without_changing_pages() {
         "overrides":{}
     });
     let set=city_building::set_building_model(&f.home,f.db.conn(),&session_id,&proposed,0).unwrap();
-    assert!(set["ok"]==true,"set failed: {}",set["error"]);
-    let loaded=city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","asset_refs":[asset]})),f.now)
-        .unwrap_or_else(|e| panic!("buildings.overrides read failed: {e}"));
+    assert_eq!(set["ok"],true);
+    let loaded=city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","asset_refs":[asset]})),f.now).unwrap();
     let overrides=loaded["result"]["overrides"].as_array().unwrap();
     assert_eq!(overrides.len(),1);
     assert_eq!(overrides[0]["asset_ref"],asset);
