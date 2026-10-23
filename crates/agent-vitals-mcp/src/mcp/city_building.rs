@@ -12,7 +12,9 @@
 //!
 //! After a successful persist the query layer notifies PluginHost
 //! (socket and mailbox) with a shared `CityEntityChanged` envelope.
-//! `construction.ui` is `pushed` or `queued`.
+//! `construction.ui` is `pushed` or `queued`. Preview success and
+//! compliance / detail-regression rejects use the same channel
+//! (`action=preview|reject`) so City can show a ghost or fail-flash.
 
 use std::path::Path;
 

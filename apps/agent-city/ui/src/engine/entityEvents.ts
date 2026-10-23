@@ -11,7 +11,8 @@
 export const ENTITY_CHANGED_EVENT = "__AV_PLUGIN_ENTITY_CHANGED__";
 export const ENTITY_CHANGED_TYPE = "CityEntityChanged";
 
-export type EntityAction = "set" | "reset";
+/** Persist actions (`set`/`reset`) plus ephemeral edit states (`preview`/`reject`). */
+export type EntityAction = "set" | "reset" | "preview" | "reject";
 
 export type CityEntityChanged = {
   type: typeof ENTITY_CHANGED_TYPE;
@@ -78,7 +79,7 @@ export function dispatchEntityChanged(event: CityEntityChanged, handlers: Entity
 }
 
 function parseAction(value: unknown): EntityAction | null {
-  return value === "set" || value === "reset" ? value : null;
+  return value === "set" || value === "reset" || value === "preview" || value === "reject" ? value : null;
 }
 
 function stringId(value: unknown): string | null {

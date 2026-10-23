@@ -10,7 +10,7 @@
 import { ENTITY_CHANGED_TYPE, parseEntityChanged, type CityEntityChanged } from "./entityEvents";
 
 export type KitKind = "box" | "cylinder" | "cone";
-export type KitRole = "wall" | "trim" | "roof" | "glass" | "structure";
+export type KitRole = "wall" | "trim" | "roof" | "glass" | "structure" | "door" | "window";
 
 export type KitPart = {
   id?: string;
@@ -49,7 +49,7 @@ export type OverlayDecision = {
 };
 
 const KINDS = new Set<KitKind>(["box", "cylinder", "cone"]);
-const ROLES = new Set<KitRole>(["wall", "trim", "roof", "glass", "structure"]);
+const ROLES = new Set<KitRole>(["wall", "trim", "roof", "glass", "structure", "door", "window"]);
 
 export function isKitKind(value: string): value is KitKind {
   return KINDS.has(value as KitKind);
@@ -145,6 +145,7 @@ export function entityChangedFromBuilding(row: {
 export function parseBuildingChanged(raw: unknown): BuildingChangedEvent | null {
   const entity = parseEntityChanged(raw);
   if (!entity || entity.entity_kind !== "building") return null;
+  if (entity.action !== "set" && entity.action !== "reset") return null;
   if (!/^ca_[0-9a-f]{32}$/.test(entity.entity_id)) return null;
   const model = entity.model == null ? null : parseKitModel(entity.model);
   if (entity.action === "set" && !model) return null;

@@ -30,6 +30,7 @@ import { layoutCity, type CityLayout, type BackdropMode } from "./cityLayout";
 import { applyPlanPatch, layoutPinsFor, type PatchedLayout, type PlanPatchV1 } from "./planPatch";
 import { CityParts, occupantsCanAppend, type QualityLevel } from "./cityParts";
 import { applyBuildingEvent, parseBuildingChanged, replayDecision, type BuildingChangedEvent, type OverlayDecision } from "./sessionKitConstruction";
+import { applyEditEvent, parseBuildingEdit, type BuildingEditEvent, type EditVisual } from "./sessionKitEditState";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { MIAMI_COASTAL } from "./citySeaside";
 import { CityAurora } from "./cityAurora";
@@ -116,6 +117,8 @@ export class CityEngine {
   lastApplyMode: "mount" | "append" = "mount";
   private readonly kitDecisions = new Map<string, OverlayDecision>();
   private readonly pendingKits = new Map<string, { event: BuildingChangedEvent; animate: boolean }>();
+  private readonly editVisuals = new Map<string, EditVisual>();
+  private readonly pendingEdits = new Map<string, BuildingEditEvent>();
   /** 对外的生效布局（已套规划修复补丁；无补丁时就是 baseLayout）。GameSession/FlightWorld/拾取读的都是它。 */
   private layout: CityLayout | null = null;
   /** Read-only driving-surface snapshots of the rendered city; invalidated whenever parts rebuild. */
@@ -1594,10 +1597,14 @@ export class CityEngine {
     for (const [id, row] of Object.entries(occupancy.byId)) positions[id] = { x: row.x, z: row.z, shaftPrimary: row.shaftPrimary };
     return { lastApplyMode: this.lastApplyMode, scaleTier: this.layout?.scaleTier ?? null,
       selectedId: this.selectedId, hoveredId: this.hoveredId, camera: this.photoView(),
-      occupantCount: occupancy.runtimeCount, positions, kits: this.parts?.kitSnapshot() ?? [] };
+      occupantCount: occupancy.runtimeCount, positions, kits: this.parts?.kitSnapshot() ?? [],
+      edits: this.parts?.editSnapshot() ?? [...this.editVisuals.values()].map((visual) => ({
+        sessionId: visual.sessionId, assetRef: visual.assetRef, kind: visual.kind, eventId: visual.eventId,
+      })) };
   }
 
   applyBuildingChanged(raw: unknown, animate: boolean): OverlayDecision | null {
+    if (this.applyBuildingEdit(raw)) return null;
     const event = parseBuildingChanged(raw);
     if (!event) return null;
     const assetRef = event.entity_id;
@@ -1608,12 +1615,40 @@ export class CityEngine {
       this.pendingKits.set(assetRef, { event, animate });
       return null;
     }
-    const next = applyBuildingEvent(this.kitDecisions.get(sessionId) ?? null, event, sessionId, animate);
+    const current = this.kitDecisions.get(sessionId) ?? null;
+    const next = applyBuildingEvent(current, event, sessionId, animate);
     if (!next) return null;
+    if (current && current.buildEventId === next.buildEventId) return next;
     this.kitDecisions.set(sessionId, next);
     this.pendingKits.delete(assetRef);
     this.parts?.applySessionKit(next);
+    this.clearBuildingEdit(sessionId);
     return next;
+  }
+
+  applyBuildingEdit(raw: unknown): boolean {
+    const event = parseBuildingEdit(raw);
+    if (!event) return false;
+    const assetRef = event.entity_id;
+    const sessionId = event.session_id
+      ?? this.parts?.sessionIdForAsset(assetRef)
+      ?? this.model?.buildings.find((building) => building.assetRef === assetRef)?.id;
+    if (!sessionId) {
+      this.pendingEdits.set(assetRef, event);
+      return true;
+    }
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const next = applyEditEvent(this.editVisuals.get(sessionId) ?? null, event, sessionId, now);
+    if (!next) return true;
+    this.editVisuals.set(sessionId, next);
+    this.pendingEdits.delete(assetRef);
+    this.parts?.applySessionEdit(next);
+    return true;
+  }
+
+  clearBuildingEdit(sessionId: string): void {
+    this.editVisuals.delete(sessionId);
+    this.parts?.clearSessionEdit(sessionId);
   }
 
   replayBuilding(assetOrSession: string): boolean {
@@ -1639,6 +1674,11 @@ export class CityEngine {
       if (!this.parts.sessionIdForAsset(assetRef)) continue;
       this.pendingKits.delete(assetRef);
       this.applyBuildingChanged(pending.event, pending.animate);
+    }
+    for (const [assetRef, pending] of [...this.pendingEdits]) {
+      if (!this.parts.sessionIdForAsset(assetRef)) continue;
+      this.pendingEdits.delete(assetRef);
+      this.applyBuildingEdit(pending);
     }
   }
 

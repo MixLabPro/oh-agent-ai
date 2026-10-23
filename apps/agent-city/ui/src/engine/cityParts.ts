@@ -54,8 +54,9 @@ export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
 import { appendRuntimes, applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, occupantsCanAppend, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
 export { occupantsCanAppend };
-import { createKitRuntime, disposeKitRuntime, replayKitRuntime, stepKitRuntime, type KitRuntime } from "./sessionKitOverride";
+import { createEditRuntime, createKitRuntime, disposeEditRuntime, disposeKitRuntime, replayKitRuntime, stepEditRuntime, stepKitRuntime, type EditRuntime, type KitRuntime } from "./sessionKitOverride";
 import type { OverlayDecision } from "./sessionKitConstruction";
+import { editPresentation, type EditVisual } from "./sessionKitEditState";
 
 export type OccupancySnapshot = {
   runtimeCount: number;
@@ -120,6 +121,7 @@ export class CityParts {
   private readonly runtimes: BuildingRuntime[] = [];
   private readonly runtimeById = new Map<string, BuildingRuntime>();
   private readonly kitBySession = new Map<string, KitRuntime>();
+  private readonly editBySession = new Map<string, EditRuntime>();
   private readonly shaftMeshes: THREE.InstancedMesh[] = [];
   private zoneById: Map<string, string> = new Map();
   private readonly shaftIdByInstance: Array<Map<number, string>> = [];
@@ -868,6 +870,47 @@ export class CityParts {
     }));
   }
 
+  applySessionEdit(visual: EditVisual): boolean {
+    const sessionId = this.runtimeById.has(visual.sessionId) ? visual.sessionId : (this.sessionIdForAsset(visual.assetRef) ?? visual.sessionId);
+    const runtime = this.runtimeById.get(sessionId);
+    if (!runtime) return false;
+    const existing = this.editBySession.get(sessionId);
+    if (existing) {
+      disposeEditRuntime(existing);
+      this.editBySession.delete(sessionId);
+    }
+    const palette = `#${runtime.paletteWall.getHexString()}`;
+    const edit = createEditRuntime({ ...visual, sessionId }, runtime, palette);
+    if (!edit) return false;
+    this.group.add(edit.group);
+    this.editBySession.set(sessionId, edit);
+    return true;
+  }
+
+  clearSessionEdit(sessionId: string): boolean {
+    const edit = this.editBySession.get(sessionId);
+    if (!edit) return false;
+    disposeEditRuntime(edit);
+    this.editBySession.delete(sessionId);
+    return true;
+  }
+
+  editSnapshot(): Array<{ sessionId: string; assetRef: string; kind: string; eventId: string; rule?: string; opacity: number; active: boolean }> {
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    return [...this.editBySession.entries()].map(([sessionId, edit]) => {
+      const shown = editPresentation(edit.visual, now);
+      return {
+        sessionId,
+        assetRef: edit.visual.assetRef,
+        kind: edit.visual.kind,
+        eventId: edit.visual.eventId,
+        ...(edit.visual.kind === "reject" ? { rule: edit.visual.rule } : {}),
+        opacity: shown.opacity,
+        active: shown.active,
+      };
+    });
+  }
+
   occupancySnapshot(): OccupancySnapshot {
     const byId: OccupancySnapshot["byId"] = {};
     for (const runtime of this.runtimes) {
@@ -1095,6 +1138,15 @@ export class CityParts {
     for (const kit of this.kitBySession.values()) {
       if (stepKitRuntime(kit, dt)) dirty = true;
     }
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    for (const [sessionId, edit] of [...this.editBySession]) {
+      if (stepEditRuntime(edit, now)) dirty = true;
+      if (edit.visual.kind === "reject" && !editPresentation(edit.visual, now).active) {
+        disposeEditRuntime(edit);
+        this.editBySession.delete(sessionId);
+        dirty = true;
+      }
+    }
     if (dirty || Number.isNaN(this.cursor)) {
       for (const mesh of this.shaftMeshes) mesh.instanceMatrix.needsUpdate = true;
       this.podiumMesh.instanceMatrix.needsUpdate = true;
@@ -1279,6 +1331,8 @@ export class CityParts {
     }
     for (const kit of this.kitBySession.values()) disposeKitRuntime(kit);
     this.kitBySession.clear();
+    for (const edit of this.editBySession.values()) disposeEditRuntime(edit);
+    this.editBySession.clear();
     for (const disposable of this.disposables) disposable.dispose();
   }
 }

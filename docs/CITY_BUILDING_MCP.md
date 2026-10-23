@@ -134,7 +134,22 @@ Host → City envelope (reusable; this PR implements `building`):
 }
 ```
 
-Building payloads also carry MCP/SQLite aliases (`asset_ref`, `build_event_id`, `kind`) plus the resolved kit `model`. Tool JSON still returns `build_event_id`. `construction.ui` is `pushed` (socket accepted) or `queued` (mailbox + poll).
+`action` is `set` | `reset` | `preview` | `reject`. Persist set/reset also carry MCP/SQLite aliases (`asset_ref`, `build_event_id`, `kind`) plus the resolved kit `model`. Tool JSON still returns `build_event_id`. `construction.ui` is `pushed` (socket accepted) or `queued` (mailbox + poll).
+
+### Visible edit states (ghost + fail-flash)
+
+These are **UI-only** and never persist to `overrides` / `build_events`:
+
+| Trigger | Envelope `action` | City render |
+|---|---|---|
+| Successful `preview_building` (including `{reset:true}`) | `preview` | Translucent **ghost** of the proposed mesh on the session lot. The committed building stays. |
+| `preview_building` or `set_building_model` rejected by **model compliance** (`invalid_model`, #9) or **detail regression** (`detail_regression`, #10) | `reject` | Brief red **fail-flash** on the lot (~900 ms). |
+
+Other structured errors (`overlap`, `invalid_inheritance`, `revision_conflict`) stay MCP-only — no City flash.
+
+Delivery: same PluginHost channel (`__AV_PLUGIN_ENTITY_CHANGED__`). Preview/reject write `state/plugins/city-buildings/edit.json` and best-effort `host.sock`. They **do not** overwrite persist `notify.json`, so a mailbox poll cannot drop a queued construction event. Tool JSON grows an output-only `notify` object (`action`, `event_id`, `ui`); input schemas are unchanged.
+
+A later successful `set` / `reset` clears the ghost and plays construction (PR #8). Cold open snaps committed overrides only — ghosts are live/ephemeral. Decal/graffiti and agent labels are not in this PR.
 
 Load path: city:v3 `buildings.overrides` (not stuffed into session pages — kit floats must not go through the integer-only v3 validator). Cold open **snaps** current overrides (resolved `model` + optional `inheritance`). Live host/poll events **animate**. City also polls `build_events` every 8s if the eval landed before the listener.
 
@@ -167,7 +182,6 @@ Copy `session_ref` from `sessions_search` into `session_id`. With City open, set
 
 ## Deferred (not in this PR)
 
-- Ghost preview / fail-flash UI (separate UI knife).
 - Pin/snapshot revision (layer 3).
 - OT/CRDT, aesthetic judge.
 - Road / vehicle write-path animation (the envelope and channel are ready; no handlers yet).
