@@ -58,7 +58,7 @@ SQLite table `claims` in the City-owned store (`overrides.sqlite`):
 
 ## City HUD
 
-Left squad timeline + optional kill-feed strip. Local kind filter (defaults: write-related on, chat/observe off; reset on like set). Building chips call `engine.focusBuilding(asset_ref)`. Active claims tint the lot (amber pad). Ghost / fail-flash from PR #12 are unchanged.
+Left squad timeline + optional kill-feed strip. Local kind filter (defaults: write-related on, chat/observe off; reset on like set). Building chips call `engine.focusBuilding(asset_ref)`. Active claims tint the lot (amber pad). Ghost / fail-flash from PR #12 are unchanged. Fanout envelopes that carry `payload.revision` keep a per-`asset_ref` watermark: a lower (or equal-but-older) revision is a no-op and never mutates a sibling lot. Soft `claim`/`release` stay last-event-wins and do not invent a revision.
 
 ## Not in this phase
 
