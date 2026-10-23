@@ -4,7 +4,7 @@
 #
 # Stages only the files the site actually references (excludes internal docs,
 # dev tooling and legacy scripts), builds the prerendered /zh/ page and the
-# Starlight docs into the same stage, verifies, then uploads with wrangler.
+# Starlight docs into the same stage, copies /blog, verifies, then uploads with wrangler.
 # Needs Node.js >= 22.22 (Astro 7, docs build).
 # One-time setup: npx wrangler login
 set -euo pipefail
@@ -28,6 +28,7 @@ cp 3c04062f7bc54e2b928e35bd99565348.txt "$STAGE"/
 mkdir -p "$STAGE"/zh && cp zh/index.html "$STAGE"/zh/
 rsync -a --exclude=".DS_Store" --exclude="shots/" assets/ "$STAGE"/assets/
 rsync -a --exclude=".DS_Store" city3d/ "$STAGE"/city3d/
+rsync -a --exclude=".DS_Store" blog/ "$STAGE"/blog/
 rsync -a --exclude=".DS_Store" ../docs/dist/ "$STAGE"/docs/
 # llms.txt conventionally lives at the site root.
 cp ../docs/dist/llms.txt ../docs/dist/llms-full.txt "$STAGE"/
@@ -35,6 +36,7 @@ cp ../docs/dist/llms.txt ../docs/dist/llms-full.txt "$STAGE"/
 echo "== staged =="
 test -f "$STAGE/docs/index.html" && test -f "$STAGE/docs/zh/index.html" && test -f "$STAGE/docs/sitemap-index.xml"
 test -f "$STAGE/zh/index.html" && test -f "$STAGE/llms.txt"
+test -f "$STAGE/blog/index.html" && test -f "$STAGE/blog/multi-agent-shared-notes/index.html"
 find "$STAGE" -maxdepth 2 -name index.html | sort
 
 echo "== deploy =="

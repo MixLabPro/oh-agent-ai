@@ -25,7 +25,7 @@
     'play.disclosure': '视觉为探索概念：真实 City 模拟数据画面叠加示意路线，并非游戏实录。桌面 City 已实现飞机、驾驶与喷气飞车玩法，已随 1.0.0-beta.3 桌面测试版提供。网页演示支持建筑探索和活动回放。',
     'insights.usage.label': '01 / 用量', 'insights.cost.label': '02 / 费用口径', 'insights.session.label': '03 / 会话证据',
     'skip': '跳到内容', 'brand.tag': "看见 Agent 的另一面",
-    'nav.aria': '主导航', 'nav.city': '城市体验', 'nav.play': '探索玩法', 'nav.insights': '数据洞察', 'nav.privacy': '隐私', 'nav.docs': '文档', 'nav.download': "下载",
+    'nav.aria': '主导航', 'nav.city': '城市体验', 'nav.play': '探索玩法', 'nav.insights': '数据洞察', 'nav.privacy': '隐私', 'nav.blog': '博客', 'nav.docs': '文档', 'nav.download': "下载",
     'hero.kicker': "让 AGENT 的使用历史，鲜活起来。",
     'hero.line1': "Agent 在工作，", 'hero.line2': "你的世界在生长。",
     'hero.lede': "一款在本机分析 Claude Code、Codex 使用历史的桌面应用。把会话变成城市，回放工作节奏，看清 Token 去向。不上传会话。",
