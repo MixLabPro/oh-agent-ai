@@ -105,11 +105,7 @@ impl PlayerStrategy {
         let mut best_score = score_plan(m, &best_plan);
         let combos = cartesian(&dest_opts);
         let cap = 80.min(combos.len());
-        let stride = if combos.len() > cap {
-            combos.len() / cap
-        } else {
-            1
-        };
+        let stride = combos.len().checked_div(cap).unwrap_or(1).max(1);
         let mut i = 0;
         while i < combos.len() {
             let dests = &combos[i];
@@ -356,10 +352,6 @@ impl Rng64 {
         x
     }
     fn index(&mut self, n: usize) -> usize {
-        if n == 0 {
-            0
-        } else {
-            (self.next() as usize) % n
-        }
+        (self.next() as usize).checked_rem(n).unwrap_or(0)
     }
 }

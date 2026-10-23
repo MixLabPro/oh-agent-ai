@@ -1,7 +1,5 @@
 //! Shared vocabulary. Stats table is GDD §3.1.
 
-use crate::geom::Cell;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MechId {
     Assault,
@@ -126,10 +124,4 @@ pub enum Outcome {
     Victory,
     DefeatWipe,
     DefeatTimeout,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DeployedMech {
-    pub id: MechId,
-    pub pos: Cell,
 }

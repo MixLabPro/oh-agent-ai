@@ -266,7 +266,7 @@ impl Match {
     }
 
     pub fn is_telegraph(&self, c: Cell) -> bool {
-        self.projected_cells().iter().any(|p| *p == c)
+        self.projected_cells().contains(&c)
     }
 
     pub fn adjacent_to_boss(&self, c: Cell) -> bool {

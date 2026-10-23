@@ -171,11 +171,7 @@ pub fn run_fun_validation(cfg: FunValidationConfig) -> FunValidationReport {
                     }
                 }
             }
-            let mean_loss = if loss_n == 0 {
-                0
-            } else {
-                (loss_hp_sum * 10) / loss_n
-            };
+            let mean_loss = (loss_hp_sum * 10).checked_div(loss_n).unwrap_or(0);
             combos.push(ComboStats {
                 strategy: kind.id(),
                 cover_preset: preset.id(),
@@ -185,7 +181,7 @@ pub fn run_fun_validation(cfg: FunValidationConfig) -> FunValidationReport {
                 timeout_losses: timeout,
                 decisive_swing_matches: swing_matches,
                 mean_boss_hp_on_loss_x10: mean_loss as i32,
-                mean_turns_x10: if n == 0 { 0 } else { ((turns_sum * 10) / n) as i32 },
+                mean_turns_x10: (turns_sum * 10).checked_div(n).unwrap_or(0) as i32,
             });
         }
     }
@@ -207,11 +203,7 @@ impl FunValidationReport {
         s.push_str(self.disclaimer);
         s.push('\n');
         for c in &self.combos {
-            let wr = if c.matches == 0 {
-                0
-            } else {
-                (c.wins * 100) / c.matches
-            };
+            let wr = (c.wins * 100).checked_div(c.matches).unwrap_or(0);
             s.push_str(&format!(
                 "  {} / {}: n={} wins={} ({}%) wipe={} timeout={} swings={} mean_loss_boss_hp={}.{} mean_turns={}.{}\n",
                 c.strategy,
