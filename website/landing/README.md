@@ -18,7 +18,7 @@ From this directory:
 python3 -m http.server 5180 --bind 127.0.0.1
 ```
 
-Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. Blog pages: `http://127.0.0.1:5180/blog/` and `http://127.0.0.1:5180/blog/multi-agent-shared-notes/`. The page is a static site; the interactive City requires HTTP serving. Opening `index.html` as a local file still offers product images and text. It now explicitly explains that the interactive City needs HTTP, disables its launch button, and avoids a failed iframe fetch or startup timeout.
+Open `http://127.0.0.1:5180/?lang=zh` or `?lang=en`. Blog pages: `http://127.0.0.1:5180/blog/`, `http://127.0.0.1:5180/blog/multi-agent-shared-notes/`, and `http://127.0.0.1:5180/blog/fleet-auditor-before-hire/`. The page is a static site; the interactive City requires HTTP serving. Opening `index.html` as a local file still offers product images and text. It now explicitly explains that the interactive City needs HTTP, disables its launch button, and avoids a failed iframe fetch or startup timeout.
 
 ## Page and data
 
