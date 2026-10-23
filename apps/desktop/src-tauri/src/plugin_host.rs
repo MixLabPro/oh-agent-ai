@@ -327,8 +327,13 @@ fn deliver_entity_event(app: &tauri::AppHandle, payload: &serde_json::Value) -> 
 
 fn poll_building_mailbox(app: &tauri::AppHandle) {
     let home = crate::overview::data_home();
-    let Some(payload) = agent_vitals_runtime::query::city_building::read_mailbox(&home) else { return; };
-    let _ = deliver_entity_event(app, &payload);
+    if let Some(payload) = agent_vitals_runtime::query::city_building::read_mailbox(&home) {
+        let _ = deliver_entity_event(app, &payload);
+    }
+    // Preview / reject live on edit.json so persist notify.json is never overwritten.
+    if let Some(payload) = agent_vitals_runtime::query::city_building::read_edit_mailbox(&home) {
+        let _ = deliver_entity_event(app, &payload);
+    }
 }
 
 fn start_building_bridge(app: &tauri::AppHandle) {
@@ -879,6 +884,10 @@ mod tests {
         assert!(script.contains("\"revision\":3"));
         let road = json!({"type":"CityEntityChanged","entity_kind":"road","entity_id":"rd_1","action":"set","revision":1,"event_id":"ev_1"});
         assert!(entity_event_script(&road).contains("__AV_PLUGIN_ENTITY_CHANGED__"));
+        let preview = json!({"type":"CityEntityChanged","entity_kind":"building","entity_id":"ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action":"preview","revision":0,"event_id":"ui_preview_1"});
+        assert!(entity_event_script(&preview).contains("\"action\":\"preview\""));
+        let reject = json!({"type":"CityEntityChanged","entity_kind":"building","entity_id":"ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action":"reject","revision":1,"event_id":"ui_reject_1"});
+        assert!(entity_event_script(&reject).contains("\"action\":\"reject\""));
     }
 
     #[test]

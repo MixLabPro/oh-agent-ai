@@ -8,6 +8,10 @@
 //! PluginHost (unix socket push + durable mailbox) using the shared
 //! `CityEntityChanged` envelope (`entity_kind=building` today). City dispatches
 //! on kind and plays construction. `build_events` remains the poll fallback.
+//!
+//! Preview success and compliance / detail-regression rejects use the same
+//! envelope (`action=preview|reject`) but never persist: they write `edit.json`
+//! (not `notify.json`) so a later persist mailbox poll cannot be overwritten.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +34,10 @@ pub const MAX_PARTS: usize = 64;
 pub const ENTITY_CHANGED_EVENT: &str = "__AV_PLUGIN_ENTITY_CHANGED__";
 pub const ENTITY_CHANGED_TYPE: &str = "CityEntityChanged";
 pub const ENTITY_KIND_BUILDING: &str = "building";
+/// Live edit actions. Not stored in `build_events`; City treats them as ephemeral.
+pub const ENTITY_ACTION_PREVIEW: &str = "preview";
+pub const ENTITY_ACTION_REJECT: &str = "reject";
+const FLASH_RULES: &[&str] = &["invalid_model", "detail_regression"];
 
 const KINDS: &[&str] = &["box", "cylinder", "cone"];
 const ROLES: &[&str] = &["wall", "trim", "roof", "glass", "structure", "door", "window"];
@@ -45,8 +53,14 @@ const LOT_HALF_Z: f64 = 6.0;
 const MAX_HEIGHT: f64 = 48.0;
 const OVERLAP_EPS: f64 = 0.02;
 
+/// Payload is boxed so `Result<T, BuildingError>` stays under clippy's
+/// `result_large_err` threshold (rustc 1.99: Err ≥128 bytes). Field access
+/// is unchanged via `Deref`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BuildingError {
+pub struct BuildingError(Box<BuildingErrorInner>);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildingErrorInner {
     pub kind: &'static str,
     pub rule: &'static str,
     pub parts: Vec<String>,
@@ -55,16 +69,39 @@ pub struct BuildingError {
     pub compliant_models: Vec<String>,
 }
 
+impl std::ops::Deref for BuildingError {
+    type Target = BuildingErrorInner;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<BuildingError>() < 128,
+    "BuildingError must stay under clippy result_large_err (128-byte Err variant)",
+);
+
 impl BuildingError {
-    pub(crate) fn validation(rule: &'static str, parts: Vec<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
-        Self {
-            kind: "validation",
+    fn new(
+        kind: &'static str,
+        rule: &'static str,
+        parts: Vec<String>,
+        message: impl Into<String>,
+        suggested_fix: Option<String>,
+        compliant_models: Vec<String>,
+    ) -> Self {
+        Self(Box::new(BuildingErrorInner {
+            kind,
             rule,
             parts,
             message: message.into(),
-            suggested_fix: Some(fix.into()),
-            compliant_models: Vec::new(),
-        }
+            suggested_fix,
+            compliant_models,
+        }))
+    }
+
+    pub(crate) fn validation(rule: &'static str, parts: Vec<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self::new("validation", rule, parts, message, Some(fix.into()), Vec::new())
     }
 
     pub(crate) fn invalid_model_compliance(
@@ -72,14 +109,7 @@ impl BuildingError {
         fix: impl Into<String>,
         candidates: &[String],
     ) -> Self {
-        Self {
-            kind: "validation",
-            rule: "invalid_model",
-            parts: Vec::new(),
-            message: message.into(),
-            suggested_fix: Some(fix.into()),
-            compliant_models: candidates.to_vec(),
-        }
+        Self::new("validation", "invalid_model", Vec::new(), message, Some(fix.into()), candidates.to_vec())
     }
 
     pub(crate) fn detail_regression(
@@ -87,34 +117,27 @@ impl BuildingError {
         fix: impl Into<String>,
         candidates: &[String],
     ) -> Self {
-        Self {
-            kind: "validation",
-            rule: "detail_regression",
-            parts: Vec::new(),
-            message: message.into(),
-            suggested_fix: Some(fix.into()),
-            compliant_models: candidates.to_vec(),
-        }
+        Self::new("validation", "detail_regression", Vec::new(), message, Some(fix.into()), candidates.to_vec())
     }
     fn conflict(current_revision: u64) -> Self {
-        Self {
-            kind: "conflict",
-            rule: "revision_conflict",
-            parts: Vec::new(),
-            message: format!("expected_revision does not match current revision {current_revision}"),
-            suggested_fix: Some("call get_building and retry with the returned revision".into()),
-            compliant_models: Vec::new(),
-        }
+        Self::new(
+            "conflict",
+            "revision_conflict",
+            Vec::new(),
+            format!("expected_revision does not match current revision {current_revision}"),
+            Some("call get_building and retry with the returned revision".into()),
+            Vec::new(),
+        )
     }
     fn not_found(session_id: &str) -> Self {
-        Self {
-            kind: "not_found",
-            rule: "unknown_session",
-            parts: Vec::new(),
-            message: format!("no session building matches `{session_id}`"),
-            suggested_fix: Some("pass sessions_search.session_ref (sr_…) or the building asset_ref (ca_…)".into()),
-            compliant_models: Vec::new(),
-        }
+        Self::new(
+            "not_found",
+            "unknown_session",
+            Vec::new(),
+            format!("no session building matches `{session_id}`"),
+            Some("pass sessions_search.session_ref (sr_…) or the building asset_ref (ca_…)".into()),
+            Vec::new(),
+        )
     }
     pub fn to_json(&self) -> Value {
         let mut out = json!({
@@ -538,14 +561,14 @@ fn open_store(home: &Path) -> Result<Connection, BuildingError> {
 }
 
 fn store_unavailable() -> BuildingError {
-    BuildingError {
-        kind: "not_found",
-        rule: "store_unavailable",
-        parts: Vec::new(),
-        message: "city building override store is unavailable".into(),
-        suggested_fix: Some("retry; the store lives under state/plugins/city-buildings/".into()),
-        compliant_models: Vec::new(),
-    }
+    BuildingError::new(
+        "not_found",
+        "store_unavailable",
+        Vec::new(),
+        "city building override store is unavailable",
+        Some("retry; the store lives under state/plugins/city-buildings/".into()),
+        Vec::new(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -655,9 +678,20 @@ pub fn is_entity_changed(payload: &Value) -> bool {
     payload.get("type").and_then(Value::as_str) == Some(ENTITY_CHANGED_TYPE)
         && payload.get("entity_kind").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
         && payload.get("entity_id").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
-        && matches!(payload.get("action").and_then(Value::as_str), Some("set") | Some("reset"))
+        && matches!(
+            payload.get("action").and_then(Value::as_str),
+            Some("set") | Some("reset") | Some(ENTITY_ACTION_PREVIEW) | Some(ENTITY_ACTION_REJECT)
+        )
         && payload.get("revision").and_then(Value::as_u64).is_some()
         && entity_event_id(payload).is_some()
+}
+
+pub fn is_flash_rule(rule: &str) -> bool {
+    FLASH_RULES.contains(&rule)
+}
+
+pub fn edit_mailbox_path(home: &Path) -> PathBuf {
+    store_dir(home).join("edit.json")
 }
 
 fn write_mailbox(home: &Path, payload: &Value) -> Result<(), BuildingError> {
@@ -705,6 +739,94 @@ pub fn notify_city_ui(home: &Path, payload: &Value) -> &'static str {
 pub fn read_mailbox(home: &Path) -> Option<Value> {
     let raw = std::fs::read_to_string(mailbox_path(home)).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+fn write_named_mailbox(home: &Path, filename: &str, payload: &Value) -> Result<(), BuildingError> {
+    let dir = store_dir(home);
+    std::fs::create_dir_all(&dir).map_err(|_| store_unavailable())?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = dir.join(filename);
+    let tmp = dir.join(format!("{filename}.tmp"));
+    std::fs::write(&tmp, payload.to_string()).map_err(|_| store_unavailable())?;
+    std::fs::rename(&tmp, &path).map_err(|_| store_unavailable())?;
+    Ok(())
+}
+
+fn write_edit_mailbox(home: &Path, payload: &Value) -> Result<(), BuildingError> {
+    write_named_mailbox(home, "edit.json", payload)
+}
+
+/// Preview / reject notify: separate mailbox so persist `notify.json` stays intact.
+/// `"pushed"` / `"queued"` become `notify.ui`. Ghost/flash only matter while City is open.
+pub fn notify_edit_ui(home: &Path, payload: &Value) -> &'static str {
+    let _ = write_edit_mailbox(home, payload);
+    if try_push_socket(home, payload) { "pushed" } else { "queued" }
+}
+
+pub fn read_edit_mailbox(home: &Path) -> Option<Value> {
+    let raw = std::fs::read_to_string(edit_mailbox_path(home)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn peek_revision(home: &Path, asset_ref: &str) -> u64 {
+    open_existing(home).ok().flatten()
+        .and_then(|db| load_override(&db, asset_ref).ok())
+        .map(|stored| stored.revision)
+        .unwrap_or(0)
+}
+
+fn new_edit_event_id(action: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let now = crate::clock::now_ms();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("ui_{action}_{now:012x}{seq:08x}")
+}
+
+fn attach_edit_notify(
+    home: &Path,
+    identity: &BuildingIdentity,
+    action: &str,
+    extra: Value,
+) -> Value {
+    let revision = peek_revision(home, &identity.asset_ref);
+    let event_id = new_edit_event_id(action);
+    let payload = building_changed_payload(identity, revision, &event_id, action, extra);
+    let ui = notify_edit_ui(home, &payload);
+    json!({
+        "channel": if ui == "pushed" { "host-socket" } else { "mailbox" },
+        "ui": ui,
+        "action": action,
+        "event_id": event_id,
+        "revision": revision,
+    })
+}
+
+fn with_preview_notify(mut out: Value, home: &Path, identity: &BuildingIdentity, model: &Value) -> Value {
+    out["notify"] = attach_edit_notify(home, identity, ENTITY_ACTION_PREVIEW, json!({
+        "source": "preview",
+        "ephemeral": true,
+        "persisted": false,
+        "model": model,
+        "error": Value::Null,
+    }));
+    out
+}
+
+fn with_reject_notify(mut out: Value, home: &Path, identity: &BuildingIdentity, error: &BuildingError) -> Value {
+    if !is_flash_rule(error.rule) {
+        return out;
+    }
+    out["notify"] = attach_edit_notify(home, identity, ENTITY_ACTION_REJECT, json!({
+        "source": "reject",
+        "ephemeral": true,
+        "persisted": false,
+        "error": error.to_json(),
+    }));
+    out
 }
 
 /// Current overrides (model_json NOT NULL). Missing store → empty, not an error.
@@ -983,7 +1105,7 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheri
     if inheritance.get("reset").and_then(Value::as_bool) == Some(true) {
         let clean = default_model(identity.tokens_total());
         let summary = geometric_summary(&clean);
-        return Ok(json!({
+        return Ok(with_preview_notify(json!({
             "ok": true,
             "error": Value::Null,
             "persisted": false,
@@ -993,12 +1115,12 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheri
             "summary": summary,
             "observe": { "text": observe_text("preview-reset", &summary, 0), "summary": summary },
             "projection": projection_meta(&identity, &summary, "current"),
-        }));
+        }), home, &identity, &clean));
     }
     let merged = match resolve_inheritance(&identity, inheritance) {
         Ok(clean) => clean,
         Err(error) => {
-            return Ok(json!({
+            return Ok(with_reject_notify(json!({
                 "ok": false,
                 "error": error.to_json(),
                 "persisted": false,
@@ -1012,13 +1134,13 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheri
                     "compliant_catalog": json!(compliant_catalog_ids(&derive_slot(&identity.session_key, identity.tokens_total()))),
                     "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
                 },
-            }));
+            }), home, &identity, &error));
         }
     };
     match validate_for_session(home, &identity, &merged) {
         Ok(clean) => {
             let summary = geometric_summary(&clean);
-            Ok(json!({
+            Ok(with_preview_notify(json!({
                 "ok": true,
                 "error": Value::Null,
                 "persisted": false,
@@ -1028,9 +1150,9 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheri
                 "summary": summary,
                 "observe": { "text": observe_text("preview", &summary, 0), "summary": summary },
                 "projection": projection_meta(&identity, &summary, "current"),
-            }))
+            }), home, &identity, &clean))
         }
-        Err(error) => Ok(json!({
+        Err(error) => Ok(with_reject_notify(json!({
             "ok": false,
             "error": error.to_json(),
             "persisted": false,
@@ -1045,7 +1167,7 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheri
                 "compliant_catalog": json!(compliant_catalog_ids(&derive_slot(&identity.session_key, identity.tokens_total()))),
                 "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
             },
-        })),
+        }), home, &identity, &error)),
     }
 }
 
@@ -1074,12 +1196,12 @@ pub fn set_building_model(
     let clean = match validate_for_session(home, &identity, &merged) {
         Ok(clean) => clean,
         Err(error) => {
-            return Ok(json!({
+            return Ok(with_reject_notify(json!({
                 "ok": false,
                 "error": error.to_json(),
                 "persisted": false,
                 "revision": current_revision(home, &identity.asset_ref)?,
-            }));
+            }), home, &identity, &error));
         }
     };
     let stored = normalize_inheritance(inheritance)?;
@@ -1260,6 +1382,12 @@ mod tests {
         assert_eq!(fail["ok"], false);
         assert_eq!(fail["error"]["rule"], "detail_regression");
         assert!(fail["error"]["compliant_models"].as_array().is_some_and(|a| !a.is_empty()));
+        assert_eq!(fail["notify"]["action"], ENTITY_ACTION_REJECT);
+        let edit = read_edit_mailbox(&home).expect("edit mailbox after detail_regression");
+        assert_eq!(edit["action"], ENTITY_ACTION_REJECT);
+        assert_eq!(edit["error"]["rule"], "detail_regression");
+        let persist = read_mailbox(&home).expect("persist mailbox from prior set");
+        assert_eq!(persist["action"], "set");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1284,6 +1412,65 @@ mod tests {
         assert_eq!(fail["ok"], false);
         assert_eq!(fail["error"]["rule"], "invalid_model");
         assert!(fail["error"]["compliant_models"].as_array().is_some_and(|a| !a.is_empty()));
+        assert_eq!(fail["notify"]["action"], ENTITY_ACTION_REJECT);
+        assert!(fail["notify"]["event_id"].as_str().unwrap().starts_with("ui_reject_"));
+        let edit = read_edit_mailbox(&home).expect("edit mailbox after reject");
+        assert!(is_entity_changed(&edit));
+        assert_eq!(edit["action"], ENTITY_ACTION_REJECT);
+        assert_eq!(edit["error"]["rule"], "invalid_model");
+        assert_eq!(edit["ephemeral"], true);
+        assert!(read_mailbox(&home).is_none(), "reject must not overwrite persist mailbox");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn preview_success_notifies_ghost_without_touching_persist_mailbox() {
+        let (home, db, session_id) = seed();
+        let inheritance = json!({
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "projection" },
+            "overrides": {}
+        });
+        let set = set_building_model(&home, db.conn(), &session_id, &inheritance, 0).unwrap();
+        assert_eq!(set["ok"], true);
+        let persist = read_mailbox(&home).expect("persist mailbox after set");
+        assert_eq!(persist["action"], "set");
+        let persist_event = persist["event_id"].clone();
+
+        let pass = preview_building(&home, db.conn(), &session_id, &inheritance).unwrap();
+        assert_eq!(pass["ok"], true);
+        assert_eq!(pass["persisted"], false);
+        assert_eq!(pass["notify"]["action"], ENTITY_ACTION_PREVIEW);
+        assert!(pass["notify"]["event_id"].as_str().unwrap().starts_with("ui_preview_"));
+        let edit = read_edit_mailbox(&home).expect("edit mailbox after preview");
+        assert!(is_entity_changed(&edit));
+        assert_eq!(edit["action"], ENTITY_ACTION_PREVIEW);
+        assert_eq!(edit["ephemeral"], true);
+        assert_eq!(edit["persisted"], false);
+        assert_eq!(edit["model"]["kit_version"], "session-kit/v1");
+        assert!(edit["model"]["parts"].as_array().is_some_and(|p| !p.is_empty()));
+        let persist_after = read_mailbox(&home).expect("persist mailbox stays");
+        assert_eq!(persist_after["event_id"], persist_event);
+        assert_eq!(persist_after["action"], "set");
+        let events = list_build_events(&home, &[], None, 10).unwrap();
+        assert!(events.iter().all(|row| row["action"] == "set" || row["action"] == "reset"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn overlap_preview_does_not_flash() {
+        let (home, db, session_id) = seed();
+        let fail = preview_building(&home, db.conn(), &session_id, &json!({
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "projection" },
+            "overrides": {
+                "parts_add": [valid_part("a", 0.0), valid_part("b", 0.2)]
+            }
+        })).unwrap();
+        assert_eq!(fail["ok"], false);
+        assert_eq!(fail["error"]["rule"], "overlap");
+        assert!(fail.get("notify").is_none());
+        assert!(read_edit_mailbox(&home).is_none());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1472,6 +1659,14 @@ mod tests {
         assert!(is_entity_changed(&road));
         assert_eq!(road["entity_kind"], "road");
         assert_eq!(entity_event_id(&road), Some("ev_1"));
+        let preview = Value::Object(entity_changed_payload(
+            "building", "ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ENTITY_ACTION_PREVIEW, 0, "ui_preview_1",
+        ));
+        assert!(is_entity_changed(&preview));
+        let reject = Value::Object(entity_changed_payload(
+            "building", "ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ENTITY_ACTION_REJECT, 1, "ui_reject_1",
+        ));
+        assert!(is_entity_changed(&reject));
         let mut incomplete = payload.clone();
         incomplete["entity_kind"] = json!("");
         assert!(!is_entity_changed(&incomplete));

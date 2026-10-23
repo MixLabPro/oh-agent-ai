@@ -337,7 +337,7 @@ fn model_footprint(model: &Value) -> (f64, f64, f64) {
     let min = summary["bbox"]["min"].as_array().cloned().unwrap_or_default();
     let max = summary["bbox"]["max"].as_array().cloned().unwrap_or_default();
     let height = summary["height"].as_f64().unwrap_or(0.0);
-    let half_x = if min.len() >= 1 && max.len() >= 1 {
+    let half_x = if !min.is_empty() && !max.is_empty() {
         (max[0].as_f64().unwrap_or(0.0) - min[0].as_f64().unwrap_or(0.0)) / 2.0
     } else {
         0.0
@@ -397,7 +397,7 @@ fn story_metrics(model: &Value, total_height: f64) -> (u32, f64) {
         .filter(|n| n.is_finite() && *n > 0.0);
 
     let bands = count_floor_bands(model);
-    let floors = declared_floors.unwrap_or_else(|| if bands >= 2 { bands } else { 1 });
+    let floors = declared_floors.unwrap_or(if bands >= 2 { bands } else { 1 });
     let story_height = declared_story.unwrap_or_else(|| total_height / floors.max(1) as f64);
     (floors, story_height)
 }

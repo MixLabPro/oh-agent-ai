@@ -8,8 +8,11 @@ import { createMaterialFactory } from "./render/landmarkMaterials";
 import type { BuildingPlan, Part, PartRole } from "./models/model";
 import type { BuildingRuntime } from "./render/types";
 import {
-  constructionOrder, partReveal, type KitPart, type OverlayDecision,
+  constructionOrder, partReveal, type KitPart, type KitRole, type OverlayDecision,
 } from "./sessionKitConstruction";
+import {
+  editPresentation, GHOST_OPACITY, type EditVisual, type GhostVisual, type RejectVisual,
+} from "./sessionKitEditState";
 
 export type KitRuntime = {
   decision: OverlayDecision;
@@ -25,14 +28,24 @@ const ROLE_TINT: Record<string, string> = {
   roof: "#7a3e32",
   glass: "#73b8c0",
   trim: "#e8d5a3",
+  door: "#5a4030",
+  window: "#8ec8d0",
 };
+
+const FLASH_COLOR = "#e24b4b";
+
+function compileRole(role: KitRole): PartRole {
+  if (role === "door") return "structure";
+  if (role === "window") return "glass";
+  return role;
+}
 
 function planFrom(parts: KitPart[], palette?: string): BuildingPlan {
   return constructionOrder(parts).map((part) => {
     const mapped: Part = {
       id: part.id,
       kind: part.kind,
-      role: part.role as PartRole,
+      role: compileRole(part.role),
       at: part.at,
       size: part.size,
       color: part.color ?? palette ?? ROLE_TINT[part.role] ?? ROLE_TINT.wall,
@@ -106,4 +119,90 @@ export function replayKitRuntime(kit: KitRuntime): void {
   kit.progress = 0;
   kit.group.visible = kit.decision.kind === "set";
   applyKitProgress(kit.objects, 0, kit.decision.parts.length);
+}
+
+export type EditRuntime = {
+  visual: EditVisual;
+  group: THREE.Group;
+  objects: THREE.Object3D[];
+  disposables: Array<{ dispose: () => void }>;
+  lastOpacity: number;
+};
+
+function ghostMaterialFactory(onCreate: (item: { dispose: () => void }) => void): ReturnType<typeof createMaterialFactory> {
+  const inner = createMaterialFactory((item) => onCreate(item));
+  return (color, emissive, options) => {
+    const material = inner(color, emissive, { ...options, private: true });
+    material.transparent = true;
+    material.opacity = GHOST_OPACITY;
+    material.depthWrite = false;
+    return material;
+  };
+}
+
+export function createGhostRuntime(visual: GhostVisual, runtime: BuildingRuntime, palette?: string): EditRuntime {
+  const group = new THREE.Group();
+  group.name = `session-kit-ghost:${visual.assetRef}`;
+  group.position.set(runtime.slot.x, runtime.groundY, runtime.slot.z);
+  group.rotation.y = runtime.slot.yaw;
+  const disposables: Array<{ dispose: () => void }> = [];
+  const objects: THREE.Object3D[] = [];
+  const target: CompileTarget = {
+    group,
+    material: ghostMaterialFactory((item) => disposables.push(item)),
+    disposables,
+    onPart: (_part, object) => { objects.push(object); },
+  };
+  if (visual.parts.length) compileBuilding(planFrom(visual.parts, palette), target);
+  applyKitProgress(objects, 1, visual.parts.length);
+  group.visible = visual.parts.length > 0;
+  return { visual, group, objects, disposables, lastOpacity: GHOST_OPACITY };
+}
+
+export function createFlashRuntime(visual: RejectVisual, runtime: BuildingRuntime): EditRuntime {
+  const group = new THREE.Group();
+  group.name = `session-kit-flash:${visual.assetRef}`;
+  group.position.set(runtime.slot.x, runtime.groundY, runtime.slot.z);
+  group.rotation.y = runtime.slot.yaw;
+  const height = Math.max(2.2, runtime.building.height * Math.max(runtime.display, 0.4));
+  const geometry = new THREE.BoxGeometry(runtime.slot.width * 0.94, height, runtime.slot.depth * 0.94);
+  const material = new THREE.MeshBasicMaterial({
+    color: FLASH_COLOR, transparent: true, opacity: 0.55, depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.y = height / 2;
+  group.add(mesh);
+  return {
+    visual,
+    group,
+    objects: [mesh],
+    disposables: [geometry, material],
+    lastOpacity: 0.55,
+  };
+}
+
+export function createEditRuntime(visual: EditVisual, runtime: BuildingRuntime, palette?: string): EditRuntime | null {
+  if (visual.kind === "ghost") return createGhostRuntime(visual, runtime, palette);
+  return createFlashRuntime(visual, runtime);
+}
+
+export function stepEditRuntime(edit: EditRuntime, nowMs: number): boolean {
+  const shown = editPresentation(edit.visual, nowMs);
+  if (edit.lastOpacity === shown.opacity && edit.group.visible === shown.active) return false;
+  edit.lastOpacity = shown.opacity;
+  edit.group.visible = shown.active;
+  for (const object of edit.objects) {
+    object.traverse((node) => {
+      const material = (node as THREE.Mesh).material;
+      if (material && "opacity" in material) {
+        (material as THREE.MeshBasicMaterial).opacity = shown.opacity;
+      }
+    });
+  }
+  return true;
+}
+
+export function disposeEditRuntime(edit: EditRuntime): void {
+  edit.group.removeFromParent();
+  for (const disposable of edit.disposables) disposable.dispose();
 }

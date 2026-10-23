@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Host → City entity envelope + building construction apply path.
-// No WebGL: pure parse/dispatch/reducer + part-reveal math.
+// Host → City entity envelope + building construction / ghost / fail-flash apply path.
+// No WebGL: pure parse/dispatch/reducer + part-reveal + edit-state math.
 import assert from "node:assert/strict";
 import { loadCity } from "./city-kit/index.mjs";
 
@@ -11,11 +11,20 @@ const {
 });
 const {
   parseBuildingChanged, applyBuildingEvent, entityChangedFromBuilding,
-  partReveal, visiblePartCount, constructionOrder,
+  partReveal, visiblePartCount, constructionOrder, parseKitModel,
 } = await loadCity({
   "engine/sessionKitConstruction.ts": [
     "parseBuildingChanged", "applyBuildingEvent", "entityChangedFromBuilding",
-    "partReveal", "visiblePartCount", "constructionOrder",
+    "partReveal", "visiblePartCount", "constructionOrder", "parseKitModel",
+  ],
+});
+const {
+  parseBuildingEdit, applyEditEvent, editPresentation, flashEnvelope,
+  GHOST_OPACITY, REJECT_FLASH_MS, isFlashRule,
+} = await loadCity({
+  "engine/sessionKitEditState.ts": [
+    "parseBuildingEdit", "applyEditEvent", "editPresentation", "flashEnvelope",
+    "GHOST_OPACITY", "REJECT_FLASH_MS", "isFlashRule",
   ],
 });
 
@@ -103,6 +112,15 @@ assert.equal(parseBuildingChanged({
   type: ENTITY_CHANGED_TYPE, entity_kind: "road", entity_id: ASSET,
   action: "set", revision: 1, event_id: EVENT, model,
 }), null, "road must not enter the building handler");
+assert.equal(parseBuildingChanged({
+  type: ENTITY_CHANGED_TYPE, entity_kind: "building", entity_id: ASSET,
+  action: "preview", revision: 1, event_id: "ui_preview_1", model,
+}), null, "preview must not enter the persist construction reducer");
+assert.equal(parseBuildingChanged({
+  type: ENTITY_CHANGED_TYPE, entity_kind: "building", entity_id: ASSET,
+  action: "reject", revision: 1, event_id: "ui_reject_1",
+  error: { rule: "invalid_model" },
+}), null, "reject must not enter the persist construction reducer");
 
 const fromRow = entityChangedFromBuilding({
   asset_ref: ASSET, revision: 1, kind: "set", build_event_id: EVENT, model,
@@ -127,5 +145,73 @@ const aliasOnly = parseEntityChanged({
 assert.equal(aliasOnly.entity_id, ASSET);
 assert.equal(aliasOnly.action, "set");
 assert.equal(aliasOnly.event_id, EVENT);
+
+assert.ok(parseKitModel({
+  kit_version: "session-kit/v1",
+  parts: [
+    { id: "door", kind: "box", role: "door", at: [0, 0, 3], size: [1.2, 2, 0.2] },
+    { id: "window", kind: "box", role: "window", at: [0, 3, 3], size: [1.4, 1.2, 0.15] },
+    { id: "base", kind: "box", role: "structure", at: [0, 0, 0], size: [3, 2, 3] },
+  ],
+}), "catalog door/window roles must parse so ghost/construction can render default kits");
+
+const previewEnvelope = {
+  type: ENTITY_CHANGED_TYPE, schema_version: 1, entity_kind: "building",
+  entity_id: ASSET, action: "preview", revision: 1, event_id: "ui_preview_test1",
+  session_id: SESSION, source: "preview", ephemeral: true, persisted: false, model,
+};
+const preview = parseBuildingEdit(previewEnvelope);
+assert.ok(preview);
+assert.equal(preview.action, "preview");
+assert.equal(dispatchEntityChanged(preview, { building: () => kinds.push("preview") }), true);
+assert.deepEqual(kinds.slice(-1), ["preview"]);
+
+const ghost = applyEditEvent(null, preview, SESSION, 0);
+assert.ok(ghost);
+assert.equal(ghost.kind, "ghost");
+assert.equal(ghost.parts.length, 2);
+assert.equal(editPresentation(ghost, 0).opacity, GHOST_OPACITY);
+assert.equal(editPresentation(ghost, 0).active, true);
+assert.equal(applyEditEvent(ghost, preview, SESSION, 10), ghost, "same preview event_id is a no-op");
+
+const rejectEnvelope = {
+  type: ENTITY_CHANGED_TYPE, entity_kind: "building", entity_id: ASSET,
+  action: "reject", revision: 1, event_id: "ui_reject_test1",
+  source: "reject", ephemeral: true,
+  error: { kind: "validation", rule: "invalid_model", message: "pillar" },
+};
+const reject = parseBuildingEdit(rejectEnvelope);
+assert.ok(reject);
+const flash = applyEditEvent(ghost, reject, SESSION, 100);
+assert.ok(flash);
+assert.equal(flash.kind, "reject");
+assert.equal(flash.rule, "invalid_model");
+assert.equal(flash.startedAtMs, 100);
+assert.equal(editPresentation(flash, 100).active, true);
+assert.ok(editPresentation(flash, 100 + REJECT_FLASH_MS / 2).opacity > 0.2);
+assert.equal(editPresentation(flash, 100 + REJECT_FLASH_MS).active, false);
+assert.equal(flashEnvelope(-1).active, false);
+assert.equal(flashEnvelope(REJECT_FLASH_MS).active, false);
+
+assert.equal(parseBuildingEdit({
+  type: ENTITY_CHANGED_TYPE, entity_kind: "building", entity_id: ASSET,
+  action: "reject", revision: 1, event_id: "ui_reject_overlap",
+  error: { rule: "overlap" },
+}), null, "overlap is not a City fail-flash rule");
+assert.equal(isFlashRule("detail_regression"), true);
+assert.equal(isFlashRule("revision_conflict"), false);
+
+const regression = parseBuildingEdit({
+  type: ENTITY_CHANGED_TYPE, entity_kind: "building", entity_id: ASSET,
+  action: "reject", revision: 2, event_id: "ui_reject_detail",
+  error: { rule: "detail_regression" },
+});
+assert.ok(regression);
+assert.equal(applyEditEvent(null, regression, SESSION, 0).rule, "detail_regression");
+
+const parsedPreview = parseEntityChanged(previewEnvelope);
+assert.equal(parsedPreview.action, "preview");
+const parsedReject = parseEntityChanged(rejectEnvelope);
+assert.equal(parsedReject.action, "reject");
 
 console.log("verify-city-entity-bridge: ok");
