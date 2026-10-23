@@ -395,9 +395,11 @@ fn buildings_overrides_reads_the_city_owned_store_without_changing_pages() {
     assert!(empty["page"].is_null());
     assert_eq!(empty["result"]["overrides"].as_array().unwrap().len(),0);
     assert_eq!(empty["result"]["poll_hint_ms"],2_000);
-    let proposed=json!({"kit_version":"session-kit/v1","params":{"form":"tower"},"parts":[
-        {"id":"base","kind":"box","role":"structure","at":[0.0,0.0,0.0],"size":[3.0,2.0,3.0]},
-        {"id":"cap","kind":"cone","role":"roof","at":[0.0,2.0,0.0],"size":[2.0,1.5,2.0]}
+    let proposed=json!({"kit_version":"session-kit/v1","params":{"catalog_id":"kit-low-block","floors":2,"story_height":2.8},"parts":[
+        {"id":"base","kind":"box","role":"structure","at":[0.0,0.0,0.0],"size":[5.0,2.8,6.0]},
+        {"id":"cap","kind":"box","role":"wall","at":[0.0,2.8,0.0],"size":[4.5,2.8,5.5]},
+        {"id":"door","kind":"box","role":"door","at":[0.0,0.0,3.0],"size":[1.2,2.0,0.2]},
+        {"id":"window","kind":"box","role":"window","at":[0.0,3.5,3.0],"size":[1.4,1.2,0.15]}
     ]});
     let set=city_building::set_building_model(&f.home,f.db.conn(),&session_id,&proposed,0).unwrap();
     assert_eq!(set["ok"],true);

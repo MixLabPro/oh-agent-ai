@@ -34,12 +34,14 @@ ReACT loop: **get → preview → set → get**. Confirm the set by matching `re
 ```
 
 - `parts` length 1–64.
-- `kind`: `box` | `cylinder` | `cone`. `role`: `wall` | `trim` | `roof` | `glass` | `structure`.
+- `kind`: `box` | `cylinder` | `cone`. `role`: `wall` | `trim` | `roof` | `glass` | `structure` | `door` | `window`.
 - `at` is the base centre (y = bottom). `size` is `[x, y, z]` extents. Optional `rot`, `color` (`#rrggbb`).
-- `params.form`: `tower` | `slab` | `block` | `midrise`. Optional `params.palette`.
+- `params.form`: `tower` | `slab` | `block` | `midrise`. Optional `params.palette`, `params.catalog_id`, `params.build_cost`, `params.floors`, `params.story_height`.
 - No scripts, no extra fields. Unknown `kit_version` is a validation error. Stored overrides keep their `kit_version` so old rows are not silently migrated.
 
-Cheap geometry checks: finite numbers, parts ≤64, lot envelope (±4 x, ±6 z, height 0–48 world units), AABB overlap.
+**Geometry checks:** finite numbers, parts ≤64, lot envelope (±4 x, ±6 z, height 0–48 world units), AABB overlap.
+
+**Model compliance (preview + set, same path):** derived lot footprint (min coverage + max bounds), session height class + story height (`params.story_height` / `params.floors`, reject pillar-like single shafts), construction budget (`estimate` or `params.build_cost` vs session `budget_cap`; catalog `cost` when `catalog_id` set), and required `door` / `window` part roles for occupiable models (waived when `catalog_id` points at a kit that provides them). Failures use `rule: invalid_model` and may include `compliant_models` (catalog ids). `get_building.projection` returns `lot`, `compliant_catalog`, and `required_part_roles`.
 
 ## Errors
 
