@@ -128,6 +128,7 @@ for (const [, source] of zhHtml.matchAll(/<(?:img|script)[^>]+src="([^"]+)"/g)) 
 assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/zh\/<\/loc>/);
 assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/blog\/<\/loc>/);
 assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/blog\/multi-agent-shared-notes\/<\/loc>/);
+assert.match(read('sitemap.xml'), /<loc>https:\/\/ohagent\.ai\/blog\/fleet-auditor-before-hire\/<\/loc>/);
 assert.match(read('sitemap.xml'), /<lastmod>2026-10-23<\/lastmod>/);
 assert.match(read('robots.txt'), /Sitemap: https:\/\/ohagent\.ai\/docs\/sitemap-index\.xml/);
 assert.match(read('deploy.sh'), /rsync -a --exclude="\.DS_Store" \.\.\/docs\/dist\/ "\$STAGE"\/docs\//, 'deploy.sh stages the docs under /docs');
@@ -136,7 +137,9 @@ assert.match(read('deploy.sh'), /cp zh\/index\.html "\$STAGE"\/zh\//, 'deploy.sh
 {
   const blogIndex = read('blog/index.html');
   const blogPost = read('blog/multi-agent-shared-notes/index.html');
+  const fleetPost = read('blog/fleet-auditor-before-hire/index.html');
   assert.match(blogIndex, /href="\/blog\/multi-agent-shared-notes\/"/);
+  assert.match(blogIndex, /href="\/blog\/fleet-auditor-before-hire\/"/);
   assert.match(blogIndex, /href="\/styles\.css/);
   assert.match(blogPost, /arxiv\.org\/abs\/2610\.22319/);
   assert.match(blogPost, /x\.com\/eggbaby\/status\/2111388911985475975/);
@@ -144,7 +147,11 @@ assert.match(read('deploy.sh'), /cp zh\/index\.html "\$STAGE"\/zh\//, 'deploy.sh
   assert.match(blogPost, /\(MIT\)/);
   assert.match(blogPost, /href="\/styles\.css/);
   assert.match(blogPost, /<link rel="canonical" href="https:\/\/ohagent\.ai\/blog\/multi-agent-shared-notes\/">/);
-  assert.doesNotMatch(blogIndex + blogPost, /<script[^>]+src="https?:/, 'Blog pages stay same-origin');
+  assert.match(fleetPost, /botskills\.sh\/blog\/grok-bot-fleet-audit/);
+  assert.match(fleetPost, /thedailybot\.vercel\.app\/changelog\/guide-fleet-cost-hygiene/);
+  assert.match(fleetPost, /href="\/styles\.css/);
+  assert.match(fleetPost, /<link rel="canonical" href="https:\/\/ohagent\.ai\/blog\/fleet-auditor-before-hire\/">/);
+  assert.doesNotMatch(blogIndex + blogPost + fleetPost, /<script[^>]+src="https?:/, 'Blog pages stay same-origin');
 }
 
 // Execute localization against all actual translation-bearing elements.
