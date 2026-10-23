@@ -423,6 +423,10 @@ fn buildings_overrides_reads_the_city_owned_store_without_changing_pages() {
     assert_eq!(mailbox["type"],"CityEntityChanged");
     assert_eq!(mailbox["entity_kind"],"building");
     assert_eq!(mailbox["action"],"set");
+    let squad=&loaded["result"]["squad_mailbox"];
+    assert_eq!(squad["v"],1);
+    assert!(squad["kind"]=="set" || squad["kind"]=="release");
+    assert!(loaded["result"]["claims"].as_array().unwrap().is_empty());
     assert!(first["page"]["sessions"][0].get("building_override").is_none());
     assert_eq!(city_v3::read(&f.home,&f.next(&first,json!({"operation":"buildings.overrides","bogus":true})),f.now),Err("invalid_parameter"));
 }

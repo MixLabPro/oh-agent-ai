@@ -31,6 +31,7 @@ import { applyPlanPatch, layoutPinsFor, type PatchedLayout, type PlanPatchV1 } f
 import { CityParts, occupantsCanAppend, type QualityLevel } from "./cityParts";
 import { applyBuildingEvent, parseBuildingChanged, replayDecision, type BuildingChangedEvent, type OverlayDecision } from "./sessionKitConstruction";
 import { applyEditEvent, parseBuildingEdit, type BuildingEditEvent, type EditVisual } from "./sessionKitEditState";
+import { parseSquadEnvelope, type ClaimTint, type SquadEnvelope } from "./squadEvents";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { MIAMI_COASTAL } from "./citySeaside";
 import { CityAurora } from "./cityAurora";
@@ -1101,22 +1102,23 @@ export class CityEngine {
   focusBuilding(id: string): boolean {
     if (!this.parts) return false;
     if (this.cinematic) this.stopCinematic();
-    const anchor = this.parts.focusAnchorFor(id);
+    const resolved = this.parts.sessionIdForAsset(id) ?? id;
+    const anchor = this.parts.focusAnchorFor(resolved);
     if (!anchor) return false;
-    this.setSelected(id); // Keyboard/menu selection must also update the engine's selected target.
+    this.setSelected(resolved); // Keyboard/menu selection must also update the engine's selected target.
     this.attracted = false;
     const framing = buildingFrame(anchor.height, anchor.footprint, this.camera.fov, this.camera.aspect);
     const target = new THREE.Vector3(anchor.x, anchor.ground + anchor.height * 0.5, anchor.z);
     const direction = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).setY(0).normalize();
     if (direction.lengthSq() < 0.01) direction.set(0.8, 0, 0.6).normalize();
     // Start with neighbourhood context for small buildings; wheel zoom remains much closer.
-    const position = this.buildingViewPosition(id, target, direction, Math.max(framing.distance, framing.minDistance * 6));
+    const position = this.buildingViewPosition(resolved, target, direction, Math.max(framing.distance, framing.minDistance * 6));
     this.controls.enablePan = false;
     this.controls.zoomToCursor = false;
     this.controls.minDistance = framing.minDistance;
     this.controls.maxDistance = Math.max(this.boundsRadius * 4.5, position.distanceTo(target) * 1.5);
-    this.orbitLockedId = id;
-    this.options.onOrbitLock?.(id);
+    this.orbitLockedId = resolved;
+    this.options.onOrbitLock?.(resolved);
     this.flyTo(position, target, 550);
     return true;
   }
@@ -1600,7 +1602,8 @@ export class CityEngine {
       occupantCount: occupancy.runtimeCount, positions, kits: this.parts?.kitSnapshot() ?? [],
       edits: this.parts?.editSnapshot() ?? [...this.editVisuals.values()].map((visual) => ({
         sessionId: visual.sessionId, assetRef: visual.assetRef, kind: visual.kind, eventId: visual.eventId,
-      })) };
+      })),
+      claims: this.parts?.claimSnapshot() ?? [] };
   }
 
   applyBuildingChanged(raw: unknown, animate: boolean): OverlayDecision | null {
@@ -1649,6 +1652,21 @@ export class CityEngine {
   clearBuildingEdit(sessionId: string): void {
     this.editVisuals.delete(sessionId);
     this.parts?.clearSessionEdit(sessionId);
+  }
+
+  applySquadEvent(raw: unknown): SquadEnvelope | null {
+    const event = parseSquadEnvelope(raw);
+    if (!event) return null;
+    return event;
+  }
+
+  applyClaimTint(visual: ClaimTint): boolean {
+    return this.parts?.applySessionClaim(visual) ?? false;
+  }
+
+  clearClaimTint(sessionOrAsset: string): boolean {
+    const sessionId = this.parts?.sessionIdForAsset(sessionOrAsset) ?? sessionOrAsset;
+    return this.parts?.clearSessionClaim(sessionId) ?? false;
   }
 
   replayBuilding(assetOrSession: string): boolean {

@@ -297,7 +297,14 @@ pub(crate) fn entity_event_script(payload: &serde_json::Value) -> String {
     format!("window.dispatchEvent(new CustomEvent('{channel}', {{detail: {payload}}}));")
 }
 
+/// PluginHost → City: squad IM envelope (v:1). Same host.sock, different event.
+pub(crate) fn squad_event_script(payload: &serde_json::Value) -> String {
+    let channel = agent_vitals_runtime::query::city_im::SQUAD_EVENT;
+    format!("window.dispatchEvent(new CustomEvent('{channel}', {{detail: {payload}}}));")
+}
+
 static ENTITY_DELIVERED: OnceLock<Mutex<String>> = OnceLock::new();
+static SQUAD_DELIVERED: OnceLock<Mutex<String>> = OnceLock::new();
 static ENTITY_BRIDGE: OnceLock<()> = OnceLock::new();
 
 fn city_view_id(app: &tauri::AppHandle) -> Option<String> {
@@ -325,6 +332,28 @@ fn deliver_entity_event(app: &tauri::AppHandle, payload: &serde_json::Value) -> 
     true
 }
 
+fn deliver_squad_event(app: &tauri::AppHandle, payload: &serde_json::Value) -> bool {
+    use agent_vitals_runtime::query::city_im::{envelope_id, is_squad_envelope};
+    if !is_squad_envelope(payload) { return false; }
+    let Some(event_id) = envelope_id(payload) else { return false; };
+    {
+        let delivered = SQUAD_DELIVERED.get_or_init(|| Mutex::new(String::new())).lock().unwrap();
+        if delivered.as_str() == event_id { return true; }
+    }
+    let Some(id) = city_view_id(app) else { return false; };
+    let Some(view) = app.get_webview(&id) else { return false; };
+    if view.eval(squad_event_script(payload)).is_err() { return false; }
+    *SQUAD_DELIVERED.get_or_init(|| Mutex::new(String::new())).lock().unwrap() = event_id.to_string();
+    let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("im");
+    agent_vitals_runtime::logging::log_info("plugin_host", &format!("squad {kind} {event_id}"));
+    true
+}
+
+fn deliver_host_payload(app: &tauri::AppHandle, payload: &serde_json::Value) -> bool {
+    if deliver_entity_event(app, payload) { return true; }
+    deliver_squad_event(app, payload)
+}
+
 fn poll_building_mailbox(app: &tauri::AppHandle) {
     let home = crate::overview::data_home();
     if let Some(payload) = agent_vitals_runtime::query::city_building::read_mailbox(&home) {
@@ -333,6 +362,10 @@ fn poll_building_mailbox(app: &tauri::AppHandle) {
     // Preview / reject live on edit.json so persist notify.json is never overwritten.
     if let Some(payload) = agent_vitals_runtime::query::city_building::read_edit_mailbox(&home) {
         let _ = deliver_entity_event(app, &payload);
+    }
+    // Squad IM is a third mailbox: never overwrite persist or edit.
+    if let Some(payload) = agent_vitals_runtime::query::city_im::read_squad_mailbox(&home) {
+        let _ = deliver_squad_event(app, &payload);
     }
 }
 
@@ -359,7 +392,7 @@ fn start_building_bridge(app: &tauri::AppHandle) {
                         let mut line = String::new();
                         if BufReader::new(stream).read_line(&mut line).is_err() { continue; }
                         let Ok(payload) = serde_json::from_str::<Value>(line.trim()) else { continue; };
-                        let _ = deliver_entity_event(&app, &payload);
+                        let _ = deliver_host_payload(&app, &payload);
                     }
                 }
                 Err(error) => {
@@ -888,6 +921,17 @@ mod tests {
         assert!(entity_event_script(&preview).contains("\"action\":\"preview\""));
         let reject = json!({"type":"CityEntityChanged","entity_kind":"building","entity_id":"ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action":"reject","revision":1,"event_id":"ui_reject_1"});
         assert!(entity_event_script(&reject).contains("\"action\":\"reject\""));
+        let squad = json!({
+            "v":1,"id":"evt_1","ts":1761180000,
+            "session_id":"sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "agent_id":"nano","agent_name":"Nano","kind":"claim",
+            "payload":{"asset_ref":"ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ttl_sec":90,"expires_at":1761180090}
+        });
+        let script = squad_event_script(&squad);
+        assert!(script.contains("__AV_PLUGIN_SQUAD_EVENT__"));
+        assert!(!script.contains("__AV_PLUGIN_ENTITY_CHANGED__"));
+        assert!(script.contains("\"kind\":\"claim\""));
+        assert_eq!(agent_vitals_runtime::query::city_im::SQUAD_EVENT, "__AV_PLUGIN_SQUAD_EVENT__");
     }
 
     #[test]

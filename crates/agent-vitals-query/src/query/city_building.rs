@@ -12,6 +12,9 @@
 //! Preview success and compliance / detail-regression rejects use the same
 //! envelope (`action=preview|reject`) but never persist: they write `edit.json`
 //! (not `notify.json`) so a later persist mailbox poll cannot be overwritten.
+//!
+//! The same write path also fans out a squad IM envelope (`docs/CITY_SQUAD_IM.md`)
+//! on `squad.json` + `host.sock`. That channel never overwrites persist notify.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +22,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
 use super::city_assets;
+use super::city_im::{self, ImActor};
 use super::city_building_compliance::{self, compliant_catalog_ids, derive_slot, slot_to_json};
 use super::city_building_inheritance::{
     is_inheritance_document, normalize_inheritance, resolve_inheritance, resolve_to_mesh,
@@ -526,7 +530,7 @@ fn validate_for_session(
     Ok(clean)
 }
 
-fn open_store(home: &Path) -> Result<Connection, BuildingError> {
+pub(crate) fn open_store(home: &Path) -> Result<Connection, BuildingError> {
     let dir = store_dir(home);
     std::fs::create_dir_all(&dir).map_err(|_| store_unavailable())?;
     #[cfg(unix)] {
@@ -551,6 +555,15 @@ fn open_store(home: &Path) -> Result<Connection, BuildingError> {
             kind TEXT NOT NULL,
             part_count INTEGER NOT NULL,
             created_at_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS claims(
+            session_id TEXT NOT NULL,
+            asset_ref TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (session_id, asset_ref)
          );",
     ).map_err(|_| store_unavailable())?;
     #[cfg(unix)] {
@@ -741,7 +754,7 @@ pub fn read_mailbox(home: &Path) -> Option<Value> {
     serde_json::from_str(&raw).ok()
 }
 
-fn write_named_mailbox(home: &Path, filename: &str, payload: &Value) -> Result<(), BuildingError> {
+pub(crate) fn write_named_mailbox(home: &Path, filename: &str, payload: &Value) -> Result<(), BuildingError> {
     let dir = store_dir(home);
     std::fs::create_dir_all(&dir).map_err(|_| store_unavailable())?;
     #[cfg(unix)] {
@@ -813,19 +826,42 @@ fn with_preview_notify(mut out: Value, home: &Path, identity: &BuildingIdentity,
         "model": model,
         "error": Value::Null,
     }));
-    out
+    attach_squad(out, home, identity, ENTITY_ACTION_PREVIEW, json!({
+        "asset_ref": identity.asset_ref,
+        "ok": true,
+        "revision": peek_revision(home, &identity.asset_ref),
+    }))
 }
 
-fn with_reject_notify(mut out: Value, home: &Path, identity: &BuildingIdentity, error: &BuildingError) -> Value {
-    if !is_flash_rule(error.rule) {
-        return out;
+fn with_reject_notify(mut out: Value, home: &Path, identity: &BuildingIdentity, error: &BuildingError, origin: &str) -> Value {
+    if is_flash_rule(error.rule) {
+        out["notify"] = attach_edit_notify(home, identity, ENTITY_ACTION_REJECT, json!({
+            "source": "reject",
+            "ephemeral": true,
+            "persisted": false,
+            "error": error.to_json(),
+        }));
+        return attach_squad(out, home, identity, ENTITY_ACTION_REJECT, json!({
+            "asset_ref": identity.asset_ref,
+            "ok": false,
+            "error": error.message.as_str(),
+            "rule": error.rule,
+            "revision": peek_revision(home, &identity.asset_ref),
+        }));
     }
-    out["notify"] = attach_edit_notify(home, identity, ENTITY_ACTION_REJECT, json!({
-        "source": "reject",
-        "ephemeral": true,
-        "persisted": false,
-        "error": error.to_json(),
-    }));
+    attach_squad(out, home, identity, origin, json!({
+        "asset_ref": identity.asset_ref,
+        "ok": false,
+        "error": error.message.as_str(),
+        "rule": error.rule,
+        "revision": peek_revision(home, &identity.asset_ref),
+    }))
+}
+
+fn attach_squad(mut out: Value, home: &Path, identity: &BuildingIdentity, kind: &str, payload: Value) -> Value {
+    if let Some(squad) = city_im::fanout_building(home, identity, &ImActor::mcp_default(), kind, payload) {
+        out["squad"] = squad;
+    }
     out
 }
 
@@ -1134,7 +1170,7 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheri
                     "compliant_catalog": json!(compliant_catalog_ids(&derive_slot(&identity.session_key, identity.tokens_total()))),
                     "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
                 },
-            }), home, &identity, &error));
+            }), home, &identity, &error, ENTITY_ACTION_PREVIEW));
         }
     };
     match validate_for_session(home, &identity, &merged) {
@@ -1167,7 +1203,7 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheri
                 "compliant_catalog": json!(compliant_catalog_ids(&derive_slot(&identity.session_key, identity.tokens_total()))),
                 "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
             },
-        }), home, &identity, &error)),
+        }), home, &identity, &error, ENTITY_ACTION_PREVIEW)),
     }
 }
 
@@ -1185,12 +1221,18 @@ pub fn set_building_model(
     let merged = match resolve_inheritance(&identity, inheritance) {
         Ok(clean) => clean,
         Err(error) => {
-            return Ok(json!({
+            return Ok(attach_squad(json!({
                 "ok": false,
                 "error": error.to_json(),
                 "persisted": false,
                 "revision": current_revision(home, &identity.asset_ref)?,
-            }));
+            }), home, &identity, "set", json!({
+                "asset_ref": identity.asset_ref,
+                "ok": false,
+                "error": error.message.as_str(),
+                "rule": error.rule,
+                "revision": current_revision(home, &identity.asset_ref)?,
+            })));
         }
     };
     let clean = match validate_for_session(home, &identity, &merged) {
@@ -1201,7 +1243,7 @@ pub fn set_building_model(
                 "error": error.to_json(),
                 "persisted": false,
                 "revision": current_revision(home, &identity.asset_ref)?,
-            }), home, &identity, &error));
+            }), home, &identity, &error, "set"));
         }
     };
     let stored = normalize_inheritance(inheritance)?;
@@ -1234,12 +1276,19 @@ fn apply_override(
     };
     if stored.revision != expected_revision {
         let _ = db.execute_batch("ROLLBACK");
-        return Ok(json!({
+        let error = BuildingError::conflict(stored.revision);
+        return Ok(attach_squad(json!({
             "ok": false,
-            "error": BuildingError::conflict(stored.revision).to_json(),
+            "error": error.to_json(),
             "persisted": false,
             "revision": stored.revision,
-        }));
+        }), home, identity, kind, json!({
+            "asset_ref": identity.asset_ref,
+            "ok": false,
+            "error": error.message.as_str(),
+            "rule": error.rule,
+            "revision": stored.revision,
+        })));
     }
     let next = stored.revision + 1;
     let now = crate::clock::now_ms();
@@ -1289,8 +1338,10 @@ fn apply_override(
         "source": source, "kit_version": kit_version, "part_count": summary["part_count"],
         "model": applied, "summary": summary,
     }));
+    // Construction notify first so IM fanout cannot block or overwrite persist mailbox.
     let ui = notify_city_ui(home, &payload);
-    Ok(json!({
+    city_im::release_set_won(home, identity, &ImActor::mcp_default());
+    Ok(attach_squad(json!({
         "ok": true,
         "error": Value::Null,
         "persisted": true,
@@ -1304,7 +1355,12 @@ fn apply_override(
         "construction": construction_stub(kind, part_count as usize, &build_event_id, ui),
         "notify": { "channel": if ui == "pushed" { "host-socket" } else { "mailbox" }, "ui": ui },
         "projection": projection_meta(identity, &summary, "current"),
-    }))
+    }), home, identity, kind, json!({
+        "asset_ref": identity.asset_ref,
+        "ok": true,
+        "revision": next,
+        "build_event_id": build_event_id,
+    })))
 }
 
 #[cfg(test)]
@@ -1592,10 +1648,24 @@ mod tests {
         let listener = UnixListener::bind(socket_path(&home)).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("host accept");
-            let mut line = String::new();
-            BufReader::new(stream).read_line(&mut line).unwrap();
-            let _ = tx.send(line);
+            // Persist notify plus IM fanout share host.sock; drain a few accepts.
+            let _ = listener.set_nonblocking(true);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let mut line = String::new();
+                        if BufReader::new(stream).read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                            let _ = tx.send(line);
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
         });
         let inheritance = json!({
             "kit_version": INHERITANCE_KIT_VERSION,
@@ -1607,7 +1677,11 @@ mod tests {
         assert_eq!(set["construction"]["ui"], "pushed");
         assert_eq!(set["notify"]["channel"], "host-socket");
         let line = rx.recv_timeout(std::time::Duration::from_secs(2)).expect("socket payload");
-        let payload: Value = serde_json::from_str(line.trim()).unwrap();
+        let mut payloads = vec![serde_json::from_str::<Value>(line.trim()).unwrap()];
+        while let Ok(extra) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            if let Ok(value) = serde_json::from_str::<Value>(extra.trim()) { payloads.push(value); }
+        }
+        let payload = payloads.iter().find(|row| is_entity_changed(row)).cloned().expect("construction notify");
         assert!(is_entity_changed(&payload));
         assert_eq!(payload["type"], ENTITY_CHANGED_TYPE);
         assert_eq!(payload["entity_kind"], ENTITY_KIND_BUILDING);

@@ -48,11 +48,12 @@ Agent Vitals, the data layer of Oh Agent, has a local MCP server. Run `agent-vit
 | `issues_summary` / `skills_summary` | Behaviour findings and skill-usage summaries |
 | `control_plane` | Source status, extra folders, exclusions, retention, time zone, sync pause/run, catalog policy (writes need the flag) |
 | `trust_profile_*` | Schema, list, validate, stage and status for Trust audit profiles |
-| `get_building` / `preview_building` / `set_building_model` / `reset_building` | Read, validate, replace, or reset one Agent City session building model (`session-kit/v1`, ≤64 parts). Writes need `--allow-local-writes`. An open City window plays construction from the shared `CityEntityChanged` host event; preview shows a ghost, compliance/detail-regression rejects flash the lot |
+| `get_building` / `preview_building` / `set_building_model` / `reset_building` | Read, validate, replace, or reset one Agent City session building model (`session-kit/v1`, ≤64 parts). Writes need `--allow-local-writes`. An open City window plays construction from the shared `CityEntityChanged` host event; preview shows a ghost, compliance/detail-regression rejects flash the lot. Successful and failed writes also fan out a squad IM envelope (`docs/CITY_SQUAD_IM.md`) |
+| `im_publish` | Publish a squad IM envelope (`chat` / `claim` / `release` only). Server assigns `id`/`ts`. Writes need `--allow-local-writes`. Building preview/set/reset are not Agent-reported |
 
 Three more tools (`query_sql_readonly`, `billing_workflow`, `authority_audit`) are only compiled in with the internal `mcp-internal` feature, so they aren't in normal builds.
 
-<!-- source: crates/agent-vitals-mcp/src/mcp/mod.rs (dispatch match: data_status, usage_hourly, budget_profiles, cost_breakdown, sessions_search, session_detail, session_trace, control_plane, price_cards, data_quality_issues, issues_summary, skills_summary, trust_profile_schema/list/validate/stage/proposal_status, get_building, preview_building, set_building_model, reset_building; #[cfg(feature = "mcp-internal")] query_sql_readonly, billing_workflow, authority_audit) -->
+<!-- source: crates/agent-vitals-mcp/src/mcp/mod.rs (dispatch match: data_status, usage_hourly, budget_profiles, cost_breakdown, sessions_search, session_detail, session_trace, control_plane, price_cards, data_quality_issues, issues_summary, skills_summary, trust_profile_schema/list/validate/stage/proposal_status, get_building, preview_building, set_building_model, reset_building, im_publish; #[cfg(feature = "mcp-internal")] query_sql_readonly, billing_workflow, authority_audit) -->
 <!-- note: docs/AGENT_VITALS_DATA_MCP_SPEC.md §7 lists billing_workflow as "v1.0 local control plane", but in code it is behind mcp-internal. Code wins here. -->
 
 ## How do I connect it to Claude Code or Codex?

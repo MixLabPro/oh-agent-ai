@@ -312,3 +312,23 @@
 .city-minimap-handle em { font-style: normal; font-size: 11px; writing-mode: vertical-rl; letter-spacing: 1px; }
 @media (hover: none) { .city-minimap-handle { opacity: 1; } }
 @media (max-width: 720px) { .city-minimap { transform-origin: left bottom; } .city-minimap:not(.is-collapsed) { transform: scale(0.8); } }
+
+.city-squad-feed { position: absolute; left: 16px; top: 72px; z-index: 5; width: min(280px, calc(100% - 32px)); max-height: calc(100% - 160px); display: flex; flex-direction: column; background: var(--city-surface, rgba(10, 18, 28, .82)); border: 1px solid var(--city-border, #ffffff28); border-radius: 12px; color: var(--city-text, #edf3fc); font-size: 12px; pointer-events: auto; }
+.city-squad-feed.is-open { padding: 10px 12px 12px; }
+.city-squad-toggle { min-height: 36px; margin: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
+.city-squad-hint { margin: 0 0 8px; color: var(--city-muted, #9eb0c4); }
+.city-squad-filter { margin: 0 0 8px; padding: 6px 0 0; border: 0; display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.city-squad-filter legend { padding: 0; color: var(--city-muted, #9eb0c4); font-size: 11px; }
+.city-squad-filter label { display: flex; align-items: center; gap: 4px; }
+.city-squad-feed ol { margin: 0; padding: 0; overflow: auto; list-style: none; }
+.city-squad-feed li { margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid #ffffff14; }
+.city-squad-meta { display: block; color: #d5e4f4; font-weight: 600; }
+.city-squad-body { display: block; margin: 2px 0 4px; color: var(--city-muted, #9eb0c4); overflow-wrap: anywhere; }
+.city-squad-feed button { min-height: 28px; margin: 0; }
+.city-squad-kill { position: absolute; top: 16px; left: 50%; z-index: 6; transform: translateX(-50%); display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; pointer-events: auto; }
+.city-squad-kill li { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px; background: rgba(10, 18, 28, .78); border: 1px solid #f0c14b55; font-size: 12px; }
+.city-squad-kill button { min-height: 28px; margin: 0; }
+@media (max-width: 720px) {
+  .city-squad-feed { left: 12px; right: 12px; width: auto; top: auto; bottom: 72px; max-height: 36%; }
+  .city-squad-kill { top: auto; bottom: calc(72px + 36% + 8px); }
+}
