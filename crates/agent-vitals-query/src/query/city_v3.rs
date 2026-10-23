@@ -292,7 +292,7 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
                 None=>None,
                 Some(value)=>Some(value.as_i64().filter(|n|*n>=0).ok_or("invalid_parameter")?),
             };
-            let overrides=super::city_building::list_overrides(home,&refs).map_err(|_| "data_unavailable")?;
+            let overrides=super::city_building::list_overrides(home,Some(db.conn()),&refs).map_err(|_| "data_unavailable")?;
             let events=super::city_building::list_build_events(home,&refs,since,50).map_err(|_| "data_unavailable")?;
             result["result"]=json!({"overrides":overrides,"events":events,
                 "mailbox":super::city_building::read_mailbox(home),

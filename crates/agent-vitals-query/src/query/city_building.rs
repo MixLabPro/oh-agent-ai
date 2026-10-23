@@ -16,6 +16,10 @@ use serde_json::{json, Map, Value};
 
 use super::city_assets;
 use super::city_building_compliance::{self, compliant_catalog_ids, derive_slot, slot_to_json};
+use super::city_building_inheritance::{
+    is_inheritance_document, normalize_inheritance, resolve_inheritance, resolve_to_mesh,
+    INHERITANCE_KIT_VERSION,
+};
 use super::session_ref::{self, session_ref};
 
 pub const KIT_VERSION: &str = "session-kit/v1";
@@ -52,7 +56,7 @@ pub struct BuildingError {
 }
 
 impl BuildingError {
-    fn validation(rule: &'static str, parts: Vec<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
+    pub(crate) fn validation(rule: &'static str, parts: Vec<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
         Self {
             kind: "validation",
             rule,
@@ -470,9 +474,20 @@ pub fn default_model(tokens_total: i64) -> Value {
 fn current_model(home: &Path, identity: &BuildingIdentity) -> Result<Value, BuildingError> {
     let db = open_store(home)?;
     let stored = load_override(&db, &identity.asset_ref)?;
-    Ok(stored
-        .model
-        .unwrap_or_else(|| default_model(identity.tokens_total())))
+    Ok(resolve_to_mesh(identity, stored.model.as_ref()))
+}
+
+fn resolve_stored_row(
+    home: &Path,
+    conn: &Connection,
+    asset_ref: &str,
+    stored: &StoredOverride,
+) -> Result<(Value, Option<Value>), BuildingError> {
+    let identity = resolve_identity(home, conn, asset_ref)?;
+    let raw = stored.model.as_ref();
+    let inheritance = raw.filter(|doc| is_inheritance_document(doc)).cloned();
+    let model = resolve_to_mesh(&identity, raw);
+    Ok((model, inheritance))
 }
 
 fn validate_for_session(
@@ -693,7 +708,12 @@ pub fn read_mailbox(home: &Path) -> Option<Value> {
 }
 
 /// Current overrides (model_json NOT NULL). Missing store → empty, not an error.
-pub fn list_overrides(home: &Path, asset_refs: &[String]) -> Result<Vec<Value>, BuildingError> {
+/// `model` is always the resolved mesh for City UI; `inheritance` is present when stored as layer 2.
+pub fn list_overrides(
+    home: &Path,
+    authority: Option<&Connection>,
+    asset_refs: &[String],
+) -> Result<Vec<Value>, BuildingError> {
     let Some(db) = open_existing(home)? else { return Ok(Vec::new()); };
     if asset_refs.len() > 200 {
         return Err(BuildingError::validation(
@@ -711,27 +731,79 @@ pub fn list_overrides(home: &Path, asset_refs: &[String]) -> Result<Vec<Value>, 
         }).map_err(|_| store_unavailable())?;
         for row in rows {
             let (asset_ref, revision, kit_version, model_json, updated_at_ms) = row.map_err(|_| store_unavailable())?;
-            let model: Value = serde_json::from_str(&model_json).map_err(|_| store_unavailable())?;
-            out.push(json!({
-                "asset_ref": asset_ref, "revision": revision, "kit_version": kit_version,
-                "source": "override", "model": model, "updated_at_ms": updated_at_ms,
-            }));
+            let stored_doc: Value = serde_json::from_str(&model_json).map_err(|_| store_unavailable())?;
+            let row = override_list_row(home, authority, &asset_ref, revision as u64, &kit_version, &stored_doc, Some(updated_at_ms))?;
+            out.push(row);
         }
         return Ok(out);
     }
     for asset_ref in asset_refs {
         if !is_asset_ref(asset_ref) { continue; }
         let stored = load_override(&db, asset_ref)?;
-        let Some(model) = stored.model else { continue; };
-        out.push(json!({
-            "asset_ref": asset_ref,
-            "revision": stored.revision,
-            "kit_version": stored.kit_version,
-            "source": "override",
-            "model": model,
-        }));
+        let Some(stored_doc) = stored.model else { continue; };
+        out.push(override_list_row(
+            home,
+            authority,
+            asset_ref,
+            stored.revision,
+            &stored.kit_version,
+            &stored_doc,
+            None,
+        )?);
     }
     Ok(out)
+}
+
+fn override_list_row(
+    home: &Path,
+    authority: Option<&Connection>,
+    asset_ref: &str,
+    revision: u64,
+    kit_version: &str,
+    stored_doc: &Value,
+    updated_at_ms: Option<i64>,
+) -> Result<Value, BuildingError> {
+    let inheritance = stored_doc
+        .as_object()
+        .filter(|_| is_inheritance_document(stored_doc))
+        .map(|_| stored_doc.clone());
+    let model = if is_inheritance_document(stored_doc) {
+        if let Some(conn) = authority {
+            resolve_stored_row(home, conn, asset_ref, &StoredOverride {
+                revision,
+                kit_version: kit_version.to_string(),
+                model: Some(stored_doc.clone()),
+            })?
+            .0
+        } else {
+            resolve_inheritance(
+                &BuildingIdentity {
+                    asset_ref: asset_ref.to_string(),
+                    session_id: String::new(),
+                    harness: String::new(),
+                    session_key: String::new(),
+                    tokens_total: 50_000,
+                },
+                stored_doc,
+            )?
+        }
+    } else {
+        stored_doc.clone()
+    };
+    let mut row = json!({
+        "asset_ref": asset_ref,
+        "revision": revision,
+        "kit_version": kit_version,
+        "source": "override",
+        "model": model,
+    });
+    if let Some(ms) = updated_at_ms {
+        row["updated_at_ms"] = json!(ms);
+    }
+    if let Some(inheritance) = inheritance {
+        row["inheritance"] = inheritance;
+    }
+    Ok(row)
 }
 
 /// Queued construction records. Missing store → empty.
@@ -872,15 +944,24 @@ pub fn get_building(home: &Path, conn: &Connection, session_id: &str) -> Result<
     let identity = resolve_identity(home, conn, session_id)?;
     let db = open_store(home)?;
     let stored = load_override(&db, &identity.asset_ref)?;
-    let (model, source, kit_status) = match &stored.model {
+    let (model, inheritance, source, kit_status) = match &stored.model {
+        Some(doc) if is_inheritance_document(doc) => {
+            let status = if stored.kit_version == INHERITANCE_KIT_VERSION { "current" } else { "frozen" };
+            (
+                resolve_to_mesh(&identity, Some(doc)),
+                Some(doc.clone()),
+                "override",
+                status,
+            )
+        }
         Some(model) => {
             let status = if stored.kit_version == KIT_VERSION { "current" } else { "frozen" };
-            (model.clone(), "override", status)
+            (model.clone(), None, "override", status)
         }
-        None => (default_model(identity.tokens_total), "default", "current"),
+        None => (default_model(identity.tokens_total()), None, "default", "current"),
     };
     let summary = geometric_summary(&model);
-    Ok(json!({
+    let mut out = json!({
         "ok": true,
         "error": Value::Null,
         "source": source,
@@ -890,19 +971,59 @@ pub fn get_building(home: &Path, conn: &Connection, session_id: &str) -> Result<
         "summary": summary,
         "observe": { "text": observe_text(source, &summary, stored.revision), "summary": summary },
         "projection": projection_meta(&identity, &summary, kit_status),
-    }))
+    });
+    if let Some(inheritance) = inheritance {
+        out["inheritance"] = inheritance;
+    }
+    Ok(out)
 }
 
-pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, model: &Value) -> Result<Value, BuildingError> {
+pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, inheritance: &Value) -> Result<Value, BuildingError> {
     let identity = resolve_identity(home, conn, session_id)?;
-    match validate_for_session(home, &identity, model) {
+    if inheritance.get("reset").and_then(Value::as_bool) == Some(true) {
+        let clean = default_model(identity.tokens_total());
+        let summary = geometric_summary(&clean);
+        return Ok(json!({
+            "ok": true,
+            "error": Value::Null,
+            "persisted": false,
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "inheritance": inheritance,
+            "model": clean,
+            "summary": summary,
+            "observe": { "text": observe_text("preview-reset", &summary, 0), "summary": summary },
+            "projection": projection_meta(&identity, &summary, "current"),
+        }));
+    }
+    let merged = match resolve_inheritance(&identity, inheritance) {
+        Ok(clean) => clean,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "error": error.to_json(),
+                "persisted": false,
+                "kit_version": INHERITANCE_KIT_VERSION,
+                "summary": Value::Null,
+                "projection": {
+                    "asset_ref": identity.asset_ref,
+                    "session_id": identity.session_id,
+                    "harness": identity.harness,
+                    "lot": slot_to_json(&derive_slot(&identity.session_key, identity.tokens_total())),
+                    "compliant_catalog": json!(compliant_catalog_ids(&derive_slot(&identity.session_key, identity.tokens_total()))),
+                    "parcel": { "state": "unavailable", "reason": "city_layout_not_in_building_store" },
+                },
+            }));
+        }
+    };
+    match validate_for_session(home, &identity, &merged) {
         Ok(clean) => {
             let summary = geometric_summary(&clean);
             Ok(json!({
                 "ok": true,
                 "error": Value::Null,
                 "persisted": false,
-                "kit_version": KIT_VERSION,
+                "kit_version": INHERITANCE_KIT_VERSION,
+                "inheritance": inheritance,
                 "model": clean,
                 "summary": summary,
                 "observe": { "text": observe_text("preview", &summary, 0), "summary": summary },
@@ -913,7 +1034,8 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, model:
             "ok": false,
             "error": error.to_json(),
             "persisted": false,
-            "kit_version": KIT_VERSION,
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "inheritance": inheritance,
             "summary": Value::Null,
             "projection": {
                 "asset_ref": identity.asset_ref,
@@ -927,9 +1049,18 @@ pub fn preview_building(home: &Path, conn: &Connection, session_id: &str, model:
     }
 }
 
-pub fn set_building_model(home: &Path, conn: &Connection, session_id: &str, model: &Value, expected_revision: u64) -> Result<Value, BuildingError> {
+pub fn set_building_model(
+    home: &Path,
+    conn: &Connection,
+    session_id: &str,
+    inheritance: &Value,
+    expected_revision: u64,
+) -> Result<Value, BuildingError> {
     let identity = resolve_identity(home, conn, session_id)?;
-    let clean = match validate_for_session(home, &identity, model) {
+    if inheritance.get("reset").and_then(Value::as_bool) == Some(true) {
+        return apply_override(home, &identity, None, expected_revision, "reset", None);
+    }
+    let merged = match resolve_inheritance(&identity, inheritance) {
         Ok(clean) => clean,
         Err(error) => {
             return Ok(json!({
@@ -940,12 +1071,24 @@ pub fn set_building_model(home: &Path, conn: &Connection, session_id: &str, mode
             }));
         }
     };
-    apply_override(home, &identity, Some(clean), expected_revision, "set")
+    let clean = match validate_for_session(home, &identity, &merged) {
+        Ok(clean) => clean,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "error": error.to_json(),
+                "persisted": false,
+                "revision": current_revision(home, &identity.asset_ref)?,
+            }));
+        }
+    };
+    let stored = normalize_inheritance(inheritance)?;
+    apply_override(home, &identity, Some(stored), expected_revision, "set", Some(clean))
 }
 
 pub fn reset_building(home: &Path, conn: &Connection, session_id: &str, expected_revision: u64) -> Result<Value, BuildingError> {
     let identity = resolve_identity(home, conn, session_id)?;
-    apply_override(home, &identity, None, expected_revision, "reset")
+    apply_override(home, &identity, None, expected_revision, "reset", None)
 }
 
 fn current_revision(home: &Path, asset_ref: &str) -> Result<u64, BuildingError> {
@@ -959,6 +1102,7 @@ fn apply_override(
     model: Option<Value>,
     expected_revision: u64,
     kind: &str,
+    resolved_applied: Option<Value>,
 ) -> Result<Value, BuildingError> {
     let db = open_store(home)?;
     db.execute_batch("BEGIN IMMEDIATE").map_err(|_| store_unavailable())?;
@@ -992,9 +1136,16 @@ fn apply_override(
         let _ = db.execute_batch("ROLLBACK");
         return Err(store_unavailable());
     }
-    let applied = match &model {
-        Some(value) => value.clone(),
-        None => default_model(identity.tokens_total),
+    let applied = match (&model, resolved_applied) {
+        (None, _) => default_model(identity.tokens_total()),
+        (_, Some(mesh)) => mesh,
+        (Some(value), None) => {
+            if is_inheritance_document(value) {
+                resolve_inheritance(identity, value)?
+            } else {
+                value.clone()
+            }
+        }
     };
     let summary = geometric_summary(&applied);
     let part_count = summary["part_count"].as_u64().unwrap_or(0) as i64;
@@ -1032,6 +1183,17 @@ fn apply_override(
         "notify": { "channel": if ui == "pushed" { "host-socket" } else { "mailbox" }, "ui": ui },
         "projection": projection_meta(identity, &summary, "current"),
     }))
+}
+
+#[cfg(test)]
+pub(crate) fn test_building_identity(tokens_total: i64) -> BuildingIdentity {
+    BuildingIdentity {
+        asset_ref: "ca_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        session_id: "sr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        harness: "codex".into(),
+        session_key: "sess".into(),
+        tokens_total,
+    }
 }
 
 #[cfg(test)]
@@ -1078,33 +1240,22 @@ mod tests {
         assert_eq!(summary["height"], 2.2);
     }
 
+    fn inh_catalog(catalog_id: &str, overrides: Value) -> Value {
+        json!({
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "catalog", "catalog_id": catalog_id },
+            "overrides": overrides,
+        })
+    }
+
     #[test]
     fn preview_rejects_detail_regression_against_current_model() {
         let (home, db, session_id) = seed();
-        let rich = json!({
-            "kit_version": KIT_VERSION,
-            "params": {"floors": 2, "story_height": 3.2, "detail_tier": "detailed"},
-            "parts": [
-                {"id": "base", "kind": "box", "role": "structure", "at": [0.0, 0.0, 0.0], "size": [5.0, 3.2, 6.0]},
-                {"id": "upper", "kind": "box", "role": "wall", "at": [0.0, 3.2, 0.0], "size": [4.5, 3.2, 5.5]},
-                {"id": "door", "kind": "box", "role": "door", "at": [0.0, 0.0, 3.11], "size": [1.2, 2.2, 0.2]},
-                {"id": "window", "kind": "box", "role": "window", "at": [0.0, 4.0, 3.085], "size": [1.4, 1.2, 0.15]},
-                {"id": "trim", "kind": "box", "role": "trim", "at": [0.0, 6.45, 0.0], "size": [4.8, 0.25, 5.8]},
-            ]
-        });
+        let rich = inh_catalog("kit-fine-midrise", json!({}));
         let set = set_building_model(&home, db.conn(), &session_id, &rich, 0).unwrap();
         assert_eq!(set["ok"], true);
 
-        let coarser = json!({
-            "kit_version": KIT_VERSION,
-            "params": {"catalog_id": "kit-low-block", "floors": 2, "story_height": 2.8, "detail_tier": "coarse", "build_cost": 30.0},
-            "parts": [
-                {"id": "base", "kind": "box", "role": "structure", "at": [0.0, 0.0, 0.0], "size": [5.0, 2.8, 6.0]},
-                {"id": "cap", "kind": "box", "role": "wall", "at": [0.0, 2.8, 0.0], "size": [4.5, 2.8, 5.5]},
-                {"id": "door", "kind": "box", "role": "door", "at": [0.0, 0.0, 3.11], "size": [1.2, 2.0, 0.2]},
-                {"id": "window", "kind": "box", "role": "window", "at": [0.0, 3.5, 3.085], "size": [1.4, 1.2, 0.15]},
-            ]
-        });
+        let coarser = inh_catalog("kit-low-block", json!({ "params": { "detail_tier": "coarse" } }));
         let fail = preview_building(&home, db.conn(), &session_id, &coarser).unwrap();
         assert_eq!(fail["ok"], false);
         assert_eq!(fail["error"]["rule"], "detail_regression");
@@ -1116,9 +1267,18 @@ mod tests {
     fn preview_rejects_compliance_pillar_with_invalid_model_candidates() {
         let (home, db, session_id) = seed();
         let pillar = json!({
-            "kit_version": KIT_VERSION,
-            "params": {},
-            "parts": [{"id": "pin", "kind": "box", "role": "wall", "at": [0.0, 0.0, 0.0], "size": [0.8, 10.0, 0.8]}]
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "projection" },
+            "overrides": {
+                "parts_remove": ["podium", "shaft", "roof", "door", "window"],
+                "parts_add": [{
+                    "id": "pin",
+                    "kind": "box",
+                    "role": "wall",
+                    "at": [0.0, 0.0, 0.0],
+                    "size": [0.8, 10.0, 0.8]
+                }]
+            }
         });
         let fail = preview_building(&home, db.conn(), &session_id, &pillar).unwrap();
         assert_eq!(fail["ok"], false);
@@ -1167,24 +1327,32 @@ mod tests {
         let asset = got["projection"]["asset_ref"].as_str().unwrap().to_string();
         assert!(asset.starts_with("ca_"));
 
-        let proposed = got["model"].clone();
-        let fail = preview_building(&home, db.conn(), &session_id, &valid_model(vec![
-            valid_part("a", 0.0), valid_part("b", 0.2),
-        ])).unwrap();
+        let inheritance = json!({
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "projection" },
+            "overrides": {}
+        });
+        let fail = preview_building(&home, db.conn(), &session_id, &json!({
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "projection" },
+            "overrides": {
+                "parts_add": [valid_part("a", 0.0), valid_part("b", 0.2)]
+            }
+        })).unwrap();
         assert_eq!(fail["ok"], false);
         assert_eq!(fail["error"]["rule"], "overlap");
         assert_eq!(fail["persisted"], false);
 
-        let pass = preview_building(&home, db.conn(), &session_id, &proposed).unwrap();
+        let pass = preview_building(&home, db.conn(), &session_id, &inheritance).unwrap();
         assert_eq!(pass["ok"], true);
         assert_eq!(pass["persisted"], false);
 
-        let conflict = set_building_model(&home, db.conn(), &session_id, &proposed, 9).unwrap();
+        let conflict = set_building_model(&home, db.conn(), &session_id, &inheritance, 9).unwrap();
         assert_eq!(conflict["ok"], false);
         assert_eq!(conflict["error"]["kind"], "conflict");
         assert_eq!(conflict["revision"], 0);
 
-        let set = set_building_model(&home, db.conn(), &session_id, &proposed, 0).unwrap();
+        let set = set_building_model(&home, db.conn(), &session_id, &inheritance, 0).unwrap();
         assert_eq!(set["ok"], true);
         assert_eq!(set["revision"], 1);
         assert!(set["build_event_id"].as_str().unwrap().starts_with("be_"));
@@ -1203,9 +1371,10 @@ mod tests {
         assert_eq!(mail["build_event_id"], set["build_event_id"]);
         assert_eq!(mail["revision"], 1);
         assert_eq!(mail["kind"], "set");
-        let listed = list_overrides(&home, std::slice::from_ref(&asset)).unwrap();
+        let listed = list_overrides(&home, Some(db.conn()), std::slice::from_ref(&asset)).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["model"]["parts"][1]["id"], got["model"]["parts"][1]["id"]);
+        assert!(listed[0]["inheritance"].is_object());
         let events = list_build_events(&home, &[], None, 10).unwrap();
         assert_eq!(events[0]["build_event_id"], set["build_event_id"]);
 
@@ -1241,9 +1410,12 @@ mod tests {
             BufReader::new(stream).read_line(&mut line).unwrap();
             let _ = tx.send(line);
         });
-        let got = get_building(&home, db.conn(), &session_id).unwrap();
-        let proposed = got["model"].clone();
-        let set = set_building_model(&home, db.conn(), &session_id, &proposed, 0).unwrap();
+        let inheritance = json!({
+            "kit_version": INHERITANCE_KIT_VERSION,
+            "base": { "kind": "projection" },
+            "overrides": {}
+        });
+        let set = set_building_model(&home, db.conn(), &session_id, &inheritance, 0).unwrap();
         assert_eq!(set["ok"], true);
         assert_eq!(set["construction"]["ui"], "pushed");
         assert_eq!(set["notify"]["channel"], "host-socket");
@@ -1259,6 +1431,28 @@ mod tests {
         assert_eq!(payload["kind"], "set");
         assert!(payload["entity_id"].as_str().unwrap().starts_with("ca_"));
         assert!(payload["asset_ref"].as_str().unwrap().starts_with("ca_"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn inheritance_rebase_catalog_and_reset_via_document() {
+        let (home, db, session_id) = seed();
+        let fine = inh_catalog("kit-fine-storefront", json!({
+            "parts_add": [{"id": "sign", "kind": "box", "role": "trim", "at": [0.0, 6.2, 2.5], "size": [0.8, 0.3, 0.2]}]
+        }));
+        let set = set_building_model(&home, db.conn(), &session_id, &fine, 0).unwrap();
+        assert_eq!(set["ok"], true);
+        let got = get_building(&home, db.conn(), &session_id).unwrap();
+        assert!(got["inheritance"].is_object());
+        assert!(got["model"]["parts"].as_array().unwrap().iter().any(|p| p["id"] == "sign"));
+
+        let reset_doc = json!({ "kit_version": INHERITANCE_KIT_VERSION, "reset": true });
+        let reset = set_building_model(&home, db.conn(), &session_id, &reset_doc, 1).unwrap();
+        assert_eq!(reset["ok"], true);
+        assert_eq!(reset["source"], "default");
+        let after = get_building(&home, db.conn(), &session_id).unwrap();
+        assert_eq!(after["source"], "default");
+        assert!(after.get("inheritance").is_none());
         let _ = std::fs::remove_dir_all(&home);
     }
 

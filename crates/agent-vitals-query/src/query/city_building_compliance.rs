@@ -136,6 +136,26 @@ const CATALOG: &[CatalogEntry] = &[
         detail_tier: DetailTier::Standard,
         typical_parts: 4,
     },
+    CatalogEntry {
+        id: "kit-fine-midrise",
+        max_half_x: 4.0,
+        max_half_z: 6.0,
+        max_height: 30.0,
+        cost: 85.0,
+        provides_door_window: true,
+        detail_tier: DetailTier::Detailed,
+        typical_parts: 8,
+    },
+    CatalogEntry {
+        id: "kit-fine-storefront",
+        max_half_x: 4.0,
+        max_half_z: 6.0,
+        max_height: 22.0,
+        cost: 78.0,
+        provides_door_window: true,
+        detail_tier: DetailTier::Detailed,
+        typical_parts: 6,
+    },
 ];
 
 /// Cheap richness signal for hold-or-improve (no ML). Higher is more detailed.
