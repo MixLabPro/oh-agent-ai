@@ -27,7 +27,8 @@ const preview = renderToStaticMarkup(createElement(() => {
 }));
 const checks = [
   { id: "adapters_and_build_are_descriptor_driven", passed: !/AgentCity|city\./.test(nativeHost.split("#[cfg(test)]")[0] + browserHost + builder) && nativeHost.includes('include_str!("../../plugins.json")') && shell.includes("plugins.map"), location: "apps/desktop/plugins.json" },
-  { id: "city_uses_shared_sdk_transport", passed: readFileSync(path.join(repo, "apps/agent-city/ui/src/host.ts"), "utf8").includes("@agent-vitals/app-sdk/ui-host"), location: "packages/agent-vitals-app-sdk/src/ui-host.ts" },
+  { id: "city_uses_shared_sdk_transport", passed: readFileSync(path.join(repo, "apps/agent-city/ui/src/host.ts"), "utf8").includes("@agent-vitals/app-sdk/ui-host")
+    && readFileSync(path.join(repo, "packages/agent-vitals-app-sdk/src/ui-host.ts"), "utf8").includes("export async function noteBusy"), location: "packages/agent-vitals-app-sdk/src/ui-host.ts" },
   { id: "plugin_hook_is_generic", passed: /export function usePlugin\(/.test(hook) && !/City|city\./.test(hook) && !existsSync(path.join(repo, "apps/desktop/ui-dev/react/src/app/plugins/useCityPlugin.tsx")), location: hookPath },
   { id: "plugin_presentation_uses_configured_name", passed: /Metrics (工具栏|toolbar)/.test(preview) && /Metrics (插件内容|plugin content)/.test(preview) && /(正在加载 Metrics|Loading Metrics)/.test(preview) && !preview.includes("City"), location: hookPath },
   { id: "shell_does_not_import_city_source", passed: !/import\s*\([^)]*agent-city\/ui\/src/.test(shell), location: "apps/desktop/ui-dev/react/src/app/App.tsx" },

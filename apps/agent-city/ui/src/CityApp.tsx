@@ -12,7 +12,7 @@ import {
   type KindFilter, type SquadFeedState,
 } from "./engine/squadEvents";
 import "./city.css";
-import { embedded, connect, observeHealth, publishToolbar, type Tool } from "./host";
+import { embedded, connect, observeHealth, noteBusy, publishToolbar, type Tool } from "./host";
 import type { EngineQualityMode } from "./engine/CityEngine";
 import { CityExperience, useCityExperience } from "./CityExperience";
 import { usePlanRepair } from "./planRepair/usePlanRepair";
@@ -21,6 +21,7 @@ import { supportsBackgroundFilm } from "./export/filmJob";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 import { replayStartMs } from "./replayRange";
 import { useCityGame } from "./game/useCityGame";
+import { prewarmAudioContext } from "./game/GameSfx";
 import { useCityDrivingPlay } from "./game/useCityDrivingPlay";
 import { DrivingHud } from "./game/DrivingHud";
 import type { PlayTarget } from "./engine/render/playableVehicles";
@@ -170,6 +171,15 @@ export function CityApp() {
     }
   }, [squad.claims, firstModelFrame]);
   useEffect(() => { liveCity.current = firstModelFrame; }, [firstModelFrame]);
+  useEffect(() => {
+    if (!firstModelFrame) return;
+    let cancelled = false;
+    void (async () => {
+      await noteBusy(8_000).catch(() => {});
+      if (!cancelled) prewarmAudioContext();
+    })();
+    return () => { cancelled = true; };
+  }, [firstModelFrame]);
 
   useEffect(() => {
     let active = true;
@@ -282,9 +292,12 @@ export function CityApp() {
         onPlanningProgress: (snapshot: PlanningWorkSnapshot) => {
           const work = Object.values(snapshot.consumed).reduce((sum, value) => sum + value, 0);
           setCityLoad({ stage: "planning", work });
-        } }).then(() => {
+        } }).then(async () => {
         if (preparation.signal.aborted || engineRef.current !== engine) return;
         setCityLoad({ stage: "mounting", work: null });
+        await noteBusy(15_000).catch(() => {});
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (preparation.signal.aborted || engineRef.current !== engine) return;
         engine.applyModel(model, false);
         setCityLoad({ stage: "rendering", work: null });
         // applyModel synchronously renders the first frame for this model before returning.
@@ -300,7 +313,9 @@ export function CityApp() {
     }
     if (!firstModelFrame) { experience.refreshSelection(); return; }
     const preparation = new AbortController();
-    void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal }).then(() => {
+    void prepareCityLayout(model, experience.seed, MIAMI_COASTAL, { signal: preparation.signal }).then(async () => {
+      if (preparation.signal.aborted || engineRef.current !== engine) return;
+      await noteBusy(8_000).catch(() => {});
       if (preparation.signal.aborted || engineRef.current !== engine) return;
       engine.applyModel(model, true);
       fingerprint.current = signature;
@@ -451,7 +466,10 @@ export function CityApp() {
         if (planRepair.state.active) planRepair.exit(); else planRepair.enter();
         break;
       case "city.car":
-        if (driving.active) driving.exit(); else { experience.setOptions(false); experience.clearSelection(); driving.enter(); }
+        if (driving.active) driving.exit();
+        else if (sceneReady) {
+          experience.setOptions(false); experience.clearSelection(); driving.enter();
+        }
         break;
       case "city.game":
         if (game.active) game.exit();
@@ -499,7 +517,8 @@ export function CityApp() {
       <CityMinimap engine={engineRef} language={language} driving={{ active: driving.active, pose: driving.pose }}
         hidden={!sceneReady || cinema || game.active || !!experience.film || driving.hud.phase === "preparing" || driving.hud.phase === "error"} />
       <DrivingHud model={{ active: driving.active, choosingVehicle: driving.choosingVehicle, vtol: driving.vtol, entryError: driving.entryError,
-        initialPaused: driving.initialPaused, hud: driving.hud, preparationProgress: driving.preparationProgress, events: driving.events, diagnostics: driving.diagnostics() }}
+        initialPaused: driving.initialPaused, hud: driving.hud, preparationProgress: driving.preparationProgress, events: driving.events, diagnostics: driving.diagnostics(),
+        roadCheck: driving.roadCheck }}
         actions={{ selectVehicle: driving.selectVehicle, clearEntryError: driving.clearEntryError, exit: driving.exit, pause: driving.pause,
           resume: driving.resume, openUiContext: driving.openUiContext }}
         locale={language === "en" ? "en" : "zh-Hans"} sound={driving.sound} />

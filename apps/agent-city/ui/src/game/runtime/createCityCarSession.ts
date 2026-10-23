@@ -39,7 +39,7 @@ type CityCarRequestBase = Readonly<{
   collider: Readonly<{ dimensions: CollisionDimensions; centerHeight: number; vehicleConfigHash: string }>;
   present(frame: CarPresentation, scene: CityCarSceneCapability): void;
   onPreparationMetric?(metric: PreparationMetric): void;
-  onPreparationProgress?(progress: PreparationProgress): void;
+  onPreparationProgress?(progress: PreparationProgress): void | Promise<void>;
   /** VTOL 推进器会话（玩法专属）：地面段与默认完全一致，注入空中体制物理。 */
   vtol?: boolean;
   /** 自由驾驶的出发点：点了地标停车场里的车，出生点搜索从离这里最近的路开始（不改搜索的校验，只改先试哪里）。 */
@@ -85,20 +85,20 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
   if (signal?.aborted) return unavailable("cancelled");
   if (!["idle", "error"].includes(runtime.snapshot.phase)) return unavailable("runtime-busy");
   runtime.beginPreparation();
-  const progress = (stage: PreparationProgress["stage"], state: PreparationProgress["state"], extra: Omit<PreparationProgress, "stage" | "state"> = {}) => {
-    try { request.onPreparationProgress?.(Object.freeze({ stage, state, ...extra })); } catch { /* local presentation only */ }
+  const progress = async (stage: PreparationProgress["stage"], state: PreparationProgress["state"], extra: Omit<PreparationProgress, "stage" | "state"> = {}) => {
+    try { await request.onPreparationProgress?.(Object.freeze({ stage, state, ...extra })); } catch { /* local presentation only */ }
   };
   const acquireSignal = signal ?? new AbortController().signal;
   let lease: CityCarWorldLease;
   try {
-    progress("world-capture", "started");
+    await progress("world-capture", "started");
     await preparationCheckpoint(signal);
     const started = preparationNow();
     const acquisition = await host.gameScenePort.acquireResult({ vehicle: "car", activity: "free" }, runtime.snapshot.runId + 1, acquireSignal);
     if (acquisition.status !== "ready") return unavailable(`scene-${acquisition.status}:${acquisition.reason}`);
     lease = acquisition.lease;
     try { request.onPreparationMetric?.({ stage: "world-capture", durationMs: preparationNow() - started }); } catch { /* local diagnostic */ }
-    progress("world-capture", "completed");
+    await progress("world-capture", "completed");
   }
   catch (error) { return unavailable(error instanceof Error ? error.message : "scene-unavailable"); }
   const capture = lease.snapshot.drivingWorld;
@@ -118,10 +118,10 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
     const leaseCurrent = () => lease.isCurrent() && capture.isLeaseCurrent() && staticCapture.isLeaseCurrent();
     await preparationCheckpoint(signal, leaseCurrent);
     const measured = async <T>(stage: PreparationMetric["stage"], work: () => T): Promise<T> => {
-      progress(stage, "started");
+      await progress(stage, "started");
       await preparationCheckpoint(signal, leaseCurrent);
       const result = measurePreparation(stage, work, request.onPreparationMetric);
-      progress(stage, "completed");
+      await progress(stage, "completed");
       return result;
     };
     const worldRead = await measured("world-read", () => ({ snapshot: capture.readWorld(), staticSnapshot: staticCapture.readWorld() }));
@@ -181,9 +181,9 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
       if (point.status !== "drivable") return unavailable(`spawn:${point.cause}`);
     }
     const spawnStarted = preparationNow();
-    progress("diagnostic-spawn", "started");
+    await progress("diagnostic-spawn", "started");
     const rawSpawn = mode !== "validated" ? await diagnosticSpawnAsync(snapshot.surface, regions, environment, signal, leaseCurrent,
-      (completedCandidates, candidateLimit) => progress("diagnostic-spawn", "started", { completedCandidates, candidateLimit }), mode === "free-drive" ? request.near : undefined) : (() => {
+      (completedCandidates, candidateLimit) => { void progress("diagnostic-spawn", "started", { completedCandidates, candidateLimit }); }, mode === "free-drive" ? request.near : undefined) : (() => {
       const point = regions.classify(request.x, request.z, request.layerId);
       if (point.status !== "drivable") return null;
       const support = environment.place(request.x, request.z, request.heading, point.regionId);
@@ -193,7 +193,7 @@ async function createSession(host: CityCarHost, runtime: GameRuntime<DrivingInpu
     // 否则 undefined 进入物理算术变成 NaN（HUD「Boost NaN」）。
     const spawn = vtol && rawSpawn ? { ...rawSpawn, airborne: false, verticalSpeed: 0, boost: 1 } : rawSpawn;
     try { request.onPreparationMetric?.({ stage: "diagnostic-spawn", durationMs: preparationNow() - spawnStarted }); } catch { /* local diagnostic */ }
-    progress("diagnostic-spawn", "completed");
+    await progress("diagnostic-spawn", "completed");
     if (!spawn) return unavailable(mode === "diagnostic" ? "no-safe-diagnostic-spawn" : mode === "free-drive" ? "no-safe-free-drive-spawn" : "unsafe-car-spawn");
     // VTOL 步进注入：prev/input 的收窄转换只发生在这一个调用点（内核守卫对两种体制同界）。
     const vtolStep: KernelStepFn | null = vtol ? (previous, input, world) =>

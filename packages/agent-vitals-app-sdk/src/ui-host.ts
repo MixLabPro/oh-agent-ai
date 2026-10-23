@@ -73,6 +73,13 @@ export function connect(handler: (command: Command) => void) {
   window.addEventListener("__AV_PLUGIN_COMMAND__", receive);
   return () => window.removeEventListener("__AV_PLUGIN_COMMAND__", receive);
 }
+/** Tell the host a sync stretch is about to run so the 5s pulse is not a hang.
+ * `budgetMs` is capped at 15s — the same boot-timeout ceiling. Await this before
+ * the blocking work; a fire-and-forget publish can lose the race. */
+export async function noteBusy(budgetMs = 8_000) {
+  const busyMs = Math.max(1, Math.min(Math.floor(budgetMs), 15_000));
+  await publish("heartbeat", { diagnostic: { busyMs } });
+}
 export function observeHealth(state?: () => Record<string, number | boolean>) {
   const fault = (event: Event) => {
     // Chromium reports a deferred ResizeObserver delivery as a window error.
