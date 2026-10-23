@@ -296,6 +296,8 @@ pub fn read(home: &Path, request: &Value, now: i64) -> Result<Value,&'static str
             let events=super::city_building::list_build_events(home,&refs,since,50).map_err(|_| "data_unavailable")?;
             result["result"]=json!({"overrides":overrides,"events":events,
                 "mailbox":super::city_building::read_mailbox(home),
+                "squad_mailbox":super::city_im::read_squad_mailbox(home),
+                "claims":super::city_im::list_active_claims(home, now / 1000),
                 "poll_hint_ms":2_000});
         }
         _=>unreachable!(),

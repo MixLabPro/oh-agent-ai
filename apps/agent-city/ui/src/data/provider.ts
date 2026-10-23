@@ -177,7 +177,12 @@ function continuation(context: CitySnapshotV3): Record<string, unknown> {
 
 export type BuildingOverrideRow = { asset_ref: string; revision: number; kit_version: string; source: string; model: KitModel };
 export type BuildingEventRow = BuildingChangedEvent & { created_at_ms?: number };
-export type BuildingOverridesResult = { overrides: BuildingOverrideRow[]; events: BuildingEventRow[] };
+export type BuildingOverridesResult = {
+  overrides: BuildingOverrideRow[];
+  events: BuildingEventRow[];
+  claims: unknown[];
+  squadMailbox: unknown;
+};
 
 async function readV3Raw(payload: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (signal?.aborted) throw new Error("city_request_cancelled");
@@ -205,6 +210,8 @@ function parseOverrideRow(raw: unknown): BuildingOverrideRow | null {
 export async function readBuildingOverrides(context: CitySnapshotV3, assetRefs: string[], sinceMs?: number, signal?: AbortSignal): Promise<BuildingOverridesResult> {
   const overrides: BuildingOverrideRow[] = [];
   const events: BuildingEventRow[] = [];
+  const claims: unknown[] = [];
+  let squadMailbox: unknown = null;
   const seen = new Set<string>();
   const refs = [...new Set(assetRefs.filter((id) => /^ca_[0-9a-f]{32}$/.test(id)))];
   const chunks = refs.length ? refs : [null];
@@ -232,9 +239,11 @@ export async function readBuildingOverrides(context: CitySnapshotV3, assetRefs: 
         created_at_ms: typeof row.created_at_ms === "number" ? row.created_at_ms : undefined,
       });
     }
+    if (Array.isArray(result.claims) && !claims.length) claims.push(...result.claims);
+    if (result.squad_mailbox && squadMailbox == null) squadMailbox = result.squad_mailbox;
     if (!refs.length) break;
   }
-  return { overrides, events };
+  return { overrides, events, claims, squadMailbox };
 }
 function mapSessionDetail(detail: NonNullable<CityProjectionV3["detail"]>): CityProjectionV1["sessions"][number] {
   return { ...detail, cost_minor: detail.cost.cost_minor, cost_breakdown: detail.cost.breakdown, cost_complete: detail.cost.complete, cost_reference_prices: detail.cost.reference_prices,

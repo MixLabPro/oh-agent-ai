@@ -54,7 +54,8 @@ export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
 import { appendRuntimes, applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, occupantsCanAppend, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
 export { occupantsCanAppend };
-import { createEditRuntime, createKitRuntime, disposeEditRuntime, disposeKitRuntime, replayKitRuntime, stepEditRuntime, stepKitRuntime, type EditRuntime, type KitRuntime } from "./sessionKitOverride";
+import { createClaimRuntime, createEditRuntime, createKitRuntime, disposeClaimRuntime, disposeEditRuntime, disposeKitRuntime, replayKitRuntime, stepEditRuntime, stepKitRuntime, type ClaimRuntime, type EditRuntime, type KitRuntime } from "./sessionKitOverride";
+import type { ClaimTint } from "./squadEvents";
 import type { OverlayDecision } from "./sessionKitConstruction";
 import { editPresentation, type EditVisual } from "./sessionKitEditState";
 
@@ -122,6 +123,7 @@ export class CityParts {
   private readonly runtimeById = new Map<string, BuildingRuntime>();
   private readonly kitBySession = new Map<string, KitRuntime>();
   private readonly editBySession = new Map<string, EditRuntime>();
+  private readonly claimBySession = new Map<string, ClaimRuntime>();
   private readonly shaftMeshes: THREE.InstancedMesh[] = [];
   private zoneById: Map<string, string> = new Map();
   private readonly shaftIdByInstance: Array<Map<number, string>> = [];
@@ -895,6 +897,35 @@ export class CityParts {
     return true;
   }
 
+  applySessionClaim(visual: ClaimTint): boolean {
+    const sessionId = this.runtimeById.has(visual.sessionId) ? visual.sessionId : (this.sessionIdForAsset(visual.assetRef) ?? visual.sessionId);
+    const runtime = this.runtimeById.get(sessionId);
+    if (!runtime) return false;
+    const existing = this.claimBySession.get(sessionId);
+    if (existing) {
+      disposeClaimRuntime(existing);
+      this.claimBySession.delete(sessionId);
+    }
+    const claim = createClaimRuntime({ ...visual, sessionId }, runtime);
+    this.group.add(claim.group);
+    this.claimBySession.set(sessionId, claim);
+    return true;
+  }
+
+  clearSessionClaim(sessionId: string): boolean {
+    const claim = this.claimBySession.get(sessionId);
+    if (!claim) return false;
+    disposeClaimRuntime(claim);
+    this.claimBySession.delete(sessionId);
+    return true;
+  }
+
+  claimSnapshot(): Array<{ sessionId: string; assetRef: string; agentId: string; expiresAt: number }> {
+    return [...this.claimBySession.entries()].map(([sessionId, claim]) => ({
+      sessionId, assetRef: claim.visual.assetRef, agentId: claim.visual.agentId, expiresAt: claim.visual.expiresAt,
+    }));
+  }
+
   editSnapshot(): Array<{ sessionId: string; assetRef: string; kind: string; eventId: string; rule?: string; opacity: number; active: boolean }> {
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
     return [...this.editBySession.entries()].map(([sessionId, edit]) => {
@@ -1147,6 +1178,14 @@ export class CityParts {
         dirty = true;
       }
     }
+    const nowSecs = Math.floor(Date.now() / 1000);
+    for (const [sessionId, claim] of [...this.claimBySession]) {
+      if (claim.visual.expiresAt <= nowSecs) {
+        disposeClaimRuntime(claim);
+        this.claimBySession.delete(sessionId);
+        dirty = true;
+      }
+    }
     if (dirty || Number.isNaN(this.cursor)) {
       for (const mesh of this.shaftMeshes) mesh.instanceMatrix.needsUpdate = true;
       this.podiumMesh.instanceMatrix.needsUpdate = true;
@@ -1333,6 +1372,8 @@ export class CityParts {
     this.kitBySession.clear();
     for (const edit of this.editBySession.values()) disposeEditRuntime(edit);
     this.editBySession.clear();
+    for (const claim of this.claimBySession.values()) disposeClaimRuntime(claim);
+    this.claimBySession.clear();
     for (const disposable of this.disposables) disposable.dispose();
   }
 }

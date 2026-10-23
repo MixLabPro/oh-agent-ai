@@ -6,6 +6,11 @@ import { CityEngine } from "./engine/CityEngine";
 import { tauriCityDataProvider, cityDataProtocol, readBuildingOverrides, type CityProjectionV1 } from "./data/provider";
 import { dispatchEntityChanged, ENTITY_CHANGED_EVENT, parseEntityChanged } from "./engine/entityEvents";
 import { entityChangedFromBuilding } from "./engine/sessionKitConstruction";
+import { SquadFeed } from "./SquadFeed";
+import {
+  applySquadEnvelope, claimsFromRows, emptyFeed, expireClaims, loadKindFilter, parseSquadEnvelope, saveKindFilter, SQUAD_EVENT,
+  type KindFilter, type SquadFeedState,
+} from "./engine/squadEvents";
 import "./city.css";
 import { embedded, connect, observeHealth, publishToolbar, type Tool } from "./host";
 import type { EngineQualityMode } from "./engine/CityEngine";
@@ -113,6 +118,10 @@ export function CityApp() {
   const geographyAbort = useRef<AbortController | null>(null);
   const liveCity = useRef(false);
   const seenEntityEvents = useRef(new Set<string>());
+  const [squad, setSquad] = useState<SquadFeedState>(emptyFeed);
+  const [squadFilter, setSquadFilter] = useState<KindFilter>(loadKindFilter);
+  const [squadOpen, setSquadOpen] = useState(true);
+  const [squadNow, setSquadNow] = useState(() => Date.now());
   useEffect(() => () => { geographyAbort.current?.abort(); }, []);
   useEffect(() => observeHealth(() => engineRef.current?.diagnosticState() ?? { engineMissing: true }), []);
   useEffect(() => {
@@ -132,6 +141,34 @@ export function CityApp() {
     window.addEventListener(ENTITY_CHANGED_EVENT, onEntity);
     return () => window.removeEventListener(ENTITY_CHANGED_EVENT, onEntity);
   }, []);
+  useEffect(() => {
+    const onSquad = (event: Event) => {
+      const parsed = parseSquadEnvelope((event as CustomEvent).detail);
+      if (!parsed) return;
+      const nowSecs = Math.floor(Date.now() / 1000);
+      setSquad((current) => applySquadEnvelope(current, parsed, nowSecs));
+    };
+    window.addEventListener(SQUAD_EVENT, onSquad);
+    const tick = window.setInterval(() => {
+      setSquadNow(Date.now());
+      const nowSecs = Math.floor(Date.now() / 1000);
+      setSquad((current) => {
+        const claims = expireClaims(current.claims, nowSecs);
+        if (Object.keys(claims).length === Object.keys(current.claims).length) return current;
+        return { ...current, claims };
+      });
+    }, 1000);
+    return () => { window.removeEventListener(SQUAD_EVENT, onSquad); window.clearInterval(tick); };
+  }, []);
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const present = new Set(Object.keys(squad.claims));
+    for (const claim of Object.values(squad.claims)) engine.applyClaimTint(claim);
+    for (const row of engine.inspectScene().claims as Array<{ assetRef: string; sessionId: string }>) {
+      if (!present.has(row.assetRef)) engine.clearClaimTint(row.sessionId);
+    }
+  }, [squad.claims, firstModelFrame]);
   useEffect(() => { liveCity.current = firstModelFrame; }, [firstModelFrame]);
 
   useEffect(() => {
@@ -279,9 +316,20 @@ export function CityApp() {
     const context = projection.v3_context;
     const refs = projection.sessions.map((session) => session.asset_ref).filter((id): id is string => typeof id === "string");
     const applyOverrides = async (animate: boolean) => {
-      const { overrides, events } = await readBuildingOverrides(context, refs);
+      const { overrides, events, claims, squadMailbox } = await readBuildingOverrides(context, refs);
       if (!active) return;
       for (const event of events) seenEntityEvents.current.add(event.event_id);
+      const nowSecs = Math.floor(Date.now() / 1000);
+      setSquad((current) => {
+        const stored = claimsFromRows(claims, nowSecs);
+        let next = {
+          ...current,
+          claims: Object.keys(current.claims).length ? expireClaims(current.claims, nowSecs) : stored,
+        };
+        const parsed = parseSquadEnvelope(squadMailbox);
+        if (parsed) next = applySquadEnvelope(next, parsed, nowSecs);
+        return next;
+      });
       for (const row of overrides) {
         const latest = events.find((event) => event.entity_id === row.asset_ref && event.action === "set" && event.revision === row.revision);
         engineRef.current?.applyBuildingChanged(entityChangedFromBuilding({
@@ -441,6 +489,10 @@ export function CityApp() {
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
           : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>
       </header>}
+      {!cinema && !game.active && !driving.active && sceneReady && <SquadFeed
+        items={squad.items} filter={squadFilter} nowMs={squadNow} open={squadOpen} onOpen={setSquadOpen}
+        onFilter={(next) => { setSquadFilter(next); saveKindFilter(next); }}
+        onFocus={(assetRef) => { engineRef.current?.focusBuilding(assetRef); }} />}
       <div hidden={driving.active}><CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality} game={game} planRepair={planRepair}
         windowDays={windowDays} windowOptions={windowOptions} onWindowDays={(days) => setWindowDays(days as WindowDays)} labels={labels} onLabels={(next) => { engineRef.current?.setLabelsVisible(next); setLabels(next); }}
         onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} /></div>

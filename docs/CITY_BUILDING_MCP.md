@@ -149,6 +149,8 @@ Other structured errors (`overlap`, `invalid_inheritance`, `revision_conflict`) 
 
 Delivery: same PluginHost channel (`__AV_PLUGIN_ENTITY_CHANGED__`). Preview/reject write `state/plugins/city-buildings/edit.json` and best-effort `host.sock`. They **do not** overwrite persist `notify.json`, so a mailbox poll cannot drop a queued construction event. Tool JSON grows an output-only `notify` object (`action`, `event_id`, `ui`); input schemas are unchanged.
 
+The same write path **also** fans out a squad IM envelope (`kind: preview|reject|set|reset`) onto `squad.json` + the same `host.sock`. Agents must not also call `im_publish` to report those writes. See `docs/CITY_SQUAD_IM.md`.
+
 A later successful `set` / `reset` clears the ghost and plays construction (PR #8). Cold open snaps committed overrides only — ghosts are live/ephemeral. Decal/graffiti and agent labels are not in this PR.
 
 Load path: city:v3 `buildings.overrides` (not stuffed into session pages — kit floats must not go through the integer-only v3 validator). Cold open **snaps** current overrides (resolved `model` + optional `inheritance`). Live host/poll events **animate**. City also polls `build_events` every 8s if the eval landed before the listener.
@@ -185,4 +187,5 @@ Copy `session_ref` from `sessions_search` into `session_id`. With City open, set
 - Pin/snapshot revision (layer 3).
 - OT/CRDT, aesthetic judge.
 - Road / vehicle write-path animation (the envelope and channel are ready; no handlers yet).
-- Parcel/lot coordinates, screenshots, resident metrics, multi-bot locks beyond `revision`.
+- Parcel/lot coordinates, screenshots, resident metrics, hard locks / OT (phase 1 has a stealable TTL claim on `(session_id, asset_ref)` plus IM fanout; see `docs/CITY_SQUAD_IM.md`).
+- `get_squad_feed`, verbose `observe`, agent labels, decal/graffiti.

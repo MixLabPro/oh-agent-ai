@@ -13,6 +13,7 @@ import {
 import {
   editPresentation, GHOST_OPACITY, type EditVisual, type GhostVisual, type RejectVisual,
 } from "./sessionKitEditState";
+import type { ClaimTint } from "./squadEvents";
 
 export type KitRuntime = {
   decision: OverlayDecision;
@@ -33,6 +34,8 @@ const ROLE_TINT: Record<string, string> = {
 };
 
 const FLASH_COLOR = "#e24b4b";
+const CLAIM_COLOR = "#f0c14b";
+export const CLAIM_OPACITY = 0.22;
 
 function compileRole(role: KitRole): PartRole {
   if (role === "door") return "structure";
@@ -205,4 +208,31 @@ export function stepEditRuntime(edit: EditRuntime, nowMs: number): boolean {
 export function disposeEditRuntime(edit: EditRuntime): void {
   edit.group.removeFromParent();
   for (const disposable of edit.disposables) disposable.dispose();
+}
+
+export type ClaimRuntime = {
+  visual: ClaimTint;
+  group: THREE.Group;
+  disposables: Array<{ dispose: () => void }>;
+};
+
+/** Soft-lock lot tint while a stealable claim is active. Distinct from fail-flash. */
+export function createClaimRuntime(visual: ClaimTint, runtime: BuildingRuntime): ClaimRuntime {
+  const group = new THREE.Group();
+  group.name = `session-kit-claim:${visual.assetRef}`;
+  group.position.set(runtime.slot.x, runtime.groundY + 0.04, runtime.slot.z);
+  group.rotation.y = runtime.slot.yaw;
+  const geometry = new THREE.BoxGeometry(runtime.slot.width * 0.98, 0.16, runtime.slot.depth * 0.98);
+  const material = new THREE.MeshBasicMaterial({
+    color: CLAIM_COLOR, transparent: true, opacity: CLAIM_OPACITY, depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.y = 0.08;
+  group.add(mesh);
+  return { visual, group, disposables: [geometry, material] };
+}
+
+export function disposeClaimRuntime(claim: ClaimRuntime): void {
+  claim.group.removeFromParent();
+  for (const disposable of claim.disposables) disposable.dispose();
 }
