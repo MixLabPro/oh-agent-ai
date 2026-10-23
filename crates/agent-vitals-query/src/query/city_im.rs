@@ -190,7 +190,9 @@ fn emit(home: &Path, identity: &BuildingIdentity, actor: &ImActor, kind: &str, p
 }
 
 /// Best-effort MCP write-path fanout. Never fails the building tool: construction
-/// notify already went out on its own mailbox.
+/// notify already went out on its own mailbox. Payloads include `revision` when
+/// known; City UI ignores a stale lower revision for that `asset_ref` (sibling
+/// lots stay isolated). Soft claim/release have no revision.
 pub fn fanout_building(
     home: &Path,
     identity: &BuildingIdentity,
