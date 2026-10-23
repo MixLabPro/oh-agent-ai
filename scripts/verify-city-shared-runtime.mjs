@@ -170,6 +170,17 @@ function fixture(kind, overrides = {}) {
   document.visibilityState = "hidden"; document.fire("visibilitychange", {}); assert.equal(interruptions.at(-1), "host-hidden");
   window.fire("__AV_PLUGIN_SUSPENDED__", {}); assert.equal(interruptions.at(-1), "host-suspended");
   source.detach(); source.detach(); assert.equal(window.count() + document.count(), 0, "detach releases every window/document listener");
+  focused = false;
+  const canvas = Object.assign(new HTMLElement(), { focus() { focused = true; } });
+  const steal = new KeyboardInput({ keys: { KeyW: "forward" }, emptyInput: () => ({ forward: false }),
+    isFocused: () => focused, focusTarget: () => canvas, onInterrupt: () => {} });
+  steal.attach();
+  focused = false;
+  const firstDrive = key("KeyW");
+  window.fire("keydown", firstDrive);
+  assert.equal(focused, true, "an unfocused mapped key focuses the canvas");
+  assert.equal(steal.snapshot().forward, true, "that first key still applies after the focus steal");
+  steal.detach();
   delete globalThis.window; delete globalThis.document; delete globalThis.HTMLElement;
 }
 console.log("Shared vehicle runtime: alternating adapters, activity boundaries, cancellation/stale cleanup, deterministic environment and keyboard ownership passed.");

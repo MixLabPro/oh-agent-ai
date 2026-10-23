@@ -11,6 +11,7 @@ import type { CameraClearanceQuery, ChaseCameraSafety } from "./VehicleChaseCame
 import type { RuntimeDiagnosticSnapshot } from "./runtime/RuntimeDiagnostics";
 import { DrivingEventLog, type DrivingEvent } from "./runtime/DrivingEventLog";
 import type { PreparationProgress } from "./runtime/Preparation";
+import { noteBusy } from "../host";
 import type { VerifiedSpawnCredential } from "./driving/spawnPoints";
 import { resolveFormalSpawn, SpawnConfirmationStore, type SpawnCandidateChoice, type SpawnConfirmationBinding, type SpawnConfirmationSnapshot } from "./driving/SpawnConfirmation";
 
@@ -105,6 +106,7 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
         ? "正式道路图尚不可用，暂不能开始驾驶。" : "驾驶出生点尚未完成当前场景确认，暂不能开始。"); return false;
     }
     const confirmedSpawn = authorization?.ok ? authorization.credential : null;
+    try { await noteBusy(10_000); } catch { /* host pulse is best-effort */ }
     const abort = new AbortController(); abortRef.current = abort;
     const runtime = new GameRuntime<DrivingInputState>({ dt: DRIVING_DT, emptyInput: () => ({ ...EMPTY_DRIVING_INPUT }) }); runtimeRef.current = runtime;
     preparing.current = true;
@@ -113,7 +115,10 @@ export function useCityDriving(engine: RefObject<CityEngine | null>, options: Re
     latest.current = { speed: 0, blocked: false, reason: null, coverage: null, gear: "N", altitude: null, boost: null };
     setEntryError(null); setHud({ ...IDLE_HUD, phase: "preparing" });
     const request = { collider: CITY_CAR_COLLIDER, vtol: vehicle?.vtol ?? (currentOptions.vtol === true), near, onPreparationMetric: runtime.recordPreparation.bind(runtime),
-      onPreparationProgress: (value: PreparationProgress) => setPreparationProgress(value), present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
+      onPreparationProgress: async (value: PreparationProgress) => {
+        if (value.state === "started") { try { await noteBusy(10_000); } catch { /* host pulse is best-effort */ } }
+        setPreparationProgress(value);
+      }, present: (frame: CarPresentation, scene: CityCarSceneCapability) => {
       const s = frame.state;
       latest.current = { ...latest.current, speed: Math.abs(frame.state.speed), blocked: frame.blocked, reason: frame.reason,
         altitude: Number.isFinite(s.boost) ? (s.y ?? null) : null, boost: Number.isFinite(s.boost) ? (s.boost ?? null) : null,

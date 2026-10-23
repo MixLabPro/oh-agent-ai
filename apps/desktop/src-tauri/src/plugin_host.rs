@@ -77,6 +77,12 @@ struct Instance {
     items: Vec<Tool>,
     sequence: u64,
     pending: Option<(String, Instant)>,
+    /// Authorized host round-trips currently in flight. A long `plugin_request`
+    /// is liveness, not a hang — the JS heartbeat queue sits behind that IPC.
+    in_flight: u32,
+    /// Plugin-declared sync-work budget. Heartbeat `busyMs` (capped 15s) holds
+    /// the 5s pulse so first-frame compile / vehicle prep can finish honestly.
+    busy_until: Option<Instant>,
     events: Vec<Value>,
 }
 
@@ -275,12 +281,34 @@ fn valid_tools(namespace: &str, items: &[Tool]) -> bool {
 fn refresh_fault(i: &mut Instance) -> bool {
     if i.suspended { return false; }
     if i.failed.is_some() { return false; }
+    if i.in_flight > 0 { return false; }
+    if i.busy_until.is_some_and(|until| Instant::now() < until) { return false; }
     let fault = if !i.ready && i.started.elapsed() > Duration::from_secs(15) { Some("plugin_boot_timeout") }
         else if i.ready && i.pulse.elapsed() > Duration::from_secs(5) { Some("plugin_unresponsive") }
         else if i.pending.as_ref().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(5)) { Some("plugin_command_timeout") }
         else { None };
     if let Some(code) = fault { i.failed = Some(code); note(i, code); return true; }
     false
+}
+
+fn begin_activity(host: &PluginHost, id: &str) {
+    let mut guard = host.0.lock().unwrap();
+    if let Some(i) = guard.current.as_mut().filter(|i| i.id == id) {
+        i.in_flight = i.in_flight.saturating_add(1);
+        i.pulse = Instant::now();
+    }
+}
+
+struct ActivityGuard { app: tauri::AppHandle, id: String }
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        let host = self.app.state::<PluginHost>();
+        let mut guard = host.0.lock().unwrap();
+        if let Some(i) = guard.current.as_mut().filter(|i| i.id == self.id) {
+            i.in_flight = i.in_flight.saturating_sub(1);
+            i.pulse = Instant::now();
+        }
+    }
 }
 
 fn notify_host(app: &tauri::AppHandle) {
@@ -504,7 +532,7 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
         host.generation += 1;
         let id = format!("plugin-{}-{}", definition.id, host.generation);
         let mut current = Instance { id: id.clone(), plugin_id: definition.id.clone(), command_namespace: definition.command_namespace.clone(), started: Instant::now(), pulse: Instant::now(), ready: false, suspended: false,
-            failed: None, revision: 0, items: Vec::new(), sequence: 0, pending: None, events: Vec::new() };
+            failed: None, revision: 0, items: Vec::new(), sequence: 0, pending: None, in_flight: 0, busy_until: None, events: Vec::new() };
         note(&mut current, "create_started");
         host.current = Some(current);
         id
@@ -663,10 +691,14 @@ fn apply_message(i: &mut Instance, sender: &str, message: Value) -> Result<(), S
             i.pulse = Instant::now();
             if let Some(source) = message["diagnostic"].as_object() {
                 let mut fields = serde_json::Map::new();
-                for key in ["hidden", "focused", "firstFrame", "contextLost", "loopScheduled", "modelApplied", "engineMissing", "frameAgeMs", "width", "height"] {
+                for key in ["hidden", "focused", "firstFrame", "contextLost", "loopScheduled", "modelApplied", "engineMissing", "frameAgeMs", "width", "height", "busyMs"] {
                     if let Some(value) = source.get(key).filter(|v| v.is_boolean() || v.as_u64().is_some_and(|n| n <= 86_400_000)) {
                         fields.insert(key.into(), value.clone());
                     }
+                }
+                if let Some(ms) = source.get("busyMs").and_then(|value| value.as_u64()) {
+                    let budget = Duration::from_millis(ms.min(15_000));
+                    i.busy_until = if budget.is_zero() { None } else { Some(Instant::now() + budget) };
                 }
                 if i.events.len() == 100 { i.events.remove(0); }
                 i.events.push(json!({"atMs": i.started.elapsed().as_millis() as u64, "code": "runtime_state", "state": fields}));
@@ -738,6 +770,8 @@ pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: taur
         let definition = definitions().iter().find(|p| p.id == i.plugin_id).ok_or("plugin_unknown")?;
         (definition.data_projections.clone(), definition.navigation_targets.clone(), definition.state_keys.clone(), i.plugin_id.clone())
     };
+    begin_activity(&state, &request.instance_id);
+    let _activity = ActivityGuard { app: app.clone(), id: request.instance_id.clone() };
     if request.method == "ui.open-session" {
         if !navigation.iter().any(|n| n == "session") { return Ok(plugin_request_error(request.request_id, "navigation_denied", false)); }
         let payload = request.payload.clone();
@@ -842,7 +876,7 @@ mod tests {
     use super::*;
     fn instance() -> Instance {
         Instance { id: "plugin-city-2".into(), plugin_id: "city".into(), command_namespace: "city".into(), started: Instant::now(), pulse: Instant::now(), ready: false, suspended: false,
-            failed: None, revision: 0, items: Vec::new(), sequence: 0, pending: None, events: Vec::new() }
+            failed: None, revision: 0, items: Vec::new(), sequence: 0, pending: None, in_flight: 0, busy_until: None, events: Vec::new() }
     }
     #[test]
     fn fault_deadlines_are_independent_of_frontend_polling_and_sticky() {
@@ -868,6 +902,35 @@ mod tests {
         pending.pending = Some(("request-1".into(), Instant::now() - Duration::from_secs(6)));
         assert!(refresh_fault(&mut pending));
         assert_eq!(pending.failed, Some("plugin_command_timeout"));
+    }
+    #[test]
+    fn in_flight_host_work_and_busy_budget_are_liveness_not_hangs() {
+        let mut i = instance();
+        i.ready = true;
+        i.pulse = Instant::now() - Duration::from_secs(6);
+        i.in_flight = 1;
+        assert!(!refresh_fault(&mut i), "an in-flight plugin_request must not count as plugin_unresponsive");
+        i.in_flight = 0;
+        i.busy_until = Some(Instant::now() + Duration::from_secs(8));
+        assert!(!refresh_fault(&mut i), "a declared busy budget holds the 5s pulse");
+        i.busy_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(refresh_fault(&mut i));
+        assert_eq!(i.failed, Some("plugin_unresponsive"));
+        let mut loading = instance();
+        loading.started = Instant::now() - Duration::from_secs(16);
+        loading.in_flight = 1;
+        assert!(!refresh_fault(&mut loading), "boot timeout waits while the plugin is inside a host request");
+    }
+    #[test]
+    fn heartbeat_busy_ms_is_capped_and_refreshes_pulse() {
+        let mut i = instance();
+        i.ready = true;
+        assert!(apply_message(&mut i, "plugin-city-2", json!({"version":1,"instanceId":"plugin-city-2","type":"heartbeat","diagnostic":{"busyMs":60_000}})).is_ok());
+        let until = i.busy_until.expect("busy budget");
+        assert!(until > Instant::now() + Duration::from_secs(10));
+        assert!(until <= Instant::now() + Duration::from_secs(15));
+        i.pulse = Instant::now() - Duration::from_secs(6);
+        assert!(!refresh_fault(&mut i));
     }
     #[test]
     fn rejects_old_instances_revisions_and_request_results() {

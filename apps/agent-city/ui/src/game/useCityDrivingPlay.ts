@@ -12,6 +12,8 @@ import { DrivingSfx } from "./driving/DrivingSfx";
 import type { CityCarSceneCapability } from "./runtime/createCityCarSession";
 import type { CameraClearanceQuery } from "./VehicleChaseCamera";
 import { closeOpenGameDisclosure } from "./ui/closeOpenDisclosure";
+import { noteBusy } from "../host";
+import { roadValidationReport, type RoadValidationReport } from "./roadValidation";
 
 export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: Readonly<{
   cinemaActive(): boolean; gameActive(): boolean; busy(): boolean;
@@ -31,6 +33,7 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
   const carColorRef = useRef<string | undefined>(undefined);
   /** 车的最新位姿（小地图画「我在哪」）：每帧 present 写，退出驾驶清空。 */
   const poseRef = useRef<Readonly<{ x: number; z: number; heading: number }> | null>(null);
+  const [roadCheck, setRoadCheck] = useState<RoadValidationReport | null>(null);
   const removeVisuals = useCallback(() => {
     const currentVisuals = visuals.current;
     if (currentVisuals) visualScene.current?.detach([currentVisuals.root]);
@@ -66,27 +69,36 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
     const canvas = engine.current?.domCanvas;
     if (canvas instanceof HTMLElement) canvas.focus({ preventScroll: true });
   }, [engine]);
+  const captureRoadCheck = useCallback(() => {
+    const layout = engine.current?.currentLayout;
+    setRoadCheck(layout ? roadValidationReport(layout) : null);
+  }, [engine]);
   const enter = useCallback(() => { car.clearEntryError(); carColorRef.current = undefined; setChoosingVehicle(true); }, [car.clearEntryError]);
   /** 点了地标停车场里的车：不弹选车，就开这辆（地面车、城区配色），出生点从离这座地标最近的路找起。 */
   const enterAt = useCallback((origin: Readonly<{ x: number; z: number; color: string }>) => {
     car.clearEntryError(); carColorRef.current = origin.color;
     setChoosingVehicle(false); setVtol(false); setInitialPaused(false);
-    void car.enterFreeDrive({ vtol: false }, { x: origin.x, z: origin.z }).then((ready) => { if (ready) { setInitialPaused(true); focusCanvas(); } });
-  }, [car.clearEntryError, car.enterFreeDrive, focusCanvas]);
+    void car.enterFreeDrive({ vtol: false }, { x: origin.x, z: origin.z }).then((ready) => { if (ready) { captureRoadCheck(); setInitialPaused(true); focusCanvas(); } });
+  }, [car.clearEntryError, car.enterFreeDrive, captureRoadCheck, focusCanvas]);
   const selectVehicle = useCallback((fly: boolean) => {
     carColorRef.current = undefined; setChoosingVehicle(false); setVtol(fly); setInitialPaused(false);
-    void car.enterFreeDrive({ vtol: fly }).then((ready) => { if (ready) { setInitialPaused(true); focusCanvas(); } });
-  }, [car.enterFreeDrive, focusCanvas]);
+    void car.enterFreeDrive({ vtol: fly }).then((ready) => { if (ready) { captureRoadCheck(); setInitialPaused(true); focusCanvas(); } });
+  }, [car.enterFreeDrive, captureRoadCheck, focusCanvas]);
   const resume = useCallback(() => {
     inputSource.current?.clear();
-    if (!sfxRef.current) sfxRef.current = new DrivingSfx();
-    const sfx = sfxRef.current;
-    sfx.setVolume(soundVolumeRef.current); sfx.setMuted(!sfxEnabledRef.current); sfx.resume();
-    setSoundAvailable(sfx.available);
-    setInitialPaused(false); car.resume(); focusCanvas();
+    const start = () => {
+      if (!sfxRef.current) sfxRef.current = new DrivingSfx();
+      const sfx = sfxRef.current;
+      sfx.setVolume(soundVolumeRef.current); sfx.setMuted(!sfxEnabledRef.current); sfx.resume();
+      setSoundAvailable(sfx.available);
+      setInitialPaused(false); car.resume(); focusCanvas();
+    };
+    // First AudioContext on WKWebView can block the plugin thread for seconds.
+    if (sfxRef.current) start();
+    else void noteBusy(8_000).catch(() => {}).finally(start);
   }, [car.resume, focusCanvas]);
   const pause = useCallback((reason?: string) => { inputSource.current?.clear(); car.pause(reason); sfxRef.current?.suspend(); }, [car.pause]);
-  const exit = useCallback(() => { setChoosingVehicle(false); inputSource.current?.clear(); car.exit(); removeVisuals(); sfxRef.current?.dispose(); sfxRef.current = null; setSoundAvailable(false); setInitialPaused(false); }, [car.exit, removeVisuals]);
+  const exit = useCallback(() => { setChoosingVehicle(false); inputSource.current?.clear(); car.exit(); removeVisuals(); sfxRef.current?.dispose(); sfxRef.current = null; setSoundAvailable(false); setInitialPaused(false); setRoadCheck(null); }, [car.exit, removeVisuals]);
   const openUiContext = useCallback(() => { inputSource.current?.clear(); if (phaseRef.current === "running") car.pause(); sfxRef.current?.suspend(); }, [car.pause]);
   useEffect(() => {
     if (car.hud.phase !== "running") { inputSource.current?.clear(); sfxRef.current?.suspend(); }
@@ -94,6 +106,9 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
   useEffect(() => {
     if (car.hud.phase === "idle" || car.hud.phase === "error") { removeVisuals(); poseRef.current = null; }
   }, [car.hud.phase, removeVisuals]);
+  useEffect(() => {
+    if (car.hud.phase === "running") focusCanvas();
+  }, [car.hud.phase, focusCanvas]);
   useEffect(() => removeVisuals, [removeVisuals]);
   useEffect(() => {
     if (!active || choosingVehicle) return;
@@ -140,5 +155,5 @@ export function useCityDrivingPlay(engine: RefObject<CityEngine | null>, host: R
   const toggleSfx = useCallback(() => { const next = !sfxEnabledRef.current; sfxEnabledRef.current = next; setSfxEnabled(next); sfxRef.current?.setMuted(!next); }, []);
   const sound = soundAvailable ? { volume: soundVolume, onVolume: setSoundVolume, sfx: { enabled: sfxEnabled, onToggle: toggleSfx } } : undefined;
   const pose = useCallback(() => poseRef.current, []);
-  return { ...car, active, choosingVehicle, vtol, selectVehicle, enter, enterAt, exit, resume, pause, openUiContext, initialPaused, sound, pose };
+  return { ...car, active, choosingVehicle, vtol, selectVehicle, enter, enterAt, exit, resume, pause, openUiContext, initialPaused, sound, pose, roadCheck };
 }

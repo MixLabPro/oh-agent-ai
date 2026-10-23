@@ -100,7 +100,13 @@ export class KeyboardInput<Input extends object> {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (this.options.onCommand?.(event)) return;
     const key = this.options.keys[event.code];
-    if (key === undefined || event.repeat || !this.options.isFocused()) return;
+    if (key === undefined || event.repeat) return;
+    // HUD/dialog chrome can keep document focus after Start. Steal the canvas
+    // on the first mapped key rather than dropping it until the player hits Esc.
+    if (!this.options.isFocused()) {
+      this.focusTarget()?.focus({ preventScroll: true });
+      if (!this.options.isFocused()) return;
+    }
     event.preventDefault();
     this.held.add(event.code);
     this.state[key] = true as Input[keyof Input];
