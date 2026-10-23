@@ -2,6 +2,8 @@
 //!
 //! Gates: lot/footprint, height (incl. story height / floors), construction budget,
 //! and required part roles (door, window) for occupiable volumes.
+//! After absolute compliance, `validate_detail_regression` enforces hold-or-improve
+//! detail vs the session's current model (layer 1 of 防越改越糙).
 //! Shared by `preview_building` and `set_building_model`.
 
 use serde_json::Value;
@@ -54,7 +56,32 @@ pub struct BuildingSlot {
     pub story_height_max: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailTier {
+    Coarse = 0,
+    Standard = 1,
+    Detailed = 2,
+}
+
+impl DetailTier {
+    fn from_u8(n: u8) -> Option<Self> {
+        match n {
+            0 => Some(DetailTier::Coarse),
+            1 => Some(DetailTier::Standard),
+            2 => Some(DetailTier::Detailed),
+            _ => None,
+        }
+    }
+
+    fn score_weight(self) -> i32 {
+        match self {
+            DetailTier::Coarse => 0,
+            DetailTier::Standard => 5,
+            DetailTier::Detailed => 10,
+        }
+    }
+}
+
 struct CatalogEntry {
     id: &'static str,
     max_half_x: f64,
@@ -63,6 +90,9 @@ struct CatalogEntry {
     cost: f64,
     /// Catalog kit satisfies door/window without tagging every part.
     provides_door_window: bool,
+    detail_tier: DetailTier,
+    /// Typical part count when an agent uses the kit as-is (for catalog-only scoring).
+    typical_parts: u8,
 }
 
 const CATALOG: &[CatalogEntry] = &[
@@ -73,6 +103,8 @@ const CATALOG: &[CatalogEntry] = &[
         max_height: 14.0,
         cost: 32.0,
         provides_door_window: true,
+        detail_tier: DetailTier::Standard,
+        typical_parts: 4,
     },
     CatalogEntry {
         id: "kit-midrise",
@@ -81,6 +113,8 @@ const CATALOG: &[CatalogEntry] = &[
         max_height: 30.0,
         cost: 72.0,
         provides_door_window: true,
+        detail_tier: DetailTier::Detailed,
+        typical_parts: 5,
     },
     CatalogEntry {
         id: "kit-tower",
@@ -89,6 +123,8 @@ const CATALOG: &[CatalogEntry] = &[
         max_height: 48.0,
         cost: 120.0,
         provides_door_window: true,
+        detail_tier: DetailTier::Detailed,
+        typical_parts: 5,
     },
     CatalogEntry {
         id: "kit-wide-slab",
@@ -97,8 +133,139 @@ const CATALOG: &[CatalogEntry] = &[
         max_height: 22.0,
         cost: 48.0,
         provides_door_window: true,
+        detail_tier: DetailTier::Standard,
+        typical_parts: 4,
     },
 ];
+
+/// Cheap richness signal for hold-or-improve (no ML). Higher is more detailed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetailScore {
+    pub total: i32,
+    pub part_count: usize,
+    pub has_door: bool,
+    pub has_window: bool,
+    pub detail_tier: DetailTier,
+}
+
+pub fn detail_tier_param_valid(value: &Value) -> bool {
+    parse_detail_tier_param(value).is_some()
+}
+
+fn parse_detail_tier_param(value: &Value) -> Option<DetailTier> {
+    if let Some(n) = value.as_u64() {
+        return DetailTier::from_u8(n as u8);
+    }
+    if let Some(s) = value.as_str() {
+        return match s {
+            "coarse" => Some(DetailTier::Coarse),
+            "standard" => Some(DetailTier::Standard),
+            "detailed" => Some(DetailTier::Detailed),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn resolve_detail_tier(model: &Value, part_count: usize) -> DetailTier {
+    if let Some(tier) = model
+        .get("params")
+        .and_then(|p| p.get("detail_tier"))
+        .and_then(parse_detail_tier_param)
+    {
+        return tier;
+    }
+    if let Some(id) = model
+        .get("params")
+        .and_then(|p| p.get("catalog_id"))
+        .and_then(Value::as_str)
+    {
+        if let Some(entry) = catalog_by_id(id) {
+            return entry.detail_tier;
+        }
+    }
+    if part_count <= 2 {
+        DetailTier::Coarse
+    } else if part_count <= 4 {
+        DetailTier::Standard
+    } else {
+        DetailTier::Detailed
+    }
+}
+
+fn model_has_opening_roles(model: &Value) -> (bool, bool) {
+    let door = has_part_role(model, "door");
+    let window = has_part_role(model, "window");
+    if door && window {
+        return (true, true);
+    }
+    if let Some(id) = model
+        .get("params")
+        .and_then(|p| p.get("catalog_id"))
+        .and_then(Value::as_str)
+    {
+        if let Some(entry) = catalog_by_id(id) {
+            if entry.provides_door_window {
+                return (true, true);
+            }
+        }
+    }
+    (door, window)
+}
+
+pub fn compute_detail_score(model: &Value) -> DetailScore {
+    let part_count = model
+        .get("parts")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let (has_door, has_window) = model_has_opening_roles(model);
+    let detail_tier = resolve_detail_tier(model, part_count);
+    let mut total = part_count as i32 * 2;
+    if has_door {
+        total += 3;
+    }
+    if has_window {
+        total += 3;
+    }
+    total += detail_tier.score_weight();
+    DetailScore {
+        total,
+        part_count,
+        has_door,
+        has_window,
+        detail_tier,
+    }
+}
+
+fn catalog_detail_score(entry: &CatalogEntry) -> DetailScore {
+    let has_dw = entry.provides_door_window;
+    let part_count = entry.typical_parts as usize;
+    let mut total = part_count as i32 * 2;
+    if has_dw {
+        total += 6;
+    }
+    total += entry.detail_tier.score_weight();
+    DetailScore {
+        total,
+        part_count,
+        has_door: has_dw,
+        has_window: has_dw,
+        detail_tier: entry.detail_tier,
+    }
+}
+
+pub fn non_regressing_catalog_ids(current: &Value, slot: &BuildingSlot) -> Vec<String> {
+    let floor = compute_detail_score(current).total;
+    compliant_catalog_ids(slot)
+        .into_iter()
+        .filter(|id| {
+            catalog_by_id(id)
+                .map(|entry| catalog_detail_score(entry).total >= floor)
+                .unwrap_or(false)
+        })
+        .collect()
+}
 
 const MIN_LOT_COVERAGE: f64 = 0.32;
 const OCCUPIABLE_HEIGHT: f64 = 3.5;
@@ -288,7 +455,9 @@ pub fn validate_model_compliance(model: &Value, slot: &BuildingSlot) -> Result<(
     if story_height < slot.story_height_min - 0.05 || story_height > slot.story_height_max + 0.05 {
         return Err(compliance_error(
             format!(
-                "story height {story_height:.2} is outside allowed {slot.story_height_min:.1}..{slot.story_height_max:.1}"
+                "story height {story_height:.2} is outside allowed {:.1}..{:.1}",
+                slot.story_height_min,
+                slot.story_height_max,
             ),
             "set params.story_height in range or split into stacked floor parts",
             &candidates,
@@ -297,7 +466,8 @@ pub fn validate_model_compliance(model: &Value, slot: &BuildingSlot) -> Result<(
     if (floors as f64) * story_height > slot.max_height + 0.1 {
         return Err(compliance_error(
             format!(
-                "floors×story height ({floors}×{story_height:.2}) exceeds session max height {slot.max_height:.2}"
+                "floors×story height ({floors}×{story_height:.2}) exceeds session max height {:.2}",
+                slot.max_height,
             ),
             "reduce floors, lower story_height, or shorten parts",
             &candidates,
@@ -306,7 +476,9 @@ pub fn validate_model_compliance(model: &Value, slot: &BuildingSlot) -> Result<(
     if height > slot.max_height + 0.05 {
         return Err(compliance_error(
             format!(
-                "model height {height:.2} exceeds {slot.height_class} max {slot.max_height:.2} for this session"
+                "model height {height:.2} exceeds {} max {:.2} for this session",
+                slot.height_class.as_str(),
+                slot.max_height,
             ),
             "lower the structure to match the session height class",
             &candidates,
@@ -326,30 +498,31 @@ pub fn validate_model_compliance(model: &Value, slot: &BuildingSlot) -> Result<(
     let cost = declared_cost.unwrap_or(build_cost);
     if cost > slot.budget_cap + 0.05 {
         return Err(compliance_error(
-            format!("construction cost {cost:.1} exceeds session budget cap {slot.budget_cap:.1}"),
+            format!("construction cost {cost:.1} exceeds session budget cap {:.1}", slot.budget_cap),
             "use fewer/smaller parts, set params.build_cost honestly, or pick a catalog kit within budget",
             &candidates,
         ));
     }
 
     if let Some(entry) = catalog {
+        let cid = catalog_id.unwrap_or(entry.id);
         if cost > entry.cost + 0.05 {
             return Err(compliance_error(
-                format!("construction cost {cost:.1} exceeds catalog `{catalog_id}` cost {entry.cost:.1}"),
+                format!("construction cost {cost:.1} exceeds catalog `{cid}` cost {:.1}", entry.cost),
                 "simplify the model or pick a catalog kit with a higher cost",
                 &candidates,
             ));
         }
         if half_x > entry.max_half_x + 0.02 || half_z > entry.max_half_z + 0.02 {
             return Err(compliance_error(
-                format!("model footprint exceeds catalog `{catalog_id}` lot size"),
+                format!("model footprint exceeds catalog `{cid}` lot size"),
                 "shrink the footprint or choose another catalog_id",
                 &candidates,
             ));
         }
         if height > entry.max_height + 0.05 {
             return Err(compliance_error(
-                format!("model height exceeds catalog `{catalog_id}` max {entry.max_height:.1}"),
+                format!("model height exceeds catalog `{cid}` max {:.1}", entry.max_height),
                 "lower the roof or pick a taller catalog entry",
                 &candidates,
             ));
@@ -378,6 +551,46 @@ pub fn validate_model_compliance(model: &Value, slot: &BuildingSlot) -> Result<(
     Ok(())
 }
 
+/// Hold-or-improve: proposed detail score must be ≥ current (runs after absolute compliance).
+pub fn validate_detail_regression(
+    current: &Value,
+    proposed: &Value,
+    slot: &BuildingSlot,
+) -> Result<(), BuildingError> {
+    let current_score = compute_detail_score(current);
+    let proposed_score = compute_detail_score(proposed);
+    if proposed_score.total >= current_score.total {
+        return Ok(());
+    }
+    let candidates = non_regressing_catalog_ids(current, slot);
+    let candidates = if candidates.is_empty() {
+        compliant_catalog_ids(slot)
+    } else {
+        candidates
+    };
+    Err(BuildingError::detail_regression(
+        format!(
+            "proposed detail score {} is below current {} (parts {}→{}, tier {}→{})",
+            proposed_score.total,
+            current_score.total,
+            current_score.part_count,
+            proposed_score.part_count,
+            tier_label(current_score.detail_tier),
+            tier_label(proposed_score.detail_tier),
+        ),
+        "add parts, door/window roles, or raise params.detail_tier; do not simplify below the current building",
+        &candidates,
+    ))
+}
+
+fn tier_label(tier: DetailTier) -> &'static str {
+    match tier {
+        DetailTier::Coarse => "coarse",
+        DetailTier::Standard => "standard",
+        DetailTier::Detailed => "detailed",
+    }
+}
+
 fn compliance_error(message: impl Into<String>, fix: impl Into<String>, candidates: &[String]) -> BuildingError {
     BuildingError::invalid_model_compliance(message, fix, candidates)
 }
@@ -388,7 +601,8 @@ mod tests {
     use serde_json::json;
 
     fn mid_slot() -> BuildingSlot {
-        derive_slot("sess-one", 50_000)
+        // Needs max_height ≥ kit-low-block (14 u) so compliant_catalog is non-empty.
+        derive_slot("sess-one", 100_000)
     }
 
     fn occupiable_parts() -> Value {
@@ -459,5 +673,52 @@ mod tests {
             "parts": occupiable_parts()
         });
         validate_model_compliance(&model, &mid_slot()).unwrap();
+    }
+
+    fn detailed_current() -> Value {
+        json!({
+            "kit_version": "session-kit/v1",
+            "params": {"floors": 2, "story_height": 3.0, "detail_tier": "detailed"},
+            "parts": occupiable_parts()
+        })
+    }
+
+    fn simpler_compliant() -> Value {
+        json!({
+            "kit_version": "session-kit/v1",
+            "params": {"catalog_id": "kit-low-block", "floors": 2, "story_height": 2.8, "detail_tier": "coarse", "build_cost": 30.0},
+            "parts": [
+                {"id": "base", "kind": "box", "role": "structure", "at": [0.0, 0.0, 0.0], "size": [5.0, 2.8, 6.0]},
+                {"id": "cap", "kind": "box", "role": "wall", "at": [0.0, 2.8, 0.0], "size": [4.5, 2.8, 5.5]},
+                {"id": "door", "kind": "box", "role": "door", "at": [0.0, 0.0, 3.0], "size": [1.2, 2.0, 0.2]},
+                {"id": "window", "kind": "box", "role": "window", "at": [0.0, 3.5, 3.0], "size": [1.4, 1.2, 0.15]},
+            ]
+        })
+    }
+
+    #[test]
+    fn detail_regression_equal_and_upgrade_ok() {
+        let current = detailed_current();
+        let slot = mid_slot();
+        validate_detail_regression(&current, &current, &slot).unwrap();
+        let mut parts = occupiable_parts().as_array().cloned().unwrap_or_default();
+        parts.push(json!({"id": "trim", "kind": "box", "role": "trim", "at": [0.0, 6.0, 0.0], "size": [4.0, 0.2, 5.0]}));
+        let upgraded = json!({
+            "kit_version": "session-kit/v1",
+            "params": {"catalog_id": "kit-midrise", "floors": 2, "story_height": 3.2, "detail_tier": "detailed"},
+            "parts": parts,
+        });
+        validate_model_compliance(&upgraded, &slot).unwrap();
+        validate_detail_regression(&current, &upgraded, &slot).unwrap();
+    }
+
+    #[test]
+    fn detail_regression_rejects_coarser_kit() {
+        let current = detailed_current();
+        let proposed = simpler_compliant();
+        validate_model_compliance(&proposed, &mid_slot()).unwrap();
+        let err = validate_detail_regression(&current, &proposed, &mid_slot()).unwrap_err();
+        assert_eq!(err.rule, "detail_regression");
+        assert!(!err.compliant_models.is_empty(), "candidates: {:?}", err.compliant_models);
     }
 }

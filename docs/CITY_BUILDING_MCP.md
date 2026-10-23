@@ -36,12 +36,14 @@ ReACT loop: **get → preview → set → get**. Confirm the set by matching `re
 - `parts` length 1–64.
 - `kind`: `box` | `cylinder` | `cone`. `role`: `wall` | `trim` | `roof` | `glass` | `structure` | `door` | `window`.
 - `at` is the base centre (y = bottom). `size` is `[x, y, z]` extents. Optional `rot`, `color` (`#rrggbb`).
-- `params.form`: `tower` | `slab` | `block` | `midrise`. Optional `params.palette`, `params.catalog_id`, `params.build_cost`, `params.floors`, `params.story_height`.
+- `params.form`: `tower` | `slab` | `block` | `midrise`. Optional `params.palette`, `params.catalog_id`, `params.build_cost`, `params.floors`, `params.story_height`, `params.detail_tier` (`coarse` | `standard` | `detailed` or `0`..`2`).
 - No scripts, no extra fields. Unknown `kit_version` is a validation error. Stored overrides keep their `kit_version` so old rows are not silently migrated.
 
 **Geometry checks:** finite numbers, parts ≤64, lot envelope (±4 x, ±6 z, height 0–48 world units), AABB overlap.
 
 **Model compliance (preview + set, same path):** derived lot footprint (min coverage + max bounds), session height class + story height (`params.story_height` / `params.floors`, reject pillar-like single shafts), construction budget (`estimate` or `params.build_cost` vs session `budget_cap`; catalog `cost` when `catalog_id` set), and required `door` / `window` part roles for occupiable models (waived when `catalog_id` points at a kit that provides them). Failures use `rule: invalid_model` and may include `compliant_models` (catalog ids). `get_building.projection` returns `lot`, `compliant_catalog`, and `required_part_roles`.
+
+**Detail regression (layer 1, after compliance):** compare a cheap **detail score** for the session’s **current** model (override or default) vs the proposal. Inputs: part count, door/window presence (or catalog kit that provides them), and `params.detail_tier` (`coarse` | `standard` | `detailed` or `0`..`2`; otherwise derived from part count or catalog). **Hold-or-improve:** proposed score must be ≥ current. Failures use `rule: detail_regression` and may list `compliant_models` catalog ids that would not regress. Inheritance overrides and revision snapshots are deferred.
 
 ## Errors
 
