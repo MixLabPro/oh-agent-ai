@@ -144,9 +144,9 @@ fn writes_denied() -> ToolError {
 fn map_error(error: BuildingError) -> Result<Value, ToolError> {
     match error.kind {
         "not_found" if error.rule == "unknown_session" => {
-            Err(ToolError::new("not_found", error.message))
+            Err(ToolError::new("not_found", error.message.as_str()))
         }
-        _ => Err(ToolError::new("data_unavailable", error.message)),
+        _ => Err(ToolError::new("data_unavailable", error.message.as_str())),
     }
 }
 

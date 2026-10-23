@@ -2,7 +2,6 @@
 //! Usage: cargo run -p agent-vitals-query --example seed_city_home -- /path/to/home [count]
 use std::path::PathBuf;
 use agent_vitals_data::authority::{AuthorityDb, default_authority_path};
-use rusqlite;
 
 fn main() {
     let home = PathBuf::from(std::env::args().nth(1).or_else(|| std::env::var("CITY_V3_SEED_HOME").ok())

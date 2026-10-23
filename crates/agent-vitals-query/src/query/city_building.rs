@@ -53,8 +53,14 @@ const LOT_HALF_Z: f64 = 6.0;
 const MAX_HEIGHT: f64 = 48.0;
 const OVERLAP_EPS: f64 = 0.02;
 
+/// Payload is boxed so `Result<T, BuildingError>` stays under clippy's
+/// `result_large_err` threshold (rustc 1.99: Err ≥128 bytes). Field access
+/// is unchanged via `Deref`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BuildingError {
+pub struct BuildingError(Box<BuildingErrorInner>);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildingErrorInner {
     pub kind: &'static str,
     pub rule: &'static str,
     pub parts: Vec<String>,
@@ -63,16 +69,39 @@ pub struct BuildingError {
     pub compliant_models: Vec<String>,
 }
 
+impl std::ops::Deref for BuildingError {
+    type Target = BuildingErrorInner;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<BuildingError>() < 128,
+    "BuildingError must stay under clippy result_large_err (128-byte Err variant)",
+);
+
 impl BuildingError {
-    pub(crate) fn validation(rule: &'static str, parts: Vec<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
-        Self {
-            kind: "validation",
+    fn new(
+        kind: &'static str,
+        rule: &'static str,
+        parts: Vec<String>,
+        message: impl Into<String>,
+        suggested_fix: Option<String>,
+        compliant_models: Vec<String>,
+    ) -> Self {
+        Self(Box::new(BuildingErrorInner {
+            kind,
             rule,
             parts,
             message: message.into(),
-            suggested_fix: Some(fix.into()),
-            compliant_models: Vec::new(),
-        }
+            suggested_fix,
+            compliant_models,
+        }))
+    }
+
+    pub(crate) fn validation(rule: &'static str, parts: Vec<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self::new("validation", rule, parts, message, Some(fix.into()), Vec::new())
     }
 
     pub(crate) fn invalid_model_compliance(
@@ -80,14 +109,7 @@ impl BuildingError {
         fix: impl Into<String>,
         candidates: &[String],
     ) -> Self {
-        Self {
-            kind: "validation",
-            rule: "invalid_model",
-            parts: Vec::new(),
-            message: message.into(),
-            suggested_fix: Some(fix.into()),
-            compliant_models: candidates.to_vec(),
-        }
+        Self::new("validation", "invalid_model", Vec::new(), message, Some(fix.into()), candidates.to_vec())
     }
 
     pub(crate) fn detail_regression(
@@ -95,34 +117,27 @@ impl BuildingError {
         fix: impl Into<String>,
         candidates: &[String],
     ) -> Self {
-        Self {
-            kind: "validation",
-            rule: "detail_regression",
-            parts: Vec::new(),
-            message: message.into(),
-            suggested_fix: Some(fix.into()),
-            compliant_models: candidates.to_vec(),
-        }
+        Self::new("validation", "detail_regression", Vec::new(), message, Some(fix.into()), candidates.to_vec())
     }
     fn conflict(current_revision: u64) -> Self {
-        Self {
-            kind: "conflict",
-            rule: "revision_conflict",
-            parts: Vec::new(),
-            message: format!("expected_revision does not match current revision {current_revision}"),
-            suggested_fix: Some("call get_building and retry with the returned revision".into()),
-            compliant_models: Vec::new(),
-        }
+        Self::new(
+            "conflict",
+            "revision_conflict",
+            Vec::new(),
+            format!("expected_revision does not match current revision {current_revision}"),
+            Some("call get_building and retry with the returned revision".into()),
+            Vec::new(),
+        )
     }
     fn not_found(session_id: &str) -> Self {
-        Self {
-            kind: "not_found",
-            rule: "unknown_session",
-            parts: Vec::new(),
-            message: format!("no session building matches `{session_id}`"),
-            suggested_fix: Some("pass sessions_search.session_ref (sr_…) or the building asset_ref (ca_…)".into()),
-            compliant_models: Vec::new(),
-        }
+        Self::new(
+            "not_found",
+            "unknown_session",
+            Vec::new(),
+            format!("no session building matches `{session_id}`"),
+            Some("pass sessions_search.session_ref (sr_…) or the building asset_ref (ca_…)".into()),
+            Vec::new(),
+        )
     }
     pub fn to_json(&self) -> Value {
         let mut out = json!({
@@ -546,14 +561,14 @@ fn open_store(home: &Path) -> Result<Connection, BuildingError> {
 }
 
 fn store_unavailable() -> BuildingError {
-    BuildingError {
-        kind: "not_found",
-        rule: "store_unavailable",
-        parts: Vec::new(),
-        message: "city building override store is unavailable".into(),
-        suggested_fix: Some("retry; the store lives under state/plugins/city-buildings/".into()),
-        compliant_models: Vec::new(),
-    }
+    BuildingError::new(
+        "not_found",
+        "store_unavailable",
+        Vec::new(),
+        "city building override store is unavailable",
+        Some("retry; the store lives under state/plugins/city-buildings/".into()),
+        Vec::new(),
+    )
 }
 
 #[derive(Debug, Clone)]

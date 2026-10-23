@@ -154,7 +154,7 @@ fn apply_overrides_merge(model: &mut Value, overrides: &Value) -> Result<(), Bui
         parts.retain(|p| {
             p.get("id")
                 .and_then(Value::as_str)
-                .is_none_or(|id| !remove_set.contains(id))
+                .map_or(true, |id| !remove_set.contains(id))
         });
     }
 
