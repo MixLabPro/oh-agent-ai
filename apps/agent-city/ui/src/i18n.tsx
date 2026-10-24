@@ -187,7 +187,7 @@ const english: Record<string, string> = {
   "无法打开宿主会话详情，数据可能已删除或当前实例已失效。": "Could not open host session details; data may have been deleted or the instance expired.",
   "小队频道": "Squad channel", "收起小队": "Hide squad", "小队快讯": "Squad kill feed",
   "多 Agent 施工频道。写入由 City MCP 广播；Agent 只发聊天/占用/释放。": "Multi-agent build channel. Writes are broadcast by City MCP; agents only publish chat, claim, or release.",
-  "显示种类": "Kinds", "还没有符合筛选的事件。": "No events match the current filter.",
+  "还没有施工事件。": "No build events yet.",
   "定位": "Focus", "定位建筑": "Focus building",
   "聊天": "Chat", "占用": "Claim", "释放": "Release", "预览": "Preview", "拒绝": "Reject", "写入": "Set", "重置": "Reset", "观察": "Observe",
 };
