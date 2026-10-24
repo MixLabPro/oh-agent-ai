@@ -12,7 +12,7 @@ export type SquadKind = (typeof SQUAD_KINDS)[number];
 
 export type KindFilter = Record<SquadKind, boolean>;
 
-/** Write-related on; chat/observe off. Reset follows set. */
+/** Fixed visibility. Not a user preference: write-related on, chat/observe off, reset on like set. */
 export const DEFAULT_KIND_FILTER: KindFilter = {
   chat: false,
   observe: false,
@@ -163,25 +163,8 @@ export function expireClaims(claims: Record<string, ClaimTint>, nowSecs: number)
   return next;
 }
 
-export function visibleFeed(items: SquadEnvelope[], filter: KindFilter): SquadEnvelope[] {
+export function visibleFeed(items: SquadEnvelope[], filter: KindFilter = DEFAULT_KIND_FILTER): SquadEnvelope[] {
   return items.filter((item) => filter[item.kind]);
-}
-
-export function loadKindFilter(): KindFilter {
-  try {
-    const raw = localStorage.getItem("city.squad.kinds");
-    if (!raw) return { ...DEFAULT_KIND_FILTER };
-    const parsed = JSON.parse(raw) as Partial<KindFilter>;
-    const out = { ...DEFAULT_KIND_FILTER };
-    for (const kind of SQUAD_KINDS) if (typeof parsed[kind] === "boolean") out[kind] = parsed[kind]!;
-    return out;
-  } catch {
-    return { ...DEFAULT_KIND_FILTER };
-  }
-}
-
-export function saveKindFilter(filter: KindFilter): void {
-  try { localStorage.setItem("city.squad.kinds", JSON.stringify(filter)); } catch { /* private pref */ }
 }
 
 export function envelopeAssetRef(event: SquadEnvelope): string | null {
