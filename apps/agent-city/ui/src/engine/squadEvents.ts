@@ -12,7 +12,7 @@ export type SquadKind = (typeof SQUAD_KINDS)[number];
 
 export type KindFilter = Record<SquadKind, boolean>;
 
-/** Write-related on; chat/observe off. Reset follows set. */
+/** Fixed visibility. Not a user preference: write-related on, chat/observe off, reset on like set. */
 export const DEFAULT_KIND_FILTER: KindFilter = {
   chat: false,
   observe: false,
@@ -44,9 +44,13 @@ export type ClaimTint = {
   eventId: string;
 };
 
+/** Highest fanout `payload.revision` seen per lot. Soft claim/release do not write this. */
+export type RevisionWatermark = { revision: number; ts: number };
+
 export type SquadFeedState = {
   items: SquadEnvelope[];
   claims: Record<string, ClaimTint>;
+  revisions: Record<string, RevisionWatermark>;
 };
 
 const KIND_SET = new Set<string>(SQUAD_KINDS);
@@ -55,6 +59,28 @@ const CA = /^ca_[0-9a-f]{32}$/;
 
 export function isWriteKind(kind: SquadKind): boolean {
   return kind === "preview" || kind === "reject" || kind === "set" || kind === "reset" || kind === "claim" || kind === "release";
+}
+
+const FANOUT_KINDS = new Set<SquadKind>(["preview", "reject", "set", "reset"]);
+
+/** Numeric revision on MCP fanout kinds only. Claim/release never invent one. */
+export function envelopeRevision(event: SquadEnvelope): number | null {
+  if (!FANOUT_KINDS.has(event.kind)) return null;
+  const revision = event.payload.revision;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) return null;
+  return revision;
+}
+
+/** True when a fanout envelope is older than the highest revision already applied for that asset_ref. */
+export function isStaleFanout(state: SquadFeedState, event: SquadEnvelope): boolean {
+  const assetRef = envelopeAssetRef(event);
+  if (!assetRef) return false;
+  const revision = envelopeRevision(event);
+  if (revision == null) return false;
+  const seen = state.revisions?.[assetRef];
+  if (!seen) return false;
+  if (revision < seen.revision) return true;
+  return revision === seen.revision && event.ts < seen.ts;
 }
 
 export function parseSquadEnvelope(raw: unknown): SquadEnvelope | null {
@@ -81,13 +107,28 @@ export function parseSquadEnvelope(raw: unknown): SquadEnvelope | null {
 }
 
 export function emptyFeed(): SquadFeedState {
-  return { items: [], claims: {} };
+  return { items: [], claims: {}, revisions: {} };
 }
 
 export function applySquadEnvelope(state: SquadFeedState, event: SquadEnvelope, nowSecs: number): SquadFeedState {
   if (state.items.some((item) => item.id === event.id)) return state;
+  if (isStaleFanout(state, event)) return state;
   const items = [event, ...state.items].slice(0, MAX_FEED);
-  return { items, claims: applyClaim(state.claims, event, nowSecs) };
+  return {
+    items,
+    claims: applyClaim(state.claims, event, nowSecs),
+    revisions: applyRevisionWatermark(state.revisions, event),
+  };
+}
+
+function applyRevisionWatermark(
+  revisions: Record<string, RevisionWatermark>,
+  event: SquadEnvelope,
+): Record<string, RevisionWatermark> {
+  const assetRef = envelopeAssetRef(event);
+  const revision = envelopeRevision(event);
+  if (!assetRef || revision == null) return revisions;
+  return { ...revisions, [assetRef]: { revision, ts: event.ts } };
 }
 
 export function applyClaim(claims: Record<string, ClaimTint>, event: SquadEnvelope, nowSecs: number): Record<string, ClaimTint> {
@@ -122,25 +163,8 @@ export function expireClaims(claims: Record<string, ClaimTint>, nowSecs: number)
   return next;
 }
 
-export function visibleFeed(items: SquadEnvelope[], filter: KindFilter): SquadEnvelope[] {
+export function visibleFeed(items: SquadEnvelope[], filter: KindFilter = DEFAULT_KIND_FILTER): SquadEnvelope[] {
   return items.filter((item) => filter[item.kind]);
-}
-
-export function loadKindFilter(): KindFilter {
-  try {
-    const raw = localStorage.getItem("city.squad.kinds");
-    if (!raw) return { ...DEFAULT_KIND_FILTER };
-    const parsed = JSON.parse(raw) as Partial<KindFilter>;
-    const out = { ...DEFAULT_KIND_FILTER };
-    for (const kind of SQUAD_KINDS) if (typeof parsed[kind] === "boolean") out[kind] = parsed[kind]!;
-    return out;
-  } catch {
-    return { ...DEFAULT_KIND_FILTER };
-  }
-}
-
-export function saveKindFilter(filter: KindFilter): void {
-  try { localStorage.setItem("city.squad.kinds", JSON.stringify(filter)); } catch { /* private pref */ }
 }
 
 export function envelopeAssetRef(event: SquadEnvelope): string | null {

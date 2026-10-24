@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import { cityText, useCityLanguage } from "./i18n";
 import {
-  envelopeAssetRef, envelopeSummary, isWriteKind, visibleFeed,
-  type KindFilter, type SquadEnvelope, type SquadKind, SQUAD_KINDS, KILL_FEED_MS,
+  DEFAULT_KIND_FILTER, envelopeAssetRef, envelopeSummary, isWriteKind, visibleFeed,
+  type SquadEnvelope, type SquadKind, KILL_FEED_MS,
 } from "./engine/squadEvents";
 
 const KIND_LABEL: Record<SquadKind, string> = {
@@ -18,20 +18,18 @@ const KIND_LABEL: Record<SquadKind, string> = {
 
 type Props = {
   items: SquadEnvelope[];
-  filter: KindFilter;
-  onFilter(next: KindFilter): void;
   onFocus(assetRef: string): void;
   nowMs: number;
   open: boolean;
   onOpen(open: boolean): void;
 };
 
-export function SquadFeed({ items, filter, onFilter, onFocus, nowMs, open, onOpen }: Props) {
+export function SquadFeed({ items, onFocus, nowMs, open, onOpen }: Props) {
   const language = useCityLanguage();
-  const visible = useMemo(() => visibleFeed(items, filter), [items, filter]);
+  const visible = useMemo(() => visibleFeed(items), [items]);
   const kill = useMemo(
-    () => items.filter((item) => isWriteKind(item.kind) && filter[item.kind] && (nowMs - item.ts * 1000) < KILL_FEED_MS).slice(0, 4),
-    [items, filter, nowMs],
+    () => items.filter((item) => isWriteKind(item.kind) && DEFAULT_KIND_FILTER[item.kind] && (nowMs - item.ts * 1000) < KILL_FEED_MS).slice(0, 4),
+    [items, nowMs],
   );
   return (
     <>
@@ -50,16 +48,7 @@ export function SquadFeed({ items, filter, onFilter, onFocus, nowMs, open, onOpe
         </button>
         {open && <>
           <p className="city-squad-hint">{cityText("多 Agent 施工频道。写入由 City MCP 广播；Agent 只发聊天/占用/释放。", language)}</p>
-          <fieldset className="city-squad-filter">
-            <legend>{cityText("显示种类", language)}</legend>
-            {SQUAD_KINDS.map((kind) => (
-              <label key={kind}>
-                <input type="checkbox" checked={filter[kind]} onChange={(event) => onFilter({ ...filter, [kind]: event.target.checked })} />
-                {cityText(KIND_LABEL[kind], language)}
-              </label>
-            ))}
-          </fieldset>
-          {visible.length === 0 ? <p>{cityText("还没有符合筛选的事件。", language)}</p> : <ol>
+          {visible.length === 0 ? <p>{cityText("还没有施工事件。", language)}</p> : <ol>
             {visible.map((item) => {
               const asset = envelopeAssetRef(item);
               return <li key={item.id} data-kind={item.kind}>
